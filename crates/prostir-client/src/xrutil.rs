@@ -2,6 +2,7 @@
 
 use std::num::NonZeroU32;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use android_activity::AndroidApp;
 use anyhow::{Context, Result, bail};
@@ -289,12 +290,12 @@ impl ImageLayer {
         }
         #[cfg(all(feature = "selftest", not(feature = "store")))]
         let began = crate::selftest::upload_started();
-        // Row by row (each a plain copy) into the buffer kept from the last upload.
-        let mut flipped = std::mem::take(&mut self.flipped);
-        flipped.clear();
-        flipped.reserve_exact(rgba.len());
+        // Row by row (each a plain copy) into the buffer kept from the last upload,
+        // which stays the layer's whatever fails below.
+        self.flipped.clear();
+        self.flipped.reserve_exact(rgba.len());
         for line in rgba.chunks_exact(row).rev() {
-            flipped.extend_from_slice(line);
+            self.flipped.extend_from_slice(line);
         }
         let index = self.swapchain.acquire_image()? as usize;
         self.swapchain.wait_image(xr::Duration::INFINITE)?;
@@ -312,7 +313,7 @@ impl ImageLayer {
                 self.height as i32,
                 glow::RGBA,
                 glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(&flipped)),
+                glow::PixelUnpackData::Slice(Some(&self.flipped)),
             );
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.flush();
@@ -320,8 +321,9 @@ impl ImageLayer {
         self.swapchain.release_image()?;
         self.uploaded = true;
         // A static image is uploaded once: its copy is not kept.
-        if !self.is_static {
-            self.flipped = flipped;
+        if self.is_static {
+            self.flipped = Vec::new();
+        } else {
             #[cfg(all(feature = "selftest", not(feature = "store")))]
             crate::selftest::uploaded(began);
         }
@@ -373,41 +375,49 @@ pub enum Priority {
     Video,
 }
 
+/// Whether a refused priority of each kind was logged (once per start of the
+/// process is enough: threads of a kind are refused alike).
+static REFUSAL_TOLD: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+
 /// Raises the calling thread to `priority`, so a busy moment elsewhere on the headset
-/// delays it less. Only logged if the system says no.
+/// delays it less. A refusal by the system is logged once for each kind.
 pub fn raise_thread_priority(priority: Priority) {
-    let nice = match priority {
-        Priority::Audio => -16,
-        Priority::Video => -10,
+    let (nice, kind) = match priority {
+        Priority::Audio => (-16, 0),
+        Priority::Video => (-10, 1),
     };
     // SAFETY: plain system call; on Linux `PRIO_PROCESS` with `who` 0 is the calling
     // thread alone.
-    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) } != 0 {
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) } != 0
+        && !REFUSAL_TOLD[kind].swap(true, Ordering::Relaxed)
+    {
         warn!(
-            "thread priority {nice}: {}",
+            "thread priority {nice}: {} (not told again)",
             std::io::Error::last_os_error()
         );
     }
 }
 
-/// Tells the runtime that the calling thread is the app's main thread
-/// (`XR_KHR_android_thread_settings`), which it then schedules as such.
+/// Tells the runtime that the calling thread is the app's main thread and the one
+/// that renders (`XR_KHR_android_thread_settings`): the frame loop does both, and the
+/// runtime schedules it as such.
 pub fn mark_main_thread(instance: &xr::Instance, session: &xr::Session<Gfx>) {
     let Some(ext) = instance.exts().khr_android_thread_settings.as_ref() else {
         return;
     };
-    // SAFETY: a live session and the calling thread's own id.
-    let result = unsafe {
-        (ext.set_android_application_thread)(
-            session.as_raw(),
-            xr::sys::AndroidThreadTypeKHR::APPLICATION_MAIN,
-            libc::gettid() as u32,
-        )
-    };
-    if result.into_raw() < 0 {
-        warn!("marking the main thread: {result:?}");
-    } else {
-        info!("main thread marked for the runtime");
+    // SAFETY: plain system call returning the calling thread's id.
+    let tid = unsafe { libc::gettid() } as u32;
+    for (kind, what) in [
+        (xr::sys::AndroidThreadTypeKHR::APPLICATION_MAIN, "main"),
+        (xr::sys::AndroidThreadTypeKHR::RENDERER_MAIN, "rendering"),
+    ] {
+        // SAFETY: a live session and the calling thread's own id.
+        let result = unsafe { (ext.set_android_application_thread)(session.as_raw(), kind, tid) };
+        if result.into_raw() < 0 {
+            warn!("marking the {what} thread: {result:?}");
+        } else {
+            info!("frame loop marked as the {what} thread for the runtime");
+        }
     }
 }
 
