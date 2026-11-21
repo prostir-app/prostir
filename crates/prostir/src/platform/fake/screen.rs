@@ -192,6 +192,10 @@ mod imp {
         sent: Option<u64>,
         /// Asked to stop waiting (stopping or pausing).
         flushing: bool,
+        /// The picture sent last, held as PipeWire's source holds it: a new picture
+        /// never comes in its memory, so the encoder tells a new one from the same
+        /// one sent again.
+        last: Option<gst::Buffer>,
     }
 
     #[derive(Default)]
@@ -297,6 +301,7 @@ mod imp {
                 screen: Some(screen),
                 sent: None,
                 flushing: false,
+                last: None,
             };
             Ok(())
         }
@@ -368,8 +373,10 @@ mod imp {
                         let now = *changes;
                         drop(state);
                         drop(changes);
+                        let picture = screen.picture(now);
+                        self.state.lock().unwrap().last = Some(picture.clone());
                         return Ok(gst_base::subclass::base_src::CreateSuccess::NewBuffer(
-                            screen.picture(now),
+                            picture,
                         ));
                     }
                 }

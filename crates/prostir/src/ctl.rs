@@ -512,7 +512,18 @@ fn show_state(ctl: &Ctl, revision: u32, text: &str, json: bool, io: &mut Output<
         (Ctl::Monitors, true) => writeln!(out, "{}", to_json(&state.displays)),
         (Ctl::Monitors, false) => {
             for d in &state.displays {
-                let _ = writeln!(out, "{}", display_line(d, state.primary));
+                let mut line = display_line(d, state.primary);
+                if let Some(s) = state
+                    .encoding
+                    .outputs
+                    .iter()
+                    .find(|o| o.display == d.id)
+                    .and_then(|o| o.stats)
+                {
+                    line.push('\t');
+                    line.push_str(&stats_line(&s));
+                }
+                let _ = writeln!(out, "{line}");
             }
             Ok(())
         }
@@ -630,6 +641,26 @@ fn display_line(d: &api::Display, primary: Option<u32>) -> String {
         let _ = write!(line, ": {}", f.text);
     }
     line
+}
+
+/// What a display's encoder made: `60.0 frames/s (0.5 repeated), 24.1 Mbit/s,
+/// encoder 4.3 ms (max 9.1)`.
+fn stats_line(s: &api::StreamStats) -> String {
+    let secs = (f64::from(s.window_ms) / 1e3).max(1e-3);
+    format!(
+        "{:.1} {} ({:.1} {}), {:.1} {}, {} {:.1} {} ({} {:.1})",
+        f64::from(s.frames) / secs,
+        t("кадрів/с", "frames/s"),
+        f64::from(s.repeats) / secs,
+        t("повторених", "repeated"),
+        s.bytes as f64 * 8.0 / secs / 1e6,
+        t("Мбіт/с", "Mbit/s"),
+        t("кодування", "encoder"),
+        f64::from(s.encode_us_avg) / 1e3,
+        t("мс", "ms"),
+        t("макс.", "max"),
+        f64::from(s.encode_us_max) / 1e3,
+    )
 }
 
 fn headset_line(h: &api::Headset) -> String {

@@ -991,6 +991,16 @@ impl Brain {
                 hardware: o.hardware,
                 copies: o.copies,
                 note: o.note,
+                stats: o.stats.map(|s| api::StreamStats {
+                    window_ms: s.window_ms,
+                    frames: s.frames,
+                    repeats: s.repeats,
+                    bytes: s.bytes,
+                    keyframes: s.keyframes,
+                    keyframe_max: s.keyframe_max,
+                    encode_us_avg: s.encode_us_avg,
+                    encode_us_max: s.encode_us_max,
+                }),
             })
             .collect();
         outputs.sort_by_key(|o| displays.iter().position(|d| d.id == o.display));

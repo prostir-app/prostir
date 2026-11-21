@@ -45,6 +45,7 @@ fn frame(router: &Router, id: ScreenId, keyframe: bool) -> bool {
             pts_us: 0,
             keyframe,
             data: vec![0],
+            timing: None,
         },
     )
 }

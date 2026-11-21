@@ -19,7 +19,7 @@ use prostir_proto::state::{self, Gen};
 use prostir_proto::stats::{Histogram, Period};
 use prostir_proto::{Codec, HostMsg};
 
-use crate::encoder::EncoderEvent;
+use crate::encoder::{EncoderEvent, FrameTiming};
 use crate::events::SessionId;
 use crate::outbox::Outbox;
 use crate::screen::ScreenId;
@@ -87,6 +87,96 @@ fn next_gen() -> Gen {
     Gen(NEXT_GEN.fetch_add(1, Ordering::Relaxed))
 }
 
+/// What one stream's encoder made over one window of the router's report (see
+/// [`Router::report`]), whoever got it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamStats {
+    /// How long the window was.
+    pub window_ms: u32,
+    /// Frames encoded, and of them those that repeat the picture before (a source's
+    /// keepalive on a still screen: encoded for nothing new).
+    pub frames: u32,
+    pub repeats: u32,
+    /// Their bytes.
+    pub bytes: u64,
+    /// Keyframes among them, and the largest.
+    pub keyframes: u32,
+    pub keyframe_max: u32,
+    /// From a frame entering the converter to leaving the parser, microseconds.
+    pub encode_us_avg: u32,
+    pub encode_us_max: u32,
+}
+
+impl StreamStats {
+    /// `encoded 600 frames (60.0/s, 0.5/s a still picture again), 24.1 Mbit/s,
+    /// keyframes 1, max 750 KB; encoder avg 4.3 max 9.1 ms`.
+    pub fn summary(&self) -> String {
+        let secs = (f64::from(self.window_ms) / 1e3).max(1e-3);
+        format!(
+            "encoded {} frames ({:.1}/s, {:.1}/s a still picture again), {:.1} Mbit/s, \
+             keyframes {}, max {:.0} KB; encoder avg {:.1} max {:.1} ms",
+            self.frames,
+            f64::from(self.frames) / secs,
+            f64::from(self.repeats) / secs,
+            self.bytes as f64 * 8.0 / secs / 1e6,
+            self.keyframes,
+            f64::from(self.keyframe_max) / 1024.0,
+            f64::from(self.encode_us_avg) / 1e3,
+            f64::from(self.encode_us_max) / 1e3,
+        )
+    }
+}
+
+/// What a stream's encoder made since the last report.
+#[derive(Debug, Default)]
+struct Tally {
+    since: Option<Instant>,
+    frames: u32,
+    repeats: u32,
+    bytes: u64,
+    keyframes: u32,
+    keyframe_max: u32,
+    timed: u32,
+    encode_us: u64,
+    encode_us_max: u32,
+}
+
+impl Tally {
+    fn add(&mut self, keyframe: bool, bytes: usize, timing: Option<FrameTiming>) {
+        self.since.get_or_insert_with(Instant::now);
+        self.frames += 1;
+        self.bytes += bytes as u64;
+        if keyframe {
+            self.keyframes += 1;
+            self.keyframe_max = self.keyframe_max.max(bytes as u32);
+        }
+        if let Some(t) = timing {
+            self.repeats += u32::from(t.repeat);
+            self.timed += 1;
+            self.encode_us += u64::from(t.encode_us);
+            self.encode_us_max = self.encode_us_max.max(t.encode_us);
+        }
+    }
+
+    /// What it counted up to `now`, and counts anew from there.
+    fn take(&mut self, now: Instant) -> StreamStats {
+        let t = std::mem::take(self);
+        self.since = Some(now);
+        StreamStats {
+            window_ms: t
+                .since
+                .map_or(0, |s| now.duration_since(s).as_millis() as u32),
+            frames: t.frames,
+            repeats: t.repeats,
+            bytes: t.bytes,
+            keyframes: t.keyframes,
+            keyframe_max: t.keyframe_max,
+            encode_us_avg: (t.encode_us / u64::from(t.timed.max(1))) as u32,
+            encode_us_max: t.encode_us_max,
+        }
+    }
+}
+
 /// A stream as its encoder makes it, the same for every headset.
 struct StreamSlot {
     /// The screen's name, for the log.
@@ -110,6 +200,9 @@ struct StreamSlot {
     /// Where a frame's deliveries are listed, kept between frames so a frame
     /// allocates nothing for them (see [`Router::fan_out`]).
     outs: Vec<Out>,
+    /// What its encoder made since the last report, and in the window before.
+    tally: Tally,
+    measured: Option<StreamStats>,
 }
 
 /// Keyframes headsets ask for, of one stream, at most this often.
@@ -284,6 +377,10 @@ impl Router {
         let mut inner = self.inner.lock().unwrap();
         if inner.receivers.is_empty() {
             inner.report = Period::new(REPORT_EVERY);
+            let now = Instant::now();
+            for s in inner.streams.values_mut() {
+                s.tally.take(now);
+            }
         }
         let mut receiver = Receiver {
             tx,
@@ -477,7 +574,7 @@ impl Router {
             stats: crate::outbox::OutboxStats,
             streams: Vec<(ScreenId, String, Histogram, u32)>,
         }
-        let (window, lines) = {
+        let (window, encoded, lines) = {
             let mut inner = self.inner.lock().unwrap();
             let RouterInner {
                 streams,
@@ -487,9 +584,19 @@ impl Router {
             if receivers.is_empty() {
                 return;
             }
-            let Some(window) = report.due(Instant::now()) else {
+            let now = Instant::now();
+            let Some(window) = report.due(now) else {
                 return;
             };
+            // What each encoder made, whoever got it.
+            let encoded: Vec<(String, StreamStats)> = streams
+                .values_mut()
+                .map(|s| {
+                    let stats = s.tally.take(now);
+                    s.measured = Some(stats);
+                    (s.name.clone(), stats)
+                })
+                .collect();
             let lines: Vec<Lines> = receivers
                 .iter_mut()
                 .map(|(session, r)| Lines {
@@ -507,9 +614,14 @@ impl Router {
                         .collect(),
                 })
                 .collect();
-            (window, lines)
+            (window, encoded, lines)
         };
         // Logged without the lock, which every encoded frame takes.
+        for (name, stats) in encoded {
+            if stats.frames > 0 {
+                info!("{name}: {}", stats.summary());
+            }
+        }
         let several = lines.len() > 1;
         for Lines {
             session,
@@ -573,6 +685,12 @@ impl Router {
         Some((slot.size?, slot.codec))
     }
 
+    /// What the encoder of stream `id` made in the last window of the report, once
+    /// one ended.
+    pub fn stream_stats(&self, id: ScreenId) -> Option<StreamStats> {
+        self.inner.lock().unwrap().streams.get(&id)?.measured
+    }
+
     /// The size stream `id` goes out at, once its encoder has said.
     pub fn stream_size(&self, id: ScreenId) -> Option<(u32, u32)> {
         self.inner.lock().unwrap().streams.get(&id)?.size
@@ -608,6 +726,8 @@ impl Router {
             keyframer: None,
             headset_asked: None,
             outs: Vec::new(),
+            tally: Tally::default(),
+            measured: None,
         };
         inner.streams.insert(id, slot);
         for r in inner.receivers.values_mut() {
@@ -828,7 +948,9 @@ impl Router {
                 pts_us,
                 keyframe,
                 data,
+                timing,
             } => {
+                slot.tally.add(keyframe, data.len(), timing);
                 if keyframe {
                     let mut wanted = self.snapshot.lock().unwrap();
                     if wanted.as_ref().is_some_and(|(want, _)| *want == id)

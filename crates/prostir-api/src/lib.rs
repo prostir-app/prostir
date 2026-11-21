@@ -871,6 +871,29 @@ pub struct OutputEncoding {
     /// Why it is not on the best encoder this PC has for it, in the PC's language;
     /// `null` when it is.
     pub note: Option<String>,
+    /// What its encoder made over the last window of the PC's report (about 10 s,
+    /// while a headset is connected); `null` before one ended.
+    pub stats: Option<StreamStats>,
+}
+
+/// What one display's encoder made over a window, whoever got it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamStats {
+    /// How long the window was, in milliseconds.
+    pub window_ms: u32,
+    /// Frames encoded, and of them those that only repeat the picture before (a
+    /// still screen's keepalive).
+    pub frames: u32,
+    pub repeats: u32,
+    pub bytes: u64,
+    pub keyframes: u32,
+    /// The largest keyframe, in bytes.
+    pub keyframe_max: u32,
+    /// From a frame entering the encoder's converter to leaving its parser,
+    /// microseconds.
+    pub encode_us_avg: u32,
+    pub encode_us_max: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1258,6 +1281,16 @@ mod tests {
                     hardware: false,
                     copies: true,
                     note: Some("y".into()),
+                    stats: Some(StreamStats {
+                        window_ms: 10_000,
+                        frames: 600,
+                        repeats: 5,
+                        bytes: 30_000_000,
+                        keyframes: 1,
+                        keyframe_max: 750_000,
+                        encode_us_avg: 4300,
+                        encode_us_max: 9100,
+                    }),
                 }],
             },
             sound: Sound {
@@ -1301,7 +1334,10 @@ mod tests {
             r#""physical_max":2,"streams_max":8,"min":[640,360],"max":[3840,2160]},"#,
             r#""encoding":{"bitrate":30,"sharp":false,"codec":"h265","cpu":false,"#,
             r#""using":{"codec":"h264","hardware":true},"outputs":[{"display":103,"#,
-            r#""encoder":"x264","codec":"h264","hardware":false,"copies":true,"note":"y"}]},"#,
+            r#""encoder":"x264","codec":"h264","hardware":false,"copies":true,"note":"y","#,
+            r#""stats":{"window_ms":10000,"frames":600,"repeats":5,"bytes":30000000,"#,
+            r#""keyframes":1,"keyframe_max":750000,"encode_us_avg":4300,"#,
+            r#""encode_us_max":9100}}]},"#,
             r#""sound":{"to_headset":true,"volume":{"level":40,"muted":false},"mic_on":false,"#,
             r#""mic":"off","mic_failure":null},"pairing":null,"nearby":[],"counting":"unasked","#,
             r#""problems":[{"code":"Sound","text":"x"}]}"#,

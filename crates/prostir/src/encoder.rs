@@ -114,11 +114,24 @@ pub enum EncoderEvent {
         pts_us: u64,
         keyframe: bool,
         data: Vec<u8>,
+        /// How it went through the encoder (`None` when it could not be paired with
+        /// its way in).
+        timing: Option<FrameTiming>,
     },
     Failed(String),
     /// The encoder itself failed before its first frame: it did not open (no more
     /// sessions, a size or format its driver does not take). Another encoder may.
     Unopened(NotOpened),
+}
+
+/// How one frame went through its encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameTiming {
+    /// From entering the converter to leaving the parser, microseconds.
+    pub encode_us: u32,
+    /// The picture of the frame before it, sent again (a keepalive of the source on a
+    /// still screen): its memory is the previous frame's.
+    pub repeat: bool,
 }
 
 /// Why an encoder did not open.
@@ -319,9 +332,26 @@ impl Encoder {
             .by_name("enc_in")
             .and_then(|e| e.static_pad("sink"))
         {
+            // What the frames really come as (GPU buffers or memory, format, layout,
+            // rate): said once for each change.
+            let node = node.clone();
+            pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+                if let Some(event) = info.event()
+                    && let gst::EventView::Caps(c) = event.view()
+                {
+                    info!("{node}: frames come as {}", c.caps());
+                }
+                gst::PadProbeReturn::Ok
+            });
             let probe = probe.clone();
-            pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
-                probe.lock().unwrap().entered();
+            pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                // The memory the picture lies in: a source's keepalive sends the memory
+                // of the frame before again, new pictures come in other memory.
+                let memory = info
+                    .buffer()
+                    .filter(|b| b.n_memory() > 0)
+                    .map_or(0, |b| b.peek_memory(0).as_ptr() as usize);
+                probe.lock().unwrap().entered(memory);
                 gst::PadProbeReturn::Ok
             });
         }
@@ -357,11 +387,12 @@ impl Encoder {
                         let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                         let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
                         let pts_us = buffer.pts().map_or(0, gst::ClockTime::useconds);
-                        probe.lock().unwrap().left(&node);
+                        let timing = probe.lock().unwrap().left(&node);
                         if on_event(EncoderEvent::Frame {
                             pts_us,
                             keyframe,
                             data: map.as_slice().to_vec(),
+                            timing,
                         }) {
                             request_keyframe(sink);
                         }
@@ -634,7 +665,10 @@ impl Drop for Encoder {
 /// Time each frame spends in conversion + encoding, and gaps between captured frames.
 #[derive(Default)]
 struct Probe {
-    inside: std::collections::VecDeque<Instant>,
+    /// The frames inside: when each came, and whether it repeats the picture before.
+    inside: std::collections::VecDeque<(Instant, bool)>,
+    /// The memory of the last frame that came (its address, 0: none).
+    last_memory: usize,
     last_entered: Option<Instant>,
     max_gap_ms: f64,
     frames: u32,
@@ -644,22 +678,25 @@ struct Probe {
 }
 
 impl Probe {
-    fn entered(&mut self) {
+    /// A frame in `memory` (its address; 0 when unknown) came.
+    fn entered(&mut self, memory: usize) {
         let now = Instant::now();
+        let repeat = memory != 0 && memory == self.last_memory;
+        self.last_memory = memory;
         if let Some(prev) = self.last_entered.replace(now) {
             self.max_gap_ms = self.max_gap_ms.max((now - prev).as_secs_f64() * 1e3);
         }
         if self.inside.len() > 64 {
             self.inside.clear();
         }
-        self.inside.push_back(now);
+        self.inside.push_back((now, repeat));
     }
 
-    fn left(&mut self, node: &str) {
-        let Some(t0) = self.inside.pop_front() else {
-            return;
-        };
-        let ms = t0.elapsed().as_secs_f64() * 1e3;
+    /// The next frame came out: how it went (`None` if it cannot be paired).
+    fn left(&mut self, node: &str) -> Option<FrameTiming> {
+        let (t0, repeat) = self.inside.pop_front()?;
+        let took = t0.elapsed();
+        let ms = took.as_secs_f64() * 1e3;
         self.frames += 1;
         self.sum_ms += ms;
         self.max_ms = self.max_ms.max(ms);
@@ -679,13 +716,18 @@ impl Probe {
                 self.max_gap_ms
             );
             let inside = std::mem::take(&mut self.inside);
-            let last_entered = self.last_entered;
+            let (last_entered, last_memory) = (self.last_entered, self.last_memory);
             *self = Self {
                 inside,
+                last_memory,
                 last_entered,
                 ..Self::default()
             };
         }
+        Some(FrameTiming {
+            encode_us: u32::try_from(took.as_micros()).unwrap_or(u32::MAX),
+            repeat,
+        })
     }
 }
 
