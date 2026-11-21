@@ -473,10 +473,10 @@ impl Scene {
     /// desktop (see `World::settle`), and a hand lets go of what the world no longer
     /// has it hold (laid out anew, or gone).
     fn world_done(&mut self) {
-        if let Some(rows) = self.world.take_arrange() {
+        while let Some((pc, rows)) = self.world.take_arrange() {
             // Only to a PC in a session: the world sends nothing otherwise.
-            if self.session.main().is_some() {
-                self.send(ClientMsg::Arrange { rows });
+            if self.session.connected(pc) {
+                self.send_to(pc, ClientMsg::Arrange { rows });
             }
         }
         for grab in &mut self.grabs {
@@ -1060,17 +1060,6 @@ impl Scene {
         self.notes.expire(now);
         self.world.switch_due(&self.settings, now);
         self.world_done();
-    }
-
-    /// Sends `msg` to the PC the menu acts on (see `Session::main`).
-    fn send(&mut self, msg: ClientMsg) {
-        match self.session.main() {
-            Some(pc) => self.send_to(pc, msg),
-            None => {
-                let text = self.texts().t("error-not-connected").to_owned();
-                self.show_error(text);
-            }
-        }
     }
 
     /// Sends `msg` to PC `pc`; the menu says when it cannot.
@@ -3142,9 +3131,7 @@ fn handle_net_event(
             scene.notes.forget_requests(pc);
             scene.outboxes.remove(&pc);
             // The next session's list is news, not displays removed.
-            if gone.offline {
-                scene.world.disconnected();
-            }
+            scene.world.disconnected(pc);
             if ended.opened
                 && let Some(id) = session::disconnect_text(why)
             {
@@ -3218,25 +3205,24 @@ fn handle_net_event(
     reason = "until step 7.7 passes the time in and moves the threads to the shell"
 )]
 fn displays_changed(scene: &mut Scene, pc: PcId) {
-    if scene.session.main() != Some(pc) {
-        return;
-    }
     let Some(displays) = scene.session.pc(pc).and_then(|p| p.state.displays.as_ref()) else {
         return;
     };
     // As the switch says: its display shown; with none connected, any one kept shown.
-    scene.mirror_wanted = physical::switch(displays).map_or_else(
-        || {
-            displays
-                .displays
-                .iter()
-                .any(state::Display::is_shown_physical)
-        },
-        state::Display::is_shown_physical,
-    );
+    if scene.session.main() == Some(pc) {
+        scene.mirror_wanted = physical::switch(displays).map_or_else(
+            || {
+                displays
+                    .displays
+                    .iter()
+                    .any(state::Display::is_shown_physical)
+            },
+            state::Display::is_shown_physical,
+        );
+    }
     let gone = scene
         .world
-        .listed(displays, &scene.settings, scene.head, Instant::now());
+        .listed(pc, displays, &scene.settings, scene.head, Instant::now());
     for id in gone {
         scene.monitors.remove(id);
     }

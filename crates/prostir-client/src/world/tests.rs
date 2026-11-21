@@ -82,6 +82,8 @@ struct Sim {
     head: (Vec3, Vec3),
     pc: PcId,
     arranged: Vec<Vec<Row>>,
+    /// Every PC told its rows, in order.
+    told: Vec<PcId>,
 }
 
 impl Sim {
@@ -101,6 +103,7 @@ impl Sim {
             head: (Vec3::ZERO, -Vec3::Z),
             pc: PC,
             arranged: Vec::new(),
+            told: Vec::new(),
         }
     }
 
@@ -117,7 +120,7 @@ impl Sim {
             primary: None,
         };
         self.world
-            .listed(&displays, &self.s, self.head, self.now)
+            .listed(self.pc, &displays, &self.s, self.head, self.now)
             .to_vec()
     }
 
@@ -145,8 +148,11 @@ impl Sim {
         self.world.place_button(&self.s);
         self.world.animate(&self.s, dt);
         self.world.settle(self.now);
-        if let Some(rows) = self.world.take_arrange() {
-            self.arranged.push(rows);
+        while let Some((pc, rows)) = self.world.take_arrange() {
+            self.told.push(pc);
+            if pc == self.pc {
+                self.arranged.push(rows);
+            }
         }
         self.world.order_drawing(self.head.0, |_| false);
     }
@@ -459,7 +465,7 @@ fn a_disconnect_keeps_the_places() {
     );
     let before = sim.places();
 
-    sim.world.disconnected();
+    sim.world.disconnected(sim.pc);
     for n in [1, 2, 3, 9] {
         sim.world.stream_ended(k(n));
     }
@@ -762,7 +768,7 @@ fn two_pcs_with_one_number_have_two_places() {
     sim.stream(1, QHD);
     sim.settled();
     let first = sim.place(k(1));
-    sim.world.disconnected();
+    sim.world.disconnected(sim.pc);
     sim.world.stream_ended(k(1));
 
     let theirs = DisplayKey::new(OTHER_PC, DisplayId(1));
@@ -785,6 +791,50 @@ fn two_pcs_with_one_number_have_two_places() {
         kept.contains_key(&k(1)) && kept.contains_key(&theirs),
         "both kept"
     );
+}
+
+/// Scenario 14 (step 7 note, 10.1), the world's part: two PCs in a session at once each
+/// have their own list and are told the rows of their own displays only; one ending
+/// leaves the other's list as it is.
+#[test]
+fn two_pcs_at_once_keep_their_own_desktops() {
+    let mut sim = Sim::new(None);
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    sim.stream(1, QHD);
+    sim.stream(2, QHD);
+    sim.connect(OTHER_PC);
+    sim.list(vec![monitor(1, QHD)]);
+    sim.stream(1, QHD);
+    sim.settled();
+    assert_eq!(
+        sim.world.pc(),
+        Some(PC),
+        "the first PC in a session is the main one"
+    );
+    let mut told = sim.told.clone();
+    told.sort();
+    told.dedup();
+    assert_eq!(told, [PC, OTHER_PC], "each PC told its desktop");
+    let theirs = DisplayKey::new(OTHER_PC, DisplayId(1));
+    // Each PC's monitors in its own order (the desktop it was told), by PC.
+    let all: Vec<DisplayKey> = sim.world.monitors().iter().map(|m| m.0).collect();
+    assert_eq!(all.len(), 3);
+    assert!(
+        all[..2].contains(&k(1)) && all[..2].contains(&k(2)),
+        "{all:?}"
+    );
+    assert_eq!(all[2], theirs);
+    // The second ends: the first's displays stay listed and placed.
+    sim.world.disconnected(OTHER_PC);
+    sim.world.stream_ended(theirs);
+    assert_eq!(sim.world.pc(), Some(PC));
+    sim.pc = PC;
+    let gone = sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    assert!(gone.is_empty(), "{gone:?}");
+    assert!(sim.world.placement(theirs).is_some(), "its place kept");
+    let all: Vec<DisplayKey> = sim.world.monitors().iter().map(|m| m.0).collect();
+    assert!(all.len() == 2 && all.iter().all(|m| m.pc == PC), "{all:?}");
 }
 
 /// Scenario 17. A monitor moved by a hand is drawn at its new place in the same pass
