@@ -11,6 +11,7 @@ impl Session {
         let access = self.publisher.access;
         let headset = &self.publisher.headset;
         let worn = worn(headset);
+        self.asleep &= !worn;
         self.taken_off_at = match (worn, self.taken_off_at) {
             (true, _) => None,
             (false, Some(t)) => Some(t),
@@ -175,6 +176,12 @@ impl Session {
             ClientMsg::MouseTo { .. } => info!("the headset has no right to move the mouse"),
             // Used for priorities from step 10 on.
             ClientMsg::Gaze { .. } => {}
+            // Off the head and asleep: the session ends without the grace.
+            ClientMsg::Asleep if !self.worn() => {
+                info!("the headset went to sleep");
+                self.asleep = true;
+            }
+            ClientMsg::Asleep => info!("the headset says it sleeps, though it is worn"),
             ClientMsg::Reply { req, outcome } => match self.commands.remove(&req) {
                 Some((what, reply, _)) => {
                     let result = CtlReply::of_outcome(&outcome);

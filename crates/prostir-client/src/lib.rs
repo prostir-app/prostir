@@ -20,6 +20,7 @@ pub mod outbox;
 pub mod pending;
 pub mod persist;
 pub mod physical;
+pub mod presence;
 pub mod profiles;
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 pub mod selftest;

@@ -36,6 +36,7 @@ use crate::mic::Mic;
 use crate::net::{Feedback, NetEvent};
 use crate::overlay::{self, Overlay, Sphere};
 use crate::pending::{self, Asks, ProfileSwitch};
+use crate::presence;
 use crate::profiles::{self, Profile};
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 use crate::selftest::device::{self as selftest, Act, Selftest};
@@ -57,6 +58,9 @@ const BUTTON_PX: u32 = 128;
 /// Toast texture and its size in the room.
 const TOAST_PX: (u32, u32) = (1024, 132);
 const TOAST_WIDTH: f32 = 0.46;
+/// While the app is put away, how often the screen is read (see
+/// `system::interactive`) until the headset is known to be asleep.
+const SCREEN_EVERY: Duration = Duration::from_millis(250);
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(4);
 const ERROR_SHOWN_FOR: Duration = Duration::from_secs(8);
@@ -334,8 +338,9 @@ struct Scene {
     focus: Option<DisplayKey>,
     /// Resizing a monitor with both hands.
     scaling: Option<Scaling>,
-    /// The headset is on the head (the session is visible); streaming pauses otherwise.
-    worn: bool,
+    /// Whether the headset is on the head, from the session, the activity and the
+    /// headset's sensor; streaming pauses otherwise.
+    presence: presence::Presence,
     settings: Settings,
     panel_open: bool,
     grabs: [Option<Grab>; 2],
@@ -692,7 +697,7 @@ impl Scene {
         if every == 0 {
             return;
         }
-        if !self.worn {
+        if !self.presence.worn() {
             self.off_since.get_or_insert_with(Instant::now);
             return;
         }
@@ -743,6 +748,11 @@ impl Scene {
         // Not the text: it can be a PC notification (a message, a code).
         info!("toast shown");
         self.toast = Some((text, Instant::now(), None));
+    }
+
+    /// Profile `i` as the menu names it ("Profile 2").
+    fn profile_name(&self, i: usize) -> String {
+        self.texts().f("profile-n", &[("n", (i + 1).into())])
     }
 
     /// The monitor most straight ahead of the head (not a window panel).
@@ -796,9 +806,43 @@ impl Scene {
         self.steering.set_headset(self.headset_state());
         if let Some(f) = &self.feedback {
             let _ = f.send(ClientMsg::Presence {
-                part: Presence { worn: self.worn },
+                part: Presence {
+                    worn: self.presence.worn(),
+                },
             });
         }
+    }
+
+    /// Tells the PC once the signals say the headset was put on, taken off or put to
+    /// sleep (asleep, the PC need not wait for it to come back), and lets the network
+    /// thread connect only while it is worn.
+    fn presence_due(&mut self, now: Instant) {
+        let Some(state) = self.presence.update(now) else {
+            return;
+        };
+        info!("headset {state:?}");
+        self.tell_presence();
+        if state == presence::State::Asleep
+            && let Some(f) = &self.feedback
+        {
+            let _ = f.send(ClientMsg::Asleep);
+        }
+        self.steering.set_worn(self.presence.worn());
+    }
+
+    /// Reads the screen where presence wants it (only while the app is put away, at
+    /// once and then at most every `SCREEN_EVERY`; see `Presence::wants_screen`),
+    /// then tells the PC what changed.
+    fn presence_now(&mut self, now: Instant, screen_read: &mut Option<Instant>) {
+        if !self.presence.wants_screen() {
+            *screen_read = None;
+        } else if screen_read.is_none_or(|at| now.saturating_duration_since(at) >= SCREEN_EVERY) {
+            *screen_read = Some(now);
+            if let Some(on) = crate::system::interactive() {
+                self.presence.interactive(on);
+            }
+        }
+        self.presence_due(now);
     }
 
     /// The battery was read (once a minute, more often on the palm menu): the menu
@@ -824,7 +868,7 @@ impl Scene {
     fn headset_state(&self) -> HeadsetState {
         headset_state(
             &self.settings,
-            self.worn,
+            self.presence.worn(),
             self.headset_battery,
             &self.mic,
             &self.model,
@@ -1239,6 +1283,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     exts.fb_triangle_mesh = available.fb_triangle_mesh;
     exts.khr_composition_layer_color_scale_bias = available.khr_composition_layer_color_scale_bias;
     exts.khr_android_thread_settings = available.khr_android_thread_settings;
+    // Taken off, said at once by the headset's sensor (the session may stay shown
+    // until the system sleeps).
+    exts.ext_user_presence = available.ext_user_presence;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
             application_name: "Prostir",
@@ -1252,11 +1299,12 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         &platform,
     )?;
     info!(
-        "Prostir {}: cylinder layers: {}, equirect: {}, hand interaction: {}",
+        "Prostir {}: cylinder layers: {}, equirect: {}, hand interaction: {}, user presence: {}",
         prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
         exts.khr_composition_layer_cylinder,
         exts.khr_composition_layer_equirect2,
-        exts.ext_hand_interaction
+        exts.ext_hand_interaction,
+        exts.ext_user_presence
     );
     let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
     let _ = instance.graphics_requirements::<Gfx>(system)?;
@@ -1461,7 +1509,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         mic_wanted: settings.mic,
         focus: None,
         scaling: None,
-        worn: true,
+        presence: presence::Presence::new(),
         settings,
         panel_open: false,
         grabs: [None, None],
@@ -1535,6 +1583,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     // What the person is told then, and the language it is in.
     let mut not_owned_text: Option<(Texts, String)> = None;
     let mut session_running = false;
+    // The microphone's asks for access seen so far (see `Mic::asks`).
+    let mut mic_asks = 0;
+    // When the screen was last read, while the app is put away.
+    let mut screen_read: Option<Instant> = None;
     // The input is the app's: false while the system menu is open over it (the app
     // keeps drawing, but shows no hands or rays of its own and takes no input).
     let mut focused = false;
@@ -1552,6 +1604,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         scene.save_due();
         let mut destroy = false;
         let mut paused = false;
+        // Paused (true) or resumed (false), the last one of this pass.
+        let mut activity = None;
         let timeout = if session_running {
             Duration::ZERO
         } else {
@@ -1560,12 +1614,28 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         let mut input_waiting = false;
         app.poll_events(Some(timeout), |event| match event {
             PollEvent::Main(MainEvent::Destroy) => destroy = true,
-            PollEvent::Main(MainEvent::Pause) => paused = true,
+            PollEvent::Main(MainEvent::Pause) => {
+                paused = true;
+                activity = Some(true);
+            }
+            PollEvent::Main(MainEvent::Resume { .. }) => activity = Some(false),
             PollEvent::Main(MainEvent::InputAvailable) => input_waiting = true,
             _ => {}
         });
         if destroy {
             break;
+        }
+        // The microphone asked the system for access: the prompt's pause is the app's
+        // own, not the user leaving.
+        let asks = scene.mic.asks();
+        if asks != mic_asks {
+            mic_asks = asks;
+            scene.presence.asked(Instant::now());
+        }
+        if let Some(paused) = activity {
+            // The system may freeze a paused app soon: the PC hears it first.
+            scene.presence.paused(paused);
+            scene.presence_now(Instant::now(), &mut screen_read);
         }
         if paused {
             // The system may end a paused app without a word: what waits is written now.
@@ -1624,25 +1694,23 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         scene.world.cancel_holds();
                     }
                     focused = now_focused;
-                    // Taking the headset off hides the app (and puts the headset to
-                    // sleep); the PC stops encoding until it is back on.
-                    let worn = matches!(
-                        e.state(),
-                        xr::SessionState::VISIBLE | xr::SessionState::FOCUSED
-                    );
-                    if worn != scene.worn
-                        && matches!(
-                            e.state(),
-                            xr::SessionState::VISIBLE
-                                | xr::SessionState::FOCUSED
-                                | xr::SessionState::SYNCHRONIZED
-                                | xr::SessionState::STOPPING
-                                | xr::SessionState::IDLE
-                        )
-                    {
-                        scene.worn = worn;
-                        scene.tell_presence();
-                        scene.steering.set_worn(worn);
+                    // Hidden or stopped, the PC stops encoding until the app is shown
+                    // again; told before the session ends and the files are written.
+                    let shown = match e.state() {
+                        xr::SessionState::VISIBLE | xr::SessionState::FOCUSED => {
+                            Some(presence::Session::Shown)
+                        }
+                        xr::SessionState::READY | xr::SessionState::SYNCHRONIZED => {
+                            Some(presence::Session::Hidden)
+                        }
+                        xr::SessionState::STOPPING | xr::SessionState::IDLE => {
+                            Some(presence::Session::Stopped)
+                        }
+                        _ => None,
+                    };
+                    if let Some(shown) = shown {
+                        scene.presence.session(shown);
+                        scene.presence_now(Instant::now(), &mut screen_read);
                     }
                     match e.state() {
                         xr::SessionState::READY => {
@@ -1673,10 +1741,17 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         _ => {}
                     }
                 }
+                xr::Event::UserPresenceChangedEXT(e) => {
+                    scene.presence.user(Instant::now(), e.is_user_present());
+                }
                 xr::Event::InstanceLossPending(_) => break 'main,
                 _ => {}
             }
         }
+        // The sensor's "away" counts once it lasted (see `presence::AWAY_GRACE`), and
+        // the screen is read while the app is put away: looked at every pass, also
+        // while nothing is drawn.
+        scene.presence_now(Instant::now(), &mut screen_read);
 
         while let Ok(event) = net_rx.try_recv() {
             if let Some(t) = test.as_deref_mut() {
@@ -2877,6 +2952,12 @@ fn handle_net_event(
             if now.presence != opened_with.presence {
                 scene.tell_presence();
             }
+            // Asleep already as the session opened (`Open` says only "not worn").
+            if scene.presence.state() == presence::State::Asleep
+                && let Some(f) = &scene.feedback
+            {
+                let _ = f.send(ClientMsg::Asleep);
+            }
             scene.offline_since = None;
             scene.ip_input = None;
             scene.unreachable = None;
@@ -2905,8 +2986,13 @@ fn handle_net_event(
             (Some(ui::Asked::Profile(slot)), Outcome::Ids { ids }) => {
                 if scene.world.switching_with(req) {
                     // Switched to: the PC made its monitors (which it shows comes with
-                    // its list of displays).
+                    // its list of displays). The menu is closed by now: a toast says it.
                     scene.active_profile = Some(slot);
+                    let name = scene.profile_name(slot);
+                    let text = scene
+                        .texts()
+                        .f("toast-profile-switched", &[("name", name.into())]);
+                    scene.show_toast(text);
                     let keys = ids.into_iter().filter_map(|id| scene.key(id)).collect();
                     scene
                         .world
@@ -3251,15 +3337,7 @@ fn handle_action(
     controls: &mut Controls,
 ) {
     // Changing the setup by hand leaves the profile it came from.
-    if matches!(
-        action,
-        Action::Add { .. }
-            | Action::Remove(_)
-            | Action::MakePrimary(_)
-            | Action::Move { .. }
-            | Action::SetMirror(_)
-            | Action::Preset(_)
-    ) {
+    if action.leaves_profile() {
         scene.active_profile = None;
     }
     match action {
@@ -3539,6 +3617,11 @@ fn handle_action(
                     *slot = Some(profile);
                     scene.saves.mark(persist::File::Profiles);
                     scene.active_profile = Some(i);
+                    let name = scene.profile_name(i);
+                    let text = scene
+                        .texts()
+                        .f("toast-profile-saved", &[("name", name.into())]);
+                    scene.show_toast(text);
                 }
             } else {
                 scene.confirm_save = Some((i, Instant::now()));
