@@ -225,6 +225,9 @@ pub struct ImageLayer {
     pub height: u32,
     is_static: bool,
     uploaded: bool,
+    /// The pixels bottom row first, as GL takes them: kept between uploads of an image
+    /// that changes, so turning it over allocates nothing after the first.
+    flipped: Vec<u8>,
 }
 
 impl ImageLayer {
@@ -261,6 +264,7 @@ impl ImageLayer {
             height,
             is_static,
             uploaded: false,
+            flipped: Vec::new(),
         })
     }
 
@@ -282,7 +286,15 @@ impl ImageLayer {
                 row * self.height as usize
             );
         }
-        let flipped: Vec<u8> = rgba.chunks_exact(row).rev().flatten().copied().collect();
+        #[cfg(all(feature = "selftest", not(feature = "store")))]
+        let began = crate::selftest::upload_started();
+        // Row by row (each a plain copy) into the buffer kept from the last upload.
+        let mut flipped = std::mem::take(&mut self.flipped);
+        flipped.clear();
+        flipped.reserve_exact(rgba.len());
+        for line in rgba.chunks_exact(row).rev() {
+            flipped.extend_from_slice(line);
+        }
         let index = self.swapchain.acquire_image()? as usize;
         self.swapchain.wait_image(xr::Duration::INFINITE)?;
         let texture = NonZeroU32::new(self.images[index]).context("null GL texture")?;
@@ -306,6 +318,12 @@ impl ImageLayer {
         }
         self.swapchain.release_image()?;
         self.uploaded = true;
+        // A static image is uploaded once: its copy is not kept.
+        if !self.is_static {
+            self.flipped = flipped;
+            #[cfg(all(feature = "selftest", not(feature = "store")))]
+            crate::selftest::uploaded(began);
+        }
         Ok(())
     }
 

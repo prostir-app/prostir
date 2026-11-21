@@ -246,6 +246,9 @@ const WATCHED: usize = 1024;
 pub struct Probe {
     pub wait: Histogram,
     pub decode: Histogram,
+    /// Uploads of images that change (the menu, buttons, notices), each from the
+    /// pixels to the swapchain.
+    pub upload: Histogram,
     /// The most frames seen waiting behind one a decoder took.
     pub queue_max: usize,
     /// Times the network dropped a stream's frames until its next keyframe because
@@ -336,6 +339,21 @@ pub fn dropped_to_keyframe() {
     let probe = lock(&PROBE).clone();
     if let Some(probe) = probe {
         lock(&probe).dropped_to_keyframe += 1;
+    }
+}
+
+/// When an upload of an image starts, while a selftest runs.
+pub fn upload_started() -> Option<Instant> {
+    PROBING.load(Ordering::Relaxed).then(Instant::now)
+}
+
+/// The upload that started at `began` (see [`upload_started`]) is done.
+pub fn uploaded(began: Option<Instant>) {
+    let Some(began) = began else { return };
+    let took = began.elapsed();
+    let probe = lock(&PROBE).clone();
+    if let Some(probe) = probe {
+        lock(&probe).upload.add(took);
     }
 }
 

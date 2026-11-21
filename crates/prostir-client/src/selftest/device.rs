@@ -126,6 +126,9 @@ const KEYS: &[&str] = &[
     "menu_redraw_ms.max",
     "menu_redraw_share.p95",
     "menu_redraw_share.max",
+    "image_uploads",
+    "image_upload_ms.p95",
+    "image_upload_ms.max",
     "frames",
     "frames_missed",
     "frames_missed_moving",
@@ -1142,6 +1145,13 @@ impl Selftest {
         r.set_ms("menu_redraw_ms.max", self.menu_ms.max());
         r.set_share("menu_redraw_share.p95", self.menu_share.percentile(0.95));
         r.set_share("menu_redraw_share.max", self.menu_share.max());
+        if let Some(p) = &probe {
+            r.set("image_uploads", p.upload.count());
+            if p.upload.count() > 0 {
+                r.set_ms("image_upload_ms.p95", Some(ms(p.upload.percentile(0.95))));
+                r.set_ms("image_upload_ms.max", Some(ms(p.upload.max())));
+            }
+        }
         r.set("frames", self.frames);
         r.set("frames_missed", self.missed_steady);
         r.set("frames_missed_moving", self.missed_moving);
