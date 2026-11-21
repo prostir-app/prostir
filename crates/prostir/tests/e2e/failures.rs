@@ -264,6 +264,7 @@ fn a_keyframe_asked_for_an_old_generation_is_not_made() {
 #[test]
 fn a_keyframe_asked_twice_soon_comes_after_the_window() {
     use prostir_proto::ClientMsg;
+    const WAITS: &str = "within 300 ms of the one before, it waits";
     const LATER: &str = "within 300 ms of the one before, asked for now";
     let moving = Options {
         fps: 30,
@@ -273,7 +274,26 @@ fn a_keyframe_asked_twice_soon_comes_after_the_window() {
     let (_dir, mut pc, _keys, mut headset) = session("keyframe-twice", &moving);
     let id = headset.view().order()[0];
     let generation = headset.view().streams[&id].generation;
+    // The stream's start may bring a keyframe more: none is on the way once ten
+    // frames in a row came without one (a stream's frames come in order).
+    let started = Instant::now();
+    loop {
+        let (frames, keys) = {
+            let s = &headset.view().streams[&id];
+            (s.frames, s.keyframes)
+        };
+        headset
+            .wait(SOON, "ten frames", |v| v.streams[&id].frames >= frames + 10)
+            .unwrap();
+        if headset.view().streams[&id].keyframes == keys {
+            break;
+        }
+        assert!(started.elapsed() < SOON, "keyframes come on their own");
+    }
     let before = headset.view().streams[&id].keyframes;
+    // How the PC took each request (only this stream's are asked for).
+    let asked_for = ": a keyframe asked for: ";
+    let asks = pc.count_log(asked_for);
     let later = pc.count_log(LATER);
     let ask = |headset: &mut prostir_testkit::FakeHeadset| {
         headset
@@ -287,21 +307,29 @@ fn a_keyframe_asked_twice_soon_comes_after_the_window() {
             v.streams[&id].keyframes > before
         })
         .unwrap();
-    let again = asked.elapsed();
     ask(&mut headset);
     headset
         .wait(SOON, "a keyframe for each request", |v| {
             v.streams[&id].keyframes >= before + 2
         })
         .unwrap();
-    // On a slow machine the first keyframe may have come after the window: then the
-    // second request was answered at once, with no wait to look at.
-    if again < Duration::from_millis(250) {
+    // As the PC took the second request: on a slow machine it may have come after the
+    // window, and then it was answered at once, with no wait to look at.
+    let second = pc.wait_log_after(SOON, asked_for, asks + 1);
+    if second.contains(WAITS) {
         pc.wait_log_after(SOON, LATER, later);
         assert!(
             asked.elapsed() >= Duration::from_millis(300),
             "the second keyframe came within the window"
         );
+    } else {
+        let since: u128 = second
+            .rsplit("at once, ")
+            .next()
+            .and_then(|t| t.split(' ').next())
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or_else(|| panic!("{second}"));
+        assert!(since >= 300, "at once within the window: {second}");
     }
     assert_eq!(headset.view().streams[&id].generation, generation);
 }

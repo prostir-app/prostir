@@ -895,8 +895,21 @@ impl Router {
                 .headset_asked
                 .is_some_and(|t| now.duration_since(t) < HEADSET_KEYFRAMES)
             {
+                debug!(
+                    "{}: a keyframe asked for: within {} ms of the one before, it waits",
+                    slot.name,
+                    HEADSET_KEYFRAMES.as_millis()
+                );
                 slot.headset_pending = true;
                 return;
+            }
+            match slot.headset_asked {
+                Some(t) => debug!(
+                    "{}: a keyframe asked for: at once, {} ms after the one before",
+                    slot.name,
+                    now.duration_since(t).as_millis()
+                ),
+                None => debug!("{}: a keyframe asked for: at once, the first", slot.name),
             }
             slot.headset_asked = Some(now);
             slot.headset_pending = false;
