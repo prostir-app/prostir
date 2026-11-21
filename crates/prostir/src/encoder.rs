@@ -248,7 +248,7 @@ pub struct Encoder {
     pipeline: gst::Pipeline,
     sink: gst_app::AppSink,
     stop: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
+    paused: Arc<Pause>,
     /// The source sends nothing after a pause until the screen changes (PipeWire from
     /// KWin): it is started over on resuming. A capture pushing its own frames
     /// (`appsrc`) repeats the last one by itself.
@@ -544,7 +544,7 @@ impl Encoder {
             pipeline,
             sink,
             stop,
-            paused: Arc::new(AtomicBool::new(false)),
+            paused: Arc::default(),
             restart_on_resume,
             takes_dmabuf: cfg.backend.takes_dmabuf(),
             bus_thread: Some(bus_thread),
@@ -599,7 +599,7 @@ impl Encoder {
 
     /// Whether it is paused now (the headset is off).
     pub fn is_paused(&self) -> bool {
-        self.paused.load(Ordering::Relaxed)
+        self.paused.is_on()
     }
 
     /// What to say of the encoder this output got (see [`note`]).
@@ -643,7 +643,7 @@ impl Encoder {
         feature = "fake-desktop",
         expect(dead_code, reason = "the fake desktop pushes no frames")
     )]
-    pub fn paused(&self) -> Arc<AtomicBool> {
+    pub fn paused(&self) -> Arc<Pause> {
         self.paused.clone()
     }
 
@@ -671,7 +671,7 @@ impl Encoder {
         } else {
             gst::State::Playing
         };
-        self.paused.store(paused, Ordering::Relaxed);
+        self.paused.set(paused);
         if !paused {
             self.resumed.store(true, Ordering::Relaxed);
         }
@@ -697,6 +697,46 @@ impl Encoder {
     /// A handle that asks it for a keyframe from any thread, while it runs.
     pub fn keyframer(&self) -> Keyframer {
         Keyframer(self.sink.clone())
+    }
+}
+
+/// Whether an encoder is paused, which a capture feeding it sleeps on.
+#[derive(Debug, Default)]
+pub struct Pause {
+    on: Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+
+impl Pause {
+    pub fn is_on(&self) -> bool {
+        *self.on.lock().unwrap()
+    }
+
+    fn set(&self, on: bool) {
+        *self.on.lock().unwrap() = on;
+        self.changed.notify_all();
+    }
+
+    /// Wakes whoever waits (a capture that is to stop).
+    #[cfg_attr(
+        all(feature = "fake-desktop", not(test)),
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
+    pub fn wake(&self) {
+        let _on = self.on.lock().unwrap();
+        self.changed.notify_all();
+    }
+
+    /// Sleeps while paused, until resumed or woken with `stop` set.
+    #[cfg_attr(
+        all(feature = "fake-desktop", not(test)),
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
+    pub fn wait(&self, stop: &AtomicBool) {
+        let mut on = self.on.lock().unwrap();
+        while *on && !stop.load(Ordering::Relaxed) {
+            on = self.changed.wait(on).unwrap();
+        }
     }
 }
 
@@ -865,6 +905,44 @@ fn decode_to(data: &[u8], codec: Codec, path: &std::path::Path) -> Result<()> {
         Some(gst::MessageView::Eos(_)) => Ok(()),
         Some(gst::MessageView::Error(e)) => bail!("{}", e.error()),
         _ => bail!("the frame was not decoded in time"),
+    }
+}
+
+#[cfg(test)]
+mod pause {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use super::Pause;
+
+    /// A capture sleeps on its encoder's pause until it is resumed, or woken to stop,
+    /// and not at all while it is not paused.
+    #[test]
+    fn a_pause_is_slept_on_until_resumed_or_woken() {
+        let pause = Arc::new(Pause::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let sleeper = |pause: &Arc<Pause>, stop: &Arc<AtomicBool>| {
+            let (pause, stop) = (pause.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                pause.wait(&stop);
+                started.elapsed()
+            })
+        };
+        assert!(sleeper(&pause, &stop).join().unwrap() < Duration::from_millis(50));
+        pause.set(true);
+        let resumed = sleeper(&pause, &stop);
+        std::thread::sleep(Duration::from_millis(100));
+        pause.set(false);
+        assert!(resumed.join().unwrap() >= Duration::from_millis(90));
+        pause.set(true);
+        let stopped = sleeper(&pause, &stop);
+        std::thread::sleep(Duration::from_millis(100));
+        stop.store(true, Ordering::Relaxed);
+        pause.wake();
+        assert!(stopped.join().unwrap() >= Duration::from_millis(90));
+        assert!(pause.is_on(), "still paused, only woken");
     }
 }
 

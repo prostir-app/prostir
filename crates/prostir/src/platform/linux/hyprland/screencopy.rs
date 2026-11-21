@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::encoder::Input;
+use crate::encoder::{Input, Pause};
 use anyhow::{Context, Result, anyhow, bail};
 use gstreamer as gst;
 use gstreamer_allocators::prelude::*;
@@ -62,6 +62,8 @@ pub fn input(name: &str) -> Input {
 pub struct Capture {
     stop: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
+    /// Its encoder's pause, which the capture sleeps on while paused.
+    paused: Arc<Pause>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -71,11 +73,12 @@ impl Capture {
     pub fn start(
         output: String,
         appsrc: gst_app::AppSrc,
-        paused: Arc<AtomicBool>,
+        paused: Arc<Pause>,
         dmabuf: bool,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let closed = Arc::new(AtomicBool::new(false));
+        let woken = paused.clone();
         let thread = {
             let (stop, closed) = (stop.clone(), closed.clone());
             std::thread::Builder::new()
@@ -90,6 +93,7 @@ impl Capture {
         Ok(Self {
             stop,
             closed,
+            paused: woken,
             thread: Some(thread),
         })
     }
@@ -103,6 +107,7 @@ impl Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.paused.wake();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -702,7 +707,7 @@ fn copy_rows(
 fn run(
     name: &str,
     appsrc: &gst_app::AppSrc,
-    paused: &AtomicBool,
+    paused: &Pause,
     stop: &AtomicBool,
     want_dmabuf: bool,
 ) -> Result<()> {
@@ -747,8 +752,9 @@ fn run(
     let mut last_push = Instant::now();
     let mut failures = 0;
     while !stop.load(Ordering::Relaxed) {
-        if paused.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(50));
+        if paused.is_on() {
+            // Asleep until resumed or stopped (see `Capture`'s drop).
+            paused.wait(stop);
             continue;
         }
         state.frame = Frame::default();
@@ -816,7 +822,7 @@ fn run(
         while !(state.frame.ready || state.frame.failed) && !stop.load(Ordering::Relaxed) {
             wait(&conn, &mut queue, &mut state, Duration::from_millis(100))?;
             if last_push.elapsed() >= KEEPALIVE
-                && !paused.load(Ordering::Relaxed)
+                && !paused.is_on()
                 && let Some(l) = &last
             {
                 let _ = appsrc.push_buffer(l.clone());
