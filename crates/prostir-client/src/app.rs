@@ -745,6 +745,11 @@ impl Scene {
         self.toast = Some((text, Instant::now(), None));
     }
 
+    /// Profile `i` as the menu names it ("Profile 2").
+    fn profile_name(&self, i: usize) -> String {
+        self.texts().f("profile-n", &[("n", (i + 1).into())])
+    }
+
     /// The monitor most straight ahead of the head (not a window panel).
     fn monitor_in_front(&self) -> Option<DisplayKey> {
         let asks = &self.asks;
@@ -2934,8 +2939,10 @@ fn handle_net_event(
             (Some(ui::Asked::Profile(slot)), Outcome::Ids { ids }) => {
                 if scene.world.switching_with(req) {
                     // Switched to: the PC made its monitors (which it shows comes with
-                    // its list of displays).
+                    // its list of displays). The menu is closed by now: a toast says it.
                     scene.active_profile = Some(slot);
+                    let name = scene.profile_name(slot);
+                    scene.show_toast(name);
                     let keys = ids.into_iter().filter_map(|id| scene.key(id)).collect();
                     scene
                         .world
@@ -3568,6 +3575,11 @@ fn handle_action(
                     *slot = Some(profile);
                     scene.saves.mark(persist::File::Profiles);
                     scene.active_profile = Some(i);
+                    let name = scene.profile_name(i);
+                    let text = scene
+                        .texts()
+                        .f("toast-profile-saved", &[("name", name.into())]);
+                    scene.show_toast(text);
                 }
             } else {
                 scene.confirm_save = Some((i, Instant::now()));

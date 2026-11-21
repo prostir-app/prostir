@@ -282,6 +282,7 @@ ask-waiting = Зачекайте…
 rest-eyes = Перепочиньте очі: 20 секунд подивіться вдалину
 rest-hour = Година в шоломі: час на коротку перерву
 toast-screenshot-saved = Знімок збережено: { $path }
+toast-profile-saved = Збережено в «{ $name }»
 error-send = Не вдалося надіслати на ПК: { $error }
 error-not-connected = Немає з'єднання з ПК
 error-too-big = { $name }: { $size } ({ $codec }) завеликий, щоб цей шолом його показав

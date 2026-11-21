@@ -443,7 +443,7 @@ pub enum Action {
     Close,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Style {
     Normal,
     Selected,
@@ -2709,10 +2709,13 @@ fn save_as_profile(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f3
         } else {
             l.f("profile-n", &[("n", (i + 1).into())])
         };
-        let style = match (can, armed) {
-            (false, _) => Style::Disabled,
-            (true, true) => Style::Armed,
-            (true, false) => Style::Normal,
+        // The profile the monitors are as now: saved to or switched to last.
+        let active = s.active_profile == Some(i);
+        let style = match (can, armed, active) {
+            (false, _, _) => Style::Disabled,
+            (true, true, _) => Style::Armed,
+            (true, false, true) => Style::Selected,
+            (true, false, false) => Style::Normal,
         };
         items.push(button(
             rect(x + i as f32 * (bw + 10.0), y, bw, 48.0),
@@ -3931,6 +3934,94 @@ mod tests {
             assert_eq!(presets.len(), 3, "{preset:?}");
             assert!(presets.contains(&(Action::Preset(preset), Style::Selected)));
         }
+    }
+
+    /// The profile buttons of a tab: label, style, action.
+    fn profile_buttons(st: &UiState) -> Vec<(String, Style, Option<Action>)> {
+        Panel::new()
+            .build(st)
+            .into_iter()
+            .filter_map(|i| match i {
+                Item::Button {
+                    label,
+                    style,
+                    action,
+                    ..
+                } if label.starts_with("Profile") || label == "Replace?" => {
+                    Some((label, style, action))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The profile saved to or switched to last is the one highlighted, where it is
+    /// switched to (Quick) and where it is saved (Monitors); saving to it again asks
+    /// first, as for any saved one.
+    #[test]
+    fn the_active_profile_is_highlighted() {
+        let mut st = sample_state();
+        st.texts = crate::lang::builtin("en");
+        st.active_profile = Some(1);
+        st.saved_profiles = [true, true, false];
+
+        st.tab = Tab::Quick;
+        let quick = profile_buttons(&st);
+        assert_eq!(
+            quick,
+            [
+                (
+                    "Profile 1".into(),
+                    Style::Normal,
+                    Some(Action::ApplyProfile(0))
+                ),
+                ("Profile 2".into(), Style::Selected, None),
+                ("Profile 3".into(), Style::Disabled, None),
+            ]
+        );
+
+        st.tab = Tab::Monitors;
+        let save = profile_buttons(&st);
+        assert_eq!(
+            save,
+            [
+                (
+                    "Profile 1".into(),
+                    Style::Normal,
+                    Some(Action::SaveProfile(0))
+                ),
+                (
+                    "Profile 2".into(),
+                    Style::Selected,
+                    Some(Action::SaveProfile(1))
+                ),
+                (
+                    "Profile 3".into(),
+                    Style::Normal,
+                    Some(Action::SaveProfile(2))
+                ),
+            ]
+        );
+
+        // Pressed once to save over it: it asks, and the question shows over the mark.
+        st.confirm_save = Some(1);
+        assert_eq!(
+            profile_buttons(&st)[1],
+            (
+                "Replace?".into(),
+                Style::Armed,
+                Some(Action::SaveProfile(1))
+            )
+        );
+
+        // Changed by hand: no profile is the active one.
+        st.confirm_save = None;
+        st.active_profile = None;
+        assert!(
+            profile_buttons(&st)
+                .iter()
+                .all(|(_, style, _)| *style == Style::Normal)
+        );
     }
 
     #[test]

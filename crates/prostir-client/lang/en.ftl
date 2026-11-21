@@ -304,6 +304,8 @@ rest-eyes = Rest your eyes: look into the distance for 20 seconds
 rest-hour = An hour in the headset: time for a short break
 # $path (String): where the PC saved the picture
 toast-screenshot-saved = Screenshot saved: { $path }
+# $name (String): the profile, as the menu names it ("Profile 2")
+toast-profile-saved = Saved to "{ $name }"
 # $error (String): what went wrong, as the system says it
 error-send = Could not send to the PC: { $error }
 error-not-connected = Not connected to a PC
