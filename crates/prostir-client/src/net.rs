@@ -225,7 +225,7 @@ impl Feedback {
     }
 
     /// Queues a message. While the network is stuck, microphone sound and frame
-    /// acknowledgements beyond a couple of seconds are dropped; nothing else is. An
+    /// acknowledgements beyond about 200 ms of them are dropped; nothing else is. An
     /// error means the session is over.
     pub fn send(&self, msg: ClientMsg) -> std::io::Result<()> {
         self.outbox.push(msg)
@@ -1352,11 +1352,12 @@ fn run_session(
         if let Some(window) = report.due(now) {
             info!(
                 "received {} messages, {:.1} Mbit/s of video and sound; pauses {}; \
-                 round trip {}",
+                 round trip {}; microphone queue max {}",
                 gaps.events(),
                 media_bytes as f64 * 8.0 / window.as_secs_f64() / 1e6,
                 gaps.summary(window),
-                feedback.outbox.take_round_trips().summary_ms()
+                feedback.outbox.take_round_trips().summary_ms(),
+                feedback.outbox.take_lossy_max()
             );
             gaps.restart();
             media_bytes = 0;

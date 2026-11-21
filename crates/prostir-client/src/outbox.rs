@@ -25,8 +25,9 @@ use prostir_proto::packet::{Encoded, FRAGMENT, Outgoing, lane};
 use prostir_proto::stats::{Histogram, Pings};
 use prostir_proto::{ClientMsg, HeadsetGoodbye};
 
-/// About 2.5 s of microphone sound: more than that waiting means the network is stuck.
-pub const MAX_LOSSY: usize = 256;
+/// About 200 ms of microphone sound: more than that waiting means the network is
+/// stuck, and sound that late is no use (the PC would play it that much behind).
+pub const MAX_LOSSY: usize = 20;
 /// In a session the headset pings the PC this often: for the round trip, and so the
 /// connection never falls silent while it is fine.
 pub const PING_EVERY: Duration = Duration::from_secs(1);
@@ -55,6 +56,8 @@ struct State {
     /// When the next ping is due; `None` until the session is open.
     next_ping: Option<Instant>,
     round_trip: Histogram,
+    /// The most lossy messages waiting at once since the last look.
+    lossy_max: usize,
     /// A goodbye is queued: control messages go out up to it, nothing else does.
     leaving: bool,
     closed: bool,
@@ -111,6 +114,7 @@ impl Outbox {
                 return Ok(());
             }
             s.lossy.push_back(msg);
+            s.lossy_max = s.lossy_max.max(s.lossy.len());
         } else {
             s.control.push_back(msg);
         }
@@ -136,6 +140,12 @@ impl Outbox {
     /// The round trips since the last call.
     pub fn take_round_trips(&self) -> Histogram {
         std::mem::take(&mut self.state.lock().unwrap().round_trip)
+    }
+
+    /// The most microphone sound and acknowledgements waiting at once since the last
+    /// call.
+    pub fn take_lossy_max(&self) -> usize {
+        std::mem::take(&mut self.state.lock().unwrap().lossy_max)
     }
 
     /// Ends the session on purpose: the control messages waiting go out, then a
@@ -353,6 +363,8 @@ mod tests {
         assert!(matches!(mic[0], ClientMsg::UpStart { .. }));
         assert_eq!(mic.last(), Some(&&ClientMsg::UpEnd { up: 0 }));
         assert_eq!(msgs.len() - mic.len(), MAX_LOSSY + 10);
+        assert_eq!(o.take_lossy_max(), MAX_LOSSY + 1, "with the stream's end");
+        assert_eq!(o.take_lossy_max(), 0, "since the last look");
     }
 
     /// Pings start with the session, one a second, and pongs give the round trip.
