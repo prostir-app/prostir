@@ -3,7 +3,8 @@
 //!
 //! Frames go into GPU buffers (dmabuf) allocated with a layout (modifier) the VA-API
 //! converter can read directly, so nothing is copied through the CPU. Without such a
-//! layout (or with `--software`), frames go through shared memory instead.
+//! layout (or with `--software`), frames go through shared memory instead, copied
+//! into buffers of a pool that come back once the encoder is done with them.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -380,7 +381,11 @@ enum Slots {
         map: *mut u8,
         len: usize,
         stride: usize,
-        format: gst_video::VideoFormat,
+        /// The buffers frames are copied into, and their rows: where they start and
+        /// how many bytes of pixels each has.
+        frames: gst::BufferPool,
+        frame_stride: usize,
+        row: usize,
         _pool: wl_shm_pool::WlShmPool,
         _file: File,
     },
@@ -409,9 +414,11 @@ impl Drop for Pool {
                 slots,
                 map,
                 len,
+                frames,
                 _pool: pool,
                 ..
             } => {
+                let _ = frames.set_active(false);
                 for s in slots {
                     s.buffer.destroy();
                 }
@@ -575,10 +582,18 @@ impl Pool {
                 offset: i * frame,
             })
             .collect();
-        let caps = gst_video::VideoInfo::builder(video_format, width, height)
+        let info = gst_video::VideoInfo::builder(video_format, width, height)
             .fps(gst::Fraction::new(FRAME_RATE, 1))
-            .build()?
-            .to_caps()?;
+            .build()?;
+        let caps = info.to_caps()?;
+        // Enough buffers for those the encoder holds; more are made only if it holds
+        // more, and every one comes back when it is done with it.
+        let frames = gst_video::VideoBufferPool::new().upcast::<gst::BufferPool>();
+        let mut config = frames.config();
+        config.set_params(Some(&caps), info.size() as u32, SLOTS as u32, 0);
+        config.add_option(gst_video::BUFFER_POOL_OPTION_VIDEO_META);
+        frames.set_config(config)?;
+        frames.set_active(true)?;
         Ok((
             Self {
                 key: (None, None),
@@ -589,7 +604,9 @@ impl Pool {
                     map: map.cast(),
                     len,
                     stride: stride as usize,
-                    format: video_format,
+                    frames,
+                    frame_stride: info.stride()[0] as usize,
+                    row: width as usize * 4,
                     _pool: pool,
                     _file: file,
                 },
@@ -628,32 +645,57 @@ impl Pool {
                 slots,
                 map,
                 stride,
-                format,
+                frames,
+                frame_stride,
+                row,
                 ..
             } => {
                 let size = stride * self.height as usize;
                 // SAFETY: the slot lies inside the mapping, and the compositor is done
                 // writing it (the frame is ready).
                 let src = unsafe { std::slice::from_raw_parts(map.add(slots[slot].offset), size) };
-                let data = if y_invert {
-                    src.chunks_exact(*stride).rev().flatten().copied().collect()
-                } else {
-                    src.to_vec()
-                };
-                let mut buffer = gst::Buffer::from_mut_slice(data);
-                gst_video::VideoMeta::add_full(
-                    buffer.get_mut().expect("new buffer"),
-                    gst_video::VideoFrameFlags::empty(),
-                    *format,
-                    self.width,
-                    self.height,
-                    &[0],
-                    &[*stride as i32],
-                )?;
+                let mut buffer = frames
+                    .acquire_buffer(None)
+                    .map_err(|e| anyhow!("no buffer for a frame: {e:?}"))?;
+                {
+                    let b = buffer
+                        .get_mut()
+                        .context("a buffer of the pool still in use")?;
+                    let mut out = b.map_writable()?;
+                    copy_rows(src, *stride, &mut out, *frame_stride, *row, y_invert);
+                }
                 buffer
             }
         };
         Ok(buffer)
+    }
+}
+
+/// Copies a picture whose rows of `row` bytes lie `from_stride` apart in `from` into
+/// `to`, with its rows `to_stride` apart, upside down with `flip`: at once when both
+/// lay their rows out alike, else row by row.
+fn copy_rows(
+    from: &[u8],
+    from_stride: usize,
+    to: &mut [u8],
+    to_stride: usize,
+    row: usize,
+    flip: bool,
+) {
+    if !flip && from_stride == to_stride && to.len() >= from.len() {
+        to[..from.len()].copy_from_slice(from);
+        return;
+    }
+    let rows = from.chunks_exact(from_stride);
+    let into = to.chunks_mut(to_stride);
+    if flip {
+        for (to, from) in into.zip(rows.rev()) {
+            to[..row].copy_from_slice(&from[..row]);
+        }
+    } else {
+        for (to, from) in into.zip(rows) {
+            to[..row].copy_from_slice(&from[..row]);
+        }
     }
 }
 
@@ -699,8 +741,9 @@ fn run(
 
     let mut pool: Option<Pool> = None;
     let mut next = 0;
-    let mut last: Option<usize> = None;
-    let mut last_y_invert = false;
+    // The frame pushed last, pushed again on a still screen (the same buffer: nothing
+    // is copied, and the encoder sees it is the picture before).
+    let mut last: Option<gst::Buffer> = None;
     let mut last_push = Instant::now();
     let mut failures = 0;
     while !stop.load(Ordering::Relaxed) {
@@ -774,18 +817,18 @@ fn run(
             wait(&conn, &mut queue, &mut state, Duration::from_millis(100))?;
             if last_push.elapsed() >= KEEPALIVE
                 && !paused.load(Ordering::Relaxed)
-                && let Some(l) = last
+                && let Some(l) = &last
             {
-                let _ = appsrc.push_buffer(p.frame(l, last_y_invert)?);
+                let _ = appsrc.push_buffer(l.clone());
                 last_push = Instant::now();
             }
         }
         frame.destroy();
         if state.frame.ready {
             failures = 0;
-            let _ = appsrc.push_buffer(p.frame(slot, state.frame.y_invert)?);
-            last = Some(slot);
-            last_y_invert = state.frame.y_invert;
+            let frame = p.frame(slot, state.frame.y_invert)?;
+            let _ = appsrc.push_buffer(frame.clone());
+            last = Some(frame);
             last_push = Instant::now();
         } else if state.frame.failed {
             failures += 1;
@@ -810,6 +853,23 @@ fn manager_version(m: &ZwlrScreencopyManagerV1) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame is copied whole, or row by row where the rows are laid out apart or
+    /// the picture is upside down.
+    #[test]
+    fn copies_rows() {
+        // Two rows of 3 bytes, 4 apart.
+        let from = [1, 2, 3, 0, 4, 5, 6, 0];
+        let mut to = [9; 8];
+        copy_rows(&from, 4, &mut to, 4, 3, false);
+        assert_eq!(to, from);
+        let mut to = [9; 6];
+        copy_rows(&from, 4, &mut to, 3, 3, false);
+        assert_eq!(to, [1, 2, 3, 4, 5, 6]);
+        let mut to = [9; 8];
+        copy_rows(&from, 4, &mut to, 4, 3, true);
+        assert_eq!(to, [4, 5, 6, 9, 1, 2, 3, 9]);
+    }
 
     #[test]
     fn names_fourcc_codes() {
