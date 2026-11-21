@@ -96,8 +96,8 @@ impl Feedback {
     }
 
     /// Queues a message. While the network is stuck, microphone sound and frame
-    /// acknowledgements beyond about 200 ms of them are dropped; nothing else is. An
-    /// error means the session is over.
+    /// acknowledgements beyond about 200 ms of them are dropped, the oldest first;
+    /// nothing else is. An error means the session is over.
     pub fn send(&self, msg: ClientMsg) -> std::io::Result<()> {
         self.outbox.push(msg)
     }

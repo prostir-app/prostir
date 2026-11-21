@@ -51,7 +51,8 @@ fn lossy(msg: &ClientMsg) -> bool {
 #[derive(Default)]
 struct State {
     control: VecDeque<Encoded>,
-    lossy: VecDeque<Encoded>,
+    /// The sound lane's messages, each with whether it may be dropped.
+    lossy: VecDeque<(Encoded, bool)>,
     pings: Pings,
     /// When the next ping is due; `None` until the session is open.
     next_ping: Option<Instant>,
@@ -100,8 +101,10 @@ impl Lanes {
 }
 
 impl Outbox {
-    /// Queues `msg`. A lossy message beyond [`MAX_LOSSY`] waiting is dropped. An error
-    /// means the session is over, or the message cannot be sent at all.
+    /// Queues `msg`. With [`MAX_LOSSY`] waiting in the sound lane, a lossy message
+    /// takes the place of the oldest lossy one there (the start and end of an up
+    /// stream stay): what goes out after a stall is the newest sound. An error means
+    /// the session is over, or the message cannot be sent at all.
     pub fn push(&self, msg: ClientMsg) -> io::Result<()> {
         let (sound, is_lossy) = (in_sound_lane(&msg), lossy(&msg));
         let msg = msg.encode()?;
@@ -111,9 +114,14 @@ impl Outbox {
         }
         if sound {
             if is_lossy && s.lossy.len() >= MAX_LOSSY {
-                return Ok(());
+                match s.lossy.iter().position(|(_, lossy)| *lossy) {
+                    Some(oldest) => {
+                        s.lossy.remove(oldest);
+                    }
+                    None => return Ok(()),
+                }
             }
-            s.lossy.push_back(msg);
+            s.lossy.push_back((msg, is_lossy));
             s.lossy_max = s.lossy_max.max(s.lossy.len());
         } else {
             s.control.push_back(msg);
@@ -232,7 +240,7 @@ impl State {
             return Some(pick);
         }
         if lanes.lossy.is_none()
-            && let Some(msg) = self.lossy.pop_front()
+            && let Some((msg, _)) = self.lossy.pop_front()
         {
             lanes.lossy = Some(Outgoing::new(lane::SOUND, msg));
         }
@@ -323,7 +331,7 @@ mod tests {
     }
 
     /// While the network is stuck, sound and acknowledgements beyond a limit are
-    /// dropped; control messages never are.
+    /// dropped, the oldest first; control messages never are.
     #[test]
     fn only_lossy_messages_are_dropped() {
         let o = Outbox::default();
@@ -336,10 +344,10 @@ mod tests {
             },
         })
         .unwrap();
-        for _ in 0..MAX_LOSSY + 10 {
+        for k in 0..MAX_LOSSY + 10 {
             o.push(ClientMsg::Up {
                 up: 0,
-                data: vec![0; 2],
+                data: vec![k as u8; 2],
             })
             .unwrap();
         }
@@ -361,6 +369,16 @@ mod tests {
         // The stream's start and end, never dropped, around the data that fit.
         assert_eq!(mic.len(), MAX_LOSSY + 1);
         assert!(matches!(mic[0], ClientMsg::UpStart { .. }));
+        // The oldest sound went, the newest stayed.
+        let kept: Vec<u8> = mic
+            .iter()
+            .filter_map(|m| match m {
+                ClientMsg::Up { data, .. } => Some(data[0]),
+                _ => None,
+            })
+            .collect();
+        let newest = (MAX_LOSSY + 10 - (MAX_LOSSY - 1)) as u8..(MAX_LOSSY + 10) as u8;
+        assert_eq!(kept, newest.collect::<Vec<u8>>());
         assert_eq!(mic.last(), Some(&&ClientMsg::UpEnd { up: 0 }));
         assert_eq!(msgs.len() - mic.len(), MAX_LOSSY + 10);
         assert_eq!(o.take_lossy_max(), MAX_LOSSY + 1, "with the stream's end");
