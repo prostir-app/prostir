@@ -51,6 +51,7 @@ const OTHER_CODE: &[(&str, &str)] = &[
     ("overlay.rs", include_str!("../src/overlay.rs")),
     ("passthrough.rs", include_str!("../src/passthrough.rs")),
     ("pending.rs", include_str!("../src/pending.rs")),
+    ("presence.rs", include_str!("../src/presence.rs")),
     ("profiles.rs", include_str!("../src/profiles.rs")),
     ("selftest.rs", include_str!("../src/selftest.rs")),
     (

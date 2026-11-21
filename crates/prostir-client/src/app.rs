@@ -36,6 +36,7 @@ use crate::mic::Mic;
 use crate::net::{Feedback, NetEvent};
 use crate::overlay::{self, Overlay, Sphere};
 use crate::pending::{self, Asks, ProfileSwitch};
+use crate::presence;
 use crate::profiles::{self, Profile};
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 use crate::selftest::device::{self as selftest, Act, Selftest};
@@ -332,8 +333,9 @@ struct Scene {
     focus: Option<DisplayKey>,
     /// Resizing a monitor with both hands.
     scaling: Option<Scaling>,
-    /// The headset is on the head (the session is visible); streaming pauses otherwise.
-    worn: bool,
+    /// Whether the headset is on the head, from the session, the activity and the
+    /// headset's sensor; streaming pauses otherwise.
+    presence: presence::Presence,
     settings: Settings,
     panel_open: bool,
     grabs: [Option<Grab>; 2],
@@ -690,7 +692,7 @@ impl Scene {
         if every == 0 {
             return;
         }
-        if !self.worn {
+        if !self.presence.worn() {
             self.off_since.get_or_insert_with(Instant::now);
             return;
         }
@@ -794,8 +796,20 @@ impl Scene {
         self.steering.set_headset(self.headset_state());
         if let Some(f) = &self.feedback {
             let _ = f.send(ClientMsg::Presence {
-                part: Presence { worn: self.worn },
+                part: Presence {
+                    worn: self.presence.worn(),
+                },
             });
+        }
+    }
+
+    /// Tells the PC once the signals say the headset was put on or taken off, and
+    /// lets the network thread connect only while it is worn.
+    fn presence_due(&mut self, now: Instant) {
+        if let Some(worn) = self.presence.update(now) {
+            info!("headset {}", if worn { "worn" } else { "not worn" });
+            self.tell_presence();
+            self.steering.set_worn(worn);
         }
     }
 
@@ -822,7 +836,7 @@ impl Scene {
     fn headset_state(&self) -> HeadsetState {
         headset_state(
             &self.settings,
-            self.worn,
+            self.presence.worn(),
             self.headset_battery,
             &self.mic,
             &self.model,
@@ -1236,6 +1250,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     exts.fb_hand_tracking_aim = available.fb_hand_tracking_aim;
     exts.fb_triangle_mesh = available.fb_triangle_mesh;
     exts.khr_composition_layer_color_scale_bias = available.khr_composition_layer_color_scale_bias;
+    // Taken off, said at once by the headset's sensor (the session may stay shown
+    // until the system sleeps).
+    exts.ext_user_presence = available.ext_user_presence;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
             application_name: "Prostir",
@@ -1249,11 +1266,12 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         &platform,
     )?;
     info!(
-        "Prostir {}: cylinder layers: {}, equirect: {}, hand interaction: {}",
+        "Prostir {}: cylinder layers: {}, equirect: {}, hand interaction: {}, user presence: {}",
         prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
         exts.khr_composition_layer_cylinder,
         exts.khr_composition_layer_equirect2,
-        exts.ext_hand_interaction
+        exts.ext_hand_interaction,
+        exts.ext_user_presence
     );
     let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
     let _ = instance.graphics_requirements::<Gfx>(system)?;
@@ -1457,7 +1475,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         mic_wanted: settings.mic,
         focus: None,
         scaling: None,
-        worn: true,
+        presence: presence::Presence::new(),
         settings,
         panel_open: false,
         grabs: [None, None],
@@ -1548,6 +1566,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         scene.save_due();
         let mut destroy = false;
         let mut paused = false;
+        // Paused (true) or resumed (false), the last one of this pass.
+        let mut activity = None;
         let timeout = if session_running {
             Duration::ZERO
         } else {
@@ -1556,12 +1576,21 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         let mut input_waiting = false;
         app.poll_events(Some(timeout), |event| match event {
             PollEvent::Main(MainEvent::Destroy) => destroy = true,
-            PollEvent::Main(MainEvent::Pause) => paused = true,
+            PollEvent::Main(MainEvent::Pause) => {
+                paused = true;
+                activity = Some(true);
+            }
+            PollEvent::Main(MainEvent::Resume { .. }) => activity = Some(false),
             PollEvent::Main(MainEvent::InputAvailable) => input_waiting = true,
             _ => {}
         });
         if destroy {
             break;
+        }
+        if let Some(paused) = activity {
+            // The system may freeze a paused app soon: the PC hears it first.
+            scene.presence.paused(paused);
+            scene.presence_due(Instant::now());
         }
         if paused {
             // The system may end a paused app without a word: what waits is written now.
@@ -1620,25 +1649,23 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         scene.world.cancel_holds();
                     }
                     focused = now_focused;
-                    // Taking the headset off hides the app (and puts the headset to
-                    // sleep); the PC stops encoding until it is back on.
-                    let worn = matches!(
-                        e.state(),
-                        xr::SessionState::VISIBLE | xr::SessionState::FOCUSED
-                    );
-                    if worn != scene.worn
-                        && matches!(
-                            e.state(),
-                            xr::SessionState::VISIBLE
-                                | xr::SessionState::FOCUSED
-                                | xr::SessionState::SYNCHRONIZED
-                                | xr::SessionState::STOPPING
-                                | xr::SessionState::IDLE
-                        )
-                    {
-                        scene.worn = worn;
-                        scene.tell_presence();
-                        scene.steering.set_worn(worn);
+                    // Hidden or stopped, the PC stops encoding until the app is shown
+                    // again; told before the session ends and the files are written.
+                    let shown = match e.state() {
+                        xr::SessionState::VISIBLE | xr::SessionState::FOCUSED => {
+                            Some(presence::Session::Shown)
+                        }
+                        xr::SessionState::READY | xr::SessionState::SYNCHRONIZED => {
+                            Some(presence::Session::Hidden)
+                        }
+                        xr::SessionState::STOPPING | xr::SessionState::IDLE => {
+                            Some(presence::Session::Stopped)
+                        }
+                        _ => None,
+                    };
+                    if let Some(shown) = shown {
+                        scene.presence.session(shown);
+                        scene.presence_due(Instant::now());
                     }
                     match e.state() {
                         xr::SessionState::READY => {
@@ -1669,10 +1696,16 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         _ => {}
                     }
                 }
+                xr::Event::UserPresenceChangedEXT(e) => {
+                    scene.presence.user(Instant::now(), e.is_user_present());
+                }
                 xr::Event::InstanceLossPending(_) => break 'main,
                 _ => {}
             }
         }
+        // The sensor's "away" counts once it lasted (see `presence::AWAY_GRACE`): looked
+        // at every pass, also while nothing is drawn.
+        scene.presence_due(Instant::now());
 
         while let Ok(event) = net_rx.try_recv() {
             if let Some(t) = test.as_deref_mut() {
