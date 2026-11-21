@@ -72,6 +72,7 @@ pub fn spawn(job: DecoderJob) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("decoder-{id}"))
         .spawn(move || {
+            crate::xrutil::raise_thread_priority(crate::xrutil::Priority::Video);
             if let Err(e) = run(&job) {
                 error!("decoder {id}: {e:#}");
             }

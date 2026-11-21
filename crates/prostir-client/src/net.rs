@@ -192,6 +192,7 @@ impl Feedback {
         std::thread::Builder::new()
             .name("net-writer".into())
             .spawn(move || {
+                crate::xrutil::raise_thread_priority(crate::xrutil::Priority::Video);
                 // However this thread stops, the session ends with it.
                 struct Close(Closer, Arc<Outbox>);
                 impl Drop for Close {
@@ -646,6 +647,8 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
+            // It reads the frames off the network.
+            crate::xrutil::raise_thread_priority(crate::xrutil::Priority::Video);
             // The socket PCs announce themselves to. A network thread of an earlier
             // start that has not stopped yet may still hold it: tried again each round
             // until this one has it.

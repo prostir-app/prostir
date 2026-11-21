@@ -7,6 +7,7 @@ use android_activity::AndroidApp;
 use anyhow::{Context, Result, bail};
 use glam::{Quat, Vec3};
 use glow::HasContext;
+use log::{info, warn};
 use ndk::native_window::NativeWindow;
 use openxr as xr;
 use openxr::sys::Handle as _;
@@ -359,6 +360,54 @@ impl ImageLayer {
             pose,
             size: xr::Extent2Df { width, height },
         }
+    }
+}
+
+/// How urgent a thread of this app is to the scheduler, as Android ranks its own
+/// threads of the same kind.
+#[derive(Debug, Clone, Copy)]
+pub enum Priority {
+    /// Sound in and out (`THREAD_PRIORITY_AUDIO`).
+    Audio,
+    /// Pictures and the network that brings them (`THREAD_PRIORITY_VIDEO`).
+    Video,
+}
+
+/// Raises the calling thread to `priority`, so a busy moment elsewhere on the headset
+/// delays it less. Only logged if the system says no.
+pub fn raise_thread_priority(priority: Priority) {
+    let nice = match priority {
+        Priority::Audio => -16,
+        Priority::Video => -10,
+    };
+    // SAFETY: plain system call; on Linux `PRIO_PROCESS` with `who` 0 is the calling
+    // thread alone.
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) } != 0 {
+        warn!(
+            "thread priority {nice}: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+/// Tells the runtime that the calling thread is the app's main thread
+/// (`XR_KHR_android_thread_settings`), which it then schedules as such.
+pub fn mark_main_thread(instance: &xr::Instance, session: &xr::Session<Gfx>) {
+    let Some(ext) = instance.exts().khr_android_thread_settings.as_ref() else {
+        return;
+    };
+    // SAFETY: a live session and the calling thread's own id.
+    let result = unsafe {
+        (ext.set_android_application_thread)(
+            session.as_raw(),
+            xr::sys::AndroidThreadTypeKHR::APPLICATION_MAIN,
+            libc::gettid() as u32,
+        )
+    };
+    if result.into_raw() < 0 {
+        warn!("marking the main thread: {result:?}");
+    } else {
+        info!("main thread marked for the runtime");
     }
 }
 

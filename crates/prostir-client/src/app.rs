@@ -2293,6 +2293,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     exts.fb_hand_tracking_aim = available.fb_hand_tracking_aim;
     exts.fb_triangle_mesh = available.fb_triangle_mesh;
     exts.khr_composition_layer_color_scale_bias = available.khr_composition_layer_color_scale_bias;
+    exts.khr_android_thread_settings = available.khr_android_thread_settings;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
             application_name: "Prostir",
@@ -2335,6 +2336,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             },
         )
     }?;
+    xrutil::mark_main_thread(&instance, &session);
     let gl = xrutil::load_gl(&egl.egl);
 
     let data_dir: PathBuf = app
