@@ -334,6 +334,34 @@ bye-forgotten = The PC no longer knows this headset. Pair them again
 bye-pc-ended = The PC ended the connection
 bye-silence = No connection to the PC
 
+## Under the button pressed in the menu
+
+note-monitor-added = Monitor added
+note-monitor-removed = Monitor removed
+note-window-closed = The window is back on the monitors
+note-primary = Now the primary monitor
+note-display-shown = The PC display is shown
+note-display-hidden = The PC display is hidden
+note-sound-headset = PC sound plays in the headset
+note-sound-pc = PC sound plays on the PC
+note-encoding = Video settings applied
+note-window-detached = Window detached
+note-window-here = Window moved here
+note-layout = Monitors laid out again
+note-lined-up = Seams closed
+note-in-front = Everything is in front of you
+note-mic-headset = PC apps hear the headset microphone
+note-mic-pc = PC apps hear the PC microphone
+note-mic-ask = The system asks for microphone access when recording starts
+note-mic-allowed = Microphone access allowed
+note-mic-denied = No access to the microphone
+note-language = Menu language changed
+# $pc (String): the PC's name
+note-pc-forgotten = Forgot { $pc }
+# $pc (String): the PC's name
+note-paired = Paired with { $pc }
+note-no-monitor-in-front = No monitor in front of you
+
 ## What the PC answered when a request failed
 
 failure-not-connected = No connection to the PC

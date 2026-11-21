@@ -34,6 +34,7 @@ use crate::lang::{Lang, LangState, Moment, Texts};
 use crate::layout::{self, Cylinder, Grab, Hit, Placement, Ray};
 use crate::mic::Mic;
 use crate::net::{Feedback, NetEvent};
+use crate::note::{self, Note, Notes};
 use crate::overlay::{self, Overlay, Sphere};
 use crate::pending::{self, Asks, ProfileSwitch};
 use crate::presence;
@@ -407,6 +408,8 @@ struct Scene {
     finder: Option<(DisplayKey, Vec2, Instant)>,
     /// A short message shown on its own: text, since when, where (`None` until placed).
     toast: Option<(String, Instant, Option<Placement>)>,
+    /// What the open menu says under the button pressed (see `note`).
+    notes: Notes,
     /// The PC speaks another protocol: (the PC is newer, its app version).
     update_needed: Option<(bool, String)>,
     /// Head position and gaze this frame.
@@ -798,6 +801,8 @@ impl Scene {
     fn open_panel(&mut self, head: Vec3, forward: Vec3, touch: bool) {
         self.world.open_menu((head, forward), touch, &self.settings);
         self.panel_open = true;
+        // What was said while it was closed came as a toast.
+        self.notes.clear();
     }
 
     /// Tells the PC whether the headset is worn (quietly: nothing to show the user),
@@ -898,7 +903,8 @@ impl Scene {
     }
 
     /// Control `what` asks the PC to change something: one reply comes with its
-    /// number, and the control shows how it stands meanwhile. Without a connection
+    /// number, and the button pressed for it waits under itself meanwhile (the reply
+    /// is said there, see `note`). Without a connection
     /// nothing is sent (and nothing kept to send later: repeating "add a monitor"
     /// after reconnecting could add two).
     #[expect(
@@ -907,12 +913,16 @@ impl Scene {
     )]
     fn request(&mut self, asked: Request, what: ui::Asked) -> Option<ReqId> {
         if self.feedback.is_none() {
-            self.ask_failed(what, ui::Failure::NotConnected, String::new());
+            self.ask_failed(ui::Failure::NotConnected);
             return None;
         }
         let req = self.asks.ask(what, Instant::now());
         info!("request {}: {asked:?}", req.0);
         self.send(ClientMsg::request(req, asked));
+        if let Some(on) = self.notes.asked(what) {
+            let waiting = Note::waiting(Some(on), self.texts());
+            self.tell(waiting, false);
+        }
         Some(req)
     }
 
@@ -925,7 +935,7 @@ impl Scene {
         what: ui::Asked,
     ) -> Option<ReqId> {
         let Some(id) = self.on_pc(k) else {
-            self.ask_failed(what, ui::Failure::NotConnected, String::new());
+            self.ask_failed(ui::Failure::NotConnected);
             return None;
         };
         self.request(asked(id), what)
@@ -938,7 +948,8 @@ impl Scene {
     }
 
     /// Request `req` was answered: which control asked it, `None` for one this side
-    /// does not wait for (answered after it gave up on it).
+    /// does not wait for (answered after it gave up on it). What it comes to is said
+    /// under the button that asked (see `note::answer`).
     #[expect(
         clippy::disallowed_methods,
         reason = "until step 7.7 passes the time in and moves the threads to the shell"
@@ -962,38 +973,74 @@ impl Scene {
         };
         let took = answered.took.unwrap_or_default().as_millis();
         info!("request {} answered in {took} ms", req.0);
-        if let Outcome::Failed { error, detail } = outcome {
+        if let Outcome::Failed { error, .. } = outcome {
             warn!("request {} failed (code {})", req.0, error.code());
-            self.tell_failure(what, ui::Failure::Pc(*error), detail);
+        }
+        let on = self.notes.answered(what);
+        if let Some(told) = note::answer(what, on, outcome, self.texts()) {
+            self.tell(told.note, told.toast);
         }
         Some(what)
     }
 
-    /// Request of control `what` failed: the control says why. A control the menu
-    /// does not show while it works (a profile closes the menu, the palm menu finds the
-    /// mouse) says it with a short message.
+    /// A request was not sent, for `why`: said under the button pressed for it.
+    fn ask_failed(&mut self, why: ui::Failure) {
+        let note = Note::failure(self.notes.pressed(), why, "", self.texts());
+        self.tell(note, true);
+    }
+
+    /// The request of control `what` got no answer and never will (`why`: no answer
+    /// in time, the connection broke): said under the button that asked.
+    fn given_up(&mut self, what: ui::Asked, why: ui::Failure) {
+        let on = self.notes.answered(what);
+        let note = Note::failure(on, why, "", self.texts());
+        self.tell(note, true);
+    }
+
+    /// What a press came to (or news about it): said under the button while the menu
+    /// is open; while it is closed, a toast where `toast` says it is worth one.
     #[expect(
         clippy::disallowed_methods,
         reason = "until step 7.7 passes the time in and moves the threads to the shell"
     )]
-    fn ask_failed(&mut self, what: ui::Asked, why: ui::Failure, detail: String) {
-        self.tell_failure(what, why, &detail);
-        self.asks.failed(what, why, detail, Instant::now());
-    }
-
-    /// A control the menu does not show while it works (a profile closes the menu,
-    /// the palm menu finds the mouse) says its failure with a short message.
-    fn tell_failure(&mut self, what: ui::Asked, why: ui::Failure, detail: &str) {
-        if matches!(what, ui::Asked::Profile(_) | ui::Asked::FindMouse) {
-            let text = why
-                .text()
-                .map_or_else(|| detail.to_owned(), |id| self.texts().t(id).to_owned());
-            self.show_toast(text);
+    fn tell(&mut self, note: Note, toast: bool) {
+        if self.panel_open {
+            self.notes.say(note, Instant::now());
+        } else if toast {
+            self.show_toast(note.text.to_string());
         }
     }
 
+    /// The menu's own action `action` was done: said under its button, where what it
+    /// changed does not show on the button itself (see `note::done_text`).
+    fn done(&mut self, action: Action) {
+        if let Some(id) = note::done_text(action) {
+            let note = Note::done(Some(action), self.texts().t(id));
+            self.tell(note, false);
+        }
+    }
+
+    /// `action` needs a monitor in front of the user, and there is none.
+    fn no_monitor_in_front(&mut self, action: Action) {
+        let note = Note::failed(Some(action), self.texts().t("note-no-monitor-in-front"));
+        self.tell(note, true);
+    }
+
+    /// The menu shows the language chosen (loaded, or the one it had): said under the
+    /// choice, or that some of the file's lines could not be read (those show in
+    /// English), which is worth a toast while the menu is closed.
+    fn language_shown(&mut self) {
+        let on = Some(Action::Language(self.settings.language));
+        let note = match self.texts().warning() {
+            Some(warning) => Note::failed(on, warning),
+            None => Note::done(on, self.texts().t("note-language")),
+        };
+        let failed = note.kind == note::Kind::Failed;
+        self.tell(note, failed);
+    }
+
     /// Requests without an answer for 30 s count as failed (a late answer is let go),
-    /// and failures are shown for a while; a profile switch waited for long enough is
+    /// and a note shown long enough goes; a profile switch waited for long enough is
     /// laid out with what streams.
     #[expect(
         clippy::disallowed_methods,
@@ -1003,15 +1050,11 @@ impl Scene {
         let now = Instant::now();
         for (req, what) in self.asks.expire(now) {
             self.world.switch_given_up(req);
-            self.tell_failure(what, ui::Failure::TimedOut, "");
+            self.given_up(what, ui::Failure::TimedOut);
         }
+        self.notes.expire(now);
         self.world.switch_due(&self.settings, now);
         self.world_done();
-    }
-
-    /// How each control's request stands, for the menu.
-    fn ask_views(&self) -> Vec<ui::AskView> {
-        self.asks.views()
     }
 
     fn send(&mut self, msg: ClientMsg) {
@@ -1171,7 +1214,7 @@ impl Scene {
             update_from,
             saved_profiles: self.profiles.each_ref().map(Option::is_some),
             active_profile: self.active_profile,
-            asks: self.ask_views(),
+            note: self.notes.shown().cloned(),
         }
     }
 }
@@ -1547,6 +1590,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         gaze_moved: None,
         finder: None,
         toast: None,
+        notes: Notes::default(),
         head: (Vec3::ZERO, -Vec3::Z),
         head_right: Vec3::X,
         view_eye: None,
@@ -1771,11 +1815,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             match event {
                 SystemEvent::Battery(reading) => newest = Some(reading),
                 SystemEvent::Texts(texts) => {
-                    if scene.lang.loaded(texts)
-                        && let Some(warning) = scene.texts().warning()
-                    {
-                        let text = warning.to_owned();
-                        scene.show_toast(text);
+                    if scene.lang.loaded(texts) {
+                        scene.language_shown();
                     }
                 }
                 SystemEvent::Languages(known) => {
@@ -1980,6 +2021,12 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // The system may let the app record now, or not any more.
         if scene.mic.permission() != scene.mic_permission {
             scene.mic_changed();
+            if scene.mic_wanted
+                && let Some(note) = note::permission_note(scene.mic_permission, scene.texts())
+            {
+                let failed = note.kind == note::Kind::Failed;
+                scene.tell(note, failed);
+            }
         }
         // The palm menu shows the battery: the system thread reads it afresh when the
         // menu appears, and more often while it shows.
@@ -2133,7 +2180,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     Instant::now(),
                 ));
                 panel.hover(Some(px));
-                match panel.hovered_action() {
+                match panel.press() {
                     Some(action) => {
                         handle_action(&mut scene, action, &mut passthrough, &mut controls);
                     }
@@ -2217,7 +2264,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         hit,
                     }) => {
                         panel.hover(Some(panel_point(&hit, scene.settings.large_menu)));
-                        if let Some(action) = panel.hovered_action() {
+                        if let Some(action) = panel.press() {
                             if input.is_hand {
                                 // Decided when the pinch opens: a click, or a drag.
                                 pending_click[hand] = Some((action, hit.point));
@@ -2970,13 +3017,8 @@ fn handle_net_event(
         NetEvent::Notice(text) => scene.show_toast(text),
         NetEvent::Reply { req, outcome } => match (scene.answered(req, &outcome), outcome) {
             (Some(ui::Asked::Profile(_)), Outcome::Failed { .. }) => scene.world.switch_to(None),
-            (None, _) | (_, Outcome::Failed { .. }) => {}
-            (_, Outcome::Saved { path }) => {
-                let text = scene
-                    .texts()
-                    .f("toast-screenshot-saved", &[("path", path.into())]);
-                scene.show_toast(text);
-            }
+            // Said by `answered`.
+            (None, _) | (_, Outcome::Failed { .. } | Outcome::Saved { .. }) => {}
             (_, Outcome::Pointer { id, u, v }) => {
                 let f = |v: u16| f32::from(v) / 65535.0;
                 scene.finder = scene
@@ -2992,7 +3034,7 @@ fn handle_net_event(
                     let text = scene
                         .texts()
                         .f("toast-profile-switched", &[("name", name.into())]);
-                    scene.show_toast(text);
+                    scene.tell(Note::done(Some(Action::ApplyProfile(slot)), &text), true);
                     let keys = ids.into_iter().filter_map(|id| scene.key(id)).collect();
                     scene
                         .world
@@ -3039,7 +3081,12 @@ fn handle_net_event(
                 p.typed.clear();
             }
         }
-        NetEvent::Paired => scene.pairing = None,
+        NetEvent::Paired => {
+            if let Some(p) = scene.pairing.take() {
+                let text = scene.texts().f("note-paired", &[("pc", p.host.into())]);
+                scene.tell(Note::done(None, &text), true);
+            }
+        }
         NetEvent::PairOffer { host, why } => {
             scene.pairing = None;
             scene.pair_offer = Some((host, why));
@@ -3050,8 +3097,8 @@ fn handle_net_event(
         }
         NetEvent::Disconnected { why } => {
             // What waited for an answer gets none, nor do the commands of that PC.
-            for what in scene.asks.disconnected(Instant::now()) {
-                scene.tell_failure(what, ui::Failure::Disconnected, "");
+            for what in scene.asks.disconnected() {
+                scene.given_up(what, ui::Failure::Disconnected);
             }
             scene.offline_since = Some(Instant::now());
             scene.pairing = None;
@@ -3340,6 +3387,9 @@ fn handle_action(
     if action.leaves_profile() {
         scene.active_profile = None;
     }
+    // What was said under the button pressed before goes (another page too); what
+    // this one asks of the PC is its own.
+    scene.notes.press(action);
     match action {
         Action::Add { width, height } => {
             let req = scene.request(
@@ -3369,6 +3419,7 @@ fn handle_action(
                 scene.confirm_remove = Some((id, Instant::now()));
             }
         }
+        Action::HideNote => {}
         Action::Tab(tab) => {
             scene.tab = tab;
             scene.settings.last_tab = tab_code(tab);
@@ -3383,6 +3434,7 @@ fn handle_action(
                 let touch = scene.hands_in_view;
                 scene.open_panel(head, forward, touch);
             }
+            scene.done(action);
         }
         Action::IntroDone => {
             scene.settings.intro_seen = true;
@@ -3392,6 +3444,17 @@ fn handle_action(
         Action::Language(language) => {
             scene.settings.language = language;
             scene.saves.mark(persist::File::Settings);
+            // Another language is said once it is loaded (see `language_shown`).
+            let s = &scene.settings;
+            let shows = crate::lang::resolve(
+                language,
+                s.pc_language,
+                scene.system_lang,
+                scene.lang.known(),
+            );
+            if shows == scene.texts().lang() {
+                scene.language_shown();
+            }
         }
         Action::CinemaScreen(screen) => {
             scene
@@ -3416,16 +3479,18 @@ fn handle_action(
             // The panel appears in front: the menu steps aside.
             scene.panel_open = false;
         }
-        Action::WindowHere => {
-            if let Some(id) = scene.monitor_in_front() {
+        Action::WindowHere => match scene.monitor_in_front() {
+            Some(id) => {
                 scene.request_for(id, |id| Request::WindowHere { id }, ui::Asked::WindowHere);
             }
-        }
-        Action::Screenshot => {
-            if let Some(id) = scene.monitor_in_front() {
+            None => scene.no_monitor_in_front(action),
+        },
+        Action::Screenshot => match scene.monitor_in_front() {
+            Some(id) => {
                 scene.request_for(id, |id| Request::Screenshot { id }, ui::Asked::Screenshot);
             }
-        }
+            None => scene.no_monitor_in_front(action),
+        },
         Action::CloseWindow(id) => {
             scene.request_for(
                 id,
@@ -3433,7 +3498,10 @@ fn handle_action(
                 ui::Asked::Remove(id),
             );
         }
-        Action::Tidy => scene.tidy_up(),
+        Action::Tidy => {
+            scene.tidy_up();
+            scene.done(action);
+        }
         Action::SelectMonitor(id) => {
             scene.selected = Some(id);
             scene.confirm_remove = None;
@@ -3533,6 +3601,8 @@ fn handle_action(
             scene.saves.mark(persist::File::Settings);
             scene.mic.set_allowed(enabled);
             scene.mic_changed();
+            let note = note::mic_note(enabled, scene.mic.permission(), scene.texts());
+            scene.tell(note, false);
         }
         Action::SetAudio(enabled) => {
             scene.audio_wanted = enabled;
@@ -3557,6 +3627,7 @@ fn handle_action(
             scene.settings.preset = preset;
             scene.saves.mark(persist::File::Settings);
             scene.world.preset_chosen(&scene.settings, Instant::now());
+            scene.done(action);
         }
         Action::Curve(curve) => {
             scene.settings.curve = curve;
@@ -3621,7 +3692,7 @@ fn handle_action(
                     let text = scene
                         .texts()
                         .f("toast-profile-saved", &[("name", name.into())]);
-                    scene.show_toast(text);
+                    scene.tell(Note::done(Some(action), &text), true);
                 }
             } else {
                 scene.confirm_save = Some((i, Instant::now()));
@@ -3652,8 +3723,13 @@ fn handle_action(
                         if scene.world.pc() == Some(pc) && scene.feedback.is_some() {
                             scene.steering.forget_current();
                         }
+                        let text = scene.texts().f("note-pc-forgotten", &[("pc", name.into())]);
+                        scene.tell(Note::done(Some(action), &text), true);
                     }
-                    Err(e) => scene.show_error(format!("{e}")),
+                    Err(e) => {
+                        warn!("{e}");
+                        scene.tell(Note::failed(Some(action), &e.to_string()), true);
+                    }
                 }
                 scene.paired = store.entries().to_vec();
             }
@@ -3735,7 +3811,7 @@ fn handle_action(
                 }
                 None => {
                     let text = scene.texts().f("error-not-ip", &[("typed", typed.into())]);
-                    scene.show_error(text);
+                    scene.tell(Note::failed(Some(action), &text), true);
                 }
             }
         }

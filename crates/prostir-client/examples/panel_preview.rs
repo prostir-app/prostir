@@ -1,12 +1,70 @@
 //! Renders the headset menu to a PNG for checking the design on the desktop.
 //! cargo run -p prostir-client --example panel_preview -- panel.png [hover_x hover_y]
-//! Environment: WRIST=1 (the wrist menu), TAB=monitors|look|sound|language|pc|help (default: quick), LANG_UI=en|uk|qps (qps: the longer pseudo-language), PAIR=show|type|failed, OFFLINE=1, KEYPAD=…
+//! Environment: WRIST=1 (the wrist menu), TAB=monitors|look|sound|language|pc|help (default: quick), LANG_UI=en|uk|qps (qps: the longer pseudo-language), PAIR=show|type|failed, OFFLINE=1, KEYPAD=…, NOTE=done|failed|waiting|saved (what the page says under a button pressed on it)
 
 use prostir::ids::{DisplayKey, PcId};
-use prostir::lang::{BUILTIN, Known, Lang, Loader, Texts};
+use prostir::lang::{BUILTIN, Known, Lang, Language, Loader, Texts};
+use prostir::note::Note;
 use prostir::settings::Settings;
 use prostir::store::{NoStore, Store as _};
-use prostir::ui::{MonitorEntry, OfferWhy, PairingView, Panel, Place, Section, Tab, UiState};
+use prostir::ui::{
+    Action, MonitorEntry, OfferWhy, PairingView, Panel, Place, Section, Tab, UiState,
+};
+
+/// NOTE=`kind`: what the page of `s` says under one of its buttons, as after pressing
+/// it: done, failed (with the PC's detail where the PC says one), waiting for the PC;
+/// `saved`: a profile saved, on the Monitors page.
+fn note(kind: &str, s: &UiState) -> Option<Note> {
+    let l = &s.texts;
+    let (on, done, failed, detail) = match (s.tab, kind) {
+        (Tab::Monitors, "saved") => {
+            let name = l.f("profile-n", &[("n", 2.into())]);
+            let text = l.f("toast-profile-saved", &[("name", name.into())]);
+            return Some(Note::done(Some(Action::SaveProfile(1)), &text));
+        }
+        (Tab::Quick, _) => (
+            Action::SetAudio(false),
+            l.t("note-sound-pc"),
+            l.t("failure-sound"),
+            None,
+        ),
+        (Tab::Monitors, _) => (
+            Action::Add {
+                width: 2560,
+                height: 1440,
+            },
+            l.t("note-monitor-added"),
+            l.t("failure-limit"),
+            Some("at most 6 virtual displays"),
+        ),
+        (Tab::Settings(Section::Sound), _) => (
+            Action::SetMic(true),
+            l.t("note-mic-headset"),
+            l.t("note-mic-denied"),
+            None,
+        ),
+        (Tab::Settings(Section::Language), _) => (
+            Action::Language(Language::LikeSystem),
+            l.t("note-language"),
+            l.t("failure-not-connected"),
+            None,
+        ),
+        (Tab::Settings(Section::Pc), _) => {
+            let text = l.f("note-pc-forgotten", &[("pc", "laptop".into())]);
+            return Some(Note::done(Some(Action::ForgetPc(1)), &text));
+        }
+        _ => return None,
+    };
+    let on = Some(on);
+    Some(match kind {
+        "failed" => Note {
+            detail: detail.map(Into::into),
+            ..Note::failed(on, failed)
+        },
+        "waiting" => Note::waiting(on, l),
+        _ => Note::done(on, done),
+    })
+}
 
 /// Display `n` of the PC of the preview.
 fn k(n: u32) -> DisplayKey {
@@ -51,7 +109,7 @@ fn main() {
     let code = std::env::var("LANG_UI").unwrap_or_else(|_| "uk".into());
     let (texts, languages) = texts(&code);
     let day = prostir::lang::Moment::EXAMPLE;
-    let state = UiState {
+    let mut state = UiState {
         mic_denied: std::env::var("MIC_DENIED").is_ok(),
         confirm_save: None,
         unreachable: std::env::var("BLOCKED").ok(),
@@ -186,12 +244,15 @@ fn main() {
         },
         saved_profiles: [true, false, false],
         active_profile: Some(0),
-        asks: Vec::new(),
+        note: None,
         texts,
         languages: languages.into(),
         language_page: 0,
         update_from: NoStore.update_hint(),
     };
+    state.note = std::env::var("NOTE")
+        .ok()
+        .and_then(|kind| note(&kind, &state));
     // TOAST="text": a toast instead.
     if let Ok(message) = std::env::var("TOAST") {
         let mut panel = Panel::new();

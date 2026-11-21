@@ -12,6 +12,7 @@ use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transf
 
 use crate::ids::DisplayKey;
 use crate::lang::{Language, Moment, Texts};
+use crate::note::{Kind, Note};
 use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
 use crate::store::UpdateHint;
 
@@ -192,12 +193,13 @@ pub struct UiState {
     pub saved_profiles: [bool; crate::profiles::SLOTS],
     /// The profile last switched to (until something is changed by hand).
     pub active_profile: Option<usize>,
-    /// What the menu asked the PC for and has no answer to yet, or that failed lately:
-    /// shown by the control that asked.
-    pub asks: Vec<AskView>,
+    /// What the menu says under the button pressed last: done, waiting for the PC, or
+    /// why it failed (see `note`).
+    pub note: Option<Note>,
 }
 
-/// Which control asked the PC for something (see [`AskView`]).
+/// Which control asked the PC for something: its answer is said under the button pressed
+/// for it (see `note::Notes::asked`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Asked {
     AddMonitor,
@@ -251,58 +253,6 @@ impl Failure {
                 _ => return None,
             },
         })
-    }
-}
-
-/// How a request of the menu stands.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AskState {
-    Waiting,
-    /// Why, and the PC's detail (technical, in the PC's language).
-    Failed {
-        why: Failure,
-        detail: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AskView {
-    pub what: Asked,
-    pub state: AskState,
-}
-
-impl UiState {
-    /// How the request of control `what` stands, if one is waiting or failed lately.
-    fn ask(&self, what: Asked) -> Option<&AskState> {
-        self.asks
-            .iter()
-            .rev()
-            .find(|a| a.what == what)
-            .map(|a| &a.state)
-    }
-
-    /// A short line for control `what`: waiting, or why it failed (the code's text,
-    /// else the PC's detail), and whether it is a failure.
-    fn ask_note(&self, what: Asked) -> Option<(String, bool)> {
-        let l = &self.texts;
-        Some(match self.ask(what)? {
-            AskState::Waiting => (l.t("ask-waiting").to_owned(), false),
-            AskState::Failed { why, detail } => (
-                why.text()
-                    .map_or_else(|| detail.clone(), |id| l.t(id).to_owned()),
-                true,
-            ),
-        })
-    }
-
-    /// The PC's detail under a failure of control `what`, when there is a text above it.
-    fn ask_detail(&self, what: Asked) -> Option<&str> {
-        match self.ask(what)? {
-            AskState::Failed { why, detail } if why.text().is_some() && !detail.is_empty() => {
-                Some(detail)
-            }
-            _ => None,
-        }
     }
 }
 
@@ -440,6 +390,8 @@ pub enum Action {
     MenuButton(bool),
     /// How bright the monitors are, percent.
     Brightness(u8),
+    /// The note under a button was pressed: it goes.
+    HideNote,
     Close,
 }
 
@@ -456,6 +408,22 @@ impl Action {
                 | Action::SetMirror(_)
                 | Action::Preset(_)
         )
+    }
+
+    /// The same control as `other`: the same action, or a switch whose one button
+    /// turns it on and off (a tile on the Quick page), which after a press stands for
+    /// the other value.
+    pub fn same_control(self, other: Action) -> bool {
+        use Action::{Cinema, Focus, KeyboardWindow, SetAudio, SetMic};
+        self == other
+            || matches!(
+                (self, other),
+                (Focus(_), Focus(_))
+                    | (Cinema(_), Cinema(_))
+                    | (KeyboardWindow(_), KeyboardWindow(_))
+                    | (SetAudio(_), SetAudio(_))
+                    | (SetMic(_), SetMic(_))
+            )
     }
 }
 
@@ -508,6 +476,23 @@ enum Item {
         /// shortened with an ellipsis (see [`Panel::fit`]), and pointed at, the button
         /// shows it whole above itself.
         full: Option<String>,
+        /// What the button stands for, also while it is chosen or unavailable and
+        /// `action` is none: the note about it is said under it (see [`Note::on`]).
+        key: Option<Action>,
+    },
+    /// What the menu says under the button pressed (see [`Note`]): drawn over what
+    /// lies below the button, on a box `rect` with a point towards the button at `tip`
+    /// (x), up from the box's top, or down from its bottom where the box is above the
+    /// button; none on the bottom line. Pressed, it goes.
+    Note {
+        rect: Rect,
+        tip: Option<f32>,
+        above: bool,
+        kind: Kind,
+        text: String,
+        size: f32,
+        detail: Option<String>,
+        detail_size: f32,
     },
     /// A ring sector around (`cx`, `cy`) from radius `r0` to `r1` and angle `a0` to
     /// `a1` (radians, clockwise from straight up), pressed like a button: the round
@@ -605,7 +590,50 @@ pub struct Panel {
     dirty: bool,
     /// The wrist menu rather than the main one.
     wrist: bool,
+    /// The page shown.
+    page: Page,
+    /// The button pressed last, where it was, and on which page: a note about it is
+    /// said there, also when the button has gone since (a monitor removed) or another
+    /// one took its place (the next PC in the list after one was forgotten).
+    pressed: Option<(Action, Rect, Page)>,
 }
+
+/// Which page the menu shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Offer,
+    Pairing,
+    Update,
+    Intro,
+    Welcome,
+    Tab(Tab),
+}
+
+impl Page {
+    /// The page `s` shows (as [`Panel::build`] picks it).
+    fn of(s: &UiState) -> Self {
+        if s.pair_offer.is_some() {
+            Self::Offer
+        } else if s.pairing.is_some() {
+            Self::Pairing
+        } else if s.update.is_some() {
+            Self::Update
+        } else if s.intro && s.host.is_some() {
+            Self::Intro
+        } else if s.host.is_none() {
+            Self::Welcome
+        } else {
+            Self::Tab(s.tab)
+        }
+    }
+}
+
+/// A note's sizes: its text, the PC's detail under it, the room on either side.
+const NOTE_SIZE: f32 = 19.0;
+const NOTE_DETAIL_SIZE: f32 = 15.0;
+const NOTE_PAD: f32 = 18.0;
+/// The gap between a button and its note, where the note's point is.
+const NOTE_GAP: f32 = 10.0;
 
 impl Default for Panel {
     fn default() -> Self {
@@ -626,6 +654,8 @@ impl Panel {
             pixmap: Pixmap::new(WIDTH, HEIGHT).expect("panel size"),
             dirty: true,
             wrist: false,
+            page: Page::Welcome,
+            pressed: None,
         }
     }
 
@@ -657,7 +687,12 @@ impl Panel {
     /// Updates the hovered button from a point in panel pixels (`None`: not pointing at the panel).
     pub fn hover(&mut self, point: Option<(f32, f32)>) {
         let hovered = point.and_then(|(x, y)| {
-            self.items.iter().position(|item| match item {
+            // A note lies over the buttons below its own one.
+            let on_note = self.items.iter().rposition(|item| {
+                matches!(item, Item::Note { rect, .. }
+                    if x >= rect.left() && x <= rect.right() && y >= rect.top() && y <= rect.bottom())
+            });
+            on_note.or_else(|| self.items.iter().position(|item| match item {
                 Item::Button {
                     rect,
                     action: Some(_),
@@ -676,7 +711,7 @@ impl Panel {
                     ..
                 } => *style != Style::Disabled && item.wedge_contains(x, y),
                 _ => false,
-            })
+            }))
         });
         if hovered != self.hovered {
             self.hovered = hovered;
@@ -687,8 +722,19 @@ impl Panel {
     pub fn hovered_action(&self) -> Option<Action> {
         match self.items.get(self.hovered?)? {
             Item::Button { action, .. } | Item::Wedge { action, .. } => *action,
+            Item::Note { .. } => Some(Action::HideNote),
             _ => None,
         }
+    }
+
+    /// The hovered button is pressed: its action. Where it is, is kept for the note
+    /// about it (see [`Panel::pressed`]).
+    pub fn press(&mut self) -> Option<Action> {
+        let action = self.hovered_action()?;
+        if let Some(Item::Button { rect, .. }) = self.hovered.and_then(|i| self.items.get(i)) {
+            self.pressed = Some((action, *rect, self.page));
+        }
+        Some(action)
     }
 
     /// Labels and texts that do not fit: a button label wider than its button, text
@@ -770,6 +816,34 @@ impl Panel {
                     let r = rect(*x, baseline - size * 0.75, tw, size * 0.95);
                     boxes.push((r, text.clone(), false));
                 }
+                // Over the page on purpose: only itself is checked.
+                Item::Note {
+                    rect: r,
+                    text,
+                    size,
+                    detail,
+                    detail_size,
+                    ..
+                } => {
+                    found.extend(self.missing_glyphs(text));
+                    let room = r.width() - 2.0 * NOTE_PAD;
+                    let tw = self.text_width(text, *size, true);
+                    if tw > room + 0.5 {
+                        found.push(format!("note wider than its box: {text:?}"));
+                    }
+                    if let Some(detail) = detail {
+                        found.extend(self.missing_glyphs(detail));
+                        if self.text_width(detail, *detail_size, false) > room + 0.5 {
+                            found.push(format!("note detail wider than its box: {detail:?}"));
+                        }
+                    }
+                    if r.left() < 16.0 || r.right() > width - 16.0 {
+                        found.push(format!("note off the panel: {text:?}"));
+                    }
+                    if r.top() < 8.0 || r.bottom() > height - 12.0 {
+                        found.push(format!("note off the panel: {text:?}"));
+                    }
+                }
                 _ => {}
             }
         }
@@ -818,6 +892,24 @@ impl Panel {
                     *size = self.fitting(text, *size, *medium, room);
                     if *shorten {
                         self.shorten(text, *size, *medium, room);
+                    }
+                }
+                // As big as fits, then shortened: a reason or the PC's detail can be
+                // longer than the panel is wide.
+                Item::Note {
+                    rect,
+                    text,
+                    size,
+                    detail,
+                    detail_size,
+                    ..
+                } => {
+                    let room = rect.width() - 2.0 * NOTE_PAD;
+                    *size = self.fitting(text, *size, true, room);
+                    self.shorten(text, *size, true, room);
+                    if let Some(detail) = detail {
+                        *detail_size = self.fitting(detail, *detail_size, false, room);
+                        self.shorten(detail, *detail_size, false, room);
                     }
                 }
                 _ => {}
@@ -980,7 +1072,142 @@ impl Panel {
         Some(self.pixmap.data())
     }
 
+    /// The page `s` shows, and the note over it.
     fn build(&mut self, s: &UiState) -> Vec<Item> {
+        self.page = Page::of(s);
+        let mut items = self.build_page(s);
+        if let Some(note) = &s.note {
+            let item = self.note_item(note, &items, s.error.is_some());
+            items.push(item);
+        }
+        items
+    }
+
+    /// Where the note about button `on` goes: under the button where it was pressed,
+    /// on this page; else under the button of the page that stands for `on` (the same
+    /// action, then the same switch); none where the page has no such button.
+    fn note_anchor(&self, on: Action, items: &[Item]) -> Option<Rect> {
+        if let Some((pressed, at, page)) = self.pressed
+            && page == self.page
+            && pressed.same_control(on)
+        {
+            return Some(at);
+        }
+        let find = |same: &dyn Fn(Action) -> bool| {
+            items.iter().find_map(|item| match item {
+                Item::Button {
+                    rect,
+                    key: Some(key),
+                    ..
+                } if same(*key) => Some(*rect),
+                _ => None,
+            })
+        };
+        find(&|key| key == on).or_else(|| find(&|key| key.same_control(on)))
+    }
+
+    /// `note` as drawn: right under its button (above it where there is no room
+    /// below), over whatever lies there, as wide as its text and at least as the
+    /// button, within the panel, and grown over any control or text it would cut
+    /// through, so nothing peeks out from under it; inside the lower part of a tall
+    /// button (a tile, whose state line it covers) where it fits across it, so the row
+    /// below stays as it is; on the bottom line (above the error line, when there is
+    /// one) where the page has no button for it. Its texts are made to fit by
+    /// [`Panel::fit`].
+    fn note_item(&mut self, note: &Note, items: &[Item], error: bool) -> Item {
+        let (pw, ph) = (WIDTH as f32, HEIGHT as f32);
+        let text_w = self.text_width(&note.text, NOTE_SIZE, true);
+        let detail_w = note
+            .detail
+            .as_deref()
+            .map_or(0.0, |d| self.text_width(d, NOTE_DETAIL_SIZE, false));
+        let h = if note.detail.is_some() { 66.0 } else { 46.0 };
+        // A little more than the text, which then never measures wider than its room.
+        let wanted = text_w.max(detail_w) + 2.0 * NOTE_PAD + 2.0;
+        let widest = pw - 64.0;
+        let (rect_, tip, above) = match note.on.and_then(|on| self.note_anchor(on, items)) {
+            // A tile: room enough under its title, for a text that fits across it.
+            Some(b) if b.height() >= 2.0 * h + 20.0 && wanted <= b.width() - 20.0 => {
+                let w = (b.width() - 20.0).min(widest);
+                (
+                    rect(b.left() + 10.0, b.bottom() - 10.0 - h, w, h),
+                    None,
+                    false,
+                )
+            }
+            Some(b) => {
+                let w = wanted.max(b.width()).min(widest);
+                let mid = b.left() + b.width() / 2.0;
+                let x = (mid - w / 2.0).clamp(32.0, pw - 32.0 - w);
+                let below = b.bottom() + NOTE_GAP;
+                let above = below + h > ph - 24.0;
+                let y = if above { b.top() - NOTE_GAP - h } else { below };
+                let r = self.covering(rect(x, y, w, h), b, above, items);
+                (r, Some(mid.clamp(x + 18.0, x + w - 18.0)), above)
+            }
+            None => {
+                let w = wanted.min(widest);
+                let bottom = if error { ph - 66.0 } else { ph - 24.0 };
+                (rect((pw - w) / 2.0, bottom - h, w, h), None, false)
+            }
+        };
+        Item::Note {
+            rect: rect_,
+            tip,
+            above,
+            kind: note.kind,
+            text: note.text.to_string(),
+            size: NOTE_SIZE,
+            detail: note.detail.as_deref().map(str::to_owned),
+            detail_size: NOTE_DETAIL_SIZE,
+        }
+    }
+
+    /// Note box `r`, below its button `b` (or `above` it), grown away from the button
+    /// over each button and text it covers only in part, within the panel.
+    fn covering(&mut self, mut r: Rect, b: Rect, above: bool, items: &[Item]) -> Rect {
+        let (top, bottom) = (8.0, HEIGHT as f32 - 12.0);
+        // Growing can reach the next control: a few passes settle it.
+        for _ in 0..4 {
+            let mut grown = r;
+            for item in items {
+                let c = match item {
+                    Item::Button { rect: c, .. } if *c != b => *c,
+                    Item::Text {
+                        x,
+                        baseline,
+                        size,
+                        medium,
+                        text,
+                        ..
+                    } => {
+                        let tw = self.text_width(text, *size, *medium);
+                        rect(*x, baseline - size * 0.8, tw.max(1.0), size * 1.05)
+                    }
+                    _ => continue,
+                };
+                if !overlap(&grown, &c) {
+                    continue;
+                }
+                grown = if above && c.top() < grown.top() {
+                    let t = (c.top() - 4.0).max(top);
+                    rect(grown.left(), t, grown.width(), grown.bottom() - t)
+                } else if !above && c.bottom() > grown.bottom() {
+                    let end = (c.bottom() + 4.0).min(bottom);
+                    rect(grown.left(), grown.top(), grown.width(), end - grown.top())
+                } else {
+                    grown
+                };
+            }
+            if grown == r {
+                break;
+            }
+            r = grown;
+        }
+        r
+    }
+
+    fn build_page(&mut self, s: &UiState) -> Vec<Item> {
         let l = &s.texts;
         let mut items = vec![Item::Panel(rect(0.0, 0.0, WIDTH as f32, HEIGHT as f32))];
         let w = WIDTH as f32;
@@ -1362,6 +1589,8 @@ impl Panel {
         for (i, item) in items.iter().enumerate() {
             match item {
                 Item::Panel(r) => fill(&mut pixmap, rounded(*r, 36.0), [16, 18, 24, 240]),
+                // Drawn last, over everything (see `Panel::draw_note`).
+                Item::Note { .. } => {}
                 Item::Box(r, color) => fill(&mut pixmap, rounded(*r, 14.0), *color),
                 Item::Dot { x, y, r, color } => fill(&mut pixmap, circle(*x, *y, *r), *color),
                 Item::Text {
@@ -1459,6 +1688,28 @@ impl Panel {
             }
         }
         // A name shortened on its button, pointed at: whole, above it.
+        if let Some(Item::Note {
+            rect: r,
+            tip,
+            above,
+            kind,
+            text,
+            size,
+            detail,
+            detail_size,
+        }) = items.iter().rev().find(|i| matches!(i, Item::Note { .. }))
+        {
+            let hovered = matches!(
+                self.hovered.and_then(|i| items.get(i)),
+                Some(Item::Note { .. })
+            );
+            self.draw_note(
+                &mut pixmap,
+                (*r, *tip, *above, *kind, hovered),
+                (text, *size),
+                detail.as_deref().map(|d| (d, *detail_size)),
+            );
+        }
         if let Some(Item::Button {
             rect: r,
             label,
@@ -1471,6 +1722,53 @@ impl Panel {
         }
         self.items = items;
         self.pixmap = pixmap;
+    }
+
+    /// A note (see [`Item::Note`]): a dark box with an edge in its kind's colour, a
+    /// point towards its button, its text in the middle and the detail under it.
+    fn draw_note(
+        &mut self,
+        pixmap: &mut Pixmap,
+        (r, tip, above, kind, hovered): (Rect, Option<f32>, bool, Kind, bool),
+        (text, size): (&str, f32),
+        detail: Option<(&str, f32)>,
+    ) {
+        let (edge, fg) = match kind {
+            Kind::Done => (GOOD, TEXT),
+            Kind::Waiting => (WAIT, TEXT),
+            Kind::Failed => (DANGER, DANGER),
+        };
+        if let Some(tx) = tip {
+            let (base, point) = if above {
+                (r.bottom() - 1.0, r.bottom() + NOTE_GAP - 1.0)
+            } else {
+                (r.top() + 1.0, r.top() - NOTE_GAP + 1.0)
+            };
+            let mut pb = PathBuilder::new();
+            pb.move_to(tx - 10.0, base);
+            pb.line_to(tx, point);
+            pb.line_to(tx + 10.0, base);
+            pb.close();
+            fill(pixmap, pb.finish(), edge);
+        }
+        let shape = rounded(r, 12.0);
+        fill(pixmap, shape.clone(), [26, 30, 40, 255]);
+        let [er, eg, eb, _] = edge;
+        let alpha = if hovered { 255 } else { 190 };
+        stroke(pixmap, shape, [er, eg, eb, alpha], 2.0);
+        // In the middle of the box, which may have grown over what it covers.
+        let tw = self.text_width(text, size, true);
+        let x = r.left() + (r.width() - tw) / 2.0;
+        let mid = r.top() + r.height() / 2.0;
+        match detail {
+            None => self.draw_text(pixmap, x, mid + size * 0.36, size, true, fg, text),
+            Some((detail, dsize)) => {
+                self.draw_text(pixmap, x, mid - 4.0, size, true, fg, text);
+                let dw = self.text_width(detail, dsize, false);
+                let dx = r.left() + (r.width() - dw) / 2.0;
+                self.draw_text(pixmap, dx, mid + dsize + 4.0, dsize, false, MUTED, detail);
+            }
+        }
     }
 
     /// `text` on a dark label just above `over` (below it where there is no room above),
@@ -1811,10 +2109,6 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             *shorten = true;
         }
         items.push(title);
-        // Removing it or making it primary: how that stands, in place of its size.
-        let note = s
-            .ask_note(Asked::Remove(m.id))
-            .or_else(|| s.ask_note(Asked::MakePrimary(m.id)));
         let remove = rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0);
         let primary = rect(lx + lw - 58.0 - 10.0 - 210.0, y + 7.0, 210.0, 48.0);
         // Left of the buttons.
@@ -1825,17 +2119,10 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
                 y + 50.0,
                 16.0,
                 false,
-                if note.as_ref().is_some_and(|n| n.1) {
-                    DANGER
-                } else {
-                    MUTED
-                },
-                &match (note.as_ref(), m.place.name()) {
-                    (Some((note, _)), _) => note.clone(),
-                    (None, Some(place)) => {
-                        format!("{} × {} · {}", m.width, m.height, l.t(place))
-                    }
-                    (None, None) => format!("{} × {}", m.width, m.height),
+                MUTED,
+                &match m.place.name() {
+                    Some(place) => format!("{} × {} · {}", m.width, m.height, l.t(place)),
+                    None => format!("{} × {}", m.width, m.height),
                 },
             ),
         ));
@@ -1915,9 +2202,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         .mirror_name
         .clone()
         .unwrap_or_else(|| l.t("pc-display").to_owned());
-    let title = if let Some((note, _)) = s.ask_note(Asked::Mirror) {
-        format!("{name} · {note}")
-    } else if !connected {
+    let title = if !connected {
         format!("{name} · {}", l.t("pc-display-not-connected"))
     } else {
         name
@@ -1992,12 +2277,11 @@ fn segmented(
             (true, true) => Style::Selected,
             (true, false) => Style::Normal,
         };
-        items.push(button(
-            r,
-            label,
-            style,
-            (enabled && !selected).then_some(action),
-        ));
+        let mut b = button(r, label, style, (enabled && !selected).then_some(action));
+        if let Item::Button { key, .. } = &mut b {
+            *key = Some(action);
+        }
+        items.push(b);
     }
     *y += 48.0 + 40.0;
 }
@@ -2046,16 +2330,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         items.push(button(r, &label, style, action));
     }
     y += sizes.len().div_ceil(3) as f32 * 58.0 + 40.0;
-    // How the last "add" stands: waiting, or why it failed and the PC's detail.
-    if let Some((note, failed)) = s.ask_note(Asked::AddMonitor) {
-        let color = if failed { DANGER } else { MUTED };
-        items.push(text(rx, y - 22.0, 18.0, true, color, &note));
-        if let Some(detail) = s.ask_detail(Asked::AddMonitor) {
-            items.push(text(rx, y, 15.0, false, MUTED, detail));
-            y += 20.0;
-        }
-        y += 10.0;
-    } else if let Some(max) = max.filter(|max| s.monitors.len() >= *max) {
+    if let Some(max) = max.filter(|max| s.monitors.len() >= *max) {
         items.push(text(
             rx,
             y - 22.0,
@@ -2562,7 +2837,6 @@ fn tile(
     state: &str,
     on: bool,
     action: Option<Action>,
-    note: Option<&(String, bool)>,
 ) {
     let style = match (&action, on) {
         (None, _) => Style::Disabled,
@@ -2580,15 +2854,9 @@ fn tile(
         room,
         text(r.left() + 26.0, r.top() + 62.0, 27.0, true, fg, title),
     ));
-    // What it asked the PC for and how that stands, in place of its state.
-    let (state, color) = match note {
-        Some((note, true)) => (note.as_str(), DANGER),
-        Some((note, false)) => (note.as_str(), sub),
-        None => (state, sub),
-    };
     items.push(text_in(
         room,
-        text(r.left() + 24.0, r.top() + 104.0, 19.0, false, color, state),
+        text(r.left() + 24.0, r.top() + 104.0, 19.0, false, sub, state),
     ));
 }
 
@@ -2610,11 +2878,12 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         };
         let action = (connected && *saved && !active).then_some(Action::ApplyProfile(i));
         let name = l.f("profile-n", &[("n", (i + 1).into())]);
-        items.push(button(r, &name, style, action));
-        if let Some((note, failed)) = s.ask_note(Asked::Profile(i)) {
-            let color = if failed { DANGER } else { MUTED };
-            items.push(text(r.left(), r.bottom() + 22.0, 17.0, false, color, &note));
-        } else if !saved {
+        let mut b = button(r, &name, style, action);
+        if let Item::Button { key, .. } = &mut b {
+            *key = Some(Action::ApplyProfile(i));
+        }
+        items.push(b);
+        if !saved {
             let empty = l.t("profile-empty");
             items.push(text(r.left(), r.bottom() + 22.0, 17.0, false, MUTED, empty));
         }
@@ -2701,17 +2970,6 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             connected.then_some(Action::Screenshot),
         ),
     ];
-    let asked = [
-        None,
-        None,
-        None,
-        None,
-        Some(Asked::Sound),
-        None,
-        Some(Asked::DetachWindow),
-        Some(Asked::WindowHere),
-        Some(Asked::Screenshot),
-    ];
     for (i, (title, state, on, action)) in tiles.into_iter().enumerate() {
         let r = rect(
             x + (i % 3) as f32 * (tw + 12.0),
@@ -2719,8 +2977,7 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             tw,
             th,
         );
-        let note = asked[i].and_then(|what| s.ask_note(what));
-        tile(items, r, title, &state, on, action, note.as_ref());
+        tile(items, r, title, &state, on, action);
     }
 }
 
@@ -3157,17 +3414,12 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
     let any_gpu = pc.choices.iter().any(|(_, gpu)| *gpu);
     let set = |change: EncodingChange| Action::SetEncoding(change);
     let none = EncodingChange::default();
-    // How the last change stands, after the first title.
-    let title = match s.ask_note(Asked::Encoding) {
-        Some((note, _)) => format!("{} · {note}", l.t("pc-quality")),
-        None => l.t("pc-quality").to_owned(),
-    };
     segmented(
         items,
         x,
         w,
         &mut y,
-        &title,
+        l.t("pc-quality"),
         [
             (15, l.t("pc-quality-economy")),
             (30, l.t("pc-quality-normal")),
@@ -3276,16 +3528,12 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
     let l = &s.texts;
     // The current state is the highlighted option, not a button label to decode.
     y += 18.0;
-    let title = match s.ask_note(Asked::Sound) {
-        Some((note, _)) => format!("{} · {note}", l.t("sound-plays")),
-        None => l.t("sound-plays").to_owned(),
-    };
     segmented(
         items,
         lx,
         lw,
         &mut y,
-        &title,
+        l.t("sound-plays"),
         vec![
             (
                 l.t("sound-in-headset"),
@@ -3484,6 +3732,7 @@ fn button(rect: Rect, label: &str, style: Style, action: Option<Action>) -> Item
         style,
         action,
         full: None,
+        key: action,
     }
 }
 
@@ -3497,6 +3746,7 @@ fn name_button(rect: Rect, name: &str, size: f32, style: Style, action: Option<A
         style,
         action,
         full: Some(name.to_owned()),
+        key: action,
     }
 }
 
@@ -3696,7 +3946,7 @@ mod tests {
             update_from: NoStore.update_hint(),
             saved_profiles: [true, false, true],
             active_profile: None,
-            asks: Vec::new(),
+            note: None,
         }
     }
 
@@ -4115,46 +4365,6 @@ mod tests {
                 st.active_profile = Some(1);
                 st.error = Some(lang.f("monitors-at-most", &[("count", 6.into())]));
                 states.push(st.clone());
-                // Every control waiting for the PC, then every one failed, on the
-                // pages that have them.
-                let asks_here = matches!(
-                    tab,
-                    Tab::Quick | Tab::Monitors | Tab::Settings(Section::Sound | Section::Pc)
-                );
-                let every = [
-                    Asked::AddMonitor,
-                    Asked::Remove(k(102)),
-                    Asked::MakePrimary(k(103)),
-                    Asked::Mirror,
-                    Asked::Sound,
-                    Asked::Encoding,
-                    Asked::DetachWindow,
-                    Asked::WindowHere,
-                    Asked::Screenshot,
-                    Asked::Profile(0),
-                ];
-                let answers = [
-                    AskState::Waiting,
-                    AskState::Failed {
-                        why: Failure::Pc(ErrorCode::LIMIT),
-                        detail: "At most 6 monitors".into(),
-                    },
-                    AskState::Failed {
-                        why: Failure::Disconnected,
-                        detail: String::new(),
-                    },
-                ];
-                for state in answers.iter().filter(|_| asks_here) {
-                    let mut asking = st.clone();
-                    asking.asks = every
-                        .iter()
-                        .map(|&what| AskView {
-                            what,
-                            state: state.clone(),
-                        })
-                        .collect();
-                    states.push(asking);
-                }
                 // Twenty languages, every page of them.
                 if tab == Tab::Settings(Section::Language) {
                     for page in 0..3 {
@@ -4260,6 +4470,241 @@ mod tests {
                 for ((text, was), (_, now)) in sizes(&made).iter().zip(sizes(&p.items)) {
                     if (was - now).abs() > f32::EPSILON {
                         problems.push(format!("{:?}: {text:?} drawn smaller", st.texts));
+                    }
+                }
+            }
+        }
+        problems.dedup();
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    /// The note drawn: its box, its point, whether it is above its button, its text
+    /// and that text's size.
+    fn note_of(p: &Panel) -> Option<(Rect, Option<f32>, bool, String, f32)> {
+        p.items.iter().find_map(|i| match i {
+            Item::Note {
+                rect,
+                tip,
+                above,
+                text,
+                size,
+                ..
+            } => Some((*rect, *tip, *above, text.clone(), *size)),
+            _ => None,
+        })
+    }
+
+    /// Where the button standing for `key` is.
+    fn button_at(p: &Panel, key: Action) -> Rect {
+        p.items
+            .iter()
+            .find_map(|i| match i {
+                Item::Button {
+                    rect, key: Some(k), ..
+                } if *k == key => Some(*rect),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no button for {key:?}"))
+    }
+
+    fn middle(r: Rect) -> (f32, f32) {
+        (r.left() + r.width() / 2.0, r.top() + r.height() / 2.0)
+    }
+
+    /// A note sits right under the button it is about, its point at the button's
+    /// middle, over the row below (which it keeps from being pressed: pressed, the
+    /// note goes); above a button too near the bottom; under a switch that stands for
+    /// the other value since; where a button was pressed after the button has gone;
+    /// on the bottom line where the page has no button for it.
+    #[test]
+    fn a_note_sits_under_its_button() {
+        let texts = crate::lang::builtin("uk");
+        let mut st = sample_state();
+        let add = Action::Add {
+            width: 2560,
+            height: 1440,
+        };
+        st.note = Some(Note::done(Some(add), texts.t("note-monitor-added")));
+        let mut p = Panel::new();
+        p.set_state(&st);
+        let b = button_at(&p, add);
+        let (r, tip, above, text, size) = note_of(&p).expect("a note");
+        assert_eq!(text, "Монітор додано");
+        assert!(!above);
+        assert!(
+            (r.top() - (b.bottom() + NOTE_GAP)).abs() < 0.01,
+            "{r:?} under {b:?}"
+        );
+        assert!(r.width() >= b.width());
+        assert_eq!(tip, Some(middle(b).0));
+        assert!(
+            (size - NOTE_SIZE).abs() < f32::EPSILON,
+            "drawn at its own size"
+        );
+        assert!(p.overflows().is_empty(), "{:?}", p.overflows());
+        // Over the size below, whole (nothing of it peeks out): pressing there takes
+        // the note away, not the size below.
+        let below = button_at(
+            &p,
+            Action::Add {
+                width: 5120,
+                height: 1440,
+            },
+        );
+        assert!(r.top() <= below.top() && r.bottom() >= below.bottom());
+        p.hover(Some(middle(below)));
+        assert_eq!(p.press(), Some(Action::HideNote));
+
+        // The last row of the page: the note goes above.
+        let cinema = Action::CinemaScreen(k(103));
+        st.note = Some(Note::done(Some(cinema), "Готово"));
+        let mut p = Panel::new();
+        p.set_state(&st);
+        let b = button_at(&p, cinema);
+        let (r, _, above, ..) = note_of(&p).expect("a note");
+        assert!(above);
+        assert!((r.bottom() - (b.top() - NOTE_GAP)).abs() < 0.01);
+        assert!(p.overflows().is_empty(), "{:?}", p.overflows());
+
+        // A tile pressed: it turns the sound to the PC, and then stands for turning
+        // it back. The note covers its state line, under its title.
+        let mut st = sample_state();
+        st.tab = Tab::Quick;
+        st.audio_wanted = false;
+        st.note = Some(Note::done(
+            Some(Action::SetAudio(false)),
+            texts.t("note-sound-pc"),
+        ));
+        let mut p = Panel::new();
+        p.set_state(&st);
+        let tile = button_at(&p, Action::SetAudio(true));
+        let (r, tip, ..) = note_of(&p).expect("a note");
+        assert_eq!(tip, None);
+        assert!(r.left() > tile.left() && r.right() < tile.right());
+        assert!(r.top() > tile.top() + 70.0 && r.bottom() < tile.bottom());
+
+        // Monitor 2 removed: the note stays where its "×" was.
+        let mut st = sample_state();
+        st.selected = Some(k(102));
+        let mut p = Panel::new();
+        p.set_state(&st);
+        let remove = Action::Remove(k(102));
+        let cross = button_at(&p, remove);
+        p.hover(Some(middle(cross)));
+        assert_eq!(p.press(), Some(remove));
+        st.monitors.retain(|m| m.id != k(102));
+        st.selected = None;
+        st.note = Some(Note::done(Some(remove), texts.t("note-monitor-removed")));
+        p.set_state(&st);
+        let (r, tip, ..) = note_of(&p).expect("a note");
+        assert!((r.top() - (cross.bottom() + NOTE_GAP)).abs() < 0.01);
+        assert_eq!(tip, Some(middle(cross).0));
+
+        // No button for it here: the bottom line, above the error line when there is
+        // one.
+        for (on, error) in [
+            (None, None),
+            (Some(Action::FindMouse), None),
+            (None, Some("Не вдалося зберегти налаштування".to_owned())),
+        ] {
+            let mut st = sample_state();
+            st.error.clone_from(&error);
+            st.note = Some(Note::failed(on, texts.t("failure-not-on-displays")));
+            let mut p = Panel::new();
+            p.set_state(&st);
+            let (r, tip, ..) = note_of(&p).expect("a note");
+            assert_eq!(tip, None);
+            let bottom = if error.is_some() { 66.0 } else { 24.0 };
+            assert!((r.bottom() - (HEIGHT as f32 - bottom)).abs() < 0.01);
+            assert!(p.overflows().is_empty(), "{:?}", p.overflows());
+        }
+    }
+
+    /// The longest notes, a failure with the PC's detail and a long "done", fit under
+    /// every button of every page, in both languages at their own size, in the longer
+    /// pseudo-language made smaller.
+    #[test]
+    fn notes_fit_under_every_button() {
+        let mut problems = Vec::new();
+        for lang in [
+            crate::lang::builtin("uk"),
+            crate::lang::builtin("en"),
+            pseudo(),
+        ] {
+            let mut pages = Vec::new();
+            for tab in [
+                Tab::Quick,
+                Tab::Monitors,
+                Tab::Settings(Section::Look),
+                Tab::Settings(Section::Controls),
+                Tab::Settings(Section::Sound),
+                Tab::Settings(Section::Language),
+                Tab::Settings(Section::Pc),
+                Tab::Settings(Section::Help),
+            ] {
+                let mut st = sample_state();
+                st.texts = lang.clone();
+                st.tab = tab;
+                st.selected = Some(k(103));
+                pages.push(st);
+            }
+            let mut offline = sample_state();
+            offline.texts = lang.clone();
+            offline.host = None;
+            offline.ip_input = Some("192.168.100.200".into());
+            pages.push(offline);
+            let failed = Note {
+                detail: Some("At most 6 monitors of 5120×1440 on this PC".into()),
+                ..Note::failed(None, lang.t("failure-bad-size"))
+            };
+            let done = Note::done(None, lang.t("note-mic-ask"));
+            let mut p = Panel::new();
+            for page in pages {
+                p.set_state(&page);
+                let keys: Vec<Action> = p
+                    .items
+                    .iter()
+                    .filter_map(|i| match i {
+                        Item::Button { key, .. } => *key,
+                        _ => None,
+                    })
+                    .collect();
+                assert!(!keys.is_empty());
+                for on in keys {
+                    for note in [&failed, &done] {
+                        let mut st = page.clone();
+                        st.note = Some(Note {
+                            on: Some(on),
+                            ..note.clone()
+                        });
+                        p.set_state(&st);
+                        for o in p.overflows() {
+                            problems.push(format!("{:?}/{:?}/{on:?}: {o}", lang, page.tab));
+                        }
+                        let Some((r, tip, ..)) = note_of(&p) else {
+                            panic!("no note")
+                        };
+                        // Under its button with a point, or inside a tile.
+                        let inside = p.items.iter().any(|i| {
+                            matches!(i, Item::Button { rect: b, .. }
+                                if b.left() <= r.left() && b.right() >= r.right()
+                                    && b.top() <= r.top() && b.bottom() >= r.bottom())
+                        });
+                        if tip.is_none() && !inside {
+                            problems.push(format!("{on:?}: not by its button"));
+                        }
+                        let fits = p.items.iter().all(|i| match i {
+                            Item::Note {
+                                size, detail_size, ..
+                            } => {
+                                (size - NOTE_SIZE).abs() < f32::EPSILON
+                                    && (detail_size - NOTE_DETAIL_SIZE).abs() < f32::EPSILON
+                            }
+                            _ => true,
+                        });
+                        if lang.lang().as_str() != "qps" && !fits {
+                            problems.push(format!("{lang:?}/{on:?}: note drawn smaller"));
+                        }
                     }
                 }
             }
