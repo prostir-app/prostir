@@ -25,6 +25,7 @@ use prostir_proto::stats::{Gaps, Period};
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
 use crate::audio::{Gains, Player};
+use crate::connecting::{Ended, Probing, RETRY_PAUSE};
 use crate::frames::{Frame, FrameQueue, Frames, KeyframeWait, Pushed};
 use crate::ids::PcId;
 use crate::lang::{Lang, Texts};
@@ -634,7 +635,7 @@ pub fn spawn(
                     {
                         steering.rest(Duration::from_secs(10));
                     } else {
-                        again_now = quick_retry(&ended, began.elapsed());
+                        again_now = ended.retry_at_once(began.elapsed());
                     }
                 }
                 if !again_now {
@@ -643,23 +644,6 @@ pub fn spawn(
             }
         })
         .expect("spawn net thread")
-}
-
-/// Between attempts to connect.
-const RETRY_PAUSE: Duration = Duration::from_millis(300);
-/// A session must have run this long for the next attempt to go at once: one that
-/// breaks right after it opens is retried only after [`RETRY_PAUSE`], so a PC that
-/// keeps dropping sessions is not hammered.
-const QUICK_RETRY_AFTER: Duration = Duration::from_secs(2);
-
-/// Whether to connect again at once after a session that ended as `ended` says,
-/// having lasted `lasted`: only one that opened, ran a while and broke off without
-/// the PC saying why (a goodbye or a refusal keep their pauses).
-fn quick_retry(ended: &Ended, lasted: Duration) -> bool {
-    ended.opened
-        && ended.goodbye.is_none()
-        && ended.refused.is_none()
-        && lasted >= QUICK_RETRY_AFTER
 }
 
 /// What steering needs of a connection that is being opened.
@@ -846,36 +830,6 @@ fn connect(
         scan_subnet()
     } else {
         None
-    }
-}
-
-/// The first probe of the local network for a PC that does not announce itself, and
-/// how much longer each next one waits, up to [`PROBE_AT_MOST`].
-const PROBE_FIRST: Duration = Duration::from_millis(7500);
-const PROBE_AT_MOST: Duration = Duration::from_secs(60);
-
-/// When to probe the local network next: at once when the search starts, then less
-/// and less often while no PC is found (each probe starts 253 short connections).
-#[derive(Default)]
-struct Probing {
-    /// When the next probe is due, and the wait after it; `None` before the first.
-    next: Option<(Instant, Duration)>,
-}
-
-impl Probing {
-    /// Whether to probe now; if so, the next one waits twice as long as the last.
-    fn due(&mut self, now: Instant) -> bool {
-        match self.next {
-            Some((at, _)) if now < at => false,
-            Some((_, wait)) => {
-                self.next = Some((now + wait, (wait * 2).min(PROBE_AT_MOST)));
-                true
-            }
-            None => {
-                self.next = Some((now + PROBE_FIRST, PROBE_FIRST * 2));
-                true
-            }
-        }
     }
 }
 
@@ -1094,18 +1048,6 @@ impl Drop for StreamSlot {
     fn drop(&mut self) {
         self.queue.close();
     }
-}
-
-/// How a session went, for what to do next.
-#[derive(Default)]
-struct Ended {
-    /// The PC is trusted and the session started.
-    opened: bool,
-    /// When the PC last sent an error: right before it hung up means it cannot
-    /// serve the headset right now.
-    refused: Option<Instant>,
-    /// The PC ended the session on purpose, for this reason.
-    goodbye: Option<PcGoodbye>,
 }
 
 fn run_session(

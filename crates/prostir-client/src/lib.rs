@@ -10,6 +10,7 @@
 
 pub mod background;
 pub mod commands;
+pub mod connecting;
 pub mod device;
 pub mod frames;
 pub mod ids;
