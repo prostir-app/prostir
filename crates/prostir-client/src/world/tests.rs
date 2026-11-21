@@ -837,6 +837,31 @@ fn two_pcs_at_once_keep_their_own_desktops() {
     assert!(all.len() == 2 && all.iter().all(|m| m.pc == PC), "{all:?}");
 }
 
+/// Scenario 16 (step 7 note, 10.1), the world's part: the desktop's arrangement is told
+/// once it stood, also with no frame drawn (the headset off the head): the passes of
+/// the main loop without frames settle it.
+#[test]
+fn the_desktop_is_told_without_frames() {
+    let mut sim = Sim::new(None);
+    sim.connect(PC);
+    sim.list(three());
+    for n in 1..=3 {
+        sim.stream(n, QHD);
+    }
+    let mut told = None;
+    for _ in 0..20 {
+        sim.now += Duration::from_millis(100);
+        sim.world.settle(sim.now);
+        if let Some(t) = sim.world.take_arrange() {
+            told = Some(t);
+            break;
+        }
+    }
+    let (pc, rows) = told.expect("told without a frame");
+    assert_eq!(pc, PC);
+    assert_eq!(rows.iter().map(|r| r.entries.len()).sum::<usize>(), 3);
+}
+
 /// Scenario 17. A monitor moved by a hand is drawn at its new place in the same pass
 /// (no frame behind the hand), over the others; and one taken on its way goes on from
 /// where it is drawn, not from where it was going.

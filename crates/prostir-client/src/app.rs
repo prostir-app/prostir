@@ -1865,6 +1865,14 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             }
         }
 
+        // The core's time goes on with or without frames (the session not running, the
+        // headset off the head, nothing to render): requests time out, a placeholder
+        // goes, and the desktop's arrangement is told once it stood.
+        scene.expire_asks();
+        scene.adding_due();
+        scene.world.settle(Instant::now());
+        scene.world_done();
+
         if !session_running {
             continue;
         }
@@ -2028,8 +2036,6 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             Act::Nothing | Act::Finish => {}
         }
         scene.world.place_button(&scene.settings);
-        scene.expire_asks();
-        scene.adding_due();
         // The system may let the app record now, or not any more.
         if scene.mic.permission() != scene.mic_permission {
             scene.mic_changed();
