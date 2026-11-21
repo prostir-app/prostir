@@ -54,9 +54,13 @@ pub struct Frame {
     pub data: Vec<u8>,
 }
 
-/// Frames that may wait for a decoder; past this the network drops frames until the
-/// next keyframe and asks the PC for one. Made once for each stream.
-const QUEUE_ROOM: usize = 32;
+/// Frames that may wait for a decoder once it takes them: with one more, the network
+/// drops frames until the next keyframe and asks the PC for one, so the picture is
+/// never more than about this many frames (50 ms at 60 frames a second) behind.
+const MAX_WAITING: usize = 3;
+/// Room in each stream's queue, made once: for the frames that come while its decoder
+/// starts, and for a keyframe past [`MAX_WAITING`].
+const QUEUE_ROOM: usize = 16;
 
 /// One stream's frames on their way from the network to its decoder: a short queue
 /// whose decoder thread is woken for each frame and when the stream ends.
@@ -70,6 +74,9 @@ struct FrameQueue {
 
 struct Queued {
     frames: VecDeque<Frame>,
+    /// The decoder took a frame: it has started, and frames past [`MAX_WAITING`] mean
+    /// it is behind.
+    taking: bool,
     /// The network side is gone: no frame comes any more.
     closed: bool,
 }
@@ -88,6 +95,7 @@ impl FrameQueue {
         Self {
             queued: Mutex::new(Queued {
                 frames: VecDeque::with_capacity(QUEUE_ROOM),
+                taking: false,
                 closed: false,
             }),
             decoder: OnceLock::new(),
@@ -111,11 +119,17 @@ impl FrameQueue {
         self.lock().frames.len()
     }
 
-    /// Queues `frame` and wakes the decoder; `false` if there is no room for it.
+    /// Queues `frame` and wakes the decoder; `false` if the decoder is behind (more
+    /// than [`MAX_WAITING`] wait) and it is not a keyframe, or there is no room.
     fn push(&self, frame: Frame) -> bool {
         {
             let mut q = self.lock();
-            if q.frames.len() >= QUEUE_ROOM {
+            let room = if q.taking && !frame.keyframe {
+                MAX_WAITING
+            } else {
+                QUEUE_ROOM
+            };
+            if q.frames.len() >= room {
                 return false;
             }
             q.frames.push_back(frame);
@@ -141,7 +155,10 @@ impl Frames {
     pub fn take(&self) -> Taken {
         let mut q = self.0.lock();
         match q.frames.pop_front() {
-            Some(frame) => Taken::Frame(frame),
+            Some(frame) => {
+                q.taking = true;
+                Taken::Frame(frame)
+            }
             None if q.closed => Taken::Ended,
             None => Taken::Nothing,
         }
