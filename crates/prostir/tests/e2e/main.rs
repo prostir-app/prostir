@@ -14,6 +14,7 @@ mod goodbye;
 mod headsets;
 mod link;
 mod mcp;
+mod measure;
 mod pc;
 mod requests;
 mod resize;

@@ -565,10 +565,14 @@ fn log_filter(level: &str) -> String {
     format!("warn,prostir={level}")
 }
 
-/// Starts the log with Prostir's own lines from `level` on (see [`log_filter`]).
+/// Starts the log with Prostir's own lines from `level` on (see [`log_filter`]), each
+/// with its time to the millisecond: a session starts within a second, and its steps
+/// are only told apart so.
 fn init_log(level: &str) {
     let env = env_logger::Env::default().default_filter_or(log_filter(level));
-    env_logger::Builder::from_env(env).init();
+    env_logger::Builder::from_env(env)
+        .format_timestamp_millis()
+        .init();
 }
 
 /// `Prostir 0.2.0` (with its message revision in a development build), as `--version`

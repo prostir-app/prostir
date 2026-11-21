@@ -289,7 +289,8 @@ pub fn has_picture(path: &std::path::Path) -> bool {
 ///
 /// Every slice of sound starts with the `CLOCK_MONOTONIC` time it was made, in
 /// nanoseconds (`u64`, little-endian): a fake headset on the same machine reads how
-/// long each slice took to arrive (see `prostir-testkit`).
+/// long each slice took to arrive (see `prostir-testkit`). With
+/// `PROSTIR_FAKE_SOUND=silence` the slices are all zeros, as an idle PC's are.
 pub mod audio {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -321,13 +322,16 @@ pub mod audio {
             super::hang("sound-start");
             let stop = Arc::new(AtomicBool::new(false));
             let stopped = stop.clone();
+            let stamped = std::env::var_os("PROSTIR_FAKE_SOUND").is_none_or(|v| v != "silence");
             std::thread::Builder::new()
                 .name("fake-sound".into())
                 .spawn(move || {
                     let mut next = Instant::now();
                     while !stopped.load(Ordering::Relaxed) {
                         let mut pcm = vec![0; SLICE_BYTES];
-                        pcm[..8].copy_from_slice(&monotonic_ns().to_le_bytes());
+                        if stamped {
+                            pcm[..8].copy_from_slice(&monotonic_ns().to_le_bytes());
+                        }
                         on_sound(pcm);
                         next += Duration::from_millis(10);
                         std::thread::sleep(next.saturating_duration_since(Instant::now()));
