@@ -211,16 +211,20 @@ pub struct Measured {
     pub keyframe_asked_ms: Option<f64>,
     pub decoder_recovered_ms: Option<f64>,
     pub reconnect_ms: Option<f64>,
+    /// A stream started over without its keyframe, the PC ignoring the first ask for
+    /// one: until its first picture.
+    pub unfreeze_ms: Option<f64>,
     /// A frame's work without a menu redraw, as shares of its display period, at the
     /// 95th and 99th percentile.
     pub frame_share_p95: Option<f64>,
     pub frame_share_p99: Option<f64>,
 }
 
-/// The limits (step 7 note, 10.3 and 7): first pictures, asking for a keyframe and the
-/// decoder's recovery within 1 s, reconnecting within 3 s, a frame's work p95 within
-/// 0.15 and p99 within 0.3 of the display period. The menu's redraw is only recorded.
-/// What failed, in words.
+/// The limits (step 7 note, 10.3 and 7): first pictures, asking for a keyframe, the
+/// decoder's recovery and a picture after a lost ask for a keyframe within 1 s (the
+/// clips come round to their keyframe only every 2 s), reconnecting within 3 s, a
+/// frame's work p95 within 0.15 and p99 within 0.3 of the display period. The menu's
+/// redraw is only recorded. What failed, in words.
 pub fn check(m: &Measured) -> Vec<String> {
     let mut fails = Vec::new();
     let mut within = |what: &str, value: Option<f64>, limit: f64| match value {
@@ -237,6 +241,7 @@ pub fn check(m: &Measured) -> Vec<String> {
     within("keyframe_asked_ms", m.keyframe_asked_ms, 1000.0);
     within("decoder_recovered_ms", m.decoder_recovered_ms, 1000.0);
     within("reconnect_ms", m.reconnect_ms, 3000.0);
+    within("stream_unfreeze_ms", m.unfreeze_ms, 1000.0);
     within("frame_cpu_share.p95", m.frame_share_p95, 0.15);
     within("frame_cpu_share.p99", m.frame_share_p99, 0.3);
     fails
@@ -463,6 +468,7 @@ mod tests {
             keyframe_asked_ms: Some(20.0),
             decoder_recovered_ms: Some(95.0),
             reconnect_ms: Some(1300.0),
+            unfreeze_ms: Some(450.0),
             frame_share_p95: Some(0.12),
             frame_share_p99: Some(0.2),
         };
@@ -479,7 +485,7 @@ mod tests {
                 "reconnect_ms 3500.00 over 3000"
             ]
         );
-        assert_eq!(check(&Measured::default()).len(), 6);
+        assert_eq!(check(&Measured::default()).len(), 7);
     }
 
     /// The decoders' pictures are kept for the selftest only while it runs, and only

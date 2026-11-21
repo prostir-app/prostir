@@ -11,6 +11,7 @@
 pub mod background;
 pub mod commands;
 pub mod device;
+pub mod frames;
 pub mod ids;
 pub mod lang;
 pub mod layout;

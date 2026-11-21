@@ -109,6 +109,8 @@ const KEYS: &[&str] = &[
     "decoder_recovered_ms",
     "surface_recreated_ms",
     "stream_restart_ms",
+    "stream_unfreeze_ms",
+    "keyframe_asks_ignored",
     "reconnect_ms",
     "reconnect_picture_ms",
     "frame_samples",
@@ -173,6 +175,9 @@ enum Phase {
     Broken,
     /// A stream started over in a new generation.
     Restart,
+    /// The stream started over without its keyframe, and the fake PC ignored the
+    /// first ask for one: waiting for the headset to ask again.
+    Frozen,
     /// The fake PC hangs up; waiting for the headset to come back.
     Dropped,
     Done,
@@ -221,6 +226,12 @@ pub struct Selftest {
     recovered_ms: Option<f64>,
     restart: Option<DisplayId>,
     restart_ms: Option<f64>,
+    /// The stream started over without its keyframe, and when; its first picture
+    /// after that.
+    frozen: Option<(DisplayId, Instant)>,
+    unfreeze_ms: Option<f64>,
+    /// Asks for a keyframe the fake PC ignored (within 300 ms of one it answered).
+    asks_ignored: u32,
     dropped_at: Option<Instant>,
     reconnect_ms: Option<f64>,
     reconnect_picture_ms: Option<f64>,
@@ -492,6 +503,9 @@ impl Selftest {
             recovered_ms: None,
             restart: None,
             restart_ms: None,
+            frozen: None,
+            unfreeze_ms: None,
+            asks_ignored: 0,
             dropped_at: None,
             reconnect_ms: None,
             reconnect_picture_ms: None,
@@ -874,6 +888,16 @@ impl Selftest {
                 Act::Nothing
             }
             Phase::Restart if self.restart_ms.is_some() || in_phase >= RECOVER_WITHIN => {
+                let id = self.restart.or_else(|| self.monitors.first().copied());
+                if let (Some(id), Some(pc)) = (id, &self.pc)
+                    && pc.restart_stream_without_keyframe(id)
+                {
+                    self.frozen = Some((id, now));
+                }
+                self.next(Phase::Frozen, now);
+                Act::Nothing
+            }
+            Phase::Frozen if self.unfreeze_ms.is_some() || in_phase >= RECOVER_WITHIN => {
                 if let Some(pc) = &self.pc {
                     pc.drop_connection();
                 }
@@ -942,8 +966,20 @@ impl Selftest {
             if s.session == 1 && self.restart != Some(*id) {
                 self.first_frames.entry(*id).or_insert(first);
             }
-            if self.restart == Some(*id) && s.session == 1 && self.restart_ms.is_none() {
+            if self.restart == Some(*id)
+                && s.session == 1
+                && self.restart_ms.is_none()
+                && self.frozen.is_none()
+            {
                 self.restart_ms = Some(first);
+            }
+            if let Some((frozen, since)) = self.frozen
+                && frozen == *id
+                && s.session == 1
+                && s.started >= since
+                && self.unfreeze_ms.is_none()
+            {
+                self.unfreeze_ms = Some(ms(at.saturating_duration_since(since)));
             }
             if let Some(dropped) = self.dropped_at
                 && s.session > 1
@@ -1014,6 +1050,7 @@ impl Selftest {
                 generation,
                 seq,
             } => self.broken = Some((id, generation, seq, at)),
+            Happened::KeyframeIgnored { .. } => self.asks_ignored += 1,
             Happened::KeyframeAsked { id, generation } => {
                 if let Some((b, g, _, since)) = self.broken
                     && (b, g) == (id, generation)
@@ -1100,6 +1137,7 @@ impl Selftest {
             keyframe_asked_ms: self.keyframe_asked_ms,
             decoder_recovered_ms: self.recovered_ms,
             reconnect_ms: self.reconnect_ms,
+            unfreeze_ms: self.unfreeze_ms,
             frame_share_p95: self.frame_share.percentile(0.95),
             frame_share_p99: self.frame_share.percentile(0.99),
         }
@@ -1138,6 +1176,8 @@ impl Selftest {
         // The decoder's own fault hooks come with its rework (step 7.8b); until then
         // this stays `none`.
         r.set_ms("stream_restart_ms", self.restart_ms);
+        r.set_ms("stream_unfreeze_ms", self.unfreeze_ms);
+        r.set("keyframe_asks_ignored", self.asks_ignored);
         r.set_ms("reconnect_ms", self.reconnect_ms);
         r.set_ms("reconnect_picture_ms", self.reconnect_picture_ms);
         r.set("frame_samples", self.frame_cpu.len());

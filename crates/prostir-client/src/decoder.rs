@@ -31,7 +31,8 @@ use prostir_proto::state::{DisplayId, Gen};
 use prostir_proto::stats::{Histogram, Period};
 use prostir_proto::{ClientMsg, Codec};
 
-use crate::net::{Feedback, Frame, Frames, Taken};
+use crate::frames::{Frame, Frames, KeyframeWait, Taken};
+use crate::net::Feedback;
 
 /// The stream a decoder decodes: its display and generation (see `StreamStart`).
 #[derive(Debug, Clone, Copy)]
@@ -327,8 +328,7 @@ fn callbacks(told: &Arc<Mutex<Told>>, decoder: Thread) -> AsyncNotifyCallback {
 struct KeyframeGate {
     stream: Stream,
     feedback: Feedback,
-    waiting: bool,
-    asked: Option<Instant>,
+    wait: KeyframeWait,
 }
 
 impl KeyframeGate {
@@ -336,42 +336,35 @@ impl KeyframeGate {
         Self {
             stream,
             feedback,
-            waiting: false,
-            asked: None,
+            wait: KeyframeWait::default(),
         }
     }
 
     /// Skips frames until a keyframe that is on its way: asks for one only if a frame
     /// other than a keyframe comes first.
     fn expect_keyframe(&mut self) {
-        self.waiting = true;
+        self.wait.expect();
     }
 
     fn wait(&mut self) {
-        self.waiting = true;
-        self.ask();
+        if self.wait.lost(Instant::now()) {
+            self.ask();
+        }
     }
 
-    fn ask(&mut self) {
-        if self
-            .asked
-            .is_none_or(|t| t.elapsed() >= Duration::from_millis(300))
-        {
-            self.asked = Some(Instant::now());
-            let _ = self.feedback.send(ClientMsg::RequestKeyframe {
-                id: self.stream.id,
-                generation: self.stream.generation,
-            });
-        }
+    fn ask(&self) {
+        let _ = self.feedback.send(ClientMsg::RequestKeyframe {
+            id: self.stream.id,
+            generation: self.stream.generation,
+        });
     }
 
     fn passes(&mut self, frame: &Frame) -> bool {
-        if frame.keyframe {
-            self.waiting = false;
-        } else if self.waiting {
+        let verdict = self.wait.passes(frame.keyframe, Instant::now());
+        if verdict.ask {
             self.ask();
         }
-        !self.waiting
+        verdict.pass
     }
 }
 

@@ -9,8 +9,8 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::thread::{JoinHandle, Thread};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
@@ -25,6 +25,7 @@ use prostir_proto::stats::{Gaps, Period};
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
 use crate::audio::{Gains, Player};
+use crate::frames::{Frame, FrameQueue, Frames, KeyframeWait, Pushed};
 use crate::ids::PcId;
 use crate::lang::{Lang, Texts};
 use crate::mic::{Mic, Recorder};
@@ -43,138 +44,6 @@ const REPORT_EVERY: Duration = Duration::from_secs(10);
 /// Nothing at all from the PC for this long (it pings every second): the session is
 /// over.
 const SILENCE: Duration = Duration::from_secs(5);
-
-pub struct Frame {
-    /// When the frame arrived from the network.
-    pub received: Instant,
-    /// Its number in its generation.
-    pub seq: u32,
-    pub pts_us: u64,
-    pub keyframe: bool,
-    pub data: Vec<u8>,
-}
-
-/// Frames that may wait for a decoder once it takes them: with one more, the network
-/// drops frames until the next keyframe and asks the PC for one, so the picture is
-/// never more than about this many frames (50 ms at 60 frames a second) behind.
-const MAX_WAITING: usize = 3;
-/// Room in each stream's queue, made once: for the frames that come while its decoder
-/// starts, and for a keyframe past [`MAX_WAITING`].
-const QUEUE_ROOM: usize = 16;
-
-/// One stream's frames on their way from the network to its decoder: a short queue
-/// whose decoder thread is woken for each frame and when the stream ends.
-pub struct Frames(Arc<FrameQueue>);
-
-struct FrameQueue {
-    queued: Mutex<Queued>,
-    /// The decoder thread, once it started.
-    decoder: OnceLock<Thread>,
-}
-
-struct Queued {
-    frames: VecDeque<Frame>,
-    /// The decoder took a frame: it has started, and frames past [`MAX_WAITING`] mean
-    /// it is behind.
-    taking: bool,
-    /// The network side is gone: no frame comes any more.
-    closed: bool,
-}
-
-/// What [`Frames::take`] found.
-pub enum Taken {
-    Frame(Frame),
-    /// Nothing waits now.
-    Nothing,
-    /// Nothing waits, and nothing will come: the stream ended.
-    Ended,
-}
-
-impl FrameQueue {
-    fn new() -> Self {
-        Self {
-            queued: Mutex::new(Queued {
-                frames: VecDeque::with_capacity(QUEUE_ROOM),
-                taking: false,
-                closed: false,
-            }),
-            decoder: OnceLock::new(),
-        }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, Queued> {
-        self.queued
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn wake(&self) {
-        if let Some(t) = self.decoder.get() {
-            t.unpark();
-        }
-    }
-
-    /// Frames waiting.
-    fn waiting(&self) -> usize {
-        self.lock().frames.len()
-    }
-
-    /// Queues `frame` and wakes the decoder; `false` if the decoder is behind (more
-    /// than [`MAX_WAITING`] wait) and it is not a keyframe, or there is no room.
-    fn push(&self, frame: Frame) -> bool {
-        {
-            let mut q = self.lock();
-            let room = if q.taking && !frame.keyframe {
-                MAX_WAITING
-            } else {
-                QUEUE_ROOM
-            };
-            if q.frames.len() >= room {
-                return false;
-            }
-            q.frames.push_back(frame);
-        }
-        self.wake();
-        true
-    }
-
-    /// No frame comes any more: the decoder ends once it took those waiting.
-    fn close(&self) {
-        self.lock().closed = true;
-        self.wake();
-    }
-}
-
-impl Frames {
-    /// The thread to wake when a frame comes or the stream ends (the decoder's own).
-    pub fn wake(&self, decoder: Thread) {
-        let _ = self.0.decoder.set(decoder);
-    }
-
-    /// The next frame, if one waits.
-    pub fn take(&self) -> Taken {
-        let mut q = self.0.lock();
-        match q.frames.pop_front() {
-            Some(frame) => {
-                q.taking = true;
-                Taken::Frame(frame)
-            }
-            None if q.closed => Taken::Ended,
-            None => Taken::Nothing,
-        }
-    }
-
-    /// Frames received from the network that the decoder has not taken yet.
-    pub fn waiting(&self) -> usize {
-        self.0.waiting()
-    }
-
-    /// Nothing waits, and nothing will come.
-    pub fn ended(&self) -> bool {
-        let q = self.0.lock();
-        q.closed && q.frames.is_empty()
-    }
-}
 
 /// Messages to the PC (see [`crate::outbox`]). Sending only queues them.
 #[derive(Clone)]
@@ -1213,9 +1082,11 @@ impl Session<'_> {
 struct StreamSlot {
     /// The generation its frames belong to.
     generation: Gen,
-    /// Shared with the stream's [`Frames`].
+    /// Shared with the stream's decoder.
     queue: Arc<FrameQueue>,
-    waiting_for_keyframe: bool,
+    /// Frames are skipped until a keyframe: from the start, and after the decoder
+    /// fell behind.
+    keyframe: KeyframeWait,
 }
 
 impl Drop for StreamSlot {
@@ -1460,13 +1331,16 @@ fn run_session(
                     });
                     continue;
                 }
-                let queue = Arc::new(FrameQueue::new());
+                let queue = Arc::new(FrameQueue::default());
+                let mut keyframe = KeyframeWait::default();
+                // The PC starts every stream with one.
+                keyframe.expect();
                 streams.insert(
                     id,
                     StreamSlot {
                         generation,
                         queue: queue.clone(),
-                        waiting_for_keyframe: true,
+                        keyframe,
                     },
                 );
                 let _ = events.send(NetEvent::StreamStart {
@@ -1475,7 +1349,7 @@ fn run_session(
                     width: w,
                     height: h,
                     codec,
-                    frames: Frames(queue),
+                    frames: queue.frames(),
                     feedback: feedback.clone(),
                 });
             }
@@ -1491,26 +1365,28 @@ fn run_session(
                 let Some(slot) = streams.get_mut(&id).filter(|s| s.generation == generation) else {
                     continue;
                 };
-                if slot.waiting_for_keyframe && !keyframe {
-                    continue;
+                // Asked again while frames come and no keyframe: the PC may have
+                // ignored the last ask (it answers one every 300 ms at most).
+                let verdict = slot.keyframe.passes(keyframe, now);
+                if verdict.ask {
+                    feedback.send(ClientMsg::RequestKeyframe { id, generation })?;
                 }
                 // Its decoder is gone (the monitor was closed here): nobody takes it.
-                if Arc::strong_count(&slot.queue) == 1 {
+                if !verdict.pass || slot.queue.abandoned() {
                     continue;
                 }
-                let sent = slot.queue.push(Frame {
+                let frame = Frame {
                     received: now,
                     seq,
                     pts_us,
                     keyframe,
                     data,
-                });
-                if sent {
-                    slot.waiting_for_keyframe = false;
-                } else {
+                };
+                if slot.queue.push(frame, now) == Pushed::Behind {
                     warn!("decoder {} is behind, dropping until next keyframe", id.0);
-                    slot.waiting_for_keyframe = true;
-                    feedback.send(ClientMsg::RequestKeyframe { id, generation })?;
+                    if slot.keyframe.lost(now) {
+                        feedback.send(ClientMsg::RequestKeyframe { id, generation })?;
+                    }
                     #[cfg(all(feature = "selftest", not(feature = "store")))]
                     crate::selftest::dropped_to_keyframe();
                 }

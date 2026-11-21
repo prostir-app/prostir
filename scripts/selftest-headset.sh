@@ -6,7 +6,8 @@
 # The app runs a fixed scenario against a fake PC in its own process (its own data,
 # nothing of the person's touched, no real PC involved): two monitors from the clips
 # in the APK, a monitor moved, the menu, a frame the decoder cannot take, a stream
-# started over, the connection dropped and back. Every build has the selftest but the
+# started over, one started over without its keyframe (the first ask for one ignored),
+# the connection dropped and back. Every build has the selftest but the
 # store's, which ignores it (no report comes: exit 3).
 #
 #   scripts/selftest-headset.sh [--seconds N] [--relaunch] [--decoder-rate max]
