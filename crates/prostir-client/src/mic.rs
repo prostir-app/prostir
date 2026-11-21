@@ -146,6 +146,7 @@ impl Recorder {
         let _ = std::thread::Builder::new()
             .name("mic".into())
             .spawn(move || {
+                crate::xrutil::raise_thread_priority(crate::xrutil::Priority::Audio);
                 if !mic.ensure_permission(&flag) {
                     return;
                 }

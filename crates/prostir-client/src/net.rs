@@ -8,8 +8,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -26,6 +25,8 @@ use prostir_proto::stats::{Gaps, Period};
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg, PcGoodbye};
 
 use crate::audio::{Gains, Player};
+use crate::connecting::{Ended, Probing, RETRY_PAUSE};
+use crate::frames::{Frame, FrameQueue, Frames, KeyframeWait, Pushed};
 use crate::ids::PcId;
 use crate::lang::{Lang, Texts};
 use crate::mic::{Mic, Recorder};
@@ -45,36 +46,6 @@ const REPORT_EVERY: Duration = Duration::from_secs(10);
 /// over.
 const SILENCE: Duration = Duration::from_secs(5);
 
-pub struct Frame {
-    /// When the frame arrived from the network.
-    pub received: Instant,
-    /// Its number in its generation.
-    pub seq: u32,
-    pub pts_us: u64,
-    pub keyframe: bool,
-    pub data: Vec<u8>,
-}
-
-/// One stream's frames on their way from the network to its decoder, counting how
-/// many wait (the decoder's input queue).
-pub struct Frames {
-    rx: Receiver<Frame>,
-    waiting: Arc<AtomicUsize>,
-}
-
-impl Frames {
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<Frame, RecvTimeoutError> {
-        let frame = self.rx.recv_timeout(timeout)?;
-        self.waiting.fetch_sub(1, Ordering::Relaxed);
-        Ok(frame)
-    }
-
-    /// Frames received from the network that the decoder has not taken yet.
-    pub fn waiting(&self) -> usize {
-        self.waiting.load(Ordering::Relaxed)
-    }
-}
-
 /// Messages to the PC (see [`crate::outbox`]). Sending only queues them.
 #[derive(Clone)]
 pub struct Feedback {
@@ -91,6 +62,7 @@ impl Feedback {
         std::thread::Builder::new()
             .name("net-writer".into())
             .spawn(move || {
+                crate::xrutil::raise_thread_priority(crate::xrutil::Priority::Video);
                 // However this thread stops, the session ends with it.
                 struct Close(Closer, Arc<Outbox>);
                 impl Drop for Close {
@@ -124,8 +96,8 @@ impl Feedback {
     }
 
     /// Queues a message. While the network is stuck, microphone sound and frame
-    /// acknowledgements beyond a couple of seconds are dropped; nothing else is. An
-    /// error means the session is over.
+    /// acknowledgements beyond about 200 ms of them are dropped, the oldest first;
+    /// nothing else is. An error means the session is over.
     pub fn send(&self, msg: ClientMsg) -> std::io::Result<()> {
         self.outbox.push(msg)
     }
@@ -545,6 +517,8 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
+            // It reads the frames off the network.
+            crate::xrutil::raise_thread_priority(crate::xrutil::Priority::Video);
             // The socket PCs announce themselves to. A network thread of an earlier
             // start that has not stopped yet may still hold it: tried again each round
             // until this one has it.
@@ -565,8 +539,12 @@ pub fn spawn(
             };
             let mut trusted = TrustStore::load(&discovery.trust_file);
             let mut finder = Finder::default();
-            let mut round = 0u32;
+            let mut probing = Probing::default();
             loop {
+                // Set when the last session broke off without a word after it had run
+                // for a while: the PC is most likely still there, so the next attempt
+                // goes at once instead of after the usual pause.
+                let mut again_now = false;
                 steering.wait_until_worn();
                 steering.wait_for_answer();
                 if steering.quitting() {
@@ -576,7 +554,6 @@ pub fn spawn(
                 if std::mem::take(&mut steering.lock().trust_changed) {
                     trusted = TrustStore::load(&discovery.trust_file);
                 }
-                round += 1;
                 if beacon.is_none() && discovery.only.is_none() {
                     match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, prostir_proto::DISCOVERY_PORT)) {
                         Ok(socket) => {
@@ -598,7 +575,7 @@ pub fn spawn(
                     &steering,
                     &mut finder,
                     &events,
-                    round,
+                    &mut probing,
                 ) {
                     if steering.quitting() {
                         info!("network stopped");
@@ -608,6 +585,7 @@ pub fn spawn(
                     let name = peer.and_then(|p| finder.name_of(p));
                     steering.lock().current = current(&stream);
                     let mut ended = Ended::default();
+                    let began = Instant::now();
                     let outcome = run_session(
                         stream,
                         &events,
@@ -641,6 +619,10 @@ pub fn spawn(
                         let _ = std::fs::write(&discovery.last_host_file, p.to_string());
                     }
                     steering.lock().current = None;
+                    // A search after a session probes soon again.
+                    if ended.opened {
+                        probing = Probing::default();
+                    }
                     if events.send(NetEvent::Disconnected { why }).is_err() || steering.quitting() {
                         info!("network stopped");
                         return;
@@ -652,9 +634,13 @@ pub fn spawn(
                         .is_some_and(|t| t.elapsed() < Duration::from_secs(3))
                     {
                         steering.rest(Duration::from_secs(10));
+                    } else {
+                        again_now = ended.retry_at_once(began.elapsed());
                     }
                 }
-                steering.rest(Duration::from_millis(300));
+                if !again_now {
+                    steering.rest(RETRY_PAUSE);
+                }
             }
         })
         .expect("spawn net thread")
@@ -774,7 +760,7 @@ fn connect(
     steering: &Steering,
     finder: &mut Finder,
     events: &Sender<NetEvent>,
-    round: u32,
+    probing: &mut Probing,
 ) -> Option<TcpStream> {
     if let Some(only) = discovery.only {
         return try_connect(only);
@@ -840,7 +826,7 @@ fn connect(
         _ => return None,
     }
     // Some networks drop broadcasts: now and then probe the local /24.
-    if round % 5 == 1 && !steering.quitting() {
+    if probing.due(Instant::now()) && !steering.quitting() {
         scan_subnet()
     } else {
         None
@@ -1050,22 +1036,18 @@ impl Session<'_> {
 struct StreamSlot {
     /// The generation its frames belong to.
     generation: Gen,
-    tx: SyncSender<Frame>,
-    /// Shared with [`Frames`]: counted up here before sending, down when taken.
-    waiting: Arc<AtomicUsize>,
-    waiting_for_keyframe: bool,
+    /// Shared with the stream's decoder.
+    queue: Arc<FrameQueue>,
+    /// Frames are skipped until a keyframe: from the start, and after the decoder
+    /// fell behind.
+    keyframe: KeyframeWait,
 }
 
-/// How a session went, for what to do next.
-#[derive(Default)]
-struct Ended {
-    /// The PC is trusted and the session started.
-    opened: bool,
-    /// When the PC last sent an error: right before it hung up means it cannot
-    /// serve the headset right now.
-    refused: Option<Instant>,
-    /// The PC ended the session on purpose, for this reason.
-    goodbye: Option<PcGoodbye>,
+impl Drop for StreamSlot {
+    /// The stream is over here: its decoder ends once it took what waits.
+    fn drop(&mut self) {
+        self.queue.close();
+    }
 }
 
 fn run_session(
@@ -1219,11 +1201,12 @@ fn run_session(
         if let Some(window) = report.due(now) {
             info!(
                 "received {} messages, {:.1} Mbit/s of video and sound; pauses {}; \
-                 round trip {}",
+                 round trip {}; microphone queue max {}",
                 gaps.events(),
                 media_bytes as f64 * 8.0 / window.as_secs_f64() / 1e6,
                 gaps.summary(window),
-                feedback.outbox.take_round_trips().summary_ms()
+                feedback.outbox.take_round_trips().summary_ms(),
+                feedback.outbox.take_lossy_max()
             );
             gaps.restart();
             media_bytes = 0;
@@ -1290,15 +1273,16 @@ fn run_session(
                     });
                     continue;
                 }
-                let (tx, rx) = mpsc::sync_channel(32);
-                let waiting = Arc::new(AtomicUsize::new(0));
+                let queue = Arc::new(FrameQueue::default());
+                let mut keyframe = KeyframeWait::default();
+                // The PC starts every stream with one.
+                keyframe.expect();
                 streams.insert(
                     id,
                     StreamSlot {
                         generation,
-                        tx,
-                        waiting: waiting.clone(),
-                        waiting_for_keyframe: true,
+                        queue: queue.clone(),
+                        keyframe,
                     },
                 );
                 let _ = events.send(NetEvent::StreamStart {
@@ -1307,7 +1291,7 @@ fn run_session(
                     width: w,
                     height: h,
                     codec,
-                    frames: Frames { rx, waiting },
+                    frames: queue.frames(),
                     feedback: feedback.clone(),
                 });
             }
@@ -1323,28 +1307,30 @@ fn run_session(
                 let Some(slot) = streams.get_mut(&id).filter(|s| s.generation == generation) else {
                     continue;
                 };
-                if slot.waiting_for_keyframe && !keyframe {
+                // Asked again while frames come and no keyframe: the PC may have
+                // ignored the last ask (it answers one every 300 ms at most).
+                let verdict = slot.keyframe.passes(keyframe, now);
+                if verdict.ask {
+                    feedback.send(ClientMsg::RequestKeyframe { id, generation })?;
+                }
+                // Its decoder is gone (the monitor was closed here): nobody takes it.
+                if !verdict.pass || slot.queue.abandoned() {
                     continue;
                 }
-                slot.waiting.fetch_add(1, Ordering::Relaxed);
-                let sent = slot.tx.try_send(Frame {
+                let frame = Frame {
                     received: now,
                     seq,
                     pts_us,
                     keyframe,
                     data,
-                });
-                if sent.is_err() {
-                    slot.waiting.fetch_sub(1, Ordering::Relaxed);
-                }
-                match sent {
-                    Ok(()) => slot.waiting_for_keyframe = false,
-                    Err(TrySendError::Full(_)) => {
-                        warn!("decoder {} is behind, dropping until next keyframe", id.0);
-                        slot.waiting_for_keyframe = true;
+                };
+                if slot.queue.push(frame, now) == Pushed::Behind {
+                    warn!("decoder {} is behind, dropping until next keyframe", id.0);
+                    if slot.keyframe.lost(now) {
                         feedback.send(ClientMsg::RequestKeyframe { id, generation })?;
                     }
-                    Err(TrySendError::Disconnected(_)) => {}
+                    #[cfg(all(feature = "selftest", not(feature = "store")))]
+                    crate::selftest::dropped_to_keyframe();
                 }
             }
             HostMsg::StreamEnd { id, generation } => {

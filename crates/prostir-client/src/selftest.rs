@@ -48,6 +48,10 @@ pub struct Options {
     pub seconds: u32,
     /// End without leaving the process, so the next start runs in the same one.
     pub relaunch: bool,
+    /// `decoder_rate=max`: the decoders are asked to run as fast as they can
+    /// (`operating-rate`), for an A/B of `decode_ms` against the battery; the app
+    /// never asks that otherwise.
+    pub decoder_rate_max: bool,
 }
 
 impl Default for Options {
@@ -55,6 +59,7 @@ impl Default for Options {
         Self {
             seconds: 30,
             relaunch: false,
+            decoder_rate_max: false,
         }
     }
 }
@@ -82,6 +87,8 @@ impl Options {
                         .ok_or_else(|| format!("seconds={v}: 1 to 7200"))?;
                 }
                 ("relaunch", "1") => options.relaunch = true,
+                ("decoder_rate", "max") => options.decoder_rate_max = true,
+                ("decoder_rate", "default") => options.decoder_rate_max = false,
                 ("relaunch", "0") | ("caps", "full") | ("perf", "default") | ("pc", "fake") => {}
                 ("caps", v) => return Err(format!("caps={v} is not in this build yet")),
                 ("perf", v) => return Err(format!("perf={v} is not in this build yet")),
@@ -204,16 +211,20 @@ pub struct Measured {
     pub keyframe_asked_ms: Option<f64>,
     pub decoder_recovered_ms: Option<f64>,
     pub reconnect_ms: Option<f64>,
+    /// A stream started over without its keyframe, the PC ignoring the first ask for
+    /// one: until its first picture.
+    pub unfreeze_ms: Option<f64>,
     /// A frame's work without a menu redraw, as shares of its display period, at the
     /// 95th and 99th percentile.
     pub frame_share_p95: Option<f64>,
     pub frame_share_p99: Option<f64>,
 }
 
-/// The limits (step 7 note, 10.3 and 7): first pictures, asking for a keyframe and the
-/// decoder's recovery within 1 s, reconnecting within 3 s, a frame's work p95 within
-/// 0.15 and p99 within 0.3 of the display period. The menu's redraw is only recorded.
-/// What failed, in words.
+/// The limits (step 7 note, 10.3 and 7): first pictures, asking for a keyframe, the
+/// decoder's recovery and a picture after a lost ask for a keyframe within 1 s (the
+/// clips come round to their keyframe only every 2 s), reconnecting within 3 s, a
+/// frame's work p95 within 0.15 and p99 within 0.3 of the display period. The menu's
+/// redraw is only recorded. What failed, in words.
 pub fn check(m: &Measured) -> Vec<String> {
     let mut fails = Vec::new();
     let mut within = |what: &str, value: Option<f64>, limit: f64| match value {
@@ -230,6 +241,7 @@ pub fn check(m: &Measured) -> Vec<String> {
     within("keyframe_asked_ms", m.keyframe_asked_ms, 1000.0);
     within("decoder_recovered_ms", m.decoder_recovered_ms, 1000.0);
     within("reconnect_ms", m.reconnect_ms, 3000.0);
+    within("stream_unfreeze_ms", m.unfreeze_ms, 1000.0);
     within("frame_cpu_share.p95", m.frame_share_p95, 0.15);
     within("frame_cpu_share.p99", m.frame_share_p99, 0.3);
     fails
@@ -246,6 +258,14 @@ const WATCHED: usize = 1024;
 pub struct Probe {
     pub wait: Histogram,
     pub decode: Histogram,
+    /// Uploads of images that change (the menu, buttons, notices), each from the
+    /// pixels to the swapchain.
+    pub upload: Histogram,
+    /// The most frames seen waiting behind one a decoder took.
+    pub queue_max: usize,
+    /// Times the network dropped a stream's frames until its next keyframe because
+    /// its decoder was behind.
+    pub dropped_to_keyframe: u64,
     /// Frames decoded, by display number.
     pub decoded: BTreeMap<u32, u64>,
     /// When each stream's generation (display number, generation) gave its first
@@ -273,6 +293,19 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// On only while a selftest runs: the decoders check it before anything else.
 static PROBING: AtomicBool = AtomicBool::new(false);
 static PROBE: Mutex<Option<Arc<Mutex<Probe>>>> = Mutex::new(None);
+/// The option `decoder_rate=max` of the selftest that runs.
+static DECODER_RATE_MAX: AtomicBool = AtomicBool::new(false);
+
+/// What the decoders are asked for while a selftest runs (see
+/// [`Options::decoder_rate_max`]); set before the decoders start.
+pub fn set_decoder_rate_max(max: bool) {
+    DECODER_RATE_MAX.store(max, Ordering::Relaxed);
+}
+
+/// Whether a selftest runs that asks the decoders to run as fast as they can.
+pub fn decoder_rate_max() -> bool {
+    PROBING.load(Ordering::Relaxed) && DECODER_RATE_MAX.load(Ordering::Relaxed)
+}
 
 /// Starts collecting from the decoders into a new probe.
 pub fn probe_start() -> Arc<Mutex<Probe>> {
@@ -285,6 +318,7 @@ pub fn probe_start() -> Arc<Mutex<Probe>> {
 /// Stops collecting.
 pub fn probe_stop() {
     PROBING.store(false, Ordering::Relaxed);
+    DECODER_RATE_MAX.store(false, Ordering::Relaxed);
     *lock(&PROBE) = None;
 }
 
@@ -309,6 +343,46 @@ pub fn decoded(id: u32, generation: u32, seq: u32, wait: Duration, decode: Durat
     }
 }
 
+/// A decoder took a frame from the network with `behind` more waiting. Nothing unless
+/// a selftest runs.
+pub fn taken(behind: usize) {
+    if !PROBING.load(Ordering::Relaxed) {
+        return;
+    }
+    let probe = lock(&PROBE).clone();
+    if let Some(probe) = probe {
+        let mut p = lock(&probe);
+        p.queue_max = p.queue_max.max(behind);
+    }
+}
+
+/// The network started dropping a stream's frames until its next keyframe. Nothing
+/// unless a selftest runs.
+pub fn dropped_to_keyframe() {
+    if !PROBING.load(Ordering::Relaxed) {
+        return;
+    }
+    let probe = lock(&PROBE).clone();
+    if let Some(probe) = probe {
+        lock(&probe).dropped_to_keyframe += 1;
+    }
+}
+
+/// When an upload of an image starts, while a selftest runs.
+pub fn upload_started() -> Option<Instant> {
+    PROBING.load(Ordering::Relaxed).then(Instant::now)
+}
+
+/// The upload that started at `began` (see [`upload_started`]) is done.
+pub fn uploaded(began: Option<Instant>) {
+    let Some(began) = began else { return };
+    let took = began.elapsed();
+    let probe = lock(&PROBE).clone();
+    if let Some(probe) = probe {
+        lock(&probe).upload.add(took);
+    }
+}
+
 /// Names of the threads this app starts (as the system shows them, at most 15 bytes):
 /// one still alive when a new start begins is left over from the one before.
 pub fn is_app_thread(name: &str) -> bool {
@@ -329,8 +403,15 @@ mod tests {
             Options::parse("seconds=10, relaunch=1").unwrap(),
             Options {
                 seconds: 10,
-                relaunch: true
+                relaunch: true,
+                decoder_rate_max: false,
             }
+        );
+        assert!(Options::parse("decoder_rate=max").unwrap().decoder_rate_max);
+        assert!(
+            !Options::parse("decoder_rate=default")
+                .unwrap()
+                .decoder_rate_max
         );
         assert_eq!(
             Options::parse("seconds=5\tcaps=full perf=default")
@@ -344,6 +425,7 @@ mod tests {
             "pc=usb",
             "seconds=0",
             "speed=2",
+            "decoder_rate=fast",
             "x",
         ] {
             assert!(Options::parse(refused).is_err(), "{refused}");
@@ -386,6 +468,7 @@ mod tests {
             keyframe_asked_ms: Some(20.0),
             decoder_recovered_ms: Some(95.0),
             reconnect_ms: Some(1300.0),
+            unfreeze_ms: Some(450.0),
             frame_share_p95: Some(0.12),
             frame_share_p99: Some(0.2),
         };
@@ -402,7 +485,7 @@ mod tests {
                 "reconnect_ms 3500.00 over 3000"
             ]
         );
-        assert_eq!(check(&Measured::default()).len(), 6);
+        assert_eq!(check(&Measured::default()).len(), 7);
     }
 
     /// The decoders' pictures are kept for the selftest only while it runs, and only
@@ -413,12 +496,26 @@ mod tests {
         decoded(1, 1, 0, ms, ms);
         let probe = probe_start();
         decoded(1, 1, 0, ms, ms);
+        taken(2);
+        taken(1);
+        dropped_to_keyframe();
+        {
+            let p = lock(&probe);
+            assert_eq!((p.queue_max, p.dropped_to_keyframe), (2, 1));
+        }
         lock(&probe).watch(2, 3);
         decoded(1, 1, 1, ms, ms);
         decoded(2, 3, 7, ms, ms);
         probe_stop();
         decoded(2, 3, 8, ms, ms);
+        taken(5);
+        dropped_to_keyframe();
         let p = lock(&probe);
+        assert_eq!(
+            (p.queue_max, p.dropped_to_keyframe),
+            (2, 1),
+            "nothing after the stop"
+        );
         assert_eq!(p.decoded[&1], 2);
         assert_eq!(p.decoded[&2], 1);
         assert_eq!(p.first.len(), 2);

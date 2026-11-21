@@ -1309,11 +1309,8 @@ impl Panel {
     }
 
     fn glyph(&mut self, medium: bool, c: char, size: f32) -> &(Metrics, Vec<u8>) {
-        let key = (medium, c, size.to_bits());
         let font = if medium { &self.medium } else { &self.regular };
-        self.glyphs
-            .entry(key)
-            .or_insert_with(|| font.rasterize(c, size))
+        cached_glyph(&mut self.glyphs, font, medium, c, size)
     }
 
     /// `name`, at `size`, shortened with an ellipsis by whole letters where it is wider
@@ -1499,23 +1496,26 @@ impl Panel {
         s: &str,
     ) {
         let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
+        let data = pixmap.data_mut();
+        // The cache and the fonts are separate fields: each glyph is borrowed from the
+        // cache, not copied out of it.
+        let font = if medium { &self.medium } else { &self.regular };
         let mut pen = x;
         for c in s.chars() {
-            let (m, coverage) = self.glyph(medium, c, size).clone();
+            let (m, coverage) = cached_glyph(&mut self.glyphs, font, medium, c, size);
             let gx = (pen + m.xmin as f32).round() as i32;
             let gy = (baseline - m.height as f32 - m.ymin as f32).round() as i32;
-            let data = pixmap.data_mut();
-            for row in 0..m.height as i32 {
+            let (w, h) = (m.width as i32, m.height as i32);
+            // Only the part of the glyph inside the pixmap.
+            let (rows, cols) = (
+                gy.max(0) - gy..h.min(ph - gy),
+                gx.max(0) - gx..w.min(pw - gx),
+            );
+            for row in rows {
                 let py = gy + row;
-                if py < 0 || py >= ph {
-                    continue;
-                }
-                for col in 0..m.width as i32 {
+                for col in cols.clone() {
                     let px = gx + col;
-                    if px < 0 || px >= pw {
-                        continue;
-                    }
-                    let cov = coverage[(row * m.width as i32 + col) as usize] as u32;
+                    let cov = coverage[(row * w + col) as usize] as u32;
                     let a = cov * color[3] as u32 / 255;
                     if a == 0 {
                         continue;
@@ -1531,6 +1531,20 @@ impl Panel {
             pen += m.advance_width;
         }
     }
+}
+
+/// Glyph `c` of `font` (the medium one if `medium`) at `size`, rasterized once and
+/// kept in `glyphs`.
+fn cached_glyph<'a>(
+    glyphs: &'a mut HashMap<(bool, char, u32), (Metrics, Vec<u8>)>,
+    font: &Font,
+    medium: bool,
+    c: char,
+    size: f32,
+) -> &'a (Metrics, Vec<u8>) {
+    glyphs
+        .entry((medium, c, size.to_bits()))
+        .or_insert_with(|| font.rasterize(c, size))
 }
 
 impl Panel {
