@@ -79,6 +79,69 @@ const VA_GOP: u32 = 1024;
 /// an NVIDIA card yet.
 const NVENC_IN: &str = "video/x-raw,format={ (string)BGRx, (string)BGRA, (string)NV12 }";
 
+/// NVENC tuned for the lowest latency, where its version has the settings (the
+/// older `nvh264enc` and the one from GStreamer 1.22 differ): the low-latency preset
+/// and tuning, and no look-ahead. Its VBV keeps the encoder's own size: one of a few
+/// frames would crush the keyframes. Each setting only where the encoder has it; the
+/// probe opens the encoder tuned so, and an encoder that does not open is passed
+/// over as before. Not tried on an NVIDIA card yet: the picture (text, keyframes)
+/// needs a look there.
+pub(crate) fn tune(pipeline: &gst::Pipeline, cfg: &EncoderConfig) {
+    if cfg.backend != Backend::Nvenc {
+        return;
+    }
+    let Some(enc) = pipeline.by_name("enc") else {
+        return;
+    };
+    // The newer encoder: the fastest tuning with a middle preset.
+    if set_enum(&enc, "tune", "ultra-low-latency") {
+        set_enum(&enc, "preset", "p4");
+    } else {
+        set_enum(&enc, "preset", "low-latency-hq");
+    }
+    set_number(&enc, "rc-lookahead", 0);
+}
+
+/// Sets enum property `name` of `element` to its value `nick`, when it has both;
+/// whether it did.
+fn set_enum(element: &gst::Element, name: &str, nick: &str) -> bool {
+    let Some(pspec) = element.find_property(name) else {
+        return false;
+    };
+    let Some(spec) = pspec.downcast_ref::<gst::glib::ParamSpecEnum>() else {
+        return false;
+    };
+    let Some(value) = spec.enum_class().to_value_by_nick(nick) else {
+        return false;
+    };
+    element.set_property_from_value(name, &value);
+    debug!("{}: {name}={nick}", element.name());
+    true
+}
+
+/// Sets number property `name` of `element` to `value`, when it has it and takes it.
+fn set_number(element: &gst::Element, name: &str, value: u32) {
+    let Some(pspec) = element.find_property(name) else {
+        return;
+    };
+    let v = if let Some(p) = pspec.downcast_ref::<gst::glib::ParamSpecUInt>() {
+        (p.minimum()..=p.maximum())
+            .contains(&value)
+            .then(|| value.to_value())
+    } else if let Some(p) = pspec.downcast_ref::<gst::glib::ParamSpecInt>() {
+        i32::try_from(value)
+            .ok()
+            .filter(|v| (p.minimum()..=p.maximum()).contains(v))
+            .map(|v| v.to_value())
+    } else {
+        None
+    };
+    if let Some(v) = v {
+        element.set_property_from_value(name, &v);
+        debug!("{}: {name}={value}", element.name());
+    }
+}
+
 /// The parser after the encoder of `codec`.
 fn parser(codec: Codec) -> &'static str {
     match codec {
@@ -333,6 +396,7 @@ impl Encoder {
             .by_name("sink")
             .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
             .ok_or_else(|| anyhow!("appsink missing"))?;
+        tune(&pipeline, cfg);
         let devices = gpu.share_with(&pipeline);
 
         let on_event = Arc::new(on_event);
