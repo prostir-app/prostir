@@ -75,48 +75,9 @@ impl Session {
             return true;
         };
         match msg {
-            // The microphone, from a headset with the right to it.
-            ClientMsg::UpStart { up, kind, format } => {
-                let pcm = match format {
-                    UpFormat::Pcm16 { rate, channels } if rate == prostir_proto::AUDIO_RATE => {
-                        Some(channels)
-                    }
-                    _ => None,
-                };
-                match pcm {
-                    _ if kind != UpKind::Mic || !self.publisher.access.may(perms::MIC) => {
-                        info!("an up stream of {kind:?} this PC does not take");
-                    }
-                    Some(channels @ (1 | 2)) => {
-                        info!("the headset's microphone streams ({format:?}, up stream {up})");
-                        // A new recording replaces the one before, whose end may still
-                        // be on its way: that end then ends nothing.
-                        self.ups.retain(|_, (k, _)| *k != UpKind::Mic);
-                        self.ups.insert(up, (kind, channels));
-                    }
-                    _ => {
-                        warn!(
-                            "the headset's microphone in {format:?}, which this PC does not take"
-                        );
-                    }
-                }
-            }
-            // Only the microphone of the session that has it reaches the PC. It still
-            // goes through the control loop, which takes it at once (a pass is short and
-            // waits for nothing); moving it to the reader, as keyframes, is for later
-            // (plan, step 6, section 3.2).
-            ClientMsg::Up { up, data } => match self.ups.get(&up) {
-                _ if !self.standing.mic => {}
-                // The PC's end of the microphone is mono.
-                Some((UpKind::Mic, 2)) => displays.push_mic(&to_mono(&data)),
-                Some((UpKind::Mic, _)) => displays.push_mic(&data),
-                _ => {}
-            },
-            ClientMsg::UpEnd { up } => {
-                if self.ups.remove(&up).is_some() {
-                    info!("the headset's microphone stopped (up stream {up})");
-                }
-            }
+            // Taken by the reader (see `ups.rs`), which logged them; here they only
+            // mean the control loop looks at which session has the microphone.
+            ClientMsg::UpStart { .. } | ClientMsg::UpEnd { .. } | ClientMsg::Up { .. } => {}
             ClientMsg::Request { req, asked } => {
                 let started = Instant::now();
                 let what = format!("{asked:?}");

@@ -21,7 +21,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use log::warn;
@@ -153,6 +154,8 @@ struct State {
     video_bytes: usize,
     /// Streams that lost a frame since the router last looked: they need a keyframe.
     dropped: BTreeSet<DisplayId>,
+    /// Raised with `dropped`, shared with the outbox.
+    lost: Arc<AtomicBool>,
     /// Bytes queued since the writer last asked: what the streams need.
     queued: usize,
     /// The round trip of the latest pong, until the writer takes it.
@@ -169,10 +172,26 @@ struct State {
     closed: bool,
 }
 
-#[derive(Default)]
 pub struct Outbox {
     state: Mutex<State>,
     ready: Condvar,
+    /// Raised with `State::dropped` (the same flag): the router's every frame looks at
+    /// this, not at the queues behind the lock.
+    lost: Arc<AtomicBool>,
+}
+
+impl Default for Outbox {
+    fn default() -> Self {
+        let lost = Arc::new(AtomicBool::new(false));
+        Self {
+            state: Mutex::new(State {
+                lost: lost.clone(),
+                ..State::default()
+            }),
+            ready: Condvar::new(),
+            lost,
+        }
+    }
 }
 
 /// The lane the writer sends a packet in next.
@@ -380,8 +399,12 @@ impl Outbox {
         })
     }
 
-    /// Streams that lost frames since the last call.
+    /// Streams that lost frames since the last call (empty at once, without the
+    /// lock, while none did).
     pub fn take_dropped(&self) -> BTreeSet<DisplayId> {
+        if !self.lost.swap(false, Ordering::Relaxed) {
+            return BTreeSet::new();
+        }
         std::mem::take(&mut self.lock().dropped)
     }
 
@@ -591,6 +614,7 @@ impl State {
                     stats.dropped.late += 1;
                     q.broken = true;
                     self.dropped.insert(id);
+                    self.lost.store(true, Ordering::Relaxed);
                 }
                 self.garbage.push(f.msg);
                 continue;

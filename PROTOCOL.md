@@ -1181,7 +1181,14 @@ PC sound (`Audio`, lane 1) is 48 kHz (`AUDIO_RATE`), 2 channels (`AUDIO_CHANNELS
 interleaved signed 16-bit little-endian, with no header or timestamp: each message is a
 whole number of sample frames, to be played in arrival order. Slices are 10 ms in the
 current host (1920 bytes), but the size is implementation-defined and a receiver must
-accept any length. It flows while the headset is worn and `Sound.to_headset` is on.
+accept any length. It flows while the headset is worn and `Sound.to_headset` is on,
+and while there is sound: after 200 ms of slices that are all zero (the PC plays
+nothing) the current host sends no more until a slice is not silent, and that one goes
+at once, after two slices of silence (20 ms) that fill the player's empty buffer, so
+the sound does not start with a click. A gap in `Audio` is silence to play, not a
+fault; the receiver needs no notice of it (the current client's player counts the
+gap as one underrun in its log, which it is not). Clients from 0.1 on behave so already: the player
+waits for the next slice, and its device plays nothing meanwhile.
 
 ### Up streams: the microphone
 
@@ -1213,6 +1220,32 @@ is not taken (the stream is dropped and logged).
 The current client sends control messages first, then up streams and `FrameShown` in
 lane 1; while the network is stuck it drops `Up` pieces and `FrameShown` beyond about
 2.5 s waiting, never `UpStart` or `UpEnd`, and never a control message.
+
+### Measuring the latency from the PC to the eye (test mode)
+
+Not part of the protocol: nothing on the wire changes. A host started with
+`prostir serve --time-code` (a hidden test switch) draws into every monitor's frames, as it captures them, the time
+it captured each, as a code in the top left corner of the picture; a client in a
+measuring mode reads it back from what it decoded and compares it with the time it
+shows the picture, both on the PC's clock. `prostir_proto::timecode` draws and reads
+it, so both sides agree; the format:
+
+- A row of 42 square cells of 16 pixels on the luma plane, from the top left pixel
+  (in 4:2:0 a cell covers whole chroma samples): cell 0 white and cell 1 black (where
+  the code starts), cells 2 to 33 the value, most significant bit first, cells 34 to
+  41 a check, the four bytes of the value added modulo 256, also most significant bit
+  first. White (luma 235) is 1, black (16) is 0; a reader looks at the middle of each
+  cell (row 8, column 8 of it) and takes luma above 128 as white.
+- The value is the PC's `CLOCK_MONOTONIC` in milliseconds when the frame was captured
+  (its GStreamer timestamp on the pipeline's clock), its low 32 bits.
+- A check that does not match, or no white and black cell at the start, means no
+  code (a picture made of two frames, a monitor too small for 672 pixels across).
+
+To turn the PC's time into the headset's, the client needs the offset of the two
+clocks (for example from a ping whose answer carries the PC's time, an extension for
+this mode that is not part of the protocol yet). The PC's half (drawing) is in the
+host; the headset's half (reading, the offset, the time of the shown frame) comes with
+the client's selftest.
 
 ## 7. Layout
 

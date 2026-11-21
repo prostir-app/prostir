@@ -42,6 +42,7 @@ pub mod request;
 pub mod secure;
 pub mod state;
 pub mod stats;
+pub mod timecode;
 pub mod volume;
 pub mod wire;
 

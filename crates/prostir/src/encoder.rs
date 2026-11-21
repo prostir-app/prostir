@@ -64,6 +64,84 @@ impl Backend {
     }
 }
 
+/// Keyframes come when they are needed, not every so many frames: TCP loses nothing,
+/// a headset that lost frames asks for one, and one more follows when the screen
+/// goes still (see the router). A periodic keyframe was a burst twenty times a
+/// frame's size every ten seconds of motion on each monitor. x264 takes this as no
+/// limit, NVENC takes `-1`; VA-API's limit is 1024 frames.
+const X264_GOP: u32 = 1 << 30;
+const VA_GOP: u32 = 1024;
+
+/// What NVENC takes from the CPU's converter: the desktop's own BGRx or BGRA where
+/// its version takes them (it turns them into YUV on the graphics card; the frames
+/// then pass the converter as they are), else NV12, converted on the CPU. The caps
+/// after the encoder ask for 4:2:0 profiles, which the headset decodes. Not tried on
+/// an NVIDIA card yet.
+const NVENC_IN: &str = "video/x-raw,format={ (string)BGRx, (string)BGRA, (string)NV12 }";
+
+/// NVENC tuned for the lowest latency, where its version has the settings (the
+/// older `nvh264enc` and the one from GStreamer 1.22 differ): the low-latency preset
+/// and tuning, and no look-ahead. Its VBV keeps the encoder's own size: one of a few
+/// frames would crush the keyframes. Each setting only where the encoder has it; the
+/// probe opens the encoder tuned so, and an encoder that does not open is passed
+/// over as before. Not tried on an NVIDIA card yet: the picture (text, keyframes)
+/// needs a look there.
+pub(crate) fn tune(pipeline: &gst::Pipeline, cfg: &EncoderConfig) {
+    if cfg.backend != Backend::Nvenc {
+        return;
+    }
+    let Some(enc) = pipeline.by_name("enc") else {
+        return;
+    };
+    // The newer encoder: the fastest tuning with a middle preset.
+    if set_enum(&enc, "tune", "ultra-low-latency") {
+        set_enum(&enc, "preset", "p4");
+    } else {
+        set_enum(&enc, "preset", "low-latency-hq");
+    }
+    set_number(&enc, "rc-lookahead", 0);
+}
+
+/// Sets enum property `name` of `element` to its value `nick`, when it has both;
+/// whether it did.
+fn set_enum(element: &gst::Element, name: &str, nick: &str) -> bool {
+    let Some(pspec) = element.find_property(name) else {
+        return false;
+    };
+    let Some(spec) = pspec.downcast_ref::<gst::glib::ParamSpecEnum>() else {
+        return false;
+    };
+    let Some(value) = spec.enum_class().to_value_by_nick(nick) else {
+        return false;
+    };
+    element.set_property_from_value(name, &value);
+    debug!("{}: {name}={nick}", element.name());
+    true
+}
+
+/// Sets number property `name` of `element` to `value`, when it has it and takes it.
+fn set_number(element: &gst::Element, name: &str, value: u32) {
+    let Some(pspec) = element.find_property(name) else {
+        return;
+    };
+    let v = if let Some(p) = pspec.downcast_ref::<gst::glib::ParamSpecUInt>() {
+        (p.minimum()..=p.maximum())
+            .contains(&value)
+            .then(|| value.to_value())
+    } else if let Some(p) = pspec.downcast_ref::<gst::glib::ParamSpecInt>() {
+        i32::try_from(value)
+            .ok()
+            .filter(|v| (p.minimum()..=p.maximum()).contains(v))
+            .map(|v| v.to_value())
+    } else {
+        None
+    };
+    if let Some(v) = v {
+        element.set_property_from_value(name, &v);
+        debug!("{}: {name}={value}", element.name());
+    }
+}
+
 /// The parser after the encoder of `codec`.
 fn parser(codec: Codec) -> &'static str {
     match codec {
@@ -114,11 +192,24 @@ pub enum EncoderEvent {
         pts_us: u64,
         keyframe: bool,
         data: Vec<u8>,
+        /// How it went through the encoder (`None` when it could not be paired with
+        /// its way in).
+        timing: Option<FrameTiming>,
     },
     Failed(String),
     /// The encoder itself failed before its first frame: it did not open (no more
     /// sessions, a size or format its driver does not take). Another encoder may.
     Unopened(NotOpened),
+}
+
+/// How one frame went through its encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameTiming {
+    /// From entering the converter to leaving the parser, microseconds.
+    pub encode_us: u32,
+    /// The picture of the frame before it, sent again (a keepalive of the source on a
+    /// still screen): its memory is the previous frame's.
+    pub repeat: bool,
 }
 
 /// Why an encoder did not open.
@@ -157,7 +248,7 @@ pub struct Encoder {
     pipeline: gst::Pipeline,
     sink: gst_app::AppSink,
     stop: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
+    paused: Arc<Pause>,
     /// The source sends nothing after a pause until the screen changes (PipeWire from
     /// KWin): it is started over on resuming. A capture pushing its own frames
     /// (`appsrc`) repeats the last one by itself.
@@ -222,8 +313,8 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         #[cfg(feature = "fake-desktop")]
         (Codec::H264, Backend::Fake) => (
             format!(
-                "videoconvert name=enc_in ! video/x-raw,format=I420 ! valve drop={} ! x264enc name=enc tune=zerolatency speed-preset=superfast \
-                 bitrate={} key-int-max=600 bframes=0",
+                "videoconvert name=enc_in n-threads=0 ! video/x-raw,format=I420 ! valve drop={} ! x264enc name=enc tune=zerolatency speed-preset=superfast \
+                 bitrate={} key-int-max={X264_GOP} bframes=0",
                 !probe::fake::opens(),
                 cfg.bitrate_kbps
             ),
@@ -232,8 +323,8 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         ),
         (Codec::H264, Backend::X264) => (
             format!(
-                "videoconvert name=enc_in ! video/x-raw,format=I420 ! x264enc name=enc tune=zerolatency speed-preset=superfast \
-                 bitrate={} key-int-max=600 bframes=0",
+                "videoconvert name=enc_in n-threads=0 ! video/x-raw,format=I420 ! x264enc name=enc tune=zerolatency speed-preset=superfast \
+                 bitrate={} key-int-max={X264_GOP} bframes=0",
                 cfg.bitrate_kbps
             ),
             "h264parse config-interval=-1",
@@ -241,26 +332,26 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         ),
         (Codec::H264, Backend::Nvenc) => (
             format!(
-                "videoconvert name=enc_in ! video/x-raw,format=NV12 ! nvh264enc name=enc rc-mode=cbr \
-                 bitrate={} gop-size=600 bframes=0 zerolatency=true",
+                "videoconvert name=enc_in n-threads=0 ! {NVENC_IN} ! nvh264enc name=enc rc-mode=cbr \
+                 bitrate={} gop-size=-1 bframes=0 zerolatency=true",
                 cfg.bitrate_kbps
             ),
             "h264parse config-interval=-1",
-            "video/x-h264,stream-format=byte-stream,alignment=au",
+            "video/x-h264,stream-format=byte-stream,alignment=au,profile=high",
         ),
         (Codec::H265, Backend::Nvenc) => (
             format!(
-                "videoconvert name=enc_in ! video/x-raw,format=NV12 ! nvh265enc name=enc rc-mode=cbr \
-                 bitrate={} gop-size=600 bframes=0 zerolatency=true",
+                "videoconvert name=enc_in n-threads=0 ! {NVENC_IN} ! nvh265enc name=enc rc-mode=cbr \
+                 bitrate={} gop-size=-1 bframes=0 zerolatency=true",
                 cfg.bitrate_kbps
             ),
             "h265parse config-interval=-1",
-            "video/x-h265,stream-format=byte-stream,alignment=au",
+            "video/x-h265,stream-format=byte-stream,alignment=au,profile=main",
         ),
         (Codec::H264, Backend::Va) => (
             format!(
                 "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah264enc name=enc rate-control=cbr bitrate={} \
-                 key-int-max=600 b-frames=0 ref-frames=1 target-usage={}",
+                 key-int-max={VA_GOP} b-frames=0 ref-frames=1 target-usage={}",
                 cfg.bitrate_kbps,
                 cfg.target_usage()
             ),
@@ -270,7 +361,7 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         (Codec::H265, Backend::Va) => (
             format!(
                 "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah265enc name=enc rate-control=cbr bitrate={} \
-                 key-int-max=600 b-frames=0 ref-frames=1 target-usage={}",
+                 key-int-max={VA_GOP} b-frames=0 ref-frames=1 target-usage={}",
                 cfg.bitrate_kbps,
                 cfg.target_usage()
             ),
@@ -278,9 +369,88 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
             "video/x-h265,stream-format=byte-stream,alignment=au",
         ),
     };
+    // In the test mode of the time code, the frames go through memory, where the code
+    // is drawn into them (see `draw_time_code`).
+    let stamp = if time_code() {
+        " ! videoconvert ! video/x-raw,format=I420 ! identity name=timecode"
+    } else {
+        ""
+    };
+    // The queue's thread converts and encodes: named after the output (`q-node-42`,
+    // `q-Prostir-1`), so the system's list of threads tells whose it is.
+    let queue: String = format!("q-{}", input.label)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
     Ok(format!(
-        "{source} ! queue max-size-buffers=2 leaky=downstream ! {encoder} ! {parser} ! {caps}"
+        "{source} ! queue name={queue} max-size-buffers=2 leaky=downstream{stamp} ! {encoder} \
+         ! {parser} ! {caps}"
     ))
+}
+
+/// The test mode for measuring the latency from the PC to the eye (`prostir serve
+/// --time-code`, never on by itself): every monitor's frames get the time they were
+/// captured drawn into their top left corner as a code (`prostir_proto::timecode`),
+/// which the headset reads back from what it shows. The frames then go through
+/// memory (on KDE PipeWire hands them over so); with GPU buffers on Hyprland, use
+/// `--software`.
+static TIME_CODE: AtomicBool = AtomicBool::new(false);
+
+/// Turns the time code's test mode on, for every encoder started from now on.
+pub fn draw_time_codes() {
+    warn!("test mode: a time code is drawn into every monitor (--time-code)");
+    TIME_CODE.store(true, Ordering::Relaxed);
+}
+
+fn time_code() -> bool {
+    TIME_CODE.load(Ordering::Relaxed)
+}
+
+/// Draws the time each frame was captured (the clock's time of its timestamp, which
+/// is `CLOCK_MONOTONIC`, in ms) into the frames that pass `pad` (I420).
+fn draw_time_code(pad: &gst::Pad) {
+    pad.add_probe(gst::PadProbeType::BUFFER, |pad, info| {
+        let Some(video) = pad
+            .current_caps()
+            .and_then(|c| gst_video::VideoInfo::from_caps(&c).ok())
+        else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let base = pad
+            .parent_element()
+            .and_then(|e| e.base_time())
+            .map_or(0, gst::ClockTime::nseconds);
+        let Some(buffer) = info.buffer_mut() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let ns = match buffer.pts() {
+            Some(pts) => base + pts.nseconds(),
+            None => monotonic_ns(),
+        };
+        let ms = (ns / 1_000_000) as u32;
+        if let Ok(mut frame) =
+            gst_video::VideoFrameRef::from_buffer_ref_writable(buffer.make_mut(), &video)
+        {
+            use gst_video::prelude::*;
+            let (w, h) = (frame.width() as usize, frame.height() as usize);
+            let stride = frame.plane_stride()[0] as usize;
+            if let Ok(luma) = frame.plane_data_mut(0) {
+                prostir_proto::timecode::draw(luma, stride, w, h, ms);
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// `CLOCK_MONOTONIC` now, in nanoseconds.
+fn monotonic_ns() -> u64 {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: a timespec to fill, valid through the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut t) };
+    t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
 }
 
 impl Encoder {
@@ -305,6 +475,13 @@ impl Encoder {
             .by_name("sink")
             .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
             .ok_or_else(|| anyhow!("appsink missing"))?;
+        tune(&pipeline, cfg);
+        if let Some(pad) = pipeline
+            .by_name("timecode")
+            .and_then(|e| e.static_pad("src"))
+        {
+            draw_time_code(&pad);
+        }
         let devices = gpu.share_with(&pipeline);
 
         let on_event = Arc::new(on_event);
@@ -319,9 +496,26 @@ impl Encoder {
             .by_name("enc_in")
             .and_then(|e| e.static_pad("sink"))
         {
+            // What the frames really come as (GPU buffers or memory, format, layout,
+            // rate): said once for each change.
+            let node = node.clone();
+            pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+                if let Some(event) = info.event()
+                    && let gst::EventView::Caps(c) = event.view()
+                {
+                    info!("{node}: frames come as {}", c.caps());
+                }
+                gst::PadProbeReturn::Ok
+            });
             let probe = probe.clone();
-            pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
-                probe.lock().unwrap().entered();
+            pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                // The memory the picture lies in: a source's keepalive sends the memory
+                // of the frame before again, new pictures come in other memory.
+                let memory = info
+                    .buffer()
+                    .filter(|b| b.n_memory() > 0)
+                    .map_or(0, |b| b.peek_memory(0).as_ptr() as usize);
+                probe.lock().unwrap().entered(memory);
                 gst::PadProbeReturn::Ok
             });
         }
@@ -357,11 +551,12 @@ impl Encoder {
                         let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                         let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
                         let pts_us = buffer.pts().map_or(0, gst::ClockTime::useconds);
-                        probe.lock().unwrap().left(&node);
+                        let timing = probe.lock().unwrap().left(&node);
                         if on_event(EncoderEvent::Frame {
                             pts_us,
                             keyframe,
                             data: map.as_slice().to_vec(),
+                            timing,
                         }) {
                             request_keyframe(sink);
                         }
@@ -434,7 +629,7 @@ impl Encoder {
             pipeline,
             sink,
             stop,
-            paused: Arc::new(AtomicBool::new(false)),
+            paused: Arc::default(),
             restart_on_resume,
             takes_dmabuf: cfg.backend.takes_dmabuf(),
             bus_thread: Some(bus_thread),
@@ -489,7 +684,7 @@ impl Encoder {
 
     /// Whether it is paused now (the headset is off).
     pub fn is_paused(&self) -> bool {
-        self.paused.load(Ordering::Relaxed)
+        self.paused.is_on()
     }
 
     /// What to say of the encoder this output got (see [`note`]).
@@ -533,7 +728,7 @@ impl Encoder {
         feature = "fake-desktop",
         expect(dead_code, reason = "the fake desktop pushes no frames")
     )]
-    pub fn paused(&self) -> Arc<AtomicBool> {
+    pub fn paused(&self) -> Arc<Pause> {
         self.paused.clone()
     }
 
@@ -561,7 +756,7 @@ impl Encoder {
         } else {
             gst::State::Playing
         };
-        self.paused.store(paused, Ordering::Relaxed);
+        self.paused.set(paused);
         if !paused {
             self.resumed.store(true, Ordering::Relaxed);
         }
@@ -586,7 +781,62 @@ impl Encoder {
 
     /// A handle that asks it for a keyframe from any thread, while it runs.
     pub fn keyframer(&self) -> Keyframer {
-        Keyframer(self.sink.clone())
+        Keyframer {
+            sink: self.sink.clone(),
+            pause: self.paused.clone(),
+        }
+    }
+}
+
+/// Whether an encoder is paused, which a capture feeding it sleeps on.
+#[derive(Debug, Default)]
+pub struct Pause {
+    on: Mutex<bool>,
+    changed: std::sync::Condvar,
+    /// A keyframe was asked of a still screen: a capture sends its last picture again
+    /// at once, instead of at its next keepalive.
+    again: AtomicBool,
+}
+
+impl Pause {
+    /// Whether the capture is to send its last picture again now; it is asked once.
+    #[cfg_attr(
+        feature = "fake-desktop",
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
+    pub fn take_again(&self) -> bool {
+        self.again.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn is_on(&self) -> bool {
+        *self.on.lock().unwrap()
+    }
+
+    fn set(&self, on: bool) {
+        *self.on.lock().unwrap() = on;
+        self.changed.notify_all();
+    }
+
+    /// Wakes whoever waits (a capture that is to stop).
+    #[cfg_attr(
+        all(feature = "fake-desktop", not(test)),
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
+    pub fn wake(&self) {
+        let _on = self.on.lock().unwrap();
+        self.changed.notify_all();
+    }
+
+    /// Sleeps while paused, until resumed or woken with `stop` set.
+    #[cfg_attr(
+        all(feature = "fake-desktop", not(test)),
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
+    pub fn wait(&self, stop: &AtomicBool) {
+        let mut on = self.on.lock().unwrap();
+        while *on && !stop.load(Ordering::Relaxed) {
+            on = self.changed.wait(on).unwrap();
+        }
     }
 }
 
@@ -594,11 +844,20 @@ impl Encoder {
 /// headset's request does not wait for whoever owns the encoder. Asking an encoder
 /// that stopped does nothing.
 #[derive(Clone)]
-pub struct Keyframer(gst_app::AppSink);
+pub struct Keyframer {
+    sink: gst_app::AppSink,
+    pause: Arc<Pause>,
+}
 
 impl Keyframer {
     pub fn ask(&self) {
-        request_keyframe(&self.0);
+        request_keyframe(&self.sink);
+    }
+
+    /// The source is to send its picture again at once (a keyframe asked of a still
+    /// screen comes with the next frame): a capture pushing its own frames does so.
+    pub fn picture_again(&self) {
+        self.pause.again.store(true, Ordering::Relaxed);
     }
 }
 
@@ -634,7 +893,10 @@ impl Drop for Encoder {
 /// Time each frame spends in conversion + encoding, and gaps between captured frames.
 #[derive(Default)]
 struct Probe {
-    inside: std::collections::VecDeque<Instant>,
+    /// The frames inside: when each came, and whether it repeats the picture before.
+    inside: std::collections::VecDeque<(Instant, bool)>,
+    /// The memory of the last frame that came (its address, 0: none).
+    last_memory: usize,
     last_entered: Option<Instant>,
     max_gap_ms: f64,
     frames: u32,
@@ -644,22 +906,25 @@ struct Probe {
 }
 
 impl Probe {
-    fn entered(&mut self) {
+    /// A frame in `memory` (its address; 0 when unknown) came.
+    fn entered(&mut self, memory: usize) {
         let now = Instant::now();
+        let repeat = memory != 0 && memory == self.last_memory;
+        self.last_memory = memory;
         if let Some(prev) = self.last_entered.replace(now) {
             self.max_gap_ms = self.max_gap_ms.max((now - prev).as_secs_f64() * 1e3);
         }
         if self.inside.len() > 64 {
             self.inside.clear();
         }
-        self.inside.push_back(now);
+        self.inside.push_back((now, repeat));
     }
 
-    fn left(&mut self, node: &str) {
-        let Some(t0) = self.inside.pop_front() else {
-            return;
-        };
-        let ms = t0.elapsed().as_secs_f64() * 1e3;
+    /// The next frame came out: how it went (`None` if it cannot be paired).
+    fn left(&mut self, node: &str) -> Option<FrameTiming> {
+        let (t0, repeat) = self.inside.pop_front()?;
+        let took = t0.elapsed();
+        let ms = took.as_secs_f64() * 1e3;
         self.frames += 1;
         self.sum_ms += ms;
         self.max_ms = self.max_ms.max(ms);
@@ -679,13 +944,18 @@ impl Probe {
                 self.max_gap_ms
             );
             let inside = std::mem::take(&mut self.inside);
-            let last_entered = self.last_entered;
+            let (last_entered, last_memory) = (self.last_entered, self.last_memory);
             *self = Self {
                 inside,
+                last_memory,
                 last_entered,
                 ..Self::default()
             };
         }
+        Some(FrameTiming {
+            encode_us: u32::try_from(took.as_micros()).unwrap_or(u32::MAX),
+            repeat,
+        })
     }
 }
 
@@ -744,6 +1014,86 @@ fn decode_to(data: &[u8], codec: Codec, path: &std::path::Path) -> Result<()> {
         Some(gst::MessageView::Eos(_)) => Ok(()),
         Some(gst::MessageView::Error(e)) => bail!("{}", e.error()),
         _ => bail!("the frame was not decoded in time"),
+    }
+}
+
+#[cfg(test)]
+mod pause {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use super::Pause;
+
+    /// A capture sleeps on its encoder's pause until it is resumed, or woken to stop,
+    /// and not at all while it is not paused.
+    #[test]
+    fn a_pause_is_slept_on_until_resumed_or_woken() {
+        let pause = Arc::new(Pause::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let sleeper = |pause: &Arc<Pause>, stop: &Arc<AtomicBool>| {
+            let (pause, stop) = (pause.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                pause.wait(&stop);
+                started.elapsed()
+            })
+        };
+        assert!(sleeper(&pause, &stop).join().unwrap() < Duration::from_millis(50));
+        pause.set(true);
+        let resumed = sleeper(&pause, &stop);
+        std::thread::sleep(Duration::from_millis(100));
+        pause.set(false);
+        assert!(resumed.join().unwrap() >= Duration::from_millis(90));
+        pause.set(true);
+        let stopped = sleeper(&pause, &stop);
+        std::thread::sleep(Duration::from_millis(100));
+        stop.store(true, Ordering::Relaxed);
+        pause.wake();
+        assert!(stopped.join().unwrap() >= Duration::from_millis(90));
+        assert!(pause.is_on(), "still paused, only woken");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+
+    /// A frame that passes the time code's pad has the time it was captured drawn
+    /// into it, on the PC's monotonic clock, as the headset reads it back.
+    #[test]
+    fn the_time_code_is_drawn_into_a_frame() {
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "videotestsrc num-buffers=1 is-live=true pattern=black ! \
+             video/x-raw,format=I420,width=704,height=32 ! identity name=timecode ! \
+             appsink name=out",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let pad = pipeline
+            .by_name("timecode")
+            .unwrap()
+            .static_pad("src")
+            .unwrap();
+        super::draw_time_code(&pad);
+        let out = pipeline
+            .by_name("out")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let sample = out.pull_sample().unwrap();
+        let now_ms = super::monotonic_ns() / 1_000_000;
+        pipeline.set_state(gst::State::Null).unwrap();
+        let map = sample.buffer().unwrap().map_readable().unwrap();
+        // I420 of 704 pixels across: the luma rows are 704 bytes.
+        let code = prostir_proto::timecode::read(map.as_slice(), 704, 704, 32)
+            .expect("a time code in the frame");
+        let late = (now_ms as u32).wrapping_sub(code);
+        assert!(late < 2000, "captured {late} ms ago");
     }
 }
 

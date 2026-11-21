@@ -256,3 +256,52 @@ fn a_keyframe_asked_for_an_old_generation_is_not_made() {
         .unwrap();
     assert_eq!(headset.view().streams[&id].generation, now);
 }
+
+/// Two requests for a keyframe within 100 ms, the second after the first one's
+/// keyframe went: it comes within the 300 ms the PC leaves between a headset's
+/// keyframes, and is not dropped for it (no keyframe comes on its own any more) but
+/// asked for once they are over.
+#[test]
+fn a_keyframe_asked_twice_soon_comes_after_the_window() {
+    use prostir_proto::ClientMsg;
+    const LATER: &str = "within 300 ms of the one before, asked for now";
+    let moving = Options {
+        fps: 30,
+        env: vec![("RUST_LOG".into(), "info,prostir::router=debug".into())],
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("keyframe-twice", &moving);
+    let id = headset.view().order()[0];
+    let generation = headset.view().streams[&id].generation;
+    let before = headset.view().streams[&id].keyframes;
+    let later = pc.count_log(LATER);
+    let ask = |headset: &mut prostir_testkit::FakeHeadset| {
+        headset
+            .send(&ClientMsg::RequestKeyframe { id, generation })
+            .unwrap();
+    };
+    let asked = Instant::now();
+    ask(&mut headset);
+    headset
+        .wait(SOON, "the first keyframe", |v| {
+            v.streams[&id].keyframes > before
+        })
+        .unwrap();
+    let again = asked.elapsed();
+    ask(&mut headset);
+    headset
+        .wait(SOON, "a keyframe for each request", |v| {
+            v.streams[&id].keyframes >= before + 2
+        })
+        .unwrap();
+    // On a slow machine the first keyframe may have come after the window: then the
+    // second request was answered at once, with no wait to look at.
+    if again < Duration::from_millis(250) {
+        pc.wait_log_after(SOON, LATER, later);
+        assert!(
+            asked.elapsed() >= Duration::from_millis(300),
+            "the second keyframe came within the window"
+        );
+    }
+    assert_eq!(headset.view().streams[&id].generation, generation);
+}

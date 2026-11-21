@@ -13,6 +13,10 @@ use prostir_proto::link::tcp::SocketOptions;
 /// The options of a connection to the headset.
 pub struct TcpOptions;
 
+/// DSCP AF41 (34) in the old type-of-service byte: interactive video.
+#[cfg(target_os = "linux")]
+const AF41: u32 = 34 << 2;
+
 #[cfg(target_os = "linux")]
 fn set(stream: &TcpStream, level: libc::c_int, name: libc::c_int, value: u32) -> bool {
     use std::os::fd::AsRawFd;
@@ -48,6 +52,22 @@ impl SocketOptions for TcpOptions {
         if !ok {
             warn!(
                 "cannot set up the connection's socket: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        // Marked as video (DSCP AF41): Wi-Fi with WMM sends it in the video access
+        // category, with shorter waits for the air than ordinary traffic. A network
+        // that ignores the mark loses nothing.
+        let marked = match stream.local_addr() {
+            Ok(std::net::SocketAddr::V4(_)) => set(stream, libc::IPPROTO_IP, libc::IP_TOS, AF41),
+            Ok(std::net::SocketAddr::V6(_)) => {
+                set(stream, libc::IPPROTO_IPV6, libc::IPV6_TCLASS, AF41)
+            }
+            Err(_) => false,
+        };
+        if !marked {
+            log::debug!(
+                "cannot mark the connection as video: {}",
                 std::io::Error::last_os_error()
             );
         }
@@ -91,6 +111,8 @@ impl SocketOptions for TcpOptions {
             rtt: us(info.rtt),
             rtt_var: us(info.rtt_var),
             min_rtt: us(info.min_rtt),
+            retransmits: info.more_counters[6],
+            unsent: info.segments[2],
         })
     }
 }
@@ -134,3 +156,43 @@ const _: () = {
     assert!(std::mem::offset_of!(TcpInfo, min_rtt) == 148);
     assert!(std::mem::offset_of!(TcpInfo, delivery_rate) == 160);
 };
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::net::{TcpListener, TcpStream};
+    use std::os::fd::AsRawFd;
+
+    use super::*;
+
+    fn get(stream: &TcpStream, level: libc::c_int, name: libc::c_int) -> u32 {
+        let mut value = 0u32;
+        let mut len = size_of::<u32>() as libc::socklen_t;
+        // SAFETY: a valid socket and a 4-byte buffer the kernel fills.
+        let ok = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                level,
+                name,
+                (&raw mut value).cast(),
+                &raw mut len,
+            ) == 0
+        };
+        assert!(ok, "{}", std::io::Error::last_os_error());
+        value
+    }
+
+    /// A connection to the headset goes out marked as video, over IPv4 and IPv6.
+    #[test]
+    fn the_connection_is_marked_as_video() {
+        let v4 = TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(v4.local_addr().unwrap()).unwrap();
+        TcpOptions.prepare(&stream);
+        assert_eq!(get(&stream, libc::IPPROTO_IP, libc::IP_TOS), AF41);
+        // A PC without IPv6 has nothing to mark there.
+        if let Ok(v6) = TcpListener::bind("[::1]:0") {
+            let stream = TcpStream::connect(v6.local_addr().unwrap()).unwrap();
+            TcpOptions.prepare(&stream);
+            assert_eq!(get(&stream, libc::IPPROTO_IPV6, libc::IPV6_TCLASS), AF41);
+        }
+    }
+}

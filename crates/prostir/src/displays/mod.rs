@@ -8,8 +8,8 @@
 use crate::i18n::t;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -36,6 +36,8 @@ mod parts;
 mod physical;
 mod placing;
 mod sound;
+
+pub use sound::MicTap;
 mod windows;
 
 use encoding::too_big_why;
@@ -82,7 +84,13 @@ pub struct OutputEncoding {
     pub copies: bool,
     /// Why it is not the best this PC has for it, when it is not.
     pub note: Option<String>,
+    /// What its encoder made in the last window of the router's report.
+    pub stats: Option<crate::router::StreamStats>,
 }
+
+/// A screen that did not change for this long gets one keyframe (see
+/// [`Router::still_keyframes`]).
+const STILL: Duration = Duration::from_secs(3);
 
 /// A headset that waited this long for a fresh picture of a stream that sent nothing
 /// meanwhile gets it from the stream starting over.
@@ -157,6 +165,8 @@ pub struct Displays {
     /// The headset microphone on the PC, shared with the sound thread, which made it
     /// and lets it go (this share goes first).
     mic: Option<Arc<MicIn>>,
+    /// The same, for the sessions' readers.
+    mic_tap: Arc<MicTap>,
     /// Raised when the person switches sound or the microphone on: tried at once.
     by_hand: u32,
     /// Raised to have a recording's way in looked at again.
@@ -208,6 +218,7 @@ impl Displays {
         events: &EventSink,
     ) -> Self {
         let router = Arc::new(Router::new());
+        router.send_events_to(events.clone());
         let desk = Desk::start(
             worker::Start {
                 codec: settings.codec,
@@ -230,6 +241,7 @@ impl Displays {
             settings: settings.clone(),
             audio: None,
             mic: None,
+            mic_tap: Arc::default(),
             by_hand: 0,
             recheck: 0,
             mic_wanted: false,
@@ -619,6 +631,8 @@ impl Displays {
     /// primary output, window panels, the PC's own displays).
     pub fn tick(&mut self) {
         self.router.report();
+        self.router.still_keyframes(STILL);
+        self.router.pending_keyframes();
         self.sync_audio();
         // A way in for a recording that broke is made anew (nothing is asked), on the
         // sound thread.

@@ -24,6 +24,11 @@ use windows::KdeWindows;
 const WIDTHS: std::ops::RangeInclusive<u32> = 320..=7680;
 const HEIGHTS: std::ops::RangeInclusive<u32> = 240..=4320;
 
+/// After the outputs changed, the primary output is looked at once more this much
+/// later, and without a change this often (see [`Kde::keep_primary`]).
+const PRIMARY_SETTLE: Duration = Duration::from_secs(2);
+const PRIMARY_ANYWAY: Duration = Duration::from_secs(10);
+
 /// KDE Plasma as the desktop.
 pub struct Kde {
     caps: DesktopCaps,
@@ -31,6 +36,9 @@ pub struct Kde {
     windows: KdeWindows,
     /// When Plasma was last nudged to follow the primary output.
     primary_nudged: Option<Instant>,
+    /// The primary output was last looked at: at which change of the outputs, when,
+    /// and when to look once more after a change.
+    primary_looked: (u64, Option<Instant>, Option<Instant>),
     /// Last time the laptop panel was switched back on (to avoid fighting the user).
     woke_display_at: Option<Instant>,
     /// Displays of the PC shown so far, to number their streams in the log.
@@ -59,6 +67,7 @@ impl Kde {
             screencast: Screencast::connect()?,
             windows: KdeWindows::new(),
             primary_nudged: None,
+            primary_looked: (0, None, None),
             woke_display_at: None,
             shown: 0,
             _gpu: gpu,
@@ -122,7 +131,22 @@ impl Desktop for Kde {
 
     /// Makes sure KDE's primary output (where the Plasma panel lives) is `ours`. Right
     /// after outputs come and go (a profile switch) KDE can end up with another one.
+    ///
+    /// Asking KScreen takes a process (`kscreen-doctor`, about 75 ms of CPU), so it is
+    /// asked only when the outputs changed, once more 2 s later (KDE settles), and
+    /// otherwise every 10 s.
     fn keep_primary(&mut self, ours: &OutputKey) {
+        let now = Instant::now();
+        let changed = self.screencast.outputs_changed();
+        let (seen, last, again) = self.primary_looked;
+        let due = changed != seen
+            || again.is_some_and(|t| now >= t)
+            || last.is_none_or(|t| now.duration_since(t) >= PRIMARY_ANYWAY);
+        if !due {
+            return;
+        }
+        let again = (changed != seen).then(|| now + PRIMARY_SETTLE);
+        self.primary_looked = (changed, Some(now), again);
         let geometries = kscreen::geometries();
         let kde_primary = geometries
             .iter()

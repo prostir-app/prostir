@@ -175,6 +175,7 @@ fn base() -> State {
         nearby: Vec::new(),
         counting: Some(Counting::Yes),
         problems: Vec::new(),
+        wifi: None,
     }
 }
 

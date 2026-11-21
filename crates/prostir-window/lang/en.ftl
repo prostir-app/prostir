@@ -37,6 +37,7 @@ ov-title = Overview
 ov-connected-title = Headset connected
 ov-connected-wifi = { $name } over Wi-Fi. Monitors in the headset: { $count }.
 ov-connected-usb = { $name } over a USB cable. Monitors in the headset: { $count }.
+ov-wifi-power-save = Power saving is on for this PC's Wi-Fi ({ $interface }). It can hold the picture back by tens of milliseconds. A cable helps, or turning power saving off for this connection.
 ov-taken-off-title = Headset taken off
 ov-taken-off-body = { $name } is paused: the monitors wait until the headset is on again.
 ov-battery = headset battery

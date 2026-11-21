@@ -45,8 +45,25 @@ fn frame(router: &Router, id: ScreenId, keyframe: bool) -> bool {
             pts_us: 0,
             keyframe,
             data: vec![0],
+            timing: None,
         },
     )
+}
+
+/// A frame of a new picture (`repeat`: the picture before, sent again).
+fn timed(router: &Router, id: ScreenId, keyframe: bool, repeat: bool) {
+    router.on_event(
+        id,
+        EncoderEvent::Frame {
+            pts_us: 0,
+            keyframe,
+            data: vec![0],
+            timing: Some(FrameTiming {
+                encode_us: 1000,
+                repeat,
+            }),
+        },
+    );
 }
 
 fn keyframe(router: &Router, id: ScreenId) {
@@ -417,4 +434,135 @@ fn a_still_stream_starves_a_headset_that_waits_for_its_picture() {
     assert!(router.live(s));
     router.set_worn(1, false);
     assert!(!router.live(s), "not to a headset taken off");
+}
+
+/// A headset's request for a keyframe within 300 ms of the one before is not lost:
+/// requests in the window count as one, asked for once the window is over, with the
+/// next frame or the next tick, and only once.
+#[test]
+fn a_keyframe_asked_again_soon_comes_after_the_window() {
+    let router = Router::new();
+    let s = id(4);
+    let _outbox = attach(&router, 1, headset());
+    router.publish(1, &BTreeSet::from([s]));
+    router.add_stream(s, Codec::H264, "test".into(), false);
+    keyframe(&router, s);
+    assert!(
+        !frame(&router, s, false),
+        "a stream that flows asks nothing"
+    );
+    router.keyframe_asked(s);
+    router.keyframe_asked(s);
+    router.keyframe_asked(s);
+    assert!(!frame(&router, s, false), "not within the 300 ms");
+    assert_eq!(router.pending_keyframes(), 0);
+    std::thread::sleep(HEADSET_KEYFRAMES + Duration::from_millis(20));
+    assert!(frame(&router, s, false), "asked once the window is over");
+    assert!(!frame(&router, s, false), "once for all three");
+    assert_eq!(router.pending_keyframes(), 0);
+
+    // On a still screen no frame comes: the tick asks.
+    router.keyframe_asked(s);
+    std::thread::sleep(HEADSET_KEYFRAMES + Duration::from_millis(20));
+    router.keyframe_asked(s);
+    router.keyframe_asked(s);
+    assert_eq!(router.pending_keyframes(), 0, "the window began again");
+    std::thread::sleep(HEADSET_KEYFRAMES + Duration::from_millis(20));
+    assert_eq!(router.pending_keyframes(), 1);
+    assert_eq!(router.pending_keyframes(), 0, "only once");
+    assert!(!frame(&router, s, false), "asked already");
+}
+
+/// A screen that went still after new pictures gets one keyframe, once for each still
+/// moment; repeats of the picture and a keyframe that came anyway change nothing.
+#[test]
+fn a_still_screen_gets_one_keyframe() {
+    let router = Router::new();
+    let s = id(5);
+    let _outbox = attach(&router, 1, headset());
+    router.publish(1, &BTreeSet::from([s]));
+    router.add_stream(s, Codec::H264, "test".into(), false);
+    keyframe(&router, s);
+    let still = Duration::from_millis(50);
+    assert_eq!(
+        router.still_keyframes(still),
+        0,
+        "nothing new since the keyframe"
+    );
+    timed(&router, s, false, false);
+    assert_eq!(router.still_keyframes(still), 0, "not still yet");
+    std::thread::sleep(still + Duration::from_millis(10));
+    // The source's keepalive: the same picture, it is still still.
+    timed(&router, s, false, true);
+    assert_eq!(router.still_keyframes(still), 1);
+    assert_eq!(router.still_keyframes(still), 0, "once");
+    timed(&router, s, true, true);
+    std::thread::sleep(still + Duration::from_millis(10));
+    assert_eq!(
+        router.still_keyframes(still),
+        0,
+        "still since that keyframe"
+    );
+    // It moved again, and a keyframe came anyway before it went still: none asked.
+    timed(&router, s, false, false);
+    timed(&router, s, true, false);
+    std::thread::sleep(still + Duration::from_millis(10));
+    assert_eq!(router.still_keyframes(still), 0);
+    // It moved again: one more once still.
+    timed(&router, s, false, false);
+    std::thread::sleep(still + Duration::from_millis(10));
+    assert_eq!(router.still_keyframes(still), 1);
+}
+
+/// A keyframe that goes out answers a request that waited for the window.
+#[test]
+fn a_keyframe_going_out_answers_a_waiting_request() {
+    let router = Router::new();
+    let s = id(6);
+    let _outbox = attach(&router, 1, headset());
+    router.publish(1, &BTreeSet::from([s]));
+    router.add_stream(s, Codec::H264, "test".into(), false);
+    keyframe(&router, s);
+    router.keyframe_asked(s);
+    router.keyframe_asked(s);
+    frame(&router, s, true);
+    std::thread::sleep(HEADSET_KEYFRAMES + Duration::from_millis(20));
+    assert_eq!(router.pending_keyframes(), 0, "answered by the keyframe");
+    assert!(!frame(&router, s, false));
+}
+
+/// Sound stops going out after 200 ms of silence, and comes again with the first
+/// slice that is not silent.
+#[test]
+fn silence_stops_after_200_ms_and_sound_comes_at_once() {
+    let router = Router::new();
+    let outbox = attach(&router, 1, headset());
+    let audio = |outbox: &Outbox| {
+        sent(outbox)
+            .iter()
+            .filter(|m| matches!(m, HostMsg::Audio { .. }))
+            .count()
+    };
+    let silence = vec![0u8; 1920];
+    let mut sound = vec![0u8; 1920];
+    sound[1919] = 1;
+    for _ in 0..5 {
+        router.send_audio(sound.clone());
+    }
+    assert_eq!(audio(&outbox), 5);
+    // The outbox keeps 8 slices at most: read as they come.
+    let mut got = 0;
+    for _ in 0..50 {
+        router.send_audio(silence.clone());
+        got += audio(&outbox);
+    }
+    assert_eq!(got, 20, "200 ms of silence, then nothing");
+    router.send_audio(sound.clone());
+    assert_eq!(
+        audio(&outbox),
+        3,
+        "sound again at once, after 20 ms of silence"
+    );
+    router.send_audio(silence);
+    assert_eq!(audio(&outbox), 1, "silence after sound goes on for a while");
 }

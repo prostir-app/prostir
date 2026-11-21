@@ -286,7 +286,10 @@ change older clients would misread.
     "using": {"codec": "h264", "hardware": true},
     "outputs": [
       {"display": 103, "encoder": "VA-API", "codec": "h264", "hardware": true,
-       "copies": false, "note": null}
+       "copies": false, "note": null,
+       "stats": {"window_ms": 10000, "frames": 600, "repeats": 5, "bytes": 30000000,
+                 "keyframes": 1, "keyframe_max": 750000, "encode_us_avg": 4300,
+                 "encode_us_max": 9100}}
     ]
   },
   "sound": {
@@ -296,7 +299,8 @@ change older clients would misread.
   "pairing": null,
   "nearby": [],
   "counting": "yes",
-  "problems": [{"code": "Sound", "text": "The sound could not be switched"}]
+  "problems": [{"code": "Sound", "text": "The sound could not be switched"}],
+  "wifi": {"interface": "wlan0", "power_save": true, "freq_mhz": 5180, "width_mhz": 80}
 }
 ```
 
@@ -329,12 +333,13 @@ change older clients would misread.
 | `displays[].state` | `starting`, `running`, `failed` (see `failure`; it keeps its place and is tried again), `absent` (a display of the PC that is not connected now: the lid closed, the cable out), `kept` (a monitor of the set kept for the next headset, while no monitors are on the desktop) |
 | `primary` | the desktop's primary display |
 | `limits` | for the main headset while one is connected, else what any headset gets: `sizes` to offer `[w, h]`, `scales` (percent), `displays_max` (virtual monitors), `physical_max`, `streams_max`, `min` and `max` size |
-| `encoding` | as chosen: `bitrate` (Mbit/s per monitor), `sharp`, `codec` (`h264`, `h265`, `av1`), `cpu`; `using`: what it encodes with now, while there are monitors; `outputs`: how each display that streams encodes (each has an encoder of its own, picked for where its frames are): `display`, `encoder` (`VA-API`, `NVENC`, `x264`), `codec`, `hardware`, `copies` (its frames go through the CPU on their way to the encoder), `note` (why it is not on the best encoder this PC has for it, for example a session limit reached or an encoder that did not start; `null` when it is) |
+| `encoding` | as chosen: `bitrate` (Mbit/s per monitor), `sharp`, `codec` (`h264`, `h265`, `av1`), `cpu`; `using`: what it encodes with now, while there are monitors; `outputs`: how each display that streams encodes (each has an encoder of its own, picked for where its frames are): `display`, `encoder` (`VA-API`, `NVENC`, `x264`), `codec`, `hardware`, `copies` (its frames go through the CPU on their way to the encoder), `note` (why it is not on the best encoder this PC has for it, for example a session limit reached or an encoder that did not start; `null` when it is), `stats` (what its encoder made over the last window of the PC's report, about 10 s while a headset is connected; `null` before one ended: `window_ms`, `frames`, `repeats` (frames that only repeat the picture before, a still screen's keepalive), `bytes`, `keyframes`, `keyframe_max` in bytes, `encode_us_avg` and `encode_us_max`, from a frame entering the encoder to leaving it, in microseconds) |
 | `sound` | `to_headset`; `volume`: the main headset's volume (`level` 0 to 100, `muted`), while the PC's volume device follows it (one volume for the PC's slider and the headset's buttons), else `null`; `mic_on` (the switch of the headset whose microphone the PC takes, read only: it is changed in the headset); `mic` (`off`, `ready`, `failed`: the PC's end, the virtual microphone programs record from) and `mic_failure` |
 | `pairing` | while the pairing window is open, the PC shows a code, or a headset waits for its code: `seconds_left`, `seconds_total` (how long the pairing window was opened for; `0`: no pairing window, only a code), `pc_code` (the code to type in the headset, while the PC shows one), `code_for` (a headset waiting for its code to be typed here, by name; only while the settings window is on the bus), `last` (how the last attempt since the window opened ended: `{"paired": {"name": …}}`, `"wrong"`; anything else reads as other) |
 | `nearby` | headsets that are not this PC's and asked for it in the last minute, by the name they gave (a headset gives one while it looks for a PC to pair with), else by address, the latest last |
 | `counting` | the answer to "Count this PC among users?": `unasked` (the settings window asks, at the top of its overview and first run; nothing is counted meanwhile, so a PC where nobody answered, such as one that only runs `prostir serve`, never counts), `yes`, `no`; `null` where this build or run never counts (a debug build, one without the `count` feature or with no key, `PROSTIR_NO_COUNT=1`), so there is nothing to ask. An update from 0.1 asks again unless 0.1 was turned off |
 | `problems` | what is wrong now: `code` (an error's name) and `text` in the PC's language; `Desktop` while the desktop does not respond (a call into it has hung for 15 s) |
+| `wifi` | the PC's own Wi-Fi when it reaches its network over Wi-Fi (its default route goes through a wireless interface), as found when the last headset connected over the network; `null` on a cable or before: `interface`, `power_save` (the card's power saving; on, it can hold back what comes for the PC by tens of milliseconds; `null` when the card does not say), `freq_mhz` and `width_mhz` of the channel (0 when not known). Prostir only reports it and changes nothing of the network |
 
 The pairing code is on the bus because the tray shows it to the same user anyway; it
 is never written to the log.

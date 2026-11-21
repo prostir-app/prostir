@@ -508,11 +508,28 @@ fn show_state(ctl: &Ctl, revision: u32, text: &str, json: bool, io: &mut Output<
     let out = &mut io.out;
     let _ = match (ctl, json) {
         (Ctl::Status, true) => writeln!(out, "{text}"),
-        (Ctl::Status, false) => writeln!(out, "{}", status_line(&state)),
+        (Ctl::Status, false) => {
+            let _ = writeln!(out, "{}", status_line(&state));
+            match &state.wifi {
+                Some(w) if w.power_save == Some(true) => writeln!(out, "{}", wifi_line(w)),
+                _ => Ok(()),
+            }
+        }
         (Ctl::Monitors, true) => writeln!(out, "{}", to_json(&state.displays)),
         (Ctl::Monitors, false) => {
             for d in &state.displays {
-                let _ = writeln!(out, "{}", display_line(d, state.primary));
+                let mut line = display_line(d, state.primary);
+                if let Some(s) = state
+                    .encoding
+                    .outputs
+                    .iter()
+                    .find(|o| o.display == d.id)
+                    .and_then(|o| o.stats)
+                {
+                    line.push('\t');
+                    line.push_str(&stats_line(&s));
+                }
+                let _ = writeln!(out, "{line}");
             }
             Ok(())
         }
@@ -597,6 +614,24 @@ pub fn status_line(state: &State) -> String {
     }
 }
 
+/// The PC's Wi-Fi with power saving on, and what helps.
+fn wifi_line(w: &api::Wifi) -> String {
+    format!(
+        "{} ({}): {}",
+        t(
+            "На Wi-Fi цього ПК увімкнено енергозбереження",
+            "Power saving is on for this PC's Wi-Fi"
+        ),
+        w.interface,
+        t(
+            "воно може затримувати картинку на десятки мс. Допоможе кабель або \
+             `nmcli connection modify <з'єднання> 802-11-wireless.powersave 2`",
+            "it can hold the picture back by tens of ms. A cable helps, or \
+             `nmcli connection modify <connection> 802-11-wireless.powersave 2`"
+        )
+    )
+}
+
 fn display_line(d: &api::Display, primary: Option<u32>) -> String {
     let kind = match d.kind {
         api::DisplayKind::Virtual => t("монітор", "monitor"),
@@ -630,6 +665,26 @@ fn display_line(d: &api::Display, primary: Option<u32>) -> String {
         let _ = write!(line, ": {}", f.text);
     }
     line
+}
+
+/// What a display's encoder made: `60.0 frames/s (0.5 repeated), 24.1 Mbit/s,
+/// encoder 4.3 ms (max 9.1)`.
+fn stats_line(s: &api::StreamStats) -> String {
+    let secs = (f64::from(s.window_ms) / 1e3).max(1e-3);
+    format!(
+        "{:.1} {} ({:.1} {}), {:.1} {}, {} {:.1} {} ({} {:.1})",
+        f64::from(s.frames) / secs,
+        t("кадрів/с", "frames/s"),
+        f64::from(s.repeats) / secs,
+        t("повторених", "repeated"),
+        s.bytes as f64 * 8.0 / secs / 1e6,
+        t("Мбіт/с", "Mbit/s"),
+        t("кодування", "encoder"),
+        f64::from(s.encode_us_avg) / 1e3,
+        t("мс", "ms"),
+        t("макс.", "max"),
+        f64::from(s.encode_us_max) / 1e3,
+    )
 }
 
 fn headset_line(h: &api::Headset) -> String {

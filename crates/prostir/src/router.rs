@@ -19,13 +19,65 @@ use prostir_proto::state::{self, Gen};
 use prostir_proto::stats::{Histogram, Period};
 use prostir_proto::{Codec, HostMsg};
 
-use crate::encoder::EncoderEvent;
+use crate::encoder::{EncoderEvent, FrameTiming};
 use crate::events::SessionId;
 use crate::outbox::Outbox;
 use crate::screen::ScreenId;
 
 /// How often the router logs what each stream sent (see [`Router::report`]).
 const REPORT_EVERY: Duration = Duration::from_secs(10);
+
+/// Slices of sound that are nothing but zeros, in a row, after which no more go out:
+/// 200 ms of silence. The first slice with sound goes at once, so nothing waits for
+/// it; the headset plays a gap as silence.
+const SILENT_SLICES: u32 = 20;
+/// Slices of silence sent right before the sound that ends a gap: the headset's
+/// player starts from an empty buffer, and these fill it, so the sound does not
+/// start with a click or run dry at once.
+const PRIME_SLICES: u32 = 2;
+
+/// Whether the sound is worth sending: not after [`SILENT_SLICES`] of silence.
+#[derive(Debug, Default)]
+struct Quiet {
+    /// Slices of silence in a row.
+    zeros: u32,
+    /// Slices not sent since the last report, being silence.
+    held: u32,
+}
+
+/// What goes out of a slice of sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// The slice, as it is.
+    Send,
+    /// This many slices of silence first, then the slice: sound after a gap.
+    AfterSilence(u32),
+    /// Nothing: silence after silence.
+    Hold,
+}
+
+impl Quiet {
+    /// What goes out of `pcm`.
+    fn pass(&mut self, pcm: &[u8]) -> Pass {
+        // No early exit: the whole slice is looked at in wide steps, about 100 ns.
+        if pcm.iter().fold(0, |a, b| a | b) != 0 {
+            let gap = self.zeros > SILENT_SLICES;
+            self.zeros = 0;
+            return if gap {
+                Pass::AfterSilence(PRIME_SLICES)
+            } else {
+                Pass::Send
+            };
+        }
+        self.zeros = self.zeros.saturating_add(1);
+        if self.zeros <= SILENT_SLICES {
+            Pass::Send
+        } else {
+            self.held += 1;
+            Pass::Hold
+        }
+    }
+}
 
 /// A keyframe is asked of an encoder at most this often, whichever headset waits.
 const KEYFRAME_EVERY: Duration = Duration::from_millis(300);
@@ -87,6 +139,96 @@ fn next_gen() -> Gen {
     Gen(NEXT_GEN.fetch_add(1, Ordering::Relaxed))
 }
 
+/// What one stream's encoder made over one window of the router's report (see
+/// [`Router::report`]), whoever got it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamStats {
+    /// How long the window was.
+    pub window_ms: u32,
+    /// Frames encoded, and of them those that repeat the picture before (a source's
+    /// keepalive on a still screen: encoded for nothing new).
+    pub frames: u32,
+    pub repeats: u32,
+    /// Their bytes.
+    pub bytes: u64,
+    /// Keyframes among them, and the largest.
+    pub keyframes: u32,
+    pub keyframe_max: u32,
+    /// From a frame entering the converter to leaving the parser, microseconds.
+    pub encode_us_avg: u32,
+    pub encode_us_max: u32,
+}
+
+impl StreamStats {
+    /// `encoded 600 frames (60.0/s, 0.5/s a still picture again), 24.1 Mbit/s,
+    /// keyframes 1, max 750 KB; encoder avg 4.3 max 9.1 ms`.
+    pub fn summary(&self) -> String {
+        let secs = (f64::from(self.window_ms) / 1e3).max(1e-3);
+        format!(
+            "encoded {} frames ({:.1}/s, {:.1}/s a still picture again), {:.1} Mbit/s, \
+             keyframes {}, max {:.0} KB; encoder avg {:.1} max {:.1} ms",
+            self.frames,
+            f64::from(self.frames) / secs,
+            f64::from(self.repeats) / secs,
+            self.bytes as f64 * 8.0 / secs / 1e6,
+            self.keyframes,
+            f64::from(self.keyframe_max) / 1024.0,
+            f64::from(self.encode_us_avg) / 1e3,
+            f64::from(self.encode_us_max) / 1e3,
+        )
+    }
+}
+
+/// What a stream's encoder made since the last report.
+#[derive(Debug, Default)]
+struct Tally {
+    since: Option<Instant>,
+    frames: u32,
+    repeats: u32,
+    bytes: u64,
+    keyframes: u32,
+    keyframe_max: u32,
+    timed: u32,
+    encode_us: u64,
+    encode_us_max: u32,
+}
+
+impl Tally {
+    fn add(&mut self, keyframe: bool, bytes: usize, timing: Option<FrameTiming>) {
+        self.since.get_or_insert_with(Instant::now);
+        self.frames += 1;
+        self.bytes += bytes as u64;
+        if keyframe {
+            self.keyframes += 1;
+            self.keyframe_max = self.keyframe_max.max(bytes as u32);
+        }
+        if let Some(t) = timing {
+            self.repeats += u32::from(t.repeat);
+            self.timed += 1;
+            self.encode_us += u64::from(t.encode_us);
+            self.encode_us_max = self.encode_us_max.max(t.encode_us);
+        }
+    }
+
+    /// What it counted up to `now`, and counts anew from there.
+    fn take(&mut self, now: Instant) -> StreamStats {
+        let t = std::mem::take(self);
+        self.since = Some(now);
+        StreamStats {
+            window_ms: t
+                .since
+                .map_or(0, |s| now.duration_since(s).as_millis() as u32),
+            frames: t.frames,
+            repeats: t.repeats,
+            bytes: t.bytes,
+            keyframes: t.keyframes,
+            keyframe_max: t.keyframe_max,
+            encode_us_avg: (t.encode_us / u64::from(t.timed.max(1))) as u32,
+            encode_us_max: t.encode_us_max,
+        }
+    }
+}
+
 /// A stream as its encoder makes it, the same for every headset.
 struct StreamSlot {
     /// The screen's name, for the log.
@@ -107,9 +249,20 @@ struct StreamSlot {
     keyframer: Option<crate::encoder::Keyframer>,
     /// When a headset last asked for a keyframe of it.
     headset_asked: Option<Instant>,
+    /// A headset asked again within [`HEADSET_KEYFRAMES`] of that: one keyframe is
+    /// asked for once the time is up (every request within it counts as this one).
+    headset_pending: bool,
     /// Where a frame's deliveries are listed, kept between frames so a frame
     /// allocates nothing for them (see [`Router::fan_out`]).
     outs: Vec<Out>,
+    /// What its encoder made since the last report, and in the window before.
+    tally: Tally,
+    measured: Option<StreamStats>,
+    /// When its picture last changed (a frame that was not a repeat of the one before).
+    changed: Option<Instant>,
+    /// A frame of a new picture went since the last keyframe, and no keyframe was
+    /// asked for since the screen went still (see [`Router::still_keyframes`]).
+    unsettled: bool,
 }
 
 /// Keyframes headsets ask for, of one stream, at most this often.
@@ -119,6 +272,25 @@ const HEADSET_KEYFRAMES: Duration = Duration::from_millis(300);
 const FLOWING: Duration = Duration::from_millis(500);
 
 impl StreamSlot {
+    /// Whether a keyframe a headset asked for within 300 ms of the one before is to be
+    /// asked for now; then it counts as asked.
+    fn pending_due(&mut self, now: Instant) -> bool {
+        let due = self.headset_pending
+            && self
+                .headset_asked
+                .is_none_or(|t| now.duration_since(t) >= HEADSET_KEYFRAMES);
+        if due {
+            self.headset_pending = false;
+            self.headset_asked = Some(now);
+            debug!(
+                "{}: a keyframe asked for within {} ms of the one before, asked for now",
+                self.name,
+                HEADSET_KEYFRAMES.as_millis()
+            );
+        }
+        due
+    }
+
     /// Its picture moves: it sends frames now, and a keyframe asked of it comes with
     /// the next.
     fn flowing(&self, now: Instant) -> bool {
@@ -206,6 +378,8 @@ struct RouterInner {
     /// Every session's headset, by the session's number.
     receivers: BTreeMap<SessionId, Receiver>,
     report: Period,
+    /// The PC's sound, held back while silent.
+    quiet: Quiet,
 }
 
 impl RouterInner {
@@ -250,6 +424,9 @@ pub struct Router {
     /// Streams larger than every headset decodes, with their size and codec, for
     /// `Displays` to mark them failed.
     too_big: Mutex<Vec<TooBig>>,
+    /// The control loop, told when a keyframe is asked of a still screen (its source
+    /// then has to send a picture: see [`Router::keyframe_asked`]).
+    events: Mutex<Option<crate::events::EventSink>>,
 }
 
 impl Router {
@@ -259,12 +436,14 @@ impl Router {
                 streams: BTreeMap::new(),
                 receivers: BTreeMap::new(),
                 report: Period::new(REPORT_EVERY),
+                quiet: Quiet::default(),
             }),
             failed: AtomicBool::new(false),
             broken: Mutex::new(Vec::new()),
             unopened: Mutex::new(Vec::new()),
             too_big: Mutex::new(Vec::new()),
             snapshot: Mutex::new(None),
+            events: Mutex::new(None),
         }
     }
 
@@ -284,6 +463,10 @@ impl Router {
         let mut inner = self.inner.lock().unwrap();
         if inner.receivers.is_empty() {
             inner.report = Period::new(REPORT_EVERY);
+            let now = Instant::now();
+            for s in inner.streams.values_mut() {
+                s.tally.take(now);
+            }
         }
         let mut receiver = Receiver {
             tx,
@@ -477,19 +660,31 @@ impl Router {
             stats: crate::outbox::OutboxStats,
             streams: Vec<(ScreenId, String, Histogram, u32)>,
         }
-        let (window, lines) = {
+        let (window, encoded, silent, lines) = {
             let mut inner = self.inner.lock().unwrap();
             let RouterInner {
                 streams,
                 receivers,
                 report,
+                quiet,
             } = &mut *inner;
             if receivers.is_empty() {
                 return;
             }
-            let Some(window) = report.due(Instant::now()) else {
+            let now = Instant::now();
+            let Some(window) = report.due(now) else {
                 return;
             };
+            let silent = std::mem::take(&mut quiet.held);
+            // What each encoder made, whoever got it.
+            let encoded: Vec<(String, StreamStats)> = streams
+                .values_mut()
+                .map(|s| {
+                    let stats = s.tally.take(now);
+                    s.measured = Some(stats);
+                    (s.name.clone(), stats)
+                })
+                .collect();
             let lines: Vec<Lines> = receivers
                 .iter_mut()
                 .map(|(session, r)| Lines {
@@ -507,9 +702,14 @@ impl Router {
                         .collect(),
                 })
                 .collect();
-            (window, lines)
+            (window, encoded, silent, lines)
         };
         // Logged without the lock, which every encoded frame takes.
+        for (name, stats) in encoded {
+            if stats.frames > 0 {
+                info!("{name}: {}", stats.summary());
+            }
+        }
         let several = lines.len() > 1;
         for Lines {
             session,
@@ -536,9 +736,10 @@ impl Router {
                     video.summary(window),
                 );
             }
-            if stats.audio_wait.count() > 0 || stats.audio_dropped > 0 {
+            if stats.audio_wait.count() > 0 || stats.audio_dropped > 0 || silent > 0 {
                 info!(
-                    "sound: sent {} slices, waited in outbox {}; dropped {}{whose}",
+                    "sound: sent {} slices, waited in outbox {}; dropped {}; {silent} of \
+                     silence not sent{whose}",
                     stats.audio_wait.count(),
                     stats.audio_wait.summary_ms(),
                     stats.audio_dropped
@@ -571,6 +772,12 @@ impl Router {
         let inner = self.inner.lock().unwrap();
         let slot = inner.streams.get(&id)?;
         Some((slot.size?, slot.codec))
+    }
+
+    /// What the encoder of stream `id` made in the last window of the report, once
+    /// one ended.
+    pub fn stream_stats(&self, id: ScreenId) -> Option<StreamStats> {
+        self.inner.lock().unwrap().streams.get(&id)?.measured
     }
 
     /// The size stream `id` goes out at, once its encoder has said.
@@ -607,7 +814,12 @@ impl Router {
             last_frames: [None; 2],
             keyframer: None,
             headset_asked: None,
+            headset_pending: false,
             outs: Vec::new(),
+            tally: Tally::default(),
+            measured: None,
+            changed: None,
+            unsettled: false,
         };
         inner.streams.insert(id, slot);
         for r in inner.receivers.values_mut() {
@@ -647,9 +859,31 @@ impl Router {
         }
     }
 
+    /// Where to say that a keyframe was asked of a still screen.
+    pub fn send_events_to(&self, events: crate::events::EventSink) {
+        *self.events.lock().unwrap() = Some(events);
+    }
+
+    /// A keyframe was asked of stream `id`, whose screen is still: on a still screen
+    /// the source sends nothing until its keepalive (2 s), so it is asked for a
+    /// picture now. A capture pushing its own frames sends its last one again
+    /// (`keyframer`); a source that sends its picture when it starts (PipeWire on KDE)
+    /// is started over by the control loop.
+    fn picture_now(&self, id: ScreenId, keyframer: Option<&crate::encoder::Keyframer>) {
+        if let Some(k) = keyframer {
+            k.picture_again();
+        }
+        if let Some(events) = &*self.events.lock().unwrap() {
+            events.send(crate::events::Event::StillPicture(id));
+        }
+    }
+
     /// A headset asks for a keyframe of stream `id` (from its reader, without the
     /// control loop): at most every 300 ms for each stream, whoever asks, or keyframes
-    /// would follow one another.
+    /// would follow one another. A request within the 300 ms is never lost (no
+    /// keyframe comes on its own any more): it waits, together with any others, and
+    /// one keyframe is asked for once the time is up, with the stream's next frame or
+    /// the next tick (see [`Router::pending_keyframes`]), whichever comes first.
     pub fn keyframe_asked(&self, id: ScreenId) {
         let now = Instant::now();
         let keyframer = {
@@ -661,14 +895,75 @@ impl Router {
                 .headset_asked
                 .is_some_and(|t| now.duration_since(t) < HEADSET_KEYFRAMES)
             {
+                slot.headset_pending = true;
                 return;
             }
             slot.headset_asked = Some(now);
-            slot.keyframer.clone()
+            slot.headset_pending = false;
+            (slot.keyframer.clone(), !slot.flowing(now))
         };
-        if let Some(k) = keyframer {
+        if let Some(k) = &keyframer.0 {
             k.ask();
         }
+        if keyframer.1 {
+            self.picture_now(id, keyframer.0.as_ref());
+        }
+    }
+
+    /// Asks for the keyframes headsets asked for within 300 ms of the one before,
+    /// once that time is up (see [`Router::keyframe_asked`]); how many.
+    pub fn pending_keyframes(&self) -> usize {
+        let now = Instant::now();
+        let keyframers: Vec<_> = self
+            .inner
+            .lock()
+            .unwrap()
+            .streams
+            .iter_mut()
+            .filter_map(|(id, s)| {
+                s.pending_due(now)
+                    .then(|| (*id, s.keyframer.clone(), !s.flowing(now)))
+            })
+            .collect();
+        let n = keyframers.len();
+        for (id, k, still) in keyframers {
+            if let Some(k) = &k {
+                k.ask();
+            }
+            if still {
+                self.picture_now(id, k.as_ref());
+            }
+        }
+        n
+    }
+
+    /// Asks for one keyframe of each stream whose screen went still `after` ago and
+    /// that sent new pictures since its last keyframe: nobody sees it (nothing moves),
+    /// and it clears whatever errors the pictures since then may have left in a
+    /// decoder. Keyframes come no other way but this and on request (see
+    /// `encoder::X264_GOP`). It comes with the next frame the source sends (its
+    /// keepalive on a still screen).
+    /// Returns how many it asked for.
+    pub fn still_keyframes(&self, after: Duration) -> usize {
+        let now = Instant::now();
+        let keyframers: Vec<_> = self
+            .inner
+            .lock()
+            .unwrap()
+            .streams
+            .values_mut()
+            .filter(|s| s.unsettled && s.changed.is_some_and(|t| now.duration_since(t) >= after))
+            .map(|s| {
+                s.unsettled = false;
+                debug!("{}: still, a keyframe", s.name);
+                s.keyframer.clone()
+            })
+            .collect();
+        let n = keyframers.len();
+        for k in keyframers.into_iter().flatten() {
+            k.ask();
+        }
+        n
     }
 
     /// Asks every running encoder for a keyframe.
@@ -721,9 +1016,22 @@ impl Router {
     }
 
     /// Forwards a slice of PC sound to every headset on the head; dropped for one
-    /// whose network is backed up (a tiny gap in sound beats growing latency).
+    /// whose network is backed up (a tiny gap in sound beats growing latency). After
+    /// 200 ms of silence nothing goes until there is sound again.
     pub fn send_audio(&self, pcm: Vec<u8>) {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
+        let primed = match inner.quiet.pass(&pcm) {
+            Pass::Hold => return,
+            Pass::Send => 0,
+            Pass::AfterSilence(n) => n,
+        };
+        for r in inner.receivers.values().filter(|r| r.worn) {
+            for _ in 0..primed {
+                r.tx.audio(HostMsg::Audio {
+                    pcm: vec![0; pcm.len()],
+                });
+            }
+        }
         let mut worn = inner.receivers.values().filter(|r| r.worn).peekable();
         let mut pcm = Some(pcm);
         while let Some(r) = worn.next() {
@@ -828,7 +1136,15 @@ impl Router {
                 pts_us,
                 keyframe,
                 data,
+                timing,
             } => {
+                slot.tally.add(keyframe, data.len(), timing);
+                if !timing.is_some_and(|t| t.repeat) {
+                    slot.changed = Some(Instant::now());
+                    slot.unsettled = !keyframe;
+                } else if keyframe {
+                    slot.unsettled = false;
+                }
                 if keyframe {
                     let mut wanted = self.snapshot.lock().unwrap();
                     if wanted.as_ref().is_some_and(|(want, _)| *want == id)
@@ -837,7 +1153,20 @@ impl Router {
                         let _ = tx.try_send(data.clone());
                     }
                 }
-                Self::fan_out(slot, receivers, id, pts_us, keyframe, data)
+                // A keyframe a headset asked for meanwhile, due now: with this frame
+                // (each request is answered, none dropped), and with the still
+                // screen's one apart from it.
+                // A keyframe going out now answers what waited.
+                if keyframe {
+                    slot.headset_pending = false;
+                }
+                let pending = slot.pending_due(Instant::now());
+                let ask = Self::fan_out(slot, receivers, id, pts_us, keyframe, data) || pending;
+                // The keyframe comes with the next frame: on a still screen, now.
+                if ask && !slot.flowing(Instant::now()) {
+                    self.picture_now(id, slot.keyframer.as_ref());
+                }
+                ask
             }
         }
     }

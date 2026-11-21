@@ -138,6 +138,8 @@ struct Brain {
     desk_gave_up: bool,
     /// Desktop workers let go, until each is gone (see `deskside.rs`).
     retiring: Vec<worker::Retired>,
+    /// The PC's Wi-Fi, as found when a headset last connected over the network.
+    wifi: Option<api::Wifi>,
 }
 
 impl Brain {
@@ -332,6 +334,11 @@ impl Brain {
             }
             Event::Desk(generation, done) => self.desk(generation, done),
             Event::SoundDevices(generation, done) => self.sound_devices(generation, done),
+            Event::StillPicture(id) => {
+                if let Some(d) = &mut self.displays {
+                    d.fresh_picture(id);
+                }
+            }
             Event::Quit => self.quit = true,
         }
     }
@@ -580,10 +587,14 @@ fn log_filter(level: &str) -> String {
     format!("warn,prostir={level}")
 }
 
-/// Starts the log with Prostir's own lines from `level` on (see [`log_filter`]).
+/// Starts the log with Prostir's own lines from `level` on (see [`log_filter`]), each
+/// with its time to the millisecond: a session starts within a second, and its steps
+/// are only told apart so.
 fn init_log(level: &str) {
     let env = env_logger::Env::default().default_filter_or(log_filter(level));
-    env_logger::Builder::from_env(env).init();
+    env_logger::Builder::from_env(env)
+        .format_timestamp_millis()
+        .init();
 }
 
 /// `Prostir 0.2.0` (with its message revision in a development build), as `--version`
@@ -882,6 +893,9 @@ fn full_with(
     if let Some(why) = why {
         info!("started: {why:?}");
     }
+    if args.time_code {
+        encoder::draw_time_codes();
+    }
     // Whether the PC can share its volume, found out meanwhile.
     platform::audio::prepare();
     // The command line holds for this run only.
@@ -993,6 +1007,7 @@ fn full_with(
         waiting_desk: Vec::new(),
         desk_gave_up: false,
         retiring: Vec::new(),
+        wifi: None,
     };
 
     // The local API has a state to give from the moment it is on the bus.

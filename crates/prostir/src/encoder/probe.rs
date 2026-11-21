@@ -705,6 +705,8 @@ fn run_probe(backend: Backend, codec: Codec) -> Result<()> {
     let pipeline = gst::parse::launch(&description)?
         .downcast::<gst::Pipeline>()
         .map_err(|_| anyhow!("not a pipeline"))?;
+    // Opened as a stream opens it.
+    super::tune(&pipeline, &cfg);
     let frames = Arc::new(AtomicU32::new(0));
     if let Some(pad) = pipeline.by_name("sink").and_then(|s| s.static_pad("sink")) {
         let frames = frames.clone();

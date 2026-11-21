@@ -13,7 +13,8 @@
 //! our own stream, connected again, makes KWin put the created size back.
 
 use std::collections::HashMap;
-use std::os::fd::AsRawFd;
+use std::fmt::Write as _;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -41,6 +42,27 @@ use wayland_protocols_plasma::screencast::v1::client::{
 /// Pointer mode from the protocol: render the cursor into the stream.
 const POINTER_EMBEDDED: u32 = 2;
 
+/// How often the last frame of a still screen is sent again, in ms. The session
+/// needs none of it (pings keep it), and with the frame rate told (see
+/// [`VirtualOutput::input`]) no encoder holds a frame back waiting for the next; it
+/// is what still pushes out the one keyframe a still screen gets, and each costs an
+/// encoding on the PC and a decoding and a wake-up of the radio in the headset.
+const KEEPALIVE_MS: u32 = 2000;
+
+/// The refresh rate in mHz of an output whose rate KWin did not say.
+const DEFAULT_REFRESH: u32 = 60_000;
+
+/// A refresh rate in mHz as a frame rate for GStreamer: `60/1`, `144/1`, `59940/1000`
+/// reduced to `2997/50`.
+fn frame_rate(mhz: u32) -> String {
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let mhz = if mhz == 0 { DEFAULT_REFRESH } else { mhz };
+    let d = gcd(mhz, 1000);
+    format!("{}/{}", mhz / d, 1000 / d)
+}
+
 #[derive(Default)]
 struct StreamState {
     node: Option<u32>,
@@ -57,6 +79,10 @@ struct OutputInfo {
     mode: Option<(u32, u32)>,
     /// Current mode announced since that `done`.
     next_mode: Option<(u32, u32)>,
+    /// The current mode's refresh rate in mHz, as of the last `done`, and as announced
+    /// since.
+    refresh: Option<u32>,
+    next_refresh: Option<u32>,
     /// What the display says it is (its EDID, as KWin passes it on).
     make: String,
     model: String,
@@ -77,13 +103,15 @@ impl OutputInfo {
                 flags: WEnum::Value(flags),
                 width,
                 height,
-                ..
+                refresh,
             } if flags.contains(wl_output::Mode::Current) => {
                 self.next_mode = u32::try_from(width).ok().zip(u32::try_from(height).ok());
+                self.next_refresh = u32::try_from(refresh).ok().filter(|r| *r > 0);
             }
             wl_output::Event::Done => {
                 if let Some(mode) = self.next_mode.take() {
                     self.mode = Some(mode);
+                    self.refresh = self.next_refresh.take();
                 }
                 // xdg-output 3 and later: its sizes count with the output's `done`.
                 if let Some(size) = self.next_logical.take() {
@@ -137,6 +165,9 @@ struct Shared {
     /// it changes, and the xdg-output of each output by registry name.
     xdg: Mutex<Option<ZxdgOutputManagerV1>>,
     xdg_outputs: Mutex<HashMap<u32, ZxdgOutputV1>>,
+    /// Counts the changes of the outputs: one came or went, or one's description is
+    /// done (a mode, a scale, a position).
+    outputs_changed: std::sync::atomic::AtomicU64,
 }
 
 impl Shared {
@@ -160,6 +191,7 @@ impl Shared {
             .lock()
             .unwrap()
             .insert(name, (output, OutputInfo::default()));
+        self.outputs_changed.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -192,6 +224,7 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
                 let mut outputs = state.shared.outputs.lock().unwrap();
                 if let Some((output, _)) = outputs.remove(&name) {
                     output.release();
+                    state.shared.outputs_changed.fetch_add(1, Ordering::Relaxed);
                 }
             }
             _ => {}
@@ -208,8 +241,12 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        let done = matches!(event, wl_output::Event::Done);
         if let Some((_, info)) = state.shared.outputs.lock().unwrap().get_mut(global) {
             info.on_event(event);
+        }
+        if done {
+            state.shared.outputs_changed.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -284,6 +321,8 @@ pub struct Screencast {
     qh: QueueHandle<State>,
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
+    /// Wakes the thread that reads KWin's events (it sleeps until one comes).
+    wake: Arc<OwnedFd>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -314,8 +353,17 @@ impl Screencast {
 
         // Reads events in the background: replies to new monitors, `closed` notices.
         let stop = Arc::new(AtomicBool::new(false));
+        // Written once to wake the thread when the connection is dropped.
+        // SAFETY: a new eventfd, owned from here on.
+        let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
+        if wake < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: a descriptor just made, owned by nobody else.
+        let wake = Arc::new(unsafe { OwnedFd::from_raw_fd(wake) });
         let thread = {
             let stop = stop.clone();
+            let woken = wake.clone();
             std::thread::Builder::new()
                 .name("wayland".into())
                 .spawn(move || {
@@ -326,14 +374,23 @@ impl Screencast {
                         let Some(guard) = queue.prepare_read() else {
                             continue;
                         };
-                        let mut pfd = libc::pollfd {
-                            fd: guard.connection_fd().as_raw_fd(),
-                            events: libc::POLLIN,
-                            revents: 0,
-                        };
-                        // SAFETY: a single valid pollfd.
-                        let n = unsafe { libc::poll(&raw mut pfd, 1, 100) };
-                        if n > 0 && guard.read().is_err() {
+                        // Asleep until KWin says something or the connection is
+                        // dropped (`wake`).
+                        let mut fds = [
+                            libc::pollfd {
+                                fd: guard.connection_fd().as_raw_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            },
+                            libc::pollfd {
+                                fd: woken.as_raw_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            },
+                        ];
+                        // SAFETY: two valid pollfds.
+                        let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+                        if n > 0 && fds[0].revents != 0 && guard.read().is_err() {
                             break;
                         }
                     }
@@ -356,8 +413,14 @@ impl Screencast {
             qh,
             shared,
             stop,
+            wake,
             thread: Some(thread),
         })
+    }
+
+    /// How many times the outputs changed so far: a number that only grows.
+    pub fn outputs_changed(&self) -> u64 {
+        self.shared.outputs_changed.load(Ordering::Relaxed)
     }
 
     /// The displays of the PC itself that are on (KWin lists no output of a closed
@@ -394,14 +457,14 @@ impl Screencast {
     /// KWin streams a given display only once per connection, so use a fresh
     /// [`Screencast`] for every mirror.
     pub fn mirror(&self, number: u32, output_name: &str) -> Result<VirtualOutput> {
-        let output = self
+        let (output, refresh) = self
             .shared
             .outputs
             .lock()
             .unwrap()
             .values()
             .find(|(_, info)| info.name.as_deref() == Some(output_name))
-            .map(|(o, _)| o.clone())
+            .map(|(o, info)| (o.clone(), info.refresh))
             .with_context(|| format!("display {output_name} is gone"))?;
         self.shared
             .streams
@@ -417,6 +480,7 @@ impl Screencast {
             stream,
             output_name.to_owned(),
             None,
+            refresh.unwrap_or(DEFAULT_REFRESH),
             Duration::from_secs(2),
         )?;
         info!(
@@ -432,6 +496,7 @@ impl Screencast {
         stream: ZkdeScreencastStreamUnstableV1,
         name: String,
         made: Option<(u32, u32)>,
+        refresh: u32,
         timeout: Duration,
     ) -> Result<VirtualOutput> {
         self.conn.flush()?;
@@ -470,6 +535,7 @@ impl Screencast {
             node,
             name,
             made,
+            refresh,
             stream,
             conn: self.conn.clone(),
             shared: self.shared.clone(),
@@ -516,6 +582,7 @@ impl Screencast {
             stream,
             format!("Virtual-Prostir-{number}"),
             Some((spec.w, spec.h)),
+            u32::from(spec.refresh) * 1000,
             Duration::from_secs(10),
         )?;
         info!("Prostir-{number}: {spec}, PipeWire node {}", output.node);
@@ -534,6 +601,9 @@ impl Screencast {
 impl Drop for Screencast {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        let one = 1u64;
+        // SAFETY: an eventfd takes 8 bytes, which live through the call.
+        unsafe { libc::write(self.wake.as_raw_fd(), (&raw const one).cast(), 8) };
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -551,6 +621,8 @@ pub struct VirtualOutput {
     /// Pixel size KWin made it with; `None` for a mirrored real display, whose size
     /// streams do not change.
     made: Option<(u32, u32)>,
+    /// Its refresh rate in mHz: what the encoder is told the frame rate is.
+    refresh: u32,
     stream: ZkdeScreencastStreamUnstableV1,
     conn: Connection,
     shared: Arc<Shared>,
@@ -598,12 +670,37 @@ impl VirtualOutput {
     }
 
     /// The encoder reads the stream from KWin's PipeWire node.
+    ///
+    /// KWin's stream says no frame rate (`0/1`, frames come when the screen changes),
+    /// and an encoder without one budgets badly: VA-API spends about twice the chosen
+    /// bitrate on a busy screen, x264 holds each frame back until the next one comes.
+    /// So the stream is told the output's refresh rate (`capssetter`); frames still
+    /// come only when something changes.
     pub fn input(&self) -> Input {
         let node = self.node;
+        // On a still screen KWin sends nothing; PipeWire's source repeats the last
+        // frame every 2 s (see `KEEPALIVE_MS`).
+        let mut source = format!(
+            "pipewiresrc path={node} do-timestamp=true keepalive-time={KEEPALIVE_MS} \
+             always-copy=false"
+        );
+        if gstreamer::ElementFactory::find("capssetter").is_some() {
+            let _ = write!(
+                source,
+                " ! capssetter caps=\"video/x-raw,framerate={}\"",
+                frame_rate(self.refresh)
+            );
+        } else {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                warn!(
+                    "capssetter (gst-plugins-good) is missing: the encoder does not know \
+                     the frame rate and may spend more than the bitrate"
+                );
+            });
+        }
         Input {
-            source: format!(
-                "pipewiresrc path={node} do-timestamp=true keepalive-time=500 always-copy=false"
-            ),
+            source,
             label: format!("node {node}"),
         }
     }
@@ -699,6 +796,18 @@ mod tests {
         });
         out.on_xdg_event(&zxdg_output_v1::Event::Done);
         assert_eq!(out.scale(), Some(100));
+    }
+
+    #[test]
+    fn the_frame_rate_of_a_refresh_rate() {
+        assert_eq!(frame_rate(60_000), "60/1");
+        assert_eq!(frame_rate(144_000), "144/1");
+        assert_eq!(frame_rate(59_940), "2997/50");
+        assert_eq!(frame_rate(0), "60/1");
+        let mut out = info(vec![mode(2560, 1440, wl_output::Mode::Current)]);
+        assert_eq!(out.refresh, None, "not done");
+        out.on_event(wl_output::Event::Done);
+        assert_eq!(out.refresh, Some(60_000));
     }
 
     #[test]

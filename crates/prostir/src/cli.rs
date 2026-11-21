@@ -143,6 +143,10 @@ pub(super) struct Args {
     /// Do not run `adb reverse` for USB connections.
     #[arg(long)]
     pub(crate) no_adb: bool,
+    /// A test mode: draw the time each frame was captured into every monitor, as a
+    /// code (PROTOCOL.md, measuring the latency from the PC to the eye).
+    #[arg(long, hide = true)]
+    pub(crate) time_code: bool,
     /// Open the settings window once Prostir is ready (`prostir` starts it so).
     #[arg(long)]
     pub(crate) open_settings: bool,

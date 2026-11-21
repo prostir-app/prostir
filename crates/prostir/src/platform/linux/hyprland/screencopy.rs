@@ -3,7 +3,8 @@
 //!
 //! Frames go into GPU buffers (dmabuf) allocated with a layout (modifier) the VA-API
 //! converter can read directly, so nothing is copied through the CPU. Without such a
-//! layout (or with `--software`), frames go through shared memory instead.
+//! layout (or with `--software`), frames go through shared memory instead, copied
+//! into buffers of a pool that come back once the encoder is done with them.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -14,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::encoder::Input;
+use crate::encoder::{Input, Pause};
 use anyhow::{Context, Result, anyhow, bail};
 use gstreamer as gst;
 use gstreamer_allocators::prelude::*;
@@ -40,9 +41,11 @@ const FRAME_RATE: i32 = 60;
 
 /// Buffers captured into in turn; the encoder holds at most a few at a time.
 const SLOTS: usize = 4;
-/// With nothing changing on screen, the last frame is sent again this often (the
-/// headset treats 10 s of silence as a dead link, PipeWire in KDE does the same).
-const KEEPALIVE: Duration = Duration::from_millis(500);
+/// With nothing changing on screen, the last frame is sent again this often, as
+/// PipeWire in KDE does: the session needs none of it (pings keep it), but it pushes
+/// out the one keyframe a still screen gets, and each costs an encoding here and a
+/// decoding in the headset.
+const KEEPALIVE: Duration = Duration::from_secs(2);
 
 /// The encoder input for output `name`: an `appsrc` the capture pushes frames into.
 pub fn input(name: &str) -> Input {
@@ -59,6 +62,8 @@ pub fn input(name: &str) -> Input {
 pub struct Capture {
     stop: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
+    /// Its encoder's pause, which the capture sleeps on while paused.
+    paused: Arc<Pause>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -68,11 +73,12 @@ impl Capture {
     pub fn start(
         output: String,
         appsrc: gst_app::AppSrc,
-        paused: Arc<AtomicBool>,
+        paused: Arc<Pause>,
         dmabuf: bool,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let closed = Arc::new(AtomicBool::new(false));
+        let woken = paused.clone();
         let thread = {
             let (stop, closed) = (stop.clone(), closed.clone());
             std::thread::Builder::new()
@@ -87,6 +93,7 @@ impl Capture {
         Ok(Self {
             stop,
             closed,
+            paused: woken,
             thread: Some(thread),
         })
     }
@@ -100,6 +107,7 @@ impl Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.paused.wake();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -378,7 +386,11 @@ enum Slots {
         map: *mut u8,
         len: usize,
         stride: usize,
-        format: gst_video::VideoFormat,
+        /// The buffers frames are copied into, and their rows: where they start and
+        /// how many bytes of pixels each has.
+        frames: gst::BufferPool,
+        frame_stride: usize,
+        row: usize,
         _pool: wl_shm_pool::WlShmPool,
         _file: File,
     },
@@ -407,9 +419,11 @@ impl Drop for Pool {
                 slots,
                 map,
                 len,
+                frames,
                 _pool: pool,
                 ..
             } => {
+                let _ = frames.set_active(false);
                 for s in slots {
                     s.buffer.destroy();
                 }
@@ -573,10 +587,18 @@ impl Pool {
                 offset: i * frame,
             })
             .collect();
-        let caps = gst_video::VideoInfo::builder(video_format, width, height)
+        let info = gst_video::VideoInfo::builder(video_format, width, height)
             .fps(gst::Fraction::new(FRAME_RATE, 1))
-            .build()?
-            .to_caps()?;
+            .build()?;
+        let caps = info.to_caps()?;
+        // Enough buffers for those the encoder holds; more are made only if it holds
+        // more, and every one comes back when it is done with it.
+        let frames = gst_video::VideoBufferPool::new().upcast::<gst::BufferPool>();
+        let mut config = frames.config();
+        config.set_params(Some(&caps), info.size() as u32, SLOTS as u32, 0);
+        config.add_option(gst_video::BUFFER_POOL_OPTION_VIDEO_META);
+        frames.set_config(config)?;
+        frames.set_active(true)?;
         Ok((
             Self {
                 key: (None, None),
@@ -587,7 +609,9 @@ impl Pool {
                     map: map.cast(),
                     len,
                     stride: stride as usize,
-                    format: video_format,
+                    frames,
+                    frame_stride: info.stride()[0] as usize,
+                    row: width as usize * 4,
                     _pool: pool,
                     _file: file,
                 },
@@ -626,28 +650,25 @@ impl Pool {
                 slots,
                 map,
                 stride,
-                format,
+                frames,
+                frame_stride,
+                row,
                 ..
             } => {
                 let size = stride * self.height as usize;
                 // SAFETY: the slot lies inside the mapping, and the compositor is done
                 // writing it (the frame is ready).
                 let src = unsafe { std::slice::from_raw_parts(map.add(slots[slot].offset), size) };
-                let data = if y_invert {
-                    src.chunks_exact(*stride).rev().flatten().copied().collect()
-                } else {
-                    src.to_vec()
-                };
-                let mut buffer = gst::Buffer::from_mut_slice(data);
-                gst_video::VideoMeta::add_full(
-                    buffer.get_mut().expect("new buffer"),
-                    gst_video::VideoFrameFlags::empty(),
-                    *format,
-                    self.width,
-                    self.height,
-                    &[0],
-                    &[*stride as i32],
-                )?;
+                let mut buffer = frames
+                    .acquire_buffer(None)
+                    .map_err(|e| anyhow!("no buffer for a frame: {e:?}"))?;
+                {
+                    let b = buffer
+                        .get_mut()
+                        .context("a buffer of the pool still in use")?;
+                    let mut out = b.map_writable()?;
+                    copy_rows(src, *stride, &mut out, *frame_stride, *row, y_invert);
+                }
                 buffer
             }
         };
@@ -655,10 +676,38 @@ impl Pool {
     }
 }
 
+/// Copies a picture whose rows of `row` bytes lie `from_stride` apart in `from` into
+/// `to`, with its rows `to_stride` apart, upside down with `flip`: at once when both
+/// lay their rows out alike, else row by row.
+fn copy_rows(
+    from: &[u8],
+    from_stride: usize,
+    to: &mut [u8],
+    to_stride: usize,
+    row: usize,
+    flip: bool,
+) {
+    if !flip && from_stride == to_stride && to.len() >= from.len() {
+        to[..from.len()].copy_from_slice(from);
+        return;
+    }
+    let rows = from.chunks_exact(from_stride);
+    let into = to.chunks_mut(to_stride);
+    if flip {
+        for (to, from) in into.zip(rows.rev()) {
+            to[..row].copy_from_slice(&from[..row]);
+        }
+    } else {
+        for (to, from) in into.zip(rows) {
+            to[..row].copy_from_slice(&from[..row]);
+        }
+    }
+}
+
 fn run(
     name: &str,
     appsrc: &gst_app::AppSrc,
-    paused: &AtomicBool,
+    paused: &Pause,
     stop: &AtomicBool,
     want_dmabuf: bool,
 ) -> Result<()> {
@@ -697,13 +746,15 @@ fn run(
 
     let mut pool: Option<Pool> = None;
     let mut next = 0;
-    let mut last: Option<usize> = None;
-    let mut last_y_invert = false;
+    // The frame pushed last, pushed again on a still screen (the same buffer: nothing
+    // is copied, and the encoder sees it is the picture before).
+    let mut last: Option<gst::Buffer> = None;
     let mut last_push = Instant::now();
     let mut failures = 0;
     while !stop.load(Ordering::Relaxed) {
-        if paused.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(50));
+        if paused.is_on() {
+            // Asleep until resumed or stopped (see `Capture`'s drop).
+            paused.wait(stop);
             continue;
         }
         state.frame = Frame::default();
@@ -770,20 +821,22 @@ fn run(
         frame.copy_with_damage(p.buffer(slot));
         while !(state.frame.ready || state.frame.failed) && !stop.load(Ordering::Relaxed) {
             wait(&conn, &mut queue, &mut state, Duration::from_millis(100))?;
-            if last_push.elapsed() >= KEEPALIVE
-                && !paused.load(Ordering::Relaxed)
-                && let Some(l) = last
+            // Again now when a keyframe was asked of the still screen.
+            let again = paused.take_again();
+            if (again || last_push.elapsed() >= KEEPALIVE)
+                && !paused.is_on()
+                && let Some(l) = &last
             {
-                let _ = appsrc.push_buffer(p.frame(l, last_y_invert)?);
+                let _ = appsrc.push_buffer(l.clone());
                 last_push = Instant::now();
             }
         }
         frame.destroy();
         if state.frame.ready {
             failures = 0;
-            let _ = appsrc.push_buffer(p.frame(slot, state.frame.y_invert)?);
-            last = Some(slot);
-            last_y_invert = state.frame.y_invert;
+            let frame = p.frame(slot, state.frame.y_invert)?;
+            let _ = appsrc.push_buffer(frame.clone());
+            last = Some(frame);
             last_push = Instant::now();
         } else if state.frame.failed {
             failures += 1;
@@ -808,6 +861,23 @@ fn manager_version(m: &ZwlrScreencopyManagerV1) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame is copied whole, or row by row where the rows are laid out apart or
+    /// the picture is upside down.
+    #[test]
+    fn copies_rows() {
+        // Two rows of 3 bytes, 4 apart.
+        let from = [1, 2, 3, 0, 4, 5, 6, 0];
+        let mut to = [9; 8];
+        copy_rows(&from, 4, &mut to, 4, 3, false);
+        assert_eq!(to, from);
+        let mut to = [9; 6];
+        copy_rows(&from, 4, &mut to, 3, 3, false);
+        assert_eq!(to, [1, 2, 3, 4, 5, 6]);
+        let mut to = [9; 8];
+        copy_rows(&from, 4, &mut to, 4, 3, true);
+        assert_eq!(to, [4, 5, 6, 9, 1, 2, 3, 9]);
+    }
 
     #[test]
     fn names_fourcc_codes() {

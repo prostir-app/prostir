@@ -104,21 +104,39 @@ pub(super) fn spawn_writer(
         })?)
 }
 
+/// What the reader shares with the rest of the PC app.
+pub(super) struct Shared {
+    pub outbox: Arc<outbox::Outbox>,
+    pub router: Arc<Router>,
+    /// The session's up streams.
+    pub ups: Arc<ups::Ups>,
+    /// The PC's end of the headset microphone.
+    pub mic: Arc<crate::displays::MicTap>,
+}
+
 /// The reader thread: what is instant is answered here, not in the control loop
 /// (which may wait on a desktop tool for a while), so the round trip is the
-/// network's; the rest goes to the control loop as events of session `id`.
+/// network's, and the microphone goes to the PC as it comes; the rest goes to the
+/// control loop as events of session `id`.
 pub(super) fn spawn_reader(
     id: SessionId,
     mut receiver: Box<dyn prostir_proto::link::RecordReceiver>,
     mut packets: prostir_proto::packet::Assembler,
-    outbox: Arc<outbox::Outbox>,
-    router: Arc<Router>,
+    shared: Shared,
     events: EventSink,
 ) -> Result<()> {
     receiver.set_idle_limit(Some(SILENCE));
+    let Shared {
+        outbox,
+        router,
+        ups,
+        mic,
+    } = shared;
     std::thread::Builder::new()
         .name("net-reader".into())
         .spawn(move || {
+            // A stereo microphone's piece in mono, kept between pieces.
+            let mut mono = Vec::new();
             loop {
                 let msg = match ClientMsg::recv(&mut *receiver, &mut packets) {
                     Ok(msg) => msg,
@@ -154,7 +172,17 @@ pub(super) fn spawn_reader(
                             );
                         }
                     }
+                    ClientMsg::Up { up, data } => ups.piece(up, &data, &mic, &mut mono),
                     msg => {
+                        // Which up streams there are counts at once; the control loop
+                        // then looks at which session has the microphone.
+                        match &msg {
+                            ClientMsg::UpStart { up, kind, format } => {
+                                ups.start(*up, *kind, *format);
+                            }
+                            ClientMsg::UpEnd { up } => ups.end(*up),
+                            _ => {}
+                        }
                         if !events.send(Event::Headset(id, Instant::now(), msg)) {
                             return;
                         }

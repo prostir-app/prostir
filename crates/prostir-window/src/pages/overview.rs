@@ -97,6 +97,16 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                         };
                         let body = tk.f(id, &[name(), ("count", virtual_count.into())]);
                         text(ui, body, tk.body(), p.text_muted);
+                        if let Some(wifi) = s.wifi.as_ref().filter(|w| w.power_save == Some(true))
+                            && session.via != Via::Usb
+                        {
+                            ui.add_space(6.0);
+                            let hint = tk.f(
+                                "ov-wifi-power-save",
+                                &[("interface", wifi.interface.clone().into())],
+                            );
+                            w::status(ui, tk, p.warning, &hint);
+                        }
                     }
                 });
             });

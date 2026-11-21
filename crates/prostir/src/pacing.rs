@@ -214,11 +214,16 @@ pub struct PacerStats {
     /// was over it: the pace's own doing).
     pub held_back: Duration,
     pub over_link: Duration,
+    /// Segments TCP sent again (each one held up what came after it on the
+    /// connection), and the most bytes waiting unsent in the kernel at a look.
+    pub retransmits: u32,
+    pub unsent_max: u32,
 }
 
 impl PacerStats {
     /// `20 to 85 Mbit/s (the streams need up to 60); backed off 3 times, probed 2 (1
-    /// found more); held back 1.2 s, 4 % of it over what the link delivered`.
+    /// found more); held back 1.2 s, 4 % of it over what the link delivered; TCP sent
+    /// 3 segments again, at most 31 KB unsent`.
     pub fn summary(&self) -> String {
         let mbit = |b: u64| b * 8 / 1_000_000;
         let pace = match self.pace_max {
@@ -232,11 +237,14 @@ impl PacerStats {
         };
         format!(
             "{pace} (the streams need up to {}); backed off {} times, probed {} ({} found \
-             more); held back {held:.1} s, {over:.0} % of it over what the link delivered",
+             more); held back {held:.1} s, {over:.0} % of it over what the link delivered; \
+             TCP sent {} segments again, at most {} KB unsent",
             mbit(self.floor_max),
             self.backoffs,
             self.probes,
             self.probes_up,
+            self.retransmits,
+            self.unsent_max / 1024,
         )
     }
 }
@@ -264,6 +272,8 @@ pub struct Pacer {
     /// Delivery rates measured while the PC was held back, with when.
     delivered: VecDeque<(Instant, u64)>,
     stats: PacerStats,
+    /// TCP's count of segments sent again, at the last look.
+    retransmits: Option<u32>,
 }
 
 impl Pacer {
@@ -283,6 +293,7 @@ impl Pacer {
             demand: Demand::default(),
             delivered: VecDeque::new(),
             stats: PacerStats::default(),
+            retransmits: None,
         }
     }
 
@@ -332,6 +343,10 @@ impl Pacer {
             .map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
         self.demand.add(now, queued);
         self.floor = floor_for(self.demand.rate(now));
+        if let Some(before) = self.retransmits.replace(link.retransmits) {
+            self.stats.retransmits += link.retransmits.saturating_sub(before);
+        }
+        self.stats.unsent_max = self.stats.unsent_max.max(link.unsent);
         if self.usb || link.rtt.is_zero() {
             return None;
         }
