@@ -134,6 +134,8 @@ struct Brain {
     desk_gave_up: bool,
     /// Desktop workers let go, until each is gone (see `deskside.rs`).
     retiring: Vec<worker::Retired>,
+    /// The PC's Wi-Fi, as found when a headset last connected over the network.
+    wifi: Option<api::Wifi>,
 }
 
 impl Brain {
@@ -982,6 +984,7 @@ fn full_with(
         waiting_desk: Vec::new(),
         desk_gave_up: false,
         retiring: Vec::new(),
+        wifi: None,
     };
 
     // The local API has a state to give from the moment it is on the bus.

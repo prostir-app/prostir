@@ -572,6 +572,9 @@ pub struct State {
     pub counting: Option<Counting>,
     /// What is wrong now, in the PC's language.
     pub problems: Vec<Problem>,
+    /// The PC's Wi-Fi, when it reaches its network over Wi-Fi, as found when the last
+    /// headset connected over the network; `null` on a cable or before.
+    pub wifi: Option<Wifi>,
 }
 
 impl State {
@@ -599,6 +602,20 @@ impl State {
     pub fn display(&self, id: u32) -> Option<&Display> {
         self.displays.iter().find(|d| d.id == id)
     }
+}
+
+/// The PC's own Wi-Fi link.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Wifi {
+    /// `wlan0`.
+    pub interface: String,
+    /// The card's power saving: on, it can hold back what comes for the PC by tens of
+    /// milliseconds. `null` when the card does not say.
+    pub power_save: Option<bool>,
+    /// The channel's frequency and width in MHz; 0 when not known.
+    pub freq_mhz: u32,
+    pub width_mhz: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1310,6 +1327,12 @@ mod tests {
                 code: ApiError::Sound,
                 text: "x".into(),
             }],
+            wifi: Some(Wifi {
+                interface: "wlan0".into(),
+                power_save: Some(true),
+                freq_mhz: 5180,
+                width_mhz: 80,
+            }),
         }
     }
 
@@ -1340,7 +1363,8 @@ mod tests {
             r#""encode_us_max":9100}}]},"#,
             r#""sound":{"to_headset":true,"volume":{"level":40,"muted":false},"mic_on":false,"#,
             r#""mic":"off","mic_failure":null},"pairing":null,"nearby":[],"counting":"unasked","#,
-            r#""problems":[{"code":"Sound","text":"x"}]}"#,
+            r#""problems":[{"code":"Sound","text":"x"}],"#,
+            r#""wifi":{"interface":"wlan0","power_save":true,"freq_mhz":5180,"width_mhz":80}}"#,
         );
         assert_eq!(json, expected);
         assert_eq!(State::from_json(&json).unwrap(), state);

@@ -508,7 +508,13 @@ fn show_state(ctl: &Ctl, revision: u32, text: &str, json: bool, io: &mut Output<
     let out = &mut io.out;
     let _ = match (ctl, json) {
         (Ctl::Status, true) => writeln!(out, "{text}"),
-        (Ctl::Status, false) => writeln!(out, "{}", status_line(&state)),
+        (Ctl::Status, false) => {
+            let _ = writeln!(out, "{}", status_line(&state));
+            match &state.wifi {
+                Some(w) if w.power_save == Some(true) => writeln!(out, "{}", wifi_line(w)),
+                _ => Ok(()),
+            }
+        }
         (Ctl::Monitors, true) => writeln!(out, "{}", to_json(&state.displays)),
         (Ctl::Monitors, false) => {
             for d in &state.displays {
@@ -606,6 +612,24 @@ pub fn status_line(state: &State) -> String {
         ),
         _ => t("Чекає на шолом", "Waiting for a headset").to_owned(),
     }
+}
+
+/// The PC's Wi-Fi with power saving on, and what helps.
+fn wifi_line(w: &api::Wifi) -> String {
+    format!(
+        "{} ({}): {}",
+        t(
+            "На Wi-Fi цього ПК увімкнено енергозбереження",
+            "Power saving is on for this PC's Wi-Fi"
+        ),
+        w.interface,
+        t(
+            "воно може затримувати картинку на десятки мс. Допоможе кабель або \
+             `nmcli connection modify <з'єднання> 802-11-wireless.powersave 2`",
+            "it can hold the picture back by tens of ms. A cable helps, or \
+             `nmcli connection modify <connection> 802-11-wireless.powersave 2`"
+        )
+    )
 }
 
 fn display_line(d: &api::Display, primary: Option<u32>) -> String {

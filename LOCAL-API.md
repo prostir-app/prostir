@@ -299,7 +299,8 @@ change older clients would misread.
   "pairing": null,
   "nearby": [],
   "counting": "yes",
-  "problems": [{"code": "Sound", "text": "The sound could not be switched"}]
+  "problems": [{"code": "Sound", "text": "The sound could not be switched"}],
+  "wifi": {"interface": "wlan0", "power_save": true, "freq_mhz": 5180, "width_mhz": 80}
 }
 ```
 
@@ -338,6 +339,7 @@ change older clients would misread.
 | `nearby` | headsets that are not this PC's and asked for it in the last minute, by the name they gave (a headset gives one while it looks for a PC to pair with), else by address, the latest last |
 | `counting` | the answer to "Count this PC among users?": `unasked` (the settings window asks, at the top of its overview and first run; nothing is counted meanwhile, so a PC where nobody answered, such as one that only runs `prostir serve`, never counts), `yes`, `no`; `null` where this build or run never counts (a debug build, one without the `count` feature or with no key, `PROSTIR_NO_COUNT=1`), so there is nothing to ask. An update from 0.1 asks again unless 0.1 was turned off |
 | `problems` | what is wrong now: `code` (an error's name) and `text` in the PC's language; `Desktop` while the desktop does not respond (a call into it has hung for 15 s) |
+| `wifi` | the PC's own Wi-Fi when it reaches its network over Wi-Fi (its default route goes through a wireless interface), as found when the last headset connected over the network; `null` on a cable or before: `interface`, `power_save` (the card's power saving; on, it can hold back what comes for the PC by tens of milliseconds; `null` when the card does not say), `freq_mhz` and `width_mhz` of the channel (0 when not known). Prostir only reports it and changes nothing of the network |
 
 The pairing code is on the bus because the tray shows it to the same user anyway; it
 is never written to the log.

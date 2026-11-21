@@ -1064,6 +1064,7 @@ impl Brain {
             nearby: self.door.nearby(),
             counting: crate::usage::possible().then_some(wanted.count),
             problems,
+            wifi: self.wifi.clone(),
         }
     }
 

@@ -3,6 +3,35 @@
 
 use super::*;
 
+/// The PC's Wi-Fi, when it reaches its network over Wi-Fi, written in the log: with
+/// power saving on, how to turn it off (Prostir changes nothing of the network).
+fn look_at_wifi() -> Option<api::Wifi> {
+    let link = platform::wifi::look()?;
+    let mhz = |v: Option<u32>| v.map_or_else(|| "?".to_owned(), |v| v.to_string());
+    let line = format!(
+        "this PC is on Wi-Fi ({}, {} MHz, {} MHz wide)",
+        link.interface,
+        mhz(link.freq_mhz),
+        mhz(link.width_mhz)
+    );
+    match link.power_save {
+        Some(true) => warn!(
+            "{line} with power saving on, which can hold back what comes for the PC by \
+             tens of milliseconds; NetworkManager turns it off for a connection with \
+             `nmcli connection modify <name> 802-11-wireless.powersave 2`, or a cable \
+             avoids it"
+        ),
+        Some(false) => info!("{line}, power saving off"),
+        None => info!("{line}"),
+    }
+    Some(api::Wifi {
+        interface: link.interface,
+        power_save: link.power_save,
+        freq_mhz: link.freq_mhz.unwrap_or(0),
+        width_mhz: link.width_mhz.unwrap_or(0),
+    })
+}
+
 impl Brain {
     /// The key of the headset whose session is `id`, while it runs.
     pub(super) fn key_of(&self, id: SessionId) -> Option<[u8; 32]> {
@@ -114,6 +143,9 @@ impl Brain {
                     secret: self.security.find_secret(),
                 });
                 let via = session.api_session().via;
+                if via == api::Via::Wifi {
+                    self.wifi = look_at_wifi();
+                }
                 self.store.headset_seen(&key, unix_now(), Some(&app));
                 self.worn_told.insert(key, session.worn());
                 self.sessions.insert(key, session);

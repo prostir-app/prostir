@@ -116,6 +116,10 @@ pub use fake::*;
 mod net;
 pub use net::*;
 
+// The PC's own Wi-Fi, for diagnostics (the fake desktop's from its environment).
+#[cfg(target_os = "linux")]
+pub mod wifi;
+
 // Signals that ask the program to quit, the same on every Linux desktop and the fake one.
 pub mod signals;
 pub use signals::quit_on_signals;
