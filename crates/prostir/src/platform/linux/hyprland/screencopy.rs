@@ -55,6 +55,7 @@ pub fn input(name: &str) -> Input {
                  max-buffers=2 leaky-type=downstream"
             .to_owned(),
         label: name.to_owned(),
+        frame_rate: None,
     }
 }
 

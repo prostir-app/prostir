@@ -13,7 +13,6 @@
 //! our own stream, connected again, makes KWin put the created size back.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -44,7 +43,7 @@ const POINTER_EMBEDDED: u32 = 2;
 
 /// How often the last frame of a still screen is sent again, in ms. The session
 /// needs none of it (pings keep it), and with the frame rate told (see
-/// [`VirtualOutput::input`]) no encoder holds a frame back waiting for the next; it
+/// [`input_for`]) no encoder holds a frame back waiting for the next; it
 /// is what still pushes out the one keyframe a still screen gets, and each costs an
 /// encoding on the PC and a decoding and a wake-up of the radio in the headset.
 const KEEPALIVE_MS: u32 = 2000;
@@ -54,13 +53,38 @@ const DEFAULT_REFRESH: u32 = 60_000;
 
 /// A refresh rate in mHz as a frame rate for GStreamer: `60/1`, `144/1`, `59940/1000`
 /// reduced to `2997/50`.
-fn frame_rate(mhz: u32) -> String {
+fn frame_rate(mhz: u32) -> gstreamer::Fraction {
     fn gcd(a: u32, b: u32) -> u32 {
         if b == 0 { a } else { gcd(b, a % b) }
     }
     let mhz = if mhz == 0 { DEFAULT_REFRESH } else { mhz };
     let d = gcd(mhz, 1000);
-    format!("{}/{}", mhz / d, 1000 / d)
+    // Past i32 (millions of frames a second) no real output's rate.
+    gstreamer::Fraction::new(
+        i32::try_from(mhz / d).unwrap_or(i32::MAX),
+        (1000 / d) as i32,
+    )
+}
+
+/// The encoder's input for KWin's PipeWire node `node` of an output at `refresh` mHz.
+///
+/// KWin's stream says no frame rate (`0/1`, frames come when the screen changes),
+/// and an encoder without one budgets badly, so it is told the output's refresh rate
+/// ([`crate::encoder::tell_frame_rate`]); frames still come only when something
+/// changes. Nothing may stand between `pipewiresrc` and the encoder that hides which
+/// formats the encoder takes (as `capssetter` does): `pipewiresrc` then offers
+/// PipeWire no format and is linked to nothing ("target not found").
+fn input_for(node: u32, refresh: u32) -> Input {
+    Input {
+        // On a still screen KWin sends nothing; PipeWire's source repeats the last
+        // frame every 2 s (see `KEEPALIVE_MS`).
+        source: format!(
+            "pipewiresrc path={node} do-timestamp=true keepalive-time={KEEPALIVE_MS} \
+             always-copy=false"
+        ),
+        label: format!("node {node}"),
+        frame_rate: Some(frame_rate(refresh)),
+    }
 }
 
 #[derive(Default)]
@@ -669,40 +693,10 @@ impl VirtualOutput {
             .and_then(|(_, (_, info))| info.scale())
     }
 
-    /// The encoder reads the stream from KWin's PipeWire node.
-    ///
-    /// KWin's stream says no frame rate (`0/1`, frames come when the screen changes),
-    /// and an encoder without one budgets badly: VA-API spends about twice the chosen
-    /// bitrate on a busy screen, x264 holds each frame back until the next one comes.
-    /// So the stream is told the output's refresh rate (`capssetter`); frames still
-    /// come only when something changes.
+    /// The encoder reads the stream from KWin's PipeWire node, told the output's
+    /// refresh rate (see [`input_for`]).
     pub fn input(&self) -> Input {
-        let node = self.node;
-        // On a still screen KWin sends nothing; PipeWire's source repeats the last
-        // frame every 2 s (see `KEEPALIVE_MS`).
-        let mut source = format!(
-            "pipewiresrc path={node} do-timestamp=true keepalive-time={KEEPALIVE_MS} \
-             always-copy=false"
-        );
-        if gstreamer::ElementFactory::find("capssetter").is_some() {
-            let _ = write!(
-                source,
-                " ! capssetter caps=\"video/x-raw,framerate={}\"",
-                frame_rate(self.refresh)
-            );
-        } else {
-            static SAID: std::sync::Once = std::sync::Once::new();
-            SAID.call_once(|| {
-                warn!(
-                    "capssetter (gst-plugins-good) is missing: the encoder does not know \
-                     the frame rate and may spend more than the bitrate"
-                );
-            });
-        }
-        Input {
-            source,
-            label: format!("node {node}"),
-        }
+        input_for(self.node, self.refresh)
     }
 
     /// Makes this the primary output, so the Plasma panel and new windows go there.
@@ -800,14 +794,142 @@ mod tests {
 
     #[test]
     fn the_frame_rate_of_a_refresh_rate() {
-        assert_eq!(frame_rate(60_000), "60/1");
-        assert_eq!(frame_rate(144_000), "144/1");
-        assert_eq!(frame_rate(59_940), "2997/50");
-        assert_eq!(frame_rate(0), "60/1");
+        let rate = |n, d| gstreamer::Fraction::new(n, d);
+        assert_eq!(frame_rate(60_000), rate(60, 1));
+        assert_eq!(frame_rate(144_000), rate(144, 1));
+        assert_eq!(frame_rate(59_940), rate(2997, 50));
+        assert_eq!(frame_rate(0), rate(60, 1));
+        assert_eq!(input_for(42, 144_000).frame_rate, Some(rate(144, 1)));
         let mut out = info(vec![mode(2560, 1440, wl_output::Mode::Current)]);
         assert_eq!(out.refresh, None, "not done");
         out.on_event(wl_output::Event::Done);
         assert_eq!(out.refresh, Some(60_000));
+    }
+
+    /// `pipewiresrc` offers PipeWire the formats the elements after it take, as they
+    /// answer its caps query; told "any" (by `capssetter` after it, as once), it
+    /// offers no format, WirePlumber links it to nothing ("target not found") and
+    /// its start hangs. Skipped without gst-plugin-pipewire; nothing connects to
+    /// PipeWire (the pipeline is never started).
+    #[test]
+    fn pipewire_is_offered_the_formats_the_encoder_takes() {
+        use gstreamer::prelude::*;
+        gstreamer::init().unwrap();
+        if gstreamer::ElementFactory::find("pipewiresrc").is_none() {
+            eprintln!("skipped: no pipewiresrc (gst-plugin-pipewire)");
+            return;
+        }
+        let input = input_for(42, 60_000);
+        let pipeline = gstreamer::parse::launch(&format!(
+            "{} ! queue ! video/x-raw,format=I420 ! fakesink",
+            input.source
+        ))
+        .unwrap()
+        .downcast::<gstreamer::Bin>()
+        .unwrap();
+        let source = pipeline
+            .iterate_sources()
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|e| e.factory().is_some_and(|f| f.name() == "pipewiresrc"))
+            .expect("a pipewiresrc");
+        let offered = source.static_pad("src").unwrap().peer_query_caps(None);
+        assert!(
+            !offered.is_any(),
+            "the encoder's formats are hidden: {offered}"
+        );
+        let takes = gstreamer::Caps::builder("video/x-raw")
+            .field("format", "I420")
+            .build();
+        assert!(offered.is_subset(&takes), "{offered}");
+    }
+
+    /// KWin's stream as the encoder reads it, from a PipeWire node made here (a test
+    /// picture, not the desktop): it is linked and encoded. Run by hand:
+    /// `cargo test -p prostir -- --ignored pipewire_node_is_encoded`; needs PipeWire,
+    /// WirePlumber, `pw-cli`, gst-plugin-pipewire and x264.
+    #[test]
+    #[ignore = "by hand: makes a PipeWire video node of its own"]
+    fn a_pipewire_node_is_encoded() {
+        use std::sync::atomic::AtomicU32;
+        use std::sync::mpsc;
+
+        use gstreamer::prelude::*;
+
+        use crate::encoder::{Backend, Encoder, EncoderConfig, EncoderEvent, GpuDevices};
+
+        gstreamer::init().unwrap();
+        let name = format!("prostir-test-{}", std::process::id());
+        // KWin's stream says no frame rate, nor does this one.
+        let provider = gstreamer::parse::launch(&format!(
+            "videotestsrc is-live=true pattern=ball ! \
+             video/x-raw,format=BGRx,width=640,height=360,framerate=30/1 ! \
+             pipewiresink mode=provide \
+             stream-properties=\"props,node.name={name},media.class=Video/Source\""
+        ))
+        .unwrap();
+        provider.set_state(gstreamer::State::Playing).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let node = loop {
+            let listed = std::process::Command::new("pw-cli")
+                .args(["ls", "Node"])
+                .output()
+                .unwrap();
+            let listed = String::from_utf8_lossy(&listed.stdout);
+            let mut id = None;
+            let mut found = None;
+            for line in listed.lines().map(str::trim) {
+                if let Some(rest) = line.strip_prefix("id ") {
+                    id = rest.split(',').next().and_then(|n| n.parse::<u32>().ok());
+                }
+                if line == format!("node.name = \"{name}\"") {
+                    found = id;
+                }
+            }
+            if let Some(node) = found {
+                break node;
+            }
+            assert!(Instant::now() < deadline, "no node {name}");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+
+        let frames = Arc::new(AtomicU32::new(0));
+        let (failed, failure) = mpsc::channel();
+        let cfg = EncoderConfig {
+            codec: prostir_proto::Codec::H264,
+            bitrate_kbps: 4000,
+            backend: Backend::X264,
+            sharp: false,
+        };
+        let counted = frames.clone();
+        let encoder = Encoder::start(
+            &input_for(node, 60_000),
+            &cfg,
+            None,
+            &GpuDevices::default(),
+            move |event| {
+                match event {
+                    EncoderEvent::Frame { .. } => {
+                        counted.fetch_add(1, Ordering::Relaxed);
+                    }
+                    EncoderEvent::Failed(why) => {
+                        let _ = failed.send(why);
+                    }
+                    EncoderEvent::Unopened(not) => {
+                        let _ = failed.send(not.why);
+                    }
+                    EncoderEvent::Size { .. } => {}
+                }
+                false
+            },
+        )
+        .unwrap();
+        let why = failure.recv_timeout(Duration::from_secs(3)).ok();
+        let encoded = frames.load(Ordering::Relaxed);
+        drop(encoder);
+        provider.set_state(gstreamer::State::Null).unwrap();
+        assert_eq!(why, None, "the encoder failed");
+        assert!(encoded >= 10, "{encoded} frames in 3 s");
     }
 
     #[test]

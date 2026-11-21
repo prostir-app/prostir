@@ -283,6 +283,10 @@ pub struct Input {
     pub source: String,
     /// What it is, for logs: `node 42`, `Prostir-1`.
     pub label: String,
+    /// The frame rate the encoder is told when the source says none (KWin's PipeWire
+    /// stream says `0/1`: a frame whenever the screen changes). Frames still come only
+    /// when they come; see [`tell_frame_rate`].
+    pub frame_rate: Option<gst::Fraction>,
 }
 
 fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> Result<String> {
@@ -376,16 +380,65 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
     } else {
         ""
     };
-    // The queue's thread converts and encodes: named after the output (`q-node-42`,
-    // `q-Prostir-1`), so the system's list of threads tells whose it is.
-    let queue: String = format!("q-{}", input.label)
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
+    let queue = queue_name(input);
     Ok(format!(
         "{source} ! queue name={queue} max-size-buffers=2 leaky=downstream{stamp} ! {encoder} \
          ! {parser} ! {caps}"
     ))
+}
+
+/// The queue right after the source, whose thread converts and encodes: named after
+/// the output (`q-node-42`, `q-Prostir-1`), so the system's list of threads tells
+/// whose it is.
+fn queue_name(input: &Input) -> String {
+    format!("q-{}", input.label)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Tells everything after `pad` that its frames come at `rate` when their caps say
+/// no rate, or a rate of 0 (KWin's PipeWire stream), by rewriting the caps as they
+/// pass. An encoder without a frame rate budgets badly (VA-API spends about twice the
+/// bitrate on a busy screen, x264 holds each frame back until the next comes).
+///
+/// Not an element after the source (`capssetter`): that one answers the source's
+/// question of which formats the encoder takes with "any", so `pipewiresrc` offers
+/// PipeWire no format, WirePlumber links it to nothing ("target not found") and its
+/// start hangs. The caps query passes a probe untouched.
+pub fn tell_frame_rate(pad: &gst::Pad, rate: gst::Fraction) {
+    pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+        let Some(gst::PadProbeData::Event(event)) = &mut info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let told = match event.view() {
+            gst::EventView::Caps(c) => with_frame_rate(c.caps(), rate),
+            _ => None,
+        };
+        if let Some(caps) = told {
+            *event = gst::event::Caps::new(&caps);
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// `caps` with frame rate `rate` where they say none or 0; `None` when every
+/// structure says a rate already.
+fn with_frame_rate(caps: &gst::CapsRef, rate: gst::Fraction) -> Option<gst::Caps> {
+    let unsaid = |s: &gst::StructureRef| {
+        s.get::<gst::Fraction>("framerate")
+            .map_or(true, |r| r.numer() == 0)
+    };
+    if !caps.iter().any(unsaid) {
+        return None;
+    }
+    let mut told = caps.to_owned();
+    for s in told.make_mut().iter_mut() {
+        if unsaid(s) {
+            s.set("framerate", rate);
+        }
+    }
+    Some(told)
 }
 
 /// The test mode for measuring the latency from the PC to the eye (`prostir serve
@@ -476,6 +529,14 @@ impl Encoder {
             .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
             .ok_or_else(|| anyhow!("appsink missing"))?;
         tune(&pipeline, cfg);
+        if let Some(rate) = input.frame_rate
+            && let Some(pad) = pipeline
+                .by_name(&queue_name(input))
+                .and_then(|q| q.static_pad("sink"))
+                .and_then(|p| p.peer())
+        {
+            tell_frame_rate(&pad, rate);
+        }
         if let Some(pad) = pipeline
             .by_name("timecode")
             .and_then(|e| e.static_pad("src"))
@@ -1060,6 +1121,58 @@ mod tests {
     use gstreamer as gst;
     use gstreamer::prelude::*;
 
+    /// Caps that say no frame rate, or 0, get the one told; a rate said stays.
+    #[test]
+    fn a_frame_rate_is_told_where_none_is_said() {
+        gst::init().unwrap();
+        let rate = gst::Fraction::new(60, 1);
+        let told = |caps: &str| {
+            super::with_frame_rate(&caps.parse::<gst::Caps>().unwrap(), rate).map(|c| c.to_string())
+        };
+        assert_eq!(
+            told("video/x-raw,format=BGRx,framerate=0/1").as_deref(),
+            Some("video/x-raw, format=(string)BGRx, framerate=(fraction)60/1")
+        );
+        assert_eq!(
+            told("video/x-raw(memory:DMABuf),format=DMA_DRM").as_deref(),
+            Some("video/x-raw(memory:DMABuf), format=(string)DMA_DRM, framerate=(fraction)60/1")
+        );
+        assert_eq!(told("video/x-raw,framerate=30/1"), None);
+    }
+
+    /// Frames from a source that says no frame rate reach what comes after the pad
+    /// with the rate told, and the source is still asked for what comes after (not
+    /// "any").
+    #[test]
+    fn the_frames_after_the_pad_come_at_the_rate_told() {
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "videotestsrc name=source num-buffers=1 ! \
+             video/x-raw,format=I420,width=64,height=64,framerate=0/1 ! \
+             identity name=told ! queue ! video/x-raw,format=I420 ! appsink name=out",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let told = pipeline.by_name("told").unwrap();
+        super::tell_frame_rate(&told.static_pad("src").unwrap(), gst::Fraction::new(60, 1));
+        let asked = told.static_pad("src").unwrap().peer_query_caps(None);
+        assert!(!asked.is_any());
+        let out = pipeline
+            .by_name("out")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let sample = out.pull_sample().unwrap();
+        pipeline.set_state(gst::State::Null).unwrap();
+        let rate = sample
+            .caps()
+            .and_then(|c| c.structure(0))
+            .and_then(|s| s.get::<gst::Fraction>("framerate").ok());
+        assert_eq!(rate, Some(gst::Fraction::new(60, 1)));
+    }
+
     /// A frame that passes the time code's pad has the time it was captured drawn
     /// into it, on the PC's monotonic clock, as the headset reads it back.
     #[test]
@@ -1195,6 +1308,7 @@ mod live {
                                  max-buffers=2 leaky-type=downstream"
                             .into(),
                         label: format!("measure {i}"),
+                        frame_rate: None,
                     };
                     let cfg = EncoderConfig {
                         codec: prostir_proto::Codec::H265,

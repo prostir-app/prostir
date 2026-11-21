@@ -689,6 +689,7 @@ fn run_probe(backend: Backend, codec: Codec) -> Result<()> {
             "videotestsrc num-buffers=3 ! video/x-raw,width={w},height={h},framerate=60/1"
         ),
         label: format!("probe {}", backend.name()),
+        frame_rate: None,
     };
     let cfg = EncoderConfig {
         codec,
