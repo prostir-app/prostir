@@ -424,6 +424,9 @@ pub struct Router {
     /// Streams larger than every headset decodes, with their size and codec, for
     /// `Displays` to mark them failed.
     too_big: Mutex<Vec<TooBig>>,
+    /// The control loop, told when a keyframe is asked of a still screen (its source
+    /// then has to send a picture: see [`Router::keyframe_asked`]).
+    events: Mutex<Option<crate::events::EventSink>>,
 }
 
 impl Router {
@@ -440,6 +443,7 @@ impl Router {
             unopened: Mutex::new(Vec::new()),
             too_big: Mutex::new(Vec::new()),
             snapshot: Mutex::new(None),
+            events: Mutex::new(None),
         }
     }
 
@@ -855,6 +859,25 @@ impl Router {
         }
     }
 
+    /// Where to say that a keyframe was asked of a still screen.
+    pub fn send_events_to(&self, events: crate::events::EventSink) {
+        *self.events.lock().unwrap() = Some(events);
+    }
+
+    /// A keyframe was asked of stream `id`, whose screen is still: on a still screen
+    /// the source sends nothing until its keepalive (2 s), so it is asked for a
+    /// picture now. A capture pushing its own frames sends its last one again
+    /// (`keyframer`); a source that sends its picture when it starts (PipeWire on KDE)
+    /// is started over by the control loop.
+    fn picture_now(&self, id: ScreenId, keyframer: Option<&crate::encoder::Keyframer>) {
+        if let Some(k) = keyframer {
+            k.picture_again();
+        }
+        if let Some(events) = &*self.events.lock().unwrap() {
+            events.send(crate::events::Event::StillPicture(id));
+        }
+    }
+
     /// A headset asks for a keyframe of stream `id` (from its reader, without the
     /// control loop): at most every 300 ms for each stream, whoever asks, or keyframes
     /// would follow one another. A request within the 300 ms is never lost (no
@@ -877,10 +900,13 @@ impl Router {
             }
             slot.headset_asked = Some(now);
             slot.headset_pending = false;
-            slot.keyframer.clone()
+            (slot.keyframer.clone(), !slot.flowing(now))
         };
-        if let Some(k) = keyframer {
+        if let Some(k) = &keyframer.0 {
             k.ask();
+        }
+        if keyframer.1 {
+            self.picture_now(id, keyframer.0.as_ref());
         }
     }
 
@@ -893,12 +919,20 @@ impl Router {
             .lock()
             .unwrap()
             .streams
-            .values_mut()
-            .filter_map(|s| s.pending_due(now).then(|| s.keyframer.clone()))
+            .iter_mut()
+            .filter_map(|(id, s)| {
+                s.pending_due(now)
+                    .then(|| (*id, s.keyframer.clone(), !s.flowing(now)))
+            })
             .collect();
         let n = keyframers.len();
-        for k in keyframers.into_iter().flatten() {
-            k.ask();
+        for (id, k, still) in keyframers {
+            if let Some(k) = &k {
+                k.ask();
+            }
+            if still {
+                self.picture_now(id, k.as_ref());
+            }
         }
         n
     }
@@ -1127,7 +1161,12 @@ impl Router {
                     slot.headset_pending = false;
                 }
                 let pending = slot.pending_due(Instant::now());
-                Self::fan_out(slot, receivers, id, pts_us, keyframe, data) || pending
+                let ask = Self::fan_out(slot, receivers, id, pts_us, keyframe, data) || pending;
+                // The keyframe comes with the next frame: on a still screen, now.
+                if ask && !slot.flowing(Instant::now()) {
+                    self.picture_now(id, slot.keyframer.as_ref());
+                }
+                ask
             }
         }
     }

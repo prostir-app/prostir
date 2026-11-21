@@ -330,6 +330,11 @@ impl Brain {
             }
             Event::Desk(generation, done) => self.desk(generation, done),
             Event::SoundDevices(generation, done) => self.sound_devices(generation, done),
+            Event::StillPicture(id) => {
+                if let Some(d) = &mut self.displays {
+                    d.fresh_picture(id);
+                }
+            }
             Event::Quit => self.quit = true,
         }
     }

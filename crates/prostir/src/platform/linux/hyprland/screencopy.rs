@@ -821,7 +821,9 @@ fn run(
         frame.copy_with_damage(p.buffer(slot));
         while !(state.frame.ready || state.frame.failed) && !stop.load(Ordering::Relaxed) {
             wait(&conn, &mut queue, &mut state, Duration::from_millis(100))?;
-            if last_push.elapsed() >= KEEPALIVE
+            // Again now when a keyframe was asked of the still screen.
+            let again = paused.take_again();
+            if (again || last_push.elapsed() >= KEEPALIVE)
                 && !paused.is_on()
                 && let Some(l) = &last
             {

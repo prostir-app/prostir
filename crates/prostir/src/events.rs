@@ -61,6 +61,9 @@ pub enum Event {
     /// The sound thread made or let go of the sound or the microphone (see
     /// `worker/sound.rs`): whose (the desktop worker's number), and what.
     SoundDevices(u64, crate::worker::sound::SoundDone),
+    /// A keyframe was asked of stream `id` while its screen is still: its source is to
+    /// send a picture now (see `Router::keyframe_asked`).
+    StillPicture(crate::screen::ScreenId),
     /// A signal asked the program to quit.
     Quit,
 }

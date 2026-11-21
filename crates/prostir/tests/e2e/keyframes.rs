@@ -64,3 +64,31 @@ fn a_still_screen_gets_one_keyframe_then_none() {
     assert_eq!(keyframes(&headset), after, "none more while it stays still");
     pc.quit();
 }
+
+/// A keyframe asked of a still screen comes at once, not with the next frame its
+/// source sends again (PipeWire's keepalive, 2 s; the fake screen here sends none).
+#[test]
+fn a_keyframe_of_a_still_screen_comes_at_once() {
+    use prostir_proto::ClientMsg;
+    let (_dir, pc, _keys, mut headset) = session("still-asked", &Options::default());
+    soak(&mut headset, Duration::from_secs(1));
+    let id = headset.view().order()[0];
+    let generation = headset.view().streams[&id].generation;
+    let before = headset.view().streams[&id].keyframes;
+    let asked = Instant::now();
+    headset
+        .send(&ClientMsg::RequestKeyframe { id, generation })
+        .unwrap();
+    headset
+        .wait(Duration::from_secs(5), "the keyframe", |v| {
+            v.streams[&id].keyframes > before
+        })
+        .unwrap();
+    let took = asked.elapsed();
+    eprintln!(
+        "a keyframe of a still screen came {} ms after it was asked",
+        took.as_millis()
+    );
+    assert!(took < Duration::from_secs(1), "came after {took:?}");
+    pc.quit();
+}

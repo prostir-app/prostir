@@ -781,7 +781,10 @@ impl Encoder {
 
     /// A handle that asks it for a keyframe from any thread, while it runs.
     pub fn keyframer(&self) -> Keyframer {
-        Keyframer(self.sink.clone())
+        Keyframer {
+            sink: self.sink.clone(),
+            pause: self.paused.clone(),
+        }
     }
 }
 
@@ -790,9 +793,21 @@ impl Encoder {
 pub struct Pause {
     on: Mutex<bool>,
     changed: std::sync::Condvar,
+    /// A keyframe was asked of a still screen: a capture sends its last picture again
+    /// at once, instead of at its next keepalive.
+    again: AtomicBool,
 }
 
 impl Pause {
+    /// Whether the capture is to send its last picture again now; it is asked once.
+    #[cfg_attr(
+        feature = "fake-desktop",
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
+    pub fn take_again(&self) -> bool {
+        self.again.swap(false, Ordering::Relaxed)
+    }
+
     pub fn is_on(&self) -> bool {
         *self.on.lock().unwrap()
     }
@@ -829,11 +844,20 @@ impl Pause {
 /// headset's request does not wait for whoever owns the encoder. Asking an encoder
 /// that stopped does nothing.
 #[derive(Clone)]
-pub struct Keyframer(gst_app::AppSink);
+pub struct Keyframer {
+    sink: gst_app::AppSink,
+    pause: Arc<Pause>,
+}
 
 impl Keyframer {
     pub fn ask(&self) {
-        request_keyframe(&self.0);
+        request_keyframe(&self.sink);
+    }
+
+    /// The source is to send its picture again at once (a keyframe asked of a still
+    /// screen comes with the next frame): a capture pushing its own frames does so.
+    pub fn picture_again(&self) {
+        self.pause.again.store(true, Ordering::Relaxed);
     }
 }
 

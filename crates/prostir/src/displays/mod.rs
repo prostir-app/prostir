@@ -218,6 +218,7 @@ impl Displays {
         events: &EventSink,
     ) -> Self {
         let router = Arc::new(Router::new());
+        router.send_events_to(events.clone());
         let desk = Desk::start(
             worker::Start {
                 codec: settings.codec,
