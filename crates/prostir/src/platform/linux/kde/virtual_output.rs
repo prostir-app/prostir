@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -165,6 +165,9 @@ struct Shared {
     /// it changes, and the xdg-output of each output by registry name.
     xdg: Mutex<Option<ZxdgOutputManagerV1>>,
     xdg_outputs: Mutex<HashMap<u32, ZxdgOutputV1>>,
+    /// Counts the changes of the outputs: one came or went, or one's description is
+    /// done (a mode, a scale, a position).
+    outputs_changed: std::sync::atomic::AtomicU64,
 }
 
 impl Shared {
@@ -188,6 +191,7 @@ impl Shared {
             .lock()
             .unwrap()
             .insert(name, (output, OutputInfo::default()));
+        self.outputs_changed.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -220,6 +224,7 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
                 let mut outputs = state.shared.outputs.lock().unwrap();
                 if let Some((output, _)) = outputs.remove(&name) {
                     output.release();
+                    state.shared.outputs_changed.fetch_add(1, Ordering::Relaxed);
                 }
             }
             _ => {}
@@ -236,8 +241,12 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        let done = matches!(event, wl_output::Event::Done);
         if let Some((_, info)) = state.shared.outputs.lock().unwrap().get_mut(global) {
             info.on_event(event);
+        }
+        if done {
+            state.shared.outputs_changed.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -312,6 +321,8 @@ pub struct Screencast {
     qh: QueueHandle<State>,
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
+    /// Wakes the thread that reads KWin's events (it sleeps until one comes).
+    wake: Arc<OwnedFd>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -342,8 +353,17 @@ impl Screencast {
 
         // Reads events in the background: replies to new monitors, `closed` notices.
         let stop = Arc::new(AtomicBool::new(false));
+        // Written once to wake the thread when the connection is dropped.
+        // SAFETY: a new eventfd, owned from here on.
+        let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
+        if wake < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: a descriptor just made, owned by nobody else.
+        let wake = Arc::new(unsafe { OwnedFd::from_raw_fd(wake) });
         let thread = {
             let stop = stop.clone();
+            let woken = wake.clone();
             std::thread::Builder::new()
                 .name("wayland".into())
                 .spawn(move || {
@@ -354,14 +374,23 @@ impl Screencast {
                         let Some(guard) = queue.prepare_read() else {
                             continue;
                         };
-                        let mut pfd = libc::pollfd {
-                            fd: guard.connection_fd().as_raw_fd(),
-                            events: libc::POLLIN,
-                            revents: 0,
-                        };
-                        // SAFETY: a single valid pollfd.
-                        let n = unsafe { libc::poll(&raw mut pfd, 1, 100) };
-                        if n > 0 && guard.read().is_err() {
+                        // Asleep until KWin says something or the connection is
+                        // dropped (`wake`).
+                        let mut fds = [
+                            libc::pollfd {
+                                fd: guard.connection_fd().as_raw_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            },
+                            libc::pollfd {
+                                fd: woken.as_raw_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            },
+                        ];
+                        // SAFETY: two valid pollfds.
+                        let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+                        if n > 0 && fds[0].revents != 0 && guard.read().is_err() {
                             break;
                         }
                     }
@@ -384,8 +413,14 @@ impl Screencast {
             qh,
             shared,
             stop,
+            wake,
             thread: Some(thread),
         })
+    }
+
+    /// How many times the outputs changed so far: a number that only grows.
+    pub fn outputs_changed(&self) -> u64 {
+        self.shared.outputs_changed.load(Ordering::Relaxed)
     }
 
     /// The displays of the PC itself that are on (KWin lists no output of a closed
@@ -566,6 +601,9 @@ impl Screencast {
 impl Drop for Screencast {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        let one = 1u64;
+        // SAFETY: an eventfd takes 8 bytes, which live through the call.
+        unsafe { libc::write(self.wake.as_raw_fd(), (&raw const one).cast(), 8) };
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
