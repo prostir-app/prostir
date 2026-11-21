@@ -576,6 +576,15 @@ fn command(line: &str) -> Result<()> {
         info!("fake desktop: {name} {verb}ged");
         return Ok(());
     }
+    if let ["change", name, times] = words[..] {
+        let screen = Screen::find(name).with_context(|| format!("no output {name}"))?;
+        for _ in 0..times.parse::<u32>()? {
+            screen.change();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        info!("fake desktop: {name} changed {times} times");
+        return Ok(());
+    }
     if let ["refuse-scale"] = words[..] {
         REFUSE_SCALE.store(true, Ordering::Relaxed);
         info!("fake desktop: the next scale set fails");

@@ -12,6 +12,7 @@ mod encoders;
 mod failures;
 mod goodbye;
 mod headsets;
+mod keyframes;
 mod link;
 mod mcp;
 mod measure;

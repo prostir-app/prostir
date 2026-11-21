@@ -64,6 +64,14 @@ impl Backend {
     }
 }
 
+/// Keyframes come when they are needed, not every so many frames: TCP loses nothing,
+/// a headset that lost frames asks for one, and one more follows when the screen
+/// goes still (see the router). A periodic keyframe was a burst twenty times a
+/// frame's size every ten seconds of motion on each monitor. x264 takes this as no
+/// limit, NVENC takes `-1`; VA-API's limit is 1024 frames.
+const X264_GOP: u32 = 1 << 30;
+const VA_GOP: u32 = 1024;
+
 /// The parser after the encoder of `codec`.
 fn parser(codec: Codec) -> &'static str {
     match codec {
@@ -236,7 +244,7 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         (Codec::H264, Backend::Fake) => (
             format!(
                 "videoconvert name=enc_in ! video/x-raw,format=I420 ! valve drop={} ! x264enc name=enc tune=zerolatency speed-preset=superfast \
-                 bitrate={} key-int-max=600 bframes=0",
+                 bitrate={} key-int-max={X264_GOP} bframes=0",
                 !probe::fake::opens(),
                 cfg.bitrate_kbps
             ),
@@ -246,7 +254,7 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         (Codec::H264, Backend::X264) => (
             format!(
                 "videoconvert name=enc_in ! video/x-raw,format=I420 ! x264enc name=enc tune=zerolatency speed-preset=superfast \
-                 bitrate={} key-int-max=600 bframes=0",
+                 bitrate={} key-int-max={X264_GOP} bframes=0",
                 cfg.bitrate_kbps
             ),
             "h264parse config-interval=-1",
@@ -255,7 +263,7 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         (Codec::H264, Backend::Nvenc) => (
             format!(
                 "videoconvert name=enc_in ! video/x-raw,format=NV12 ! nvh264enc name=enc rc-mode=cbr \
-                 bitrate={} gop-size=600 bframes=0 zerolatency=true",
+                 bitrate={} gop-size=-1 bframes=0 zerolatency=true",
                 cfg.bitrate_kbps
             ),
             "h264parse config-interval=-1",
@@ -264,7 +272,7 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         (Codec::H265, Backend::Nvenc) => (
             format!(
                 "videoconvert name=enc_in ! video/x-raw,format=NV12 ! nvh265enc name=enc rc-mode=cbr \
-                 bitrate={} gop-size=600 bframes=0 zerolatency=true",
+                 bitrate={} gop-size=-1 bframes=0 zerolatency=true",
                 cfg.bitrate_kbps
             ),
             "h265parse config-interval=-1",
@@ -273,7 +281,7 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         (Codec::H264, Backend::Va) => (
             format!(
                 "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah264enc name=enc rate-control=cbr bitrate={} \
-                 key-int-max=600 b-frames=0 ref-frames=1 target-usage={}",
+                 key-int-max={VA_GOP} b-frames=0 ref-frames=1 target-usage={}",
                 cfg.bitrate_kbps,
                 cfg.target_usage()
             ),
@@ -283,7 +291,7 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         (Codec::H265, Backend::Va) => (
             format!(
                 "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah265enc name=enc rate-control=cbr bitrate={} \
-                 key-int-max=600 b-frames=0 ref-frames=1 target-usage={}",
+                 key-int-max={VA_GOP} b-frames=0 ref-frames=1 target-usage={}",
                 cfg.bitrate_kbps,
                 cfg.target_usage()
             ),

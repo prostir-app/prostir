@@ -7,7 +7,10 @@
 //! - started (or started over), it sends the current picture at once;
 //! - after that only a changed picture, so an encoder that is paused and resumed
 //!   without starting over gets nothing on a still screen;
-//! - a change while nobody reads is not queued: the next read gets the newest picture.
+//! - a change while nobody reads is not queued: the next read gets the newest picture;
+//! - with `PROSTIR_FAKE_KEEPALIVE_MS`, the picture sent last is sent again when nothing
+//!   changed for that long, in the same memory, as PipeWire's source does with its
+//!   `keepalive-time` (without it, never: a test sees a still screen send nothing).
 //!
 //! Every start is logged (`fake screen NAME: started`), so a test sees how often the
 //! core started a stream over.
@@ -31,6 +34,19 @@ use gstreamer_video as gst_video;
 
 /// The GStreamer element name of the source.
 pub const ELEMENT: &str = "prostirfakescreen";
+
+/// How long a still screen waits to send its picture again (`PROSTIR_FAKE_KEEPALIVE_MS`).
+fn keepalive() -> Option<std::time::Duration> {
+    static EVERY: LazyLock<Option<std::time::Duration>> = LazyLock::new(|| {
+        std::env::var("PROSTIR_FAKE_KEEPALIVE_MS")
+            .ok()?
+            .parse()
+            .ok()
+            .filter(|ms| *ms > 0)
+            .map(std::time::Duration::from_millis)
+    });
+    *EVERY
+}
 
 /// Screens by output name, for the sources to find theirs.
 static SCREENS: LazyLock<Mutex<HashMap<String, Arc<Screen>>>> = LazyLock::new(Default::default);
@@ -380,8 +396,19 @@ mod imp {
                         ));
                     }
                 }
-                // Woken by a change or by `unlock`.
-                changes = screen.changed.wait(changes).unwrap();
+                // Woken by a change or by `unlock`, or the picture goes again.
+                let Some(every) = keepalive() else {
+                    changes = screen.changed.wait(changes).unwrap();
+                    continue;
+                };
+                let (woken, waited) = screen.changed.wait_timeout(changes, every).unwrap();
+                changes = woken;
+                if waited.timed_out() {
+                    let state = self.state.lock().unwrap();
+                    if let (false, Some(last)) = (state.flushing, state.last.clone()) {
+                        return Ok(gst_base::subclass::base_src::CreateSuccess::NewBuffer(last));
+                    }
+                }
             }
         }
     }

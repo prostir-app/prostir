@@ -86,6 +86,10 @@ pub struct OutputEncoding {
     pub stats: Option<crate::router::StreamStats>,
 }
 
+/// A screen that did not change for this long gets one keyframe (see
+/// [`Router::still_keyframes`]).
+const STILL: Duration = Duration::from_secs(3);
+
 /// A headset that waited this long for a fresh picture of a stream that sent nothing
 /// meanwhile gets it from the stream starting over.
 const STARVED: Duration = Duration::from_secs(3);
@@ -621,6 +625,8 @@ impl Displays {
     /// primary output, window panels, the PC's own displays).
     pub fn tick(&mut self) {
         self.router.report();
+        self.router.still_keyframes(STILL);
+        self.router.pending_keyframes();
         self.sync_audio();
         // A way in for a recording that broke is made anew (nothing is asked), on the
         // sound thread.
