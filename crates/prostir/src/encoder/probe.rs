@@ -38,6 +38,20 @@ use crate::screen::ScreenId;
 /// How long one probe may take, from its own start.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// [`PROBE_TIMEOUT`] in this run, or in a build for the end-to-end tests what
+/// `PROSTIR_TEST_PROBE_SECONDS` says: a probe that hangs held so long that waiting for
+/// it shows whatever else takes a busy machine.
+pub fn probe_timeout() -> Duration {
+    #[cfg(feature = "fake-desktop")]
+    if let Some(s) = std::env::var("PROSTIR_TEST_PROBE_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        return Duration::from_secs(s);
+    }
+    PROBE_TIMEOUT
+}
+
 /// An encoder that did not open for an output is tried for it again after this long
 /// (or at once for another output).
 pub const FORGET_FAILURE: Duration = Duration::from_secs(600);
@@ -739,12 +753,13 @@ fn run_probe(backend: Backend, codec: Codec) -> Result<()> {
 }
 
 /// Probes `asked` side by side, each on a thread of its own and held to
-/// [`PROBE_TIMEOUT`] from when it started.
+/// [`probe_timeout`] from when it started.
 fn probe(asked: &[Asked]) -> Vec<(Asked, Probed)> {
+    let limit = probe_timeout();
     let (tx, rx) = mpsc::channel();
     let mut deadlines = Vec::new();
     for (index, &(backend, _, codec)) in asked.iter().enumerate() {
-        deadlines.push(Instant::now() + PROBE_TIMEOUT);
+        deadlines.push(Instant::now() + limit);
         let sender = tx.clone();
         let alive = Alive::new();
         let spawned = std::thread::Builder::new()
@@ -772,12 +787,12 @@ fn probe(asked: &[Asked]) -> Vec<(Asked, Probed)> {
                     if result.is_none() && deadlines[i] <= Instant::now() {
                         let (backend, _, codec) = asked[i];
                         warn!(
-                            "{} {codec:?}: the probe did not end in {PROBE_TIMEOUT:?}",
+                            "{} {codec:?}: the probe did not end in {limit:?}",
                             backend.label()
                         );
                         *result = Some(Probed::Failed(format!(
                             "did not answer in {} s",
-                            PROBE_TIMEOUT.as_secs()
+                            limit.as_secs()
                         )));
                     }
                 }

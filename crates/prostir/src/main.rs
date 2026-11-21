@@ -1052,7 +1052,7 @@ fn full_with(
     // inside a driver whose library the exit tears down: the process crashed so on
     // the way out. Each probe ends within its time limit; one that hangs is left
     // behind, and then the process ends without the libraries' exit handlers.
-    if !encoder::settle(encoder::PROBE_TIMEOUT) {
+    if !encoder::settle(encoder::probe_timeout()) {
         warn!("a probe of the encoders did not end: quitting without waiting for it");
         platform::end_now(code);
     }

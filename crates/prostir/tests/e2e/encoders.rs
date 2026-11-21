@@ -115,14 +115,21 @@ fn quitting_while_the_encoders_are_probed() {
 /// next start reads what was found instead. A probe that never ends holds nothing up
 /// past its time limit, the encoder it was for is not used, and it is not kept as
 /// missing: the next start uses what works at once and probes it again meanwhile.
+/// The time limit is longer here than a busy machine takes to show the monitors, so
+/// waiting for the probe shows in how long they took.
 #[test]
 fn probes_are_kept_and_one_that_hangs_holds_nothing_up() {
+    const LIMIT: Duration = Duration::from_secs(15);
     let dir = TestDir::new("probe-hangs");
     dir.save_monitors(THREE_MONITORS);
     let mut keys = dir.pair();
     let options = Options {
         software: false,
         encoder: Some("hangs"),
+        env: vec![(
+            "PROSTIR_TEST_PROBE_SECONDS".into(),
+            LIMIT.as_secs().to_string(),
+        )],
         ..Options::default()
     };
     let mut pc = Pc::start(&dir, &options);
@@ -135,16 +142,21 @@ fn probes_are_kept_and_one_that_hangs_holds_nothing_up() {
         .unwrap();
     let took = started.elapsed();
     assert!(
-        took < Duration::from_secs(3),
+        took < LIMIT * 2 / 3,
         "monitors after {took:?}, the probe held them up"
     );
-    assert_eq!(pc.count_log("fake hardware H264: did not answer in 3 s"), 1);
+    assert_eq!(
+        pc.count_log("fake hardware H264: did not answer in 15 s"),
+        1
+    );
     assert_eq!(pc.count_log("encoding with fake hardware"), 0);
     let kept = cache(&dir);
     assert!(kept.contains("retry fake - h264 did not answer"), "{kept}");
     assert!(!kept.contains("missing fake"), "{kept}");
     headset.disconnect();
-    pc.quit();
+    // Not quit: the PC would wait the limit for the hung probe (quitting so is
+    // `quitting_while_the_encoders_are_probed`'s).
+    drop(pc);
 
     // Started again: from the cache, the hung one probed again in the background,
     // not waited for.
@@ -155,7 +167,7 @@ fn probes_are_kept_and_one_that_hangs_holds_nothing_up() {
         .wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
     let took = started.elapsed();
-    assert!(took < Duration::from_secs(3), "monitors after {took:?}");
+    assert!(took < LIMIT * 2 / 3, "monitors after {took:?}");
     pc.wait_log(START, "video encoders as found before");
     pc.wait_log(START, "probing again in the background: fake hardware H264");
     assert_eq!(pc.count_log("video encoders probed in"), 0, "not all again");
