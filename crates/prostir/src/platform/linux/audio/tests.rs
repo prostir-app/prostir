@@ -47,8 +47,29 @@ fn a_full_feed_drops_instead_of_waiting() {
     }
     assert!(started.elapsed() < Duration::from_millis(500));
     let kept = 100 * slice.len() - feed.dropped;
-    assert!(kept > 0 && kept <= FEED_PIPE, "{kept} bytes wait");
+    assert!(kept > 0 && kept <= FEED_QUEUED, "{kept} bytes wait");
     assert_eq!(feed.dropped % slice.len(), 0);
+}
+
+/// A burst of pieces that came at once (Wi-Fi held them): three go through, the rest
+/// is dropped; a piece larger than the limit still goes into an empty pipe.
+#[test]
+fn a_burst_keeps_three_pieces_and_a_large_one_goes() {
+    for burst in 3..=5 {
+        let mut feed = Feed::spawn(Command::new("sleep").arg("10")).unwrap();
+        let piece = vec![1u8; 960];
+        for _ in 0..burst {
+            assert!(feed.write(&piece));
+        }
+        assert_eq!(
+            feed.dropped,
+            (burst - 3) * piece.len(),
+            "a burst of {burst}"
+        );
+    }
+    let mut feed = Feed::spawn(Command::new("sleep").arg("10")).unwrap();
+    assert!(feed.write(&[1u8; FEED_QUEUED + 960]));
+    assert_eq!(feed.dropped, 0, "into an empty pipe");
 }
 
 #[test]

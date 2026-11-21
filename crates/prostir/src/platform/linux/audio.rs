@@ -195,10 +195,15 @@ const MIC_FEED: &str = "prostir_mic_feed";
 
 /// The longest the headset's sound waits in the feed stream (`pacat`'s latency).
 const FEED_LATENCY_MS: u32 = 20;
-/// The pipe to `pacat`: one page, about 40 ms of sound. When it is full, the PC
-/// records slower than the headset sends, and new sound is dropped instead of piling
-/// up. Writes of up to this size go through whole or not at all.
+/// The pipe to `pacat`: one page, about 40 ms of sound. Writes of up to this size go
+/// through whole or not at all.
 const FEED_PIPE: usize = 4096;
+/// At most this much waits in the pipe, three pieces of 10 ms (a burst that a Wi-Fi
+/// card saving power held back comes whole): when more waits, the PC records slower
+/// than the headset sends, and new sound is dropped instead of piling up. (A pipe
+/// holds a page at least, so the limit is looked at on each write; a piece into an
+/// empty pipe always goes, whatever its size.)
+const FEED_QUEUED: usize = 3 * 960;
 
 /// The headset microphone as a PC microphone ("Prostir — мікрофон шолома"), the
 /// default input while the headset streams. A `pw-loopback` pairs an internal input
@@ -360,6 +365,14 @@ impl Feed {
         use std::io::Write;
         // Whole samples only, in pieces the pipe takes whole or not at all.
         for piece in pcm[..pcm.len() & !1].chunks(FEED_PIPE) {
+            let mut queued: libc::c_int = 0;
+            // SAFETY: FIONREAD into an int, on a pipe this process owns.
+            let asked =
+                unsafe { libc::ioctl(self.pipe.as_raw_fd(), libc::FIONREAD, &raw mut queued) };
+            if asked == 0 && queued > 0 && queued as usize + piece.len() > FEED_QUEUED {
+                self.dropped += piece.len();
+                continue;
+            }
             match self.pipe.write(piece) {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
