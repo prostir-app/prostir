@@ -272,6 +272,8 @@ impl Drop for Monitor {
         // The decoder must stop writing into the surface before the swapchain goes away.
         self.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.decoder.take() {
+            // It sleeps until there is work: woken, it sees `stop` at once.
+            t.thread().unpark();
             let _ = t.join();
         }
     }

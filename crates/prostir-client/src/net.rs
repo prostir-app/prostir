@@ -8,10 +8,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread::JoinHandle;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::thread::{JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
@@ -55,23 +54,108 @@ pub struct Frame {
     pub data: Vec<u8>,
 }
 
-/// One stream's frames on their way from the network to its decoder, counting how
-/// many wait (the decoder's input queue).
-pub struct Frames {
-    rx: Receiver<Frame>,
-    waiting: Arc<AtomicUsize>,
+/// Frames that may wait for a decoder; past this the network drops frames until the
+/// next keyframe and asks the PC for one. Made once for each stream.
+const QUEUE_ROOM: usize = 32;
+
+/// One stream's frames on their way from the network to its decoder: a short queue
+/// whose decoder thread is woken for each frame and when the stream ends.
+pub struct Frames(Arc<FrameQueue>);
+
+struct FrameQueue {
+    queued: Mutex<Queued>,
+    /// The decoder thread, once it started.
+    decoder: OnceLock<Thread>,
+}
+
+struct Queued {
+    frames: VecDeque<Frame>,
+    /// The network side is gone: no frame comes any more.
+    closed: bool,
+}
+
+/// What [`Frames::take`] found.
+pub enum Taken {
+    Frame(Frame),
+    /// Nothing waits now.
+    Nothing,
+    /// Nothing waits, and nothing will come: the stream ended.
+    Ended,
+}
+
+impl FrameQueue {
+    fn new() -> Self {
+        Self {
+            queued: Mutex::new(Queued {
+                frames: VecDeque::with_capacity(QUEUE_ROOM),
+                closed: false,
+            }),
+            decoder: OnceLock::new(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Queued> {
+        self.queued
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn wake(&self) {
+        if let Some(t) = self.decoder.get() {
+            t.unpark();
+        }
+    }
+
+    /// Frames waiting.
+    fn waiting(&self) -> usize {
+        self.lock().frames.len()
+    }
+
+    /// Queues `frame` and wakes the decoder; `false` if there is no room for it.
+    fn push(&self, frame: Frame) -> bool {
+        {
+            let mut q = self.lock();
+            if q.frames.len() >= QUEUE_ROOM {
+                return false;
+            }
+            q.frames.push_back(frame);
+        }
+        self.wake();
+        true
+    }
+
+    /// No frame comes any more: the decoder ends once it took those waiting.
+    fn close(&self) {
+        self.lock().closed = true;
+        self.wake();
+    }
 }
 
 impl Frames {
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<Frame, RecvTimeoutError> {
-        let frame = self.rx.recv_timeout(timeout)?;
-        self.waiting.fetch_sub(1, Ordering::Relaxed);
-        Ok(frame)
+    /// The thread to wake when a frame comes or the stream ends (the decoder's own).
+    pub fn wake(&self, decoder: Thread) {
+        let _ = self.0.decoder.set(decoder);
+    }
+
+    /// The next frame, if one waits.
+    pub fn take(&self) -> Taken {
+        let mut q = self.0.lock();
+        match q.frames.pop_front() {
+            Some(frame) => Taken::Frame(frame),
+            None if q.closed => Taken::Ended,
+            None => Taken::Nothing,
+        }
     }
 
     /// Frames received from the network that the decoder has not taken yet.
     pub fn waiting(&self) -> usize {
-        self.waiting.load(Ordering::Relaxed)
+        self.0.waiting()
+    }
+
+    /// Nothing waits, and nothing will come.
+    pub fn ended(&self) -> bool {
+        let q = self.0.lock();
+        q.closed && q.frames.is_empty()
     }
 }
 
@@ -1076,10 +1160,16 @@ impl Session<'_> {
 struct StreamSlot {
     /// The generation its frames belong to.
     generation: Gen,
-    tx: SyncSender<Frame>,
-    /// Shared with [`Frames`]: counted up here before sending, down when taken.
-    waiting: Arc<AtomicUsize>,
+    /// Shared with the stream's [`Frames`].
+    queue: Arc<FrameQueue>,
     waiting_for_keyframe: bool,
+}
+
+impl Drop for StreamSlot {
+    /// The stream is over here: its decoder ends once it took what waits.
+    fn drop(&mut self) {
+        self.queue.close();
+    }
 }
 
 /// How a session went, for what to do next.
@@ -1316,14 +1406,12 @@ fn run_session(
                     });
                     continue;
                 }
-                let (tx, rx) = mpsc::sync_channel(32);
-                let waiting = Arc::new(AtomicUsize::new(0));
+                let queue = Arc::new(FrameQueue::new());
                 streams.insert(
                     id,
                     StreamSlot {
                         generation,
-                        tx,
-                        waiting: waiting.clone(),
+                        queue: queue.clone(),
                         waiting_for_keyframe: true,
                     },
                 );
@@ -1333,7 +1421,7 @@ fn run_session(
                     width: w,
                     height: h,
                     codec,
-                    frames: Frames { rx, waiting },
+                    frames: Frames(queue),
                     feedback: feedback.clone(),
                 });
             }
@@ -1352,25 +1440,23 @@ fn run_session(
                 if slot.waiting_for_keyframe && !keyframe {
                     continue;
                 }
-                slot.waiting.fetch_add(1, Ordering::Relaxed);
-                let sent = slot.tx.try_send(Frame {
+                // Its decoder is gone (the monitor was closed here): nobody takes it.
+                if Arc::strong_count(&slot.queue) == 1 {
+                    continue;
+                }
+                let sent = slot.queue.push(Frame {
                     received: now,
                     seq,
                     pts_us,
                     keyframe,
                     data,
                 });
-                if sent.is_err() {
-                    slot.waiting.fetch_sub(1, Ordering::Relaxed);
-                }
-                match sent {
-                    Ok(()) => slot.waiting_for_keyframe = false,
-                    Err(TrySendError::Full(_)) => {
-                        warn!("decoder {} is behind, dropping until next keyframe", id.0);
-                        slot.waiting_for_keyframe = true;
-                        feedback.send(ClientMsg::RequestKeyframe { id, generation })?;
-                    }
-                    Err(TrySendError::Disconnected(_)) => {}
+                if sent {
+                    slot.waiting_for_keyframe = false;
+                } else {
+                    warn!("decoder {} is behind, dropping until next keyframe", id.0);
+                    slot.waiting_for_keyframe = true;
+                    feedback.send(ClientMsg::RequestKeyframe { id, generation })?;
                 }
             }
             HostMsg::StreamEnd { id, generation } => {
