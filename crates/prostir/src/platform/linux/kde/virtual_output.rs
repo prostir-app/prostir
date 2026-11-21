@@ -13,7 +13,7 @@
 //! our own stream, connected again, makes KWin put the created size back.
 
 use std::collections::HashMap;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -85,6 +85,28 @@ fn input_for(node: u32, refresh: u32) -> Input {
         label: format!("node {node}"),
         frame_rate: Some(frame_rate(refresh)),
     }
+}
+
+/// Sleeps, with no time limit, until KWin says something on the connection
+/// (`connection`) or `wake` is written to (the connection is being dropped): whether
+/// there is something to read on the connection (or it broke, which reading says).
+/// A signal wakes it too, with neither.
+fn sleep_until_said(connection: BorrowedFd<'_>, wake: BorrowedFd<'_>) -> bool {
+    let mut fds = [
+        libc::pollfd {
+            fd: connection.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    // SAFETY: two valid pollfds, alive through the call.
+    let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+    n > 0 && fds[0].revents != 0
 }
 
 #[derive(Default)]
@@ -398,23 +420,9 @@ impl Screencast {
                         let Some(guard) = queue.prepare_read() else {
                             continue;
                         };
-                        // Asleep until KWin says something or the connection is
-                        // dropped (`wake`).
-                        let mut fds = [
-                            libc::pollfd {
-                                fd: guard.connection_fd().as_raw_fd(),
-                                events: libc::POLLIN,
-                                revents: 0,
-                            },
-                            libc::pollfd {
-                                fd: woken.as_raw_fd(),
-                                events: libc::POLLIN,
-                                revents: 0,
-                            },
-                        ];
-                        // SAFETY: two valid pollfds.
-                        let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
-                        if n > 0 && fds[0].revents != 0 && guard.read().is_err() {
+                        if sleep_until_said(guard.connection_fd(), woken.as_fd())
+                            && guard.read().is_err()
+                        {
                             break;
                         }
                     }
@@ -930,6 +938,55 @@ mod tests {
         provider.set_state(gstreamer::State::Null).unwrap();
         assert_eq!(why, None, "the encoder failed");
         assert!(encoded >= 10, "{encoded} frames in 3 s");
+    }
+
+    /// The thread reading KWin's events sleeps while nothing is said (no wake-ups),
+    /// wakes at once when the connection has something to read, without waiting for
+    /// the wake-up file, and when that one is written to; a socket stands in for the
+    /// connection.
+    #[test]
+    fn kwins_events_are_read_at_once_and_nothing_else_wakes_the_reader() {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+
+        // SAFETY: a new eventfd, owned from here on.
+        let wake = unsafe { OwnedFd::from_raw_fd(libc::eventfd(0, libc::EFD_CLOEXEC)) };
+        let wake = Arc::new(wake);
+        let (mut kwin, connection) = UnixStream::pair().unwrap();
+        let sleeper = |connection: UnixStream, wake: Arc<OwnedFd>| {
+            let (done, woke) = mpsc::channel();
+            std::thread::spawn(move || {
+                let said = sleep_until_said(connection.as_fd(), wake.as_fd());
+                let _ = done.send(said);
+                connection
+            });
+            woke
+        };
+
+        let woke = sleeper(connection.try_clone().unwrap(), wake.clone());
+        assert!(
+            woke.recv_timeout(Duration::from_millis(300)).is_err(),
+            "woken with nothing said"
+        );
+        let said = Instant::now();
+        kwin.write_all(b"x").unwrap();
+        assert_eq!(woke.recv_timeout(Duration::from_secs(2)), Ok(true));
+        assert!(
+            said.elapsed() < Duration::from_millis(100),
+            "{:?}",
+            said.elapsed()
+        );
+
+        // Read, so only the wake-up file is left to wake it.
+        let mut byte = [0u8];
+        std::io::Read::read_exact(&mut &connection, &mut byte).unwrap();
+        let woke = sleeper(connection.try_clone().unwrap(), wake.clone());
+        assert!(woke.recv_timeout(Duration::from_millis(200)).is_err());
+        let one = 1u64;
+        // SAFETY: an eventfd takes 8 bytes, which live through the call.
+        unsafe { libc::write(wake.as_raw_fd(), (&raw const one).cast(), 8) };
+        assert_eq!(woke.recv_timeout(Duration::from_secs(2)), Ok(false));
     }
 
     #[test]
