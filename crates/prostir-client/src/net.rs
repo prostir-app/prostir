@@ -567,6 +567,10 @@ pub fn spawn(
             let mut finder = Finder::default();
             let mut round = 0u32;
             loop {
+                // Set when the last session broke off without a word after it had run
+                // for a while: the PC is most likely still there, so the next attempt
+                // goes at once instead of after the usual pause.
+                let mut again_now = false;
                 steering.wait_until_worn();
                 steering.wait_for_answer();
                 if steering.quitting() {
@@ -608,6 +612,7 @@ pub fn spawn(
                     let name = peer.and_then(|p| finder.name_of(p));
                     steering.lock().current = current(&stream);
                     let mut ended = Ended::default();
+                    let began = Instant::now();
                     let outcome = run_session(
                         stream,
                         &events,
@@ -652,12 +657,33 @@ pub fn spawn(
                         .is_some_and(|t| t.elapsed() < Duration::from_secs(3))
                     {
                         steering.rest(Duration::from_secs(10));
+                    } else {
+                        again_now = quick_retry(&ended, began.elapsed());
                     }
                 }
-                steering.rest(Duration::from_millis(300));
+                if !again_now {
+                    steering.rest(RETRY_PAUSE);
+                }
             }
         })
         .expect("spawn net thread")
+}
+
+/// Between attempts to connect.
+const RETRY_PAUSE: Duration = Duration::from_millis(300);
+/// A session must have run this long for the next attempt to go at once: one that
+/// breaks right after it opens is retried only after [`RETRY_PAUSE`], so a PC that
+/// keeps dropping sessions is not hammered.
+const QUICK_RETRY_AFTER: Duration = Duration::from_secs(2);
+
+/// Whether to connect again at once after a session that ended as `ended` says,
+/// having lasted `lasted`: only one that opened, ran a while and broke off without
+/// the PC saying why (a goodbye or a refusal keep their pauses).
+fn quick_retry(ended: &Ended, lasted: Duration) -> bool {
+    ended.opened
+        && ended.goodbye.is_none()
+        && ended.refused.is_none()
+        && lasted >= QUICK_RETRY_AFTER
 }
 
 /// What steering needs of a connection that is being opened.
