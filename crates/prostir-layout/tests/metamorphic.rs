@@ -477,7 +477,7 @@ fn drop_to_meet(scene: &Scene, at: &BTreeMap<u8, Placement>, upper: &[u8], lower
 /// to carry them away by.
 fn carried_rows(rng: &mut Rng) -> Option<(Scene, Vec<Vec<u8>>, Quat, Vec3)> {
     let k = 2 + rng.below(2);
-    let scene = rows_scene_of(rng, k, None, false, 0.0, false);
+    let scene = rows_scene_of(rng, k, None, false, 0.0, false, false);
     let rows = rows_now(&scene);
     let turn = Quat::from_rotation_y(rng.float(-3.1, 3.1));
     let shift = Vec3::new(

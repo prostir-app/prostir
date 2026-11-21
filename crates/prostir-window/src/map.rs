@@ -8,7 +8,7 @@ use eframe::egui::{
     vec2,
 };
 
-use unicode_segmentation::UnicodeSegmentation;
+use prostir_lang::shortened;
 
 use crate::snap;
 use crate::theme::mix;
@@ -141,42 +141,6 @@ pub fn fit_label(
         size: None,
         elided: true,
     })
-}
-
-/// `name` shortened with an ellipsis until `fits`: its ending kept where that tells
-/// similar names apart (`Pro…-3`, a number or a short last word), else its start
-/// (`Екран ноу…`). None where not even a letter and the ellipsis fit.
-/// Letters are whole graphemes: a letter with its accent stays one.
-pub fn shortened(name: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
-    let letters: Vec<&str> = name.graphemes(true).collect();
-    let n = letters.len();
-    let tail = name
-        .rfind(['-', ' '])
-        .map(|i| name[i..].graphemes(true).count())
-        .filter(|t| (2..=5).contains(t) && *t < n);
-    // The longest start of at most `max` letters (at least one) that `fits` as `make`
-    // makes it, halving: a longer start never fits where a shorter one does not.
-    let longest = |make: &dyn Fn(&str) -> String, max: usize| {
-        let at = |k: usize| make(&letters[..k].concat());
-        if max == 0 || !fits(&at(1)) {
-            return None;
-        }
-        let (mut lo, mut hi) = (1, max);
-        while lo < hi {
-            let mid = (lo + hi).div_ceil(2);
-            if fits(&at(mid)) {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        Some(at(lo))
-    };
-    tail.and_then(|t| {
-        let end = letters[n - t..].concat();
-        longest(&|start| format!("{start}…{end}"), n - t - 1)
-    })
-    .or_else(|| longest(&|start| format!("{start}…"), n - 1))
 }
 
 /// A tile's name and size, in full.
@@ -736,30 +700,6 @@ mod tests {
         inside((200.0, 20.0), name, size, one);
         assert_eq!(fit((200.0, 8.0), name, size), None);
         assert_eq!(fit((6.0, 100.0), name, size), None);
-    }
-
-    #[test]
-    fn a_shortened_name_keeps_what_tells_it_apart() {
-        let fits = |max: usize| move |s: &str| s.chars().count() <= max;
-        assert_eq!(shortened("Prostir-3", fits(6)).as_deref(), Some("Pro…-3"));
-        assert_eq!(shortened("Prostir-12", fits(5)).as_deref(), Some("P…-12"));
-        // No room for the ending: the start.
-        assert_eq!(shortened("Prostir-12", fits(3)).as_deref(), Some("Pr…"));
-        assert_eq!(
-            shortened("Екран ноутбука", fits(10)).as_deref(),
-            Some("Екран ноу…")
-        );
-        assert_eq!(shortened("Prostir-3", fits(1)), None);
-        // A letter with a combining accent stays whole.
-        let letters = |max: usize| move |s: &str| s.graphemes(true).count() <= max;
-        assert_eq!(
-            shortened("Pre\u{301}sent-2", letters(6)).as_deref(),
-            Some("Pre\u{301}…-2")
-        );
-        assert_eq!(
-            shortened("Cafe\u{301} du coin", letters(5)).as_deref(),
-            Some("Cafe\u{301}…")
-        );
     }
 
     #[test]

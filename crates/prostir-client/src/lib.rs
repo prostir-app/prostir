@@ -24,6 +24,7 @@ pub mod selftest;
 pub mod settings;
 pub mod store;
 pub mod ui;
+pub mod world;
 
 #[cfg(target_os = "android")]
 mod alloc_count;

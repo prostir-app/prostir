@@ -20,6 +20,7 @@ use fluent_bundle::concurrent::FluentBundle;
 use fluent_bundle::{FluentArgs, FluentResource, FluentValue};
 use fluent_syntax::ast::Entry;
 use unic_langid::LanguageIdentifier;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// The language every other one falls back to; always built in.
 pub const FALLBACK: &str = "en";
@@ -436,6 +437,43 @@ fn ids(text: &str) -> (BTreeMap<String, String>, Vec<String>) {
     (out, errors)
 }
 
+/// `name` shortened with an ellipsis until `fits` (a name on a tile too small for it:
+/// the PC's map of displays, the headset's map of monitors): its ending kept where that tells
+/// similar names apart (`Pro…-3`, a number or a short last word), else its start
+/// (`Екран ноу…`). None where not even a letter and the ellipsis fit.
+/// Letters are whole graphemes: a letter with its accent stays one.
+pub fn shortened(name: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
+    let letters: Vec<&str> = name.graphemes(true).collect();
+    let n = letters.len();
+    let tail = name
+        .rfind(['-', ' '])
+        .map(|i| name[i..].graphemes(true).count())
+        .filter(|t| (2..=5).contains(t) && *t < n);
+    // The longest start of at most `max` letters (at least one) that `fits` as `make`
+    // makes it, halving: a longer start never fits where a shorter one does not.
+    let longest = |make: &dyn Fn(&str) -> String, max: usize| {
+        let at = |k: usize| make(&letters[..k].concat());
+        if max == 0 || !fits(&at(1)) {
+            return None;
+        }
+        let (mut lo, mut hi) = (1, max);
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if fits(&at(mid)) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        Some(at(lo))
+    };
+    tail.and_then(|t| {
+        let end = letters[n - t..].concat();
+        longest(&|start| format!("{start}…{end}"), n - t - 1)
+    })
+    .or_else(|| longest(&|start| format!("{start}…"), n - 1))
+}
+
 /// A folder's path shown to a person: `~` for the home folder.
 pub fn short_path(path: &Path) -> String {
     let home = std::env::var_os("HOME").filter(|h| !h.is_empty());
@@ -449,6 +487,30 @@ pub fn short_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shortened_name_keeps_what_tells_it_apart() {
+        let fits = |max: usize| move |s: &str| s.chars().count() <= max;
+        assert_eq!(shortened("Prostir-3", fits(6)).as_deref(), Some("Pro…-3"));
+        assert_eq!(shortened("Prostir-12", fits(5)).as_deref(), Some("P…-12"));
+        // No room for the ending: the start.
+        assert_eq!(shortened("Prostir-12", fits(3)).as_deref(), Some("Pr…"));
+        assert_eq!(
+            shortened("Екран ноутбука", fits(10)).as_deref(),
+            Some("Екран ноу…")
+        );
+        assert_eq!(shortened("Prostir-3", fits(1)), None);
+        // A letter with a combining accent stays whole.
+        let letters = |max: usize| move |s: &str| s.graphemes(true).count() <= max;
+        assert_eq!(
+            shortened("Pre\u{301}sent-2", letters(6)).as_deref(),
+            Some("Pre\u{301}…-2")
+        );
+        assert_eq!(
+            shortened("Cafe\u{301} du coin", letters(5)).as_deref(),
+            Some("Cafe\u{301}…")
+        );
+    }
 
     const EN: &str = "language-name = English\nhello = Hello, { $name }\nonly-en = Only here\n\
         files = { $n ->\n    [one] { $n } file\n   *[other] { $n } files\n}\n";
