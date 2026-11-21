@@ -1474,6 +1474,8 @@ fn run_session(
                     warn!("decoder {} is behind, dropping until next keyframe", id.0);
                     slot.waiting_for_keyframe = true;
                     feedback.send(ClientMsg::RequestKeyframe { id, generation })?;
+                    #[cfg(all(feature = "selftest", not(feature = "store")))]
+                    crate::selftest::dropped_to_keyframe();
                 }
             }
             HostMsg::StreamEnd { id, generation } => {

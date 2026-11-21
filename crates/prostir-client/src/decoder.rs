@@ -434,6 +434,8 @@ impl Timing {
         *sum += behind as u64;
         *max = (*max).max(behind);
         *n += 1;
+        #[cfg(all(feature = "selftest", not(feature = "store")))]
+        crate::selftest::taken(behind);
     }
 
     fn queued(&mut self, frame: &Frame) {

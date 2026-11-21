@@ -246,6 +246,11 @@ const WATCHED: usize = 1024;
 pub struct Probe {
     pub wait: Histogram,
     pub decode: Histogram,
+    /// The most frames seen waiting behind one a decoder took.
+    pub queue_max: usize,
+    /// Times the network dropped a stream's frames until its next keyframe because
+    /// its decoder was behind.
+    pub dropped_to_keyframe: u64,
     /// Frames decoded, by display number.
     pub decoded: BTreeMap<u32, u64>,
     /// When each stream's generation (display number, generation) gave its first
@@ -306,6 +311,31 @@ pub fn decoded(id: u32, generation: u32, seq: u32, wait: Duration, decode: Durat
         if p.watch == Some((id, generation)) && p.watched.len() < WATCHED {
             p.watched.push((seq, at));
         }
+    }
+}
+
+/// A decoder took a frame from the network with `behind` more waiting. Nothing unless
+/// a selftest runs.
+pub fn taken(behind: usize) {
+    if !PROBING.load(Ordering::Relaxed) {
+        return;
+    }
+    let probe = lock(&PROBE).clone();
+    if let Some(probe) = probe {
+        let mut p = lock(&probe);
+        p.queue_max = p.queue_max.max(behind);
+    }
+}
+
+/// The network started dropping a stream's frames until its next keyframe. Nothing
+/// unless a selftest runs.
+pub fn dropped_to_keyframe() {
+    if !PROBING.load(Ordering::Relaxed) {
+        return;
+    }
+    let probe = lock(&PROBE).clone();
+    if let Some(probe) = probe {
+        lock(&probe).dropped_to_keyframe += 1;
     }
 }
 
@@ -413,12 +443,26 @@ mod tests {
         decoded(1, 1, 0, ms, ms);
         let probe = probe_start();
         decoded(1, 1, 0, ms, ms);
+        taken(2);
+        taken(1);
+        dropped_to_keyframe();
+        {
+            let p = lock(&probe);
+            assert_eq!((p.queue_max, p.dropped_to_keyframe), (2, 1));
+        }
         lock(&probe).watch(2, 3);
         decoded(1, 1, 1, ms, ms);
         decoded(2, 3, 7, ms, ms);
         probe_stop();
         decoded(2, 3, 8, ms, ms);
+        taken(5);
+        dropped_to_keyframe();
         let p = lock(&probe);
+        assert_eq!(
+            (p.queue_max, p.dropped_to_keyframe),
+            (2, 1),
+            "nothing after the stop"
+        );
         assert_eq!(p.decoded[&1], 2);
         assert_eq!(p.decoded[&2], 1);
         assert_eq!(p.first.len(), 2);
