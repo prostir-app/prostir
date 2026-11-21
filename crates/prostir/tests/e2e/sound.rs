@@ -443,11 +443,21 @@ fn a_new_sound_device_takes_the_headsets_level() {
     headset.take_for(Duration::from_millis(500)).unwrap();
     let asks = headset.view().volume_asks.len();
     let before = written(&pc).len();
+    // Off, and on once the device is gone: the sound's worker takes the latest wish,
+    // so both at once would leave the device as it is.
+    let removed = pc.count_log("fake desktop: the headset's sound device removed");
     for on in [false, true] {
         let req = headset
             .request(Request::SetSound { to_headset: on })
             .unwrap();
         assert_eq!(headset.reply(req, SOON).unwrap(), Outcome::Done);
+        if !on {
+            pc.wait_log_after(
+                SOON,
+                "fake desktop: the headset's sound device removed",
+                removed,
+            );
+        }
     }
     pc.wait_log_after(SOON, "fake desktop: the headset's sound device made", 1);
     let until = Instant::now() + SOON;
