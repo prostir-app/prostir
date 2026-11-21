@@ -207,6 +207,8 @@ impl Decoding<'_> {
                     continue;
                 }
                 self.free.pop_front();
+                // The codec took one: whatever waits gets its full second again.
+                self.stalled = None;
                 if feed(decoder, index, &frame, &mut self.timing)? {
                     self.failures = 0;
                 } else {
