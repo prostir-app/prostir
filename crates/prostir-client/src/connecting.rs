@@ -28,6 +28,8 @@ pub struct Ended {
     /// The PC speaks another protocol version: nothing changes until one side is
     /// updated.
     pub incompatible: bool,
+    /// The user paired with the PC in this connection.
+    pub paired: bool,
 }
 
 impl Ended {

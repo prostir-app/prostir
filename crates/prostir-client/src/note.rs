@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use prostir_proto::request::Outcome;
 use prostir_proto::state::ReqId;
 
+use crate::ids::PcId;
 use crate::lang::Texts;
 use crate::pending::{ANSWER_WITHIN, FAILURE_SHOWN_FOR};
 use crate::ui::{Action, Asked, Failure};
@@ -166,9 +167,10 @@ pub struct Notes {
     /// The menu's button pressed last, while requests sent now are its; none after a
     /// press elsewhere.
     pressed: Option<Action>,
-    /// Which button of the menu asked each request still waited for (by the request's
-    /// number in this session), and for which control: its answer is said under it.
-    asked_by: Vec<(ReqId, Asked, Action)>,
+    /// Which button of the menu asked each request still waited for (by its PC and
+    /// the request's number in that PC's session), and for which control: its answer
+    /// is said under it.
+    asked_by: Vec<(PcId, ReqId, Asked, Action)>,
 }
 
 impl Notes {
@@ -191,34 +193,38 @@ impl Notes {
         self.pressed
     }
 
-    /// Request `req` of control `what` was sent: the menu's button pressed for it
-    /// (none for a press elsewhere), whose note says the answer.
-    pub fn asked(&mut self, req: ReqId, what: Asked) -> Option<Action> {
+    /// Request `req` of control `what` was sent to PC `pc`: the menu's button pressed
+    /// for it (none for a press elsewhere), whose note says the answer.
+    pub fn asked(&mut self, pc: PcId, req: ReqId, what: Asked) -> Option<Action> {
         let on = self.pressed?;
-        self.asked_by.push((req, what, on));
+        self.asked_by.push((pc, req, what, on));
         Some(on)
     }
 
-    /// Request `req` was answered, failed or given up on: who asked it.
-    pub fn answered(&mut self, req: ReqId) -> Asker {
-        let Some(at) = self.asked_by.iter().position(|(r, ..)| *r == req) else {
+    /// Request `req` of PC `pc` was answered, failed or given up on: who asked it.
+    pub fn answered(&mut self, pc: PcId, req: ReqId) -> Asker {
+        let Some(at) = self
+            .asked_by
+            .iter()
+            .position(|(p, r, ..)| *p == pc && *r == req)
+        else {
             return Asker::default();
         };
-        let (_, what, on) = self.asked_by.swap_remove(at);
+        let (_, _, what, on) = self.asked_by.swap_remove(at);
         let newer_waits = self
             .asked_by
             .iter()
-            .any(|(r, w, _)| *w == what && r.0 > req.0);
+            .any(|(p, r, w, _)| *p == pc && *w == what && r.0 > req.0);
         Asker {
             on: Some(on),
             newer_waits,
         }
     }
 
-    /// A new session, or the connection broke: no request of before is answered, and
-    /// the numbers start again.
-    pub fn forget_requests(&mut self) {
-        self.asked_by.clear();
+    /// A new session with PC `pc`, or its connection broke: no request of before to it
+    /// is answered, and its numbers start again.
+    pub fn forget_requests(&mut self, pc: PcId) {
+        self.asked_by.retain(|(p, ..)| *p != pc);
     }
 
     /// Says `note` from `now`, in place of what was said; but a reason still shown
@@ -377,15 +383,18 @@ mod tests {
     use crate::settings::Preset;
     use prostir_proto::state::{DisplayId, ErrorCode, permission};
 
+    /// The PC of these requests.
+    const PC: PcId = PcId([3; 8]);
+
     fn k(n: u32) -> DisplayKey {
-        DisplayKey::new(PcId([3; 8]), DisplayId(n))
+        DisplayKey::new(PC, DisplayId(n))
     }
 
     /// A press of `action` in the menu that asks the PC as control `what` with request
     /// `req`, the way the menu does it: the old note goes, the button waits.
     fn ask(notes: &mut Notes, action: Action, req: u32, what: Asked, texts: &Texts, t: Instant) {
         notes.press(action);
-        let on = notes.asked(ReqId(req), what);
+        let on = notes.asked(PC, ReqId(req), what);
         assert_eq!(on, Some(action));
         notes.say(Note::waiting(on, texts), t);
     }
@@ -407,7 +416,7 @@ mod tests {
             (shown.on, shown.kind, &*shown.text),
             (Some(add), Kind::Waiting, "Зачекайте…")
         );
-        let asker = notes.answered(ReqId(1));
+        let asker = notes.answered(PC, ReqId(1));
         assert_eq!(asker.on, Some(add));
         let added = Outcome::Added { id: DisplayId(5) };
         let told = answer(Asked::AddMonitor, asker, &added, &texts).expect("said");
@@ -428,7 +437,7 @@ mod tests {
 
         // Failed: the reason under the button, the PC's detail under it.
         ask(&mut notes, add, 2, Asked::AddMonitor, &texts, t);
-        let asker = notes.answered(ReqId(2));
+        let asker = notes.answered(PC, ReqId(2));
         let failed = Outcome::failed(ErrorCode::LIMIT, "at most 6");
         let told = answer(Asked::AddMonitor, asker, &failed, &texts).expect("said");
         assert!(told.toast, "a failure is told while the menu is closed too");
@@ -458,12 +467,16 @@ mod tests {
         // A switch shows its own state: pressing it only takes the note away.
         notes.press(Action::Follow(true));
         assert_eq!(notes.shown(), None);
-        let asker = notes.answered(ReqId(1));
+        let asker = notes.answered(PC, ReqId(1));
         assert_eq!(asker.on, Some(remove));
         let told = answer(Asked::Remove(k(102)), asker, &Outcome::Done, &texts).expect("said");
         assert_eq!(&*told.note.text, "Monitor removed");
         assert_eq!(told.note.on, Some(remove));
-        assert_eq!(notes.answered(ReqId(1)), Asker::default(), "answered once");
+        assert_eq!(
+            notes.answered(PC, ReqId(1)),
+            Asker::default(),
+            "answered once"
+        );
         let mirror = Asker {
             on: Some(Action::SetMirror(false)),
             newer_waits: false,
@@ -490,7 +503,7 @@ mod tests {
         ask(&mut notes, on, 1, Asked::Sound, &texts, t);
         ask(&mut notes, off, 2, Asked::Sound, &texts, t);
         // The newer one first: it says how the sound stands now.
-        let asker = notes.answered(ReqId(2));
+        let asker = notes.answered(PC, ReqId(2));
         assert_eq!(
             asker,
             Asker {
@@ -504,18 +517,18 @@ mod tests {
             (Some(off), "PC sound plays on the PC")
         );
         // The older one after it: its own button.
-        let asker = notes.answered(ReqId(1));
+        let asker = notes.answered(PC, ReqId(1));
         assert_eq!(asker.on, Some(on));
         // A third and a fourth: the third goes through while the fourth waits, then the
         // fourth times out (the caller's `given_up`, with the request's number).
         ask(&mut notes, on, 3, Asked::Sound, &texts, t);
         ask(&mut notes, off, 4, Asked::Sound, &texts, t);
-        let asker = notes.answered(ReqId(3));
+        let asker = notes.answered(PC, ReqId(3));
         assert!(asker.newer_waits);
         assert_eq!(answer(Asked::Sound, asker, &Outcome::Done, &texts), None);
         let failed = Outcome::failed(ErrorCode::SOUND, "");
         assert!(answer(Asked::Sound, asker, &failed, &texts).is_some());
-        let asker = notes.answered(ReqId(4));
+        let asker = notes.answered(PC, ReqId(4));
         let note = Note::failure(asker.on, Failure::TimedOut, "", &texts);
         assert_eq!(
             (note.on, &*note.text),
@@ -523,8 +536,12 @@ mod tests {
         );
         // A new session: the numbers start again, nothing of before is found.
         ask(&mut notes, on, 1, Asked::Sound, &texts, t);
-        notes.forget_requests();
-        assert_eq!(notes.answered(ReqId(1)), Asker::default());
+        // Another PC's session ending leaves this one's requests.
+        notes.forget_requests(PcId([9; 8]));
+        assert_eq!(notes.answered(PcId([9; 8]), ReqId(1)), Asker::default());
+        ask(&mut notes, on, 2, Asked::Sound, &texts, t);
+        notes.forget_requests(PC);
+        assert_eq!(notes.answered(PC, ReqId(2)), Asker::default());
     }
 
     /// A press elsewhere (the palm menu, a command of the PC) keeps the menu's note,
@@ -540,8 +557,8 @@ mod tests {
         notes.press_elsewhere();
         assert!(notes.shown().is_some(), "the menu's note stays");
         assert_eq!(notes.pressed(), None);
-        assert_eq!(notes.asked(ReqId(5), Asked::Screenshot), None);
-        let asker = notes.answered(ReqId(5));
+        assert_eq!(notes.asked(PC, ReqId(5), Asked::Screenshot), None);
+        let asker = notes.answered(PC, ReqId(5));
         assert_eq!(asker, Asker::default());
         assert_eq!(
             answer(Asked::Screenshot, asker, &Outcome::Done, &texts),

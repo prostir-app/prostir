@@ -716,7 +716,7 @@ impl Selftest {
                 self.connected_at = Some(now);
                 self.report.set_ms("connect_ms", Some(ms(now - self.begun)));
             }
-            NetEvent::Part(prostir_proto::HostMsg::Displays { .. })
+            NetEvent::Part(_, prostir_proto::HostMsg::Displays { .. })
                 if self.displays_at.is_none() =>
             {
                 self.displays_at = Some(now);

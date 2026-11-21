@@ -388,8 +388,18 @@ pub fn uploaded(began: Option<Instant>) {
 pub fn is_app_thread(name: &str) -> bool {
     matches!(
         name,
-        "net" | "net-writer" | "audio" | "mic" | "fake-pc" | "fake-pc-read" | "persist" | "system"
+        "net"
+            | "net-writer"
+            | "net-dial"
+            | "net-listen"
+            | "audio"
+            | "mic"
+            | "fake-pc"
+            | "fake-pc-read"
+            | "persist"
+            | "system"
     ) || name.starts_with("decoder-")
+        || name.starts_with("link-")
 }
 
 #[cfg(test)]
@@ -556,6 +566,7 @@ mod tests {
     fn app_threads_are_known_by_name() {
         assert!(is_app_thread("decoder-3"));
         assert!(is_app_thread("net-writer"));
+        assert!(is_app_thread("link-0123456789"));
         assert!(!is_app_thread("RenderThread"));
     }
 }

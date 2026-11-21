@@ -12,7 +12,9 @@ const SOURCES: &[(&str, &str)] = &[
     ("ui.rs", include_str!("../src/ui.rs")),
     ("note.rs", include_str!("../src/note.rs")),
     ("app.rs", include_str!("../src/app.rs")),
-    ("net.rs", include_str!("../src/net.rs")),
+    ("net/mod.rs", include_str!("../src/net/mod.rs")),
+    ("net/link.rs", include_str!("../src/net/link.rs")),
+    ("net/discovery.rs", include_str!("../src/net/discovery.rs")),
     ("physical.rs", include_str!("../src/physical.rs")),
     ("session/mod.rs", include_str!("../src/session/mod.rs")),
     ("lang.rs", include_str!("../src/lang.rs")),
@@ -48,7 +50,9 @@ const OTHER_CODE: &[(&str, &str)] = &[
     ("layout/stick.rs", include_str!("../src/layout/stick.rs")),
     ("layout/tests.rs", include_str!("../src/layout/tests.rs")),
     ("lib.rs", include_str!("../src/lib.rs")),
+    ("media.rs", include_str!("../src/media.rs")),
     ("mic.rs", include_str!("../src/mic.rs")),
+    ("net/tests.rs", include_str!("../src/net/tests.rs")),
     ("outbox.rs", include_str!("../src/outbox.rs")),
     ("overlay.rs", include_str!("../src/overlay.rs")),
     ("passthrough.rs", include_str!("../src/passthrough.rs")),
@@ -76,6 +80,8 @@ const OTHER_CODE: &[(&str, &str)] = &[
 const NOT_MESSAGES: &[&str] = &[
     // Threads.
     "net-writer",
+    "net-dial",
+    "net-listen",
     "selftest-exit",
     // Names and codes in tests.
     "a-much-longer-laptop-name",
