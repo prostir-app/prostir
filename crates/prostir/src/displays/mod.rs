@@ -8,8 +8,8 @@
 use crate::i18n::t;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -36,6 +36,8 @@ mod parts;
 mod physical;
 mod placing;
 mod sound;
+
+pub use sound::MicTap;
 mod windows;
 
 use encoding::too_big_why;
@@ -163,6 +165,8 @@ pub struct Displays {
     /// The headset microphone on the PC, shared with the sound thread, which made it
     /// and lets it go (this share goes first).
     mic: Option<Arc<MicIn>>,
+    /// The same, for the sessions' readers.
+    mic_tap: Arc<MicTap>,
     /// Raised when the person switches sound or the microphone on: tried at once.
     by_hand: u32,
     /// Raised to have a recording's way in looked at again.
@@ -236,6 +240,7 @@ impl Displays {
             settings: settings.clone(),
             audio: None,
             mic: None,
+            mic_tap: Arc::default(),
             by_hand: 0,
             recheck: 0,
             mic_wanted: false,

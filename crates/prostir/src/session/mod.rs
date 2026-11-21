@@ -19,8 +19,7 @@ use log::{debug, info, warn};
 use prostir_proto::link::{Closer, Link, Via};
 use prostir_proto::request::{Asked, Command, Outcome};
 use prostir_proto::state::{
-    self, Access, ErrorCode, HeadsetState, Part, ReqId, UpFormat, UpKind, caps, clip, permission,
-    perms, role,
+    self, Access, ErrorCode, HeadsetState, Part, ReqId, UpKind, caps, clip, permission, perms, role,
 };
 use prostir_proto::stats::Period;
 use prostir_proto::volume::{Act, PcVolume};
@@ -38,6 +37,7 @@ use crate::{i18n, keep_screens, outbox, pacing, pairing, platform, publish, requ
 
 mod handle;
 mod link;
+mod ups;
 mod volume;
 
 use link::{spawn_reader, spawn_writer};
@@ -167,9 +167,8 @@ pub struct Session {
     last_command: u32,
     /// The headset's sound device and the logic of one volume, where both can.
     volume: Option<(SinkVolume, PcVolume)>,
-    /// Up streams the headset started: by number, what each carries and in how many
-    /// channels.
-    ups: BTreeMap<u8, (UpKind, u8)>,
+    /// Up streams the headset started, which its reader takes (see `ups.rs`).
+    ups: Arc<ups::Ups>,
 }
 
 /// A session that said goodbye: the headset has a moment to read it and close the
@@ -191,20 +190,6 @@ impl Closing {
             let _ = w.join();
         }
     }
-}
-
-/// Interleaved 16-bit stereo as mono: each pair of samples is their mean.
-fn to_mono(stereo: &[u8]) -> Vec<u8> {
-    stereo
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .flat_map(|[l0, l1, r0, r1]| {
-            let l = i32::from(i16::from_le_bytes([*l0, *l1]));
-            let r = i32::from(i16::from_le_bytes([*r0, *r1]));
-            (((l + r) / 2) as i16).to_le_bytes()
-        })
-        .collect()
 }
 
 /// The headset's battery is low: say so on the PC, where the user is looking.
@@ -288,12 +273,20 @@ impl Session {
         outbox.control(snapshot);
         packets.set_limits(ClientMsg::limits(true));
         let writer = spawn_writer(outbox.clone(), sender, closer.clone(), peer.via)?;
+        let ups = Arc::new(ups::Ups::new(
+            publisher.access.may(perms::MIC),
+            standing.mic,
+        ));
         let reader = spawn_reader(
             id,
             receiver,
             packets,
-            outbox.clone(),
-            displays.router.clone(),
+            link::Shared {
+                outbox: outbox.clone(),
+                router: displays.router.clone(),
+                ups: ups.clone(),
+                mic: displays.mic_tap(),
+            },
             events.clone(),
         );
         if let Err(e) = reader {
@@ -337,7 +330,7 @@ impl Session {
             answers: Answers::default(),
             last_command: 0,
             volume: None,
-            ups: BTreeMap::new(),
+            ups,
         };
         // One volume for the PC's slider and the headset's buttons, where both can.
         if session.publisher.caps().has(caps::headset::VOLUME) {
@@ -373,7 +366,7 @@ impl Session {
 
     /// The headset streams its microphone now.
     pub fn mic_streams(&self) -> bool {
-        self.ups.values().any(|(kind, _)| *kind == UpKind::Mic)
+        self.ups.mic_streams()
     }
 
     /// What the headset can do.
@@ -478,6 +471,7 @@ impl Session {
         }
         let was_main = self.standing.main;
         self.standing = standing;
+        self.ups.set_mic(standing.mic);
         self.publisher.access = access_in(self.configured, main);
         if main == was_main {
             return;
@@ -680,24 +674,4 @@ pub fn desktop_not_responding() -> String {
 /// worn).
 fn worn(headset: &HeadsetState) -> bool {
     headset.presence.is_none_or(|p| p.worn)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A stereo microphone reaches the PC's mono end as the mean of its channels.
-    #[test]
-    fn stereo_becomes_mono() {
-        let frame = |l: i16, r: i16| [l.to_le_bytes(), r.to_le_bytes()].concat();
-        let stereo = [frame(100, 300), frame(-32768, -32768), frame(32767, -32767)].concat();
-        let mono: Vec<i16> = to_mono(&stereo)
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|b| i16::from_le_bytes(*b))
-            .collect();
-        assert_eq!(mono, [200, -32768, 0]);
-        assert!(to_mono(&[1, 2, 3]).is_empty(), "no half frame");
-    }
 }

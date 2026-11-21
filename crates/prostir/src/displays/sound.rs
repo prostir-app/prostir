@@ -3,6 +3,27 @@
 
 use super::*;
 
+/// The PC's end of the headset microphone as the sessions' reader threads reach it:
+/// a piece goes in as it comes, without the control loop. Only the control loop
+/// changes what is in it, and the readers never hold a share of it, so the
+/// microphone is always let go where `Displays` lets it go.
+#[derive(Default)]
+pub struct MicTap(Mutex<Option<Arc<MicIn>>>);
+
+impl MicTap {
+    /// Plays a piece of the headset's microphone into the PC's end, while there is one.
+    pub fn push(&self, pcm: &[u8]) {
+        if let Some(mic) = &*self.0.lock().unwrap() {
+            mic.push(pcm);
+        }
+    }
+
+    fn set(&self, mic: Option<Arc<MicIn>>) {
+        let old = std::mem::replace(&mut *self.0.lock().unwrap(), mic);
+        drop(old);
+    }
+}
+
 impl Displays {
     /// The headset's microphone switch (its `UpState`): the PC's end of the microphone
     /// is there while it is on.
@@ -53,6 +74,7 @@ impl Displays {
             // the thread lets the microphone go once it hears it is not wanted.
             SoundDone::Mic(mic) => {
                 if self.streaming && self.mic_wanted {
+                    self.mic_tap.set(Some(mic.clone()));
                     self.mic = Some(mic);
                     self.mic_failed = None;
                 } else {
@@ -60,10 +82,14 @@ impl Displays {
                 }
             }
             SoundDone::MicFailed(why) => {
+                self.mic_tap.set(None);
                 self.mic = None;
                 self.mic_failed = Some(why);
             }
-            SoundDone::MicOff => self.mic = None,
+            SoundDone::MicOff => {
+                self.mic_tap.set(None);
+                self.mic = None;
+            }
         }
         self.sync_audio();
     }
@@ -104,6 +130,7 @@ impl Displays {
         // (`pactl`, `pw-loopback`) happens there; on a thread of its own all the same,
         // should the sound thread have let its share go first.
         if !mic && let Some(share) = self.mic.take() {
+            self.mic_tap.set(None);
             worker::sound::let_go_of_mic(share);
         }
         if self.mic.is_none() {
@@ -129,9 +156,8 @@ impl Displays {
         }
     }
 
-    pub fn push_mic(&self, pcm: &[u8]) {
-        if let Some(m) = &self.mic {
-            m.push(pcm);
-        }
+    /// Where the sessions' readers put the headset's microphone.
+    pub fn mic_tap(&self) -> Arc<MicTap> {
+        self.mic_tap.clone()
     }
 }
