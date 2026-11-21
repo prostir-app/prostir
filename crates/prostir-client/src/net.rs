@@ -669,7 +669,7 @@ pub fn spawn(
             };
             let mut trusted = TrustStore::load(&discovery.trust_file);
             let mut finder = Finder::default();
-            let mut round = 0u32;
+            let mut probing = Probing::default();
             loop {
                 // Set when the last session broke off without a word after it had run
                 // for a while: the PC is most likely still there, so the next attempt
@@ -684,7 +684,6 @@ pub fn spawn(
                 if std::mem::take(&mut steering.lock().trust_changed) {
                     trusted = TrustStore::load(&discovery.trust_file);
                 }
-                round += 1;
                 if beacon.is_none() && discovery.only.is_none() {
                     match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, prostir_proto::DISCOVERY_PORT)) {
                         Ok(socket) => {
@@ -706,7 +705,7 @@ pub fn spawn(
                     &steering,
                     &mut finder,
                     &events,
-                    round,
+                    &mut probing,
                 ) {
                     if steering.quitting() {
                         info!("network stopped");
@@ -750,6 +749,10 @@ pub fn spawn(
                         let _ = std::fs::write(&discovery.last_host_file, p.to_string());
                     }
                     steering.lock().current = None;
+                    // A search after a session probes soon again.
+                    if ended.opened {
+                        probing = Probing::default();
+                    }
                     if events.send(NetEvent::Disconnected { why }).is_err() || steering.quitting() {
                         info!("network stopped");
                         return;
@@ -904,7 +907,7 @@ fn connect(
     steering: &Steering,
     finder: &mut Finder,
     events: &Sender<NetEvent>,
-    round: u32,
+    probing: &mut Probing,
 ) -> Option<TcpStream> {
     if let Some(only) = discovery.only {
         return try_connect(only);
@@ -970,10 +973,40 @@ fn connect(
         _ => return None,
     }
     // Some networks drop broadcasts: now and then probe the local /24.
-    if round % 5 == 1 && !steering.quitting() {
+    if probing.due(Instant::now()) && !steering.quitting() {
         scan_subnet()
     } else {
         None
+    }
+}
+
+/// The first probe of the local network for a PC that does not announce itself, and
+/// how much longer each next one waits, up to [`PROBE_AT_MOST`].
+const PROBE_FIRST: Duration = Duration::from_millis(7500);
+const PROBE_AT_MOST: Duration = Duration::from_secs(60);
+
+/// When to probe the local network next: at once when the search starts, then less
+/// and less often while no PC is found (each probe starts 253 short connections).
+#[derive(Default)]
+struct Probing {
+    /// When the next probe is due, and the wait after it; `None` before the first.
+    next: Option<(Instant, Duration)>,
+}
+
+impl Probing {
+    /// Whether to probe now; if so, the next one waits twice as long as the last.
+    fn due(&mut self, now: Instant) -> bool {
+        match self.next {
+            Some((at, _)) if now < at => false,
+            Some((_, wait)) => {
+                self.next = Some((now + wait, (wait * 2).min(PROBE_AT_MOST)));
+                true
+            }
+            None => {
+                self.next = Some((now + PROBE_FIRST, PROBE_FIRST * 2));
+                true
+            }
+        }
     }
 }
 
