@@ -166,6 +166,16 @@ impl Backend {
     pub fn takes_dmabuf(self) -> bool {
         self.path(Memory::DmaBuf, None) == Some(Path::Direct)
     }
+
+    /// Whether it keeps a frame until the next one comes, at least where the frames
+    /// come seldom (a still screen). Measured with frames every 2 s from a PipeWire
+    /// node: VA-API H.265 gives each one out only when the next comes in (its picture
+    /// is not done when it looks, and it does not look again); x264 told the frame
+    /// rate gives each out at once. NVENC encodes on the card as VA-API does: taken
+    /// to keep one too (not measured, no NVIDIA card here). See `encoder/nudge.rs`.
+    pub fn keeps_a_frame(self) -> bool {
+        matches!(self, Self::Va | Self::Nvenc)
+    }
 }
 
 /// A codec an encoder makes, up to the largest picture its elements take (for the log

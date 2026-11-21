@@ -25,6 +25,7 @@ use prostir_proto::Codec;
 
 mod choice;
 mod gpu;
+mod nudge;
 mod probe;
 
 pub use choice::{Backend, Choice, Kind, Wanted, codec_label, note};
@@ -256,6 +257,9 @@ pub struct Encoder {
     /// It takes frames straight from GPU buffers (dmabuf), so a capture hands it those.
     takes_dmabuf: bool,
     bus_thread: Option<JoinHandle<()>>,
+    /// Sends a new picture again shortly after, for an encoder that keeps a frame
+    /// until the next comes (see `encoder/nudge.rs`); stopped before the pipeline.
+    nudger: Option<nudge::Nudger>,
     kind: Kind,
     codec: Codec,
     /// It has encoded a frame since it last started.
@@ -537,6 +541,23 @@ impl Encoder {
         {
             tell_frame_rate(&pad, rate);
         }
+        let nudger = match pipeline
+            .by_name(&queue_name(input))
+            .and_then(|q| q.static_pad("sink"))
+        {
+            Some(pad) if cfg.backend.keeps_a_frame() => {
+                let encoder = pipeline
+                    .by_name("enc_in")
+                    .and_then(|e| e.static_pad("sink"));
+                Some(nudge::Nudger::start(
+                    &pad,
+                    encoder.as_ref(),
+                    &queue_name(input),
+                    nudge::AFTER,
+                )?)
+            }
+            _ => None,
+        };
         if let Some(pad) = pipeline
             .by_name("timecode")
             .and_then(|e| e.static_pad("src"))
@@ -584,11 +605,15 @@ impl Encoder {
             let on_event = on_event.clone();
             let node = node.clone();
             let encoded = encoded.clone();
+            let nudge = nudger.as_ref().map(nudge::Nudger::handle);
             sink.set_callbacks(
                 gst_app::AppSinkCallbacks::builder()
                     .new_sample(move |sink| {
                         let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                         encoded.store(true, Ordering::Relaxed);
+                        if let Some(n) = &nudge {
+                            n.left();
+                        }
                         if let Some(info) =
                             sample.caps().and_then(|c| c.structure(0)).and_then(|s| {
                                 Some((
@@ -694,6 +719,7 @@ impl Encoder {
             restart_on_resume,
             takes_dmabuf: cfg.backend.takes_dmabuf(),
             bus_thread: Some(bus_thread),
+            nudger,
             kind: (cfg.backend, adapter),
             codec: cfg.codec,
             encoded,
@@ -828,6 +854,9 @@ impl Encoder {
             let _ = self.pipeline.set_state(gst::State::Null);
             // It opens again with the first frame.
             self.encoded.store(false, Ordering::Relaxed);
+            if let Some(n) = &self.nudger {
+                n.handle().forget();
+            }
         }
         let _ = self.pipeline.set_state(state);
         if !paused {
@@ -837,7 +866,7 @@ impl Encoder {
 
     /// Asks the encoder to emit an IDR frame (with parameter sets) as soon as possible.
     pub fn force_keyframe(&self) {
-        request_keyframe(&self.sink);
+        self.keyframer().ask();
     }
 
     /// A handle that asks it for a keyframe from any thread, while it runs.
@@ -845,6 +874,7 @@ impl Encoder {
         Keyframer {
             sink: self.sink.clone(),
             pause: self.paused.clone(),
+            nudge: self.nudger.as_ref().map(nudge::Nudger::handle),
         }
     }
 }
@@ -908,11 +938,16 @@ impl Pause {
 pub struct Keyframer {
     sink: gst_app::AppSink,
     pause: Arc<Pause>,
+    nudge: Option<nudge::Handle>,
 }
 
 impl Keyframer {
     pub fn ask(&self) {
         request_keyframe(&self.sink);
+        // The keyframe comes with the next frame, which the encoder would keep.
+        if let Some(n) = &self.nudge {
+            n.next_is_new();
+        }
     }
 
     /// The source is to send its picture again at once (a keyframe asked of a still
@@ -934,6 +969,8 @@ fn request_keyframe(sink: &gst_app::AppSink) {
 impl Drop for Encoder {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // Before the pipeline stops, which its frames would wait on.
+        drop(self.nudger.take());
         // Wakes the bus thread, which then sees `stop`.
         if let Some(bus) = self.pipeline.bus() {
             let _ = bus.post(gst::message::Application::new(gst::Structure::new_empty(
