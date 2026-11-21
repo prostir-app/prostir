@@ -20,12 +20,17 @@ pub struct Frame {
     pub data: Vec<u8>,
 }
 
-/// Frames that may wait for a decoder once it takes them: with one more, the network
-/// drops frames until the next keyframe and asks the PC for one, so the picture is
-/// never more than about this many frames (50 ms at 60 frames a second) behind.
+/// Once its decoder takes frames, the oldest one waiting older than this when another
+/// comes means the decoder is behind: the network drops frames until the next
+/// keyframe and asks the PC for one, so the picture is never much more than this
+/// behind.
+pub const MAX_AGE: Duration = Duration::from_millis(50);
+/// The decoder counts as started and caught up (so [`MAX_AGE`] holds) once it took a
+/// frame and no more than this many wait: the frames that pile up while it starts are
+/// not a reason to drop.
 pub const MAX_WAITING: usize = 3;
-/// Room in each stream's queue, made once: for the frames that come while its decoder
-/// starts, and for a keyframe past [`MAX_WAITING`].
+/// Room in each stream's queue, made once: past it frames are dropped whatever their
+/// age.
 pub const QUEUE_ROOM: usize = 16;
 
 /// The queue between the network and one decoder. The network side holds it in an
@@ -38,9 +43,9 @@ pub struct FrameQueue {
 
 struct Queued {
     frames: VecDeque<Frame>,
-    /// The decoder took a frame: it has started, and frames past [`MAX_WAITING`] mean
-    /// it is behind.
-    taking: bool,
+    /// The decoder took a frame with no more than [`MAX_WAITING`] left: from now on a
+    /// frame waiting longer than [`MAX_AGE`] means it is behind.
+    caught_up: bool,
     /// The network side is gone: no frame comes any more.
     closed: bool,
 }
@@ -67,7 +72,7 @@ impl Default for FrameQueue {
         Self {
             queued: Mutex::new(Queued {
                 frames: VecDeque::with_capacity(QUEUE_ROOM),
-                taking: false,
+                caught_up: false,
                 closed: false,
             }),
             decoder: OnceLock::new(),
@@ -97,17 +102,21 @@ impl FrameQueue {
     }
 
     /// Queues `frame` (which came at `now`) and wakes the decoder, unless the decoder
-    /// is behind.
-    pub fn push(&self, frame: Frame, _now: Instant) -> Pushed {
+    /// is behind. A keyframe always goes in, in place of the frames still waiting:
+    /// they came before it and are of no use once it is decoded.
+    pub fn push(&self, frame: Frame, now: Instant) -> Pushed {
         {
             let mut q = self.lock();
-            let room = if q.taking && !frame.keyframe {
-                MAX_WAITING
+            if frame.keyframe {
+                q.frames.clear();
             } else {
-                QUEUE_ROOM
-            };
-            if q.frames.len() >= room {
-                return Pushed::Behind;
+                let late = q.caught_up
+                    && q.frames
+                        .front()
+                        .is_some_and(|f| now.saturating_duration_since(f.received) > MAX_AGE);
+                if late || q.frames.len() >= QUEUE_ROOM {
+                    return Pushed::Behind;
+                }
             }
             q.frames.push_back(frame);
         }
@@ -136,7 +145,9 @@ impl Frames {
         let mut q = self.0.lock();
         match q.frames.pop_front() {
             Some(frame) => {
-                q.taking = true;
+                if q.frames.len() <= MAX_WAITING {
+                    q.caught_up = true;
+                }
                 Taken::Frame(frame)
             }
             None if q.closed => Taken::Ended,
@@ -276,6 +287,65 @@ mod tests {
         assert!(matches!(frames.take(), Taken::Ended));
         drop(frames);
         assert!(queue.abandoned());
+    }
+
+    /// While the decoder starts, frames pile up without being dropped; once it caught
+    /// up, a frame waiting over 50 ms when the next comes means it is behind. A burst
+    /// of frames that came together is not.
+    #[test]
+    fn behind_is_by_age_once_the_decoder_caught_up() {
+        let t = Instant::now();
+        let queue = Arc::new(FrameQueue::default());
+        let frames = queue.frames();
+        // Its decoder is still starting: old frames wait, up to the room there is.
+        assert_eq!(queue.push(frame(0, true, t), t), Pushed::Queued);
+        let late = t + ms(200);
+        for seq in 1..QUEUE_ROOM as u32 {
+            assert_eq!(queue.push(frame(seq, false, t), late), Pushed::Queued);
+        }
+        assert_eq!(
+            queue.push(frame(16, false, late), late),
+            Pushed::Behind,
+            "full"
+        );
+        // It takes them; caught up once three or fewer wait.
+        for _ in 0..QUEUE_ROOM - MAX_WAITING {
+            assert!(matches!(frames.take(), Taken::Frame(_)));
+        }
+        assert_eq!(frames.waiting(), MAX_WAITING);
+        // The oldest waiting came at `t`: 200 ms ago.
+        assert_eq!(queue.push(frame(17, false, late), late), Pushed::Behind);
+        assert_eq!(seqs(&frames).len(), MAX_WAITING);
+        // A burst: eight frames at once, none old.
+        let burst = t + ms(300);
+        for seq in 20..28 {
+            assert_eq!(queue.push(frame(seq, false, burst), burst), Pushed::Queued);
+        }
+        // 40 ms on, still in time; 60 ms on, behind.
+        assert_eq!(
+            queue.push(frame(28, false, burst), burst + ms(40)),
+            Pushed::Queued
+        );
+        assert_eq!(
+            queue.push(frame(29, false, burst), burst + ms(60)),
+            Pushed::Behind
+        );
+    }
+
+    /// A keyframe never waits behind frames it makes useless.
+    #[test]
+    fn a_keyframe_takes_the_place_of_the_frames_waiting() {
+        let t = Instant::now();
+        let queue = Arc::new(FrameQueue::default());
+        let frames = queue.frames();
+        for seq in 0..4 {
+            queue.push(frame(seq, seq == 0, t), t);
+        }
+        assert!(matches!(frames.take(), Taken::Frame(_)));
+        // Long after: the decoder is behind, yet the keyframe goes in, alone.
+        let later = t + ms(500);
+        assert_eq!(queue.push(frame(9, true, later), later), Pushed::Queued);
+        assert_eq!(seqs(&frames), [9]);
     }
 
     /// The PC asked once ignores the ask (it answered another just before): while
