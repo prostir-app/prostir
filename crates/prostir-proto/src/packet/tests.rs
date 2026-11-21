@@ -470,3 +470,35 @@ fn random_packets_come_back_or_fail_never_panic() {
         "{whole} whole, {refused} refused"
     );
 }
+
+/// A body handed back takes the next message that fits in it, in its memory; one too
+/// small for it is left for a later one, and a message's body comes back whole once
+/// sent.
+#[test]
+fn bodies_handed_back_are_filled_again() {
+    let mut asm = Assembler::new(ANY, none);
+    let slice: Vec<u8> = (0..1920).map(|i| (i % 251) as u8).collect();
+    let records = packets(3, Encoded::new(12, &[], slice.clone()).unwrap(), FRAGMENT);
+    let first = assemble(&mut asm, &records).unwrap().remove(0);
+    let at = first.body.as_ptr();
+    asm.recycle(first.body);
+    // A small spare body too, which the next slice does not fit in.
+    asm.recycle(Vec::with_capacity(16));
+    let again = assemble(&mut asm, &records).unwrap().remove(0);
+    assert_eq!(again.body, slice);
+    assert_eq!(again.body.as_ptr(), at, "the same memory");
+    // The small one is taken by a small message.
+    let small = packets(3, Encoded::new(12, &[], vec![1, 2, 3]).unwrap(), FRAGMENT);
+    let got = assemble(&mut asm, &small).unwrap().remove(0);
+    assert_eq!(got.body, [1, 2, 3]);
+    assert!(got.body.capacity() >= 16);
+    // Too many handed back: the rest are let go.
+    for _ in 0..20 {
+        asm.recycle(Vec::with_capacity(8));
+    }
+    assert_eq!(asm.spare.len(), SPARE_BODIES);
+    // What was sent comes back as it went.
+    let mut out = Outgoing::new(1, Encoded::new(140, &[7], slice.clone()).unwrap());
+    while !out.send_next(&mut Capture::default(), FRAGMENT).unwrap() {}
+    assert_eq!(out.into_message().into_body(), slice);
+}

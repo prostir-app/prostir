@@ -193,6 +193,11 @@ impl Encoded {
         w.write_all(&self.body)
     }
 
+    /// Its body back, once it is sent, to be filled again (see [`Outgoing::into_message`]).
+    pub fn into_body(self) -> Vec<u8> {
+        self.body
+    }
+
     /// Its bytes from `start`, `n` of them, as two slices.
     fn range(&self, start: usize, n: usize) -> [&[u8]; 2] {
         let head = &self.head[..usize::from(self.head_len)];
@@ -219,6 +224,12 @@ impl Outgoing {
 
     pub fn lane(&self) -> u8 {
         self.lane
+    }
+
+    /// The message, once sent (or not): its body can be filled again, so a stream of
+    /// messages of one size (the microphone's slices) needs no new memory for each.
+    pub fn into_message(self) -> Encoded {
+        self.msg
     }
 
     /// Sends its next packet, of at most `fragment` body bytes (but never so few that
@@ -323,7 +334,13 @@ pub struct Assembler {
     limits: Limits,
     /// For a tag, how many first bytes of the payload to keep apart from the body.
     head: fn(u8) -> usize,
+    /// Bodies handed back once their messages were used (see [`Assembler::recycle`]),
+    /// taken for the next messages that fit in them.
+    spare: Vec<Vec<u8>>,
 }
+
+/// How many bodies handed back an assembler keeps at most.
+const SPARE_BODIES: usize = 8;
 
 impl Assembler {
     /// Accepts what `limits` allows; `head` says for each tag how many first bytes of
@@ -336,6 +353,26 @@ impl Assembler {
             open_bytes: 0,
             limits,
             head,
+            spare: Vec::new(),
+        }
+    }
+
+    /// Hands back the body of a message used up (a slice of sound played): a next
+    /// message it is large enough for is put together in it, so a steady stream of
+    /// messages of one size needs no new memory for each. Kept only while there are
+    /// few, and only a body no larger than the largest message allowed.
+    pub fn recycle(&mut self, mut body: Vec<u8>) {
+        if self.spare.len() < SPARE_BODIES && body.capacity() <= self.limits.message as usize {
+            body.clear();
+            self.spare.push(body);
+        }
+    }
+
+    /// A body for `len` bytes: a spare one it fits in, else a new one of that size.
+    fn body_for(&mut self, len: usize) -> Vec<u8> {
+        match self.spare.iter().position(|b| b.capacity() >= len) {
+            Some(i) => self.spare.swap_remove(i),
+            None => Vec::with_capacity(len),
         }
     }
 
@@ -399,13 +436,15 @@ impl Assembler {
                 });
             }
             let head_want = (self.head)(tag).min(MAX_HEAD - MESSAGE_HEADER).min(len);
+            // Once, at the length the header says (checked against the limit), or a
+            // body handed back that it fits in.
+            let body = self.body_for(len - head_want);
             let mut partial = Partial {
                 msg: Message {
                     tag,
                     head: [0; MAX_HEAD],
                     head_len: 0,
-                    // Once, at the length the header says (checked against the limit).
-                    body: Vec::with_capacity(len - head_want),
+                    body,
                 },
                 len,
                 got: 0,

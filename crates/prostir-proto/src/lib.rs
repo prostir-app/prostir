@@ -701,6 +701,10 @@ impl HostMsg {
 }
 
 impl ClientMsg {
+    /// The tag of [`ClientMsg::Up`] as encoded: a sent slice's body can be told by it
+    /// and filled again (see [`Encoded::into_body`]).
+    pub const UP_TAG: u8 = tag::UP;
+
     /// What the PC accepts from a headset: before the session, or in it (`opened`).
     pub fn limits(opened: bool) -> Limits {
         let lanes = if opened { SESSION_LANES } else { 1 };
