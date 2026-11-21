@@ -40,9 +40,11 @@ const FRAME_RATE: i32 = 60;
 
 /// Buffers captured into in turn; the encoder holds at most a few at a time.
 const SLOTS: usize = 4;
-/// With nothing changing on screen, the last frame is sent again this often (the
-/// headset treats 10 s of silence as a dead link, PipeWire in KDE does the same).
-const KEEPALIVE: Duration = Duration::from_millis(500);
+/// With nothing changing on screen, the last frame is sent again this often, as
+/// PipeWire in KDE does: the session needs none of it (pings keep it), but it pushes
+/// out the one keyframe a still screen gets, and each costs an encoding here and a
+/// decoding in the headset.
+const KEEPALIVE: Duration = Duration::from_secs(2);
 
 /// The encoder input for output `name`: an `appsrc` the capture pushes frames into.
 pub fn input(name: &str) -> Input {

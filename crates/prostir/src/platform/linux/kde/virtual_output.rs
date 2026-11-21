@@ -42,6 +42,13 @@ use wayland_protocols_plasma::screencast::v1::client::{
 /// Pointer mode from the protocol: render the cursor into the stream.
 const POINTER_EMBEDDED: u32 = 2;
 
+/// How often the last frame of a still screen is sent again, in ms. The session
+/// needs none of it (pings keep it), and with the frame rate told (see
+/// [`VirtualOutput::input`]) no encoder holds a frame back waiting for the next; it
+/// is what still pushes out the one keyframe a still screen gets, and each costs an
+/// encoding on the PC and a decoding and a wake-up of the radio in the headset.
+const KEEPALIVE_MS: u32 = 2000;
+
 /// The refresh rate in mHz of an output whose rate KWin did not say.
 const DEFAULT_REFRESH: u32 = 60_000;
 
@@ -633,8 +640,11 @@ impl VirtualOutput {
     /// come only when something changes.
     pub fn input(&self) -> Input {
         let node = self.node;
+        // On a still screen KWin sends nothing; PipeWire's source repeats the last
+        // frame every 2 s (see `KEEPALIVE_MS`).
         let mut source = format!(
-            "pipewiresrc path={node} do-timestamp=true keepalive-time=500 always-copy=false"
+            "pipewiresrc path={node} do-timestamp=true keepalive-time={KEEPALIVE_MS} \
+             always-copy=false"
         );
         if gstreamer::ElementFactory::find("capssetter").is_some() {
             let _ = write!(
