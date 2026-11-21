@@ -25,6 +25,7 @@ pub mod presence;
 pub mod profiles;
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 pub mod selftest;
+pub mod session;
 pub mod settings;
 pub mod store;
 pub mod ui;

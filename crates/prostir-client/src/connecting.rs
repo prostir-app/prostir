@@ -1,6 +1,6 @@
-//! When the network thread tries to connect again: after a session ends, and how often
-//! it probes the local network for a PC that does not announce itself. Built and
-//! tested on any system.
+//! When the search tries to connect again (see `crate::session`): after a session ends,
+//! and how often it probes the local network for a PC that does not announce itself.
+//! Built and tested on any system.
 
 #![forbid(unsafe_code)]
 
@@ -25,6 +25,9 @@ pub struct Ended {
     pub refused: Option<Instant>,
     /// The PC ended the session on purpose, for this reason.
     pub goodbye: Option<PcGoodbye>,
+    /// The PC speaks another protocol version: nothing changes until one side is
+    /// updated.
+    pub incompatible: bool,
 }
 
 impl Ended {
