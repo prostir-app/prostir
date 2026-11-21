@@ -306,6 +306,8 @@ rest-hour = An hour in the headset: time for a short break
 toast-screenshot-saved = Screenshot saved: { $path }
 # $name (String): the profile, as the menu names it ("Profile 2")
 toast-profile-saved = Saved to "{ $name }"
+# $name (String): the profile, as the menu names it ("Profile 2")
+toast-profile-switched = Switched to "{ $name }"
 # $error (String): what went wrong, as the system says it
 error-send = Could not send to the PC: { $error }
 error-not-connected = Not connected to a PC

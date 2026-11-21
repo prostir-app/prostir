@@ -236,6 +236,25 @@ pub fn language() -> Option<Lang> {
     lang
 }
 
+/// Whether the screen is on for the user (`PowerManager.isInteractive`): false once
+/// the system goes to sleep (its power button, or taken off for long enough). One
+/// call into Android: asked only while the app is put away, never in a drawn frame.
+pub fn interactive() -> Option<bool> {
+    with_app_context(|env, context| {
+        let name = env.new_string("power")?;
+        let manager = env
+            .call_method(
+                context,
+                jni_str!("getSystemService"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+                &[JValue::Object(&name)],
+            )?
+            .l()?;
+        env.call_method(&manager, jni_str!("isInteractive"), jni_sig!("()Z"), &[])?
+            .z()
+    })
+}
+
 /// The headset's battery: percent and whether it is charging (`BatteryManager`).
 pub fn battery() -> Option<(u8, bool)> {
     with_app_context(|env, context| {

@@ -126,9 +126,10 @@ the side of the monitor whose window is playing it, and stays there as you turn 
 head. The PC finds the app that is playing through PipeWire and its window through
 Hyprland or KWin. The whole mix moves, not each app on its own.
 
-When you take the headset off, the PC stops encoding right away. After 5 seconds (at
-once when the headset goes to sleep) it removes the virtual monitors, so windows, the
-panel, sound and microphone go back to the laptop. Put the headset back on and everything comes back.
+When you take the headset off, the PC stops encoding right away. After 5 seconds
+(about a second when the headset goes to sleep) it removes the virtual monitors, so
+windows, the panel, sound and microphone go back to the laptop. Put the headset back
+on and everything comes back.
 
 The background can be black, your room through the passthrough cameras, one of four
 built-in panoramas, or a photo of your own. Your hands can be shown (handy over a

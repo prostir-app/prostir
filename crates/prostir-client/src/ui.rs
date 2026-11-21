@@ -443,6 +443,22 @@ pub enum Action {
     Close,
 }
 
+impl Action {
+    /// Changes the setup by hand: the monitors are no longer as the active profile has
+    /// them, so no profile is the active one after it.
+    pub fn leaves_profile(&self) -> bool {
+        matches!(
+            self,
+            Action::Add { .. }
+                | Action::Remove(_)
+                | Action::MakePrimary(_)
+                | Action::Move { .. }
+                | Action::SetMirror(_)
+                | Action::Preset(_)
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Style {
     Normal,
@@ -4014,14 +4030,43 @@ mod tests {
             )
         );
 
-        // Changed by hand: no profile is the active one.
+        // Switching to a profile or saving one keeps it; a layout chosen, a monitor
+        // moved, added or removed by hand leaves it, and then none is marked.
         st.confirm_save = None;
-        st.active_profile = None;
-        assert!(
-            profile_buttons(&st)
-                .iter()
-                .all(|(_, style, _)| *style == Style::Normal)
-        );
+        for keeps in [
+            Action::ApplyProfile(0),
+            Action::SaveProfile(1),
+            Action::Recenter,
+        ] {
+            assert!(!keeps.leaves_profile(), "{keeps:?}");
+        }
+        let by_hand = [
+            Action::Preset(Preset::Wall),
+            Action::Move {
+                id: k(102),
+                delta: 1,
+            },
+            Action::Add {
+                width: 1920,
+                height: 1080,
+            },
+            Action::Remove(k(102)),
+            Action::MakePrimary(k(103)),
+            Action::SetMirror(true),
+        ];
+        for action in by_hand {
+            let mut st = st.clone();
+            assert!(action.leaves_profile(), "{action:?}");
+            if action.leaves_profile() {
+                st.active_profile = None;
+            }
+            assert!(
+                profile_buttons(&st)
+                    .iter()
+                    .all(|(_, style, _)| *style == Style::Normal),
+                "after {action:?}"
+            );
+        }
     }
 
     #[test]

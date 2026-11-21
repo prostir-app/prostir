@@ -73,9 +73,9 @@ const LOOK_AGAIN: Duration = Duration::from_secs(2);
 /// Taken off for this long (awake: it may be put on again soon), the headset counts
 /// as gone.
 const TAKEN_OFF_GRACE: Duration = Duration::from_secs(5);
-/// Asleep for this long (it said `Asleep`: the power button, or the system put the app
-/// away), the headset counts as gone: at the next housekeeping, within half a second.
-const ASLEEP_GRACE: Duration = Duration::ZERO;
+/// Asleep for this long (it said `Asleep`: its power button), the headset counts as
+/// gone: about a second, so a tap that wakes it again at once keeps the session.
+const ASLEEP_GRACE: Duration = Duration::from_secs(1);
 
 /// Events handled one after the other before the next pass of the control loop, at
 /// most for this long: what a pass costs never adds up behind a stream of small

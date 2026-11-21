@@ -73,7 +73,8 @@ pub fn compatible(version: u32, min: u32) -> bool {
 }
 
 /// The revision of the messages on a development branch, raised with every change of
-/// them there. Two development builds both say [`PROTOCOL_VERSION`] but may read
+/// them there that an older development build cannot skip (a message it knows read
+/// differently; a new message it skips is not one). Two development builds both say [`PROTOCOL_VERSION`] but may read
 /// different messages: the revision in their app versions ([`app_version`]) lets the
 /// PC turn a build of another revision away with a clear word instead of a session
 /// that fails to parse. `None` in released builds, where the protocol version alone

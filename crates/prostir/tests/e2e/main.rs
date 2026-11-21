@@ -505,7 +505,7 @@ fn a_headset_put_to_sleep_ends_the_session_at_once() {
     headset.wait_closed(Duration::from_secs(5)).unwrap();
     let gone = slept.elapsed();
     assert!(
-        gone < Duration::from_millis(2500),
+        gone >= Duration::from_millis(900) && gone < Duration::from_secs(4),
         "ended {gone:?} after it slept"
     );
     assert_eq!(
@@ -522,6 +522,21 @@ fn a_headset_put_to_sleep_ends_the_session_at_once() {
     let mut back = connect(&pc, &mut keys);
     back.wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
+}
+
+/// A tap of the power button that wakes the headset again at once: asleep and worn
+/// again within the second keeps the session; taken off after that, it gets the grace
+/// of one taken off while awake, not the short one of one asleep.
+#[test]
+fn asleep_and_woken_at_once_keeps_the_session() {
+    let (_dir, mut pc, _keys, mut headset) = session("asleep-woken", &Options::default());
+    headset.sleep().unwrap();
+    headset.send(&worn(true)).unwrap();
+    pc.wait_log(SOON, "the headset went to sleep");
+    headset.send(&worn(false)).unwrap();
+    headset.take_for(Duration::from_secs(3)).unwrap();
+    assert_eq!(headset.view().goodbye, None, "still in the session");
+    assert_eq!(pc.count_log("headset asleep"), 0);
 }
 
 /// Taken off while awake, the headset may be put on again soon: the session goes on

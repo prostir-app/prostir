@@ -7,7 +7,7 @@
 )]
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use android_activity::AndroidApp;
@@ -43,6 +43,9 @@ pub struct Mic {
     /// Access to the microphone was refused: no more system prompts each time a PC
     /// app starts recording, and the menu says where to allow it.
     denied: AtomicBool,
+    /// How many times the system was asked for access: its prompt pauses the app,
+    /// which the main loop must not take for the user leaving.
+    asks: AtomicU32,
     /// The running activity, which shows the system's prompt.
     app: AndroidApp,
 }
@@ -55,6 +58,7 @@ impl Mic {
             allowed_by_system: AtomicU8::new(permission::UNKNOWN),
             allowed: AtomicBool::new(allowed),
             denied: AtomicBool::new(false),
+            asks: AtomicU32::new(0),
             app,
         }
     }
@@ -87,11 +91,23 @@ impl Mic {
         self.denied.load(Ordering::Relaxed)
     }
 
+    /// How many times the system was asked for access so far (see `asks`).
+    pub fn asks(&self) -> u32 {
+        self.asks.load(Ordering::Relaxed)
+    }
+
+    /// Shows the system's prompt (counted first, so the main loop knows the pause
+    /// that follows is the prompt's).
+    fn ask(&self) {
+        self.asks.fetch_add(1, Ordering::Relaxed);
+        request_permission(&self.app);
+    }
+
     /// The user pressed "Ask again": show the system prompt now.
     pub fn ask_again(&self) {
         self.denied.store(false, Ordering::Relaxed);
         if !has_permission() {
-            request_permission(&self.app);
+            self.ask();
         }
     }
 
@@ -115,7 +131,7 @@ impl Mic {
         }
         self.allowed_by_system
             .store(permission::ASKING, Ordering::Relaxed);
-        request_permission(&self.app);
+        self.ask();
         let until = Instant::now() + Duration::from_secs(60);
         while Instant::now() < until && !stop.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(500));
@@ -124,6 +140,14 @@ impl Mic {
                     .store(permission::GRANTED, Ordering::Relaxed);
                 return true;
             }
+        }
+        if stop.load(Ordering::Relaxed) {
+            // Not an answer: the recording was no longer wanted (the session ended,
+            // the switch went off). The next recording looks again.
+            info!("stopped waiting for the microphone permission");
+            self.allowed_by_system
+                .store(permission::UNKNOWN, Ordering::Relaxed);
+            return false;
         }
         warn!("no microphone permission");
         self.allowed_by_system

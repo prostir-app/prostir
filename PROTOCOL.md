@@ -841,9 +841,11 @@ Without a goodbye, implementation-defined details of the current apps:
 - Host: TCP keepalive (idle 4 s, interval 2 s, 3 probes) and `TCP_USER_TIMEOUT` 10 s
   also notice a headset that vanished, already while pairing.
 - Host: a headset reported as not worn (`Presence{worn: false}`) for 5 s has its
-  session ended (with goodbye `2`); one that also said `Asleep` at once (at the next
-  housekeeping, every 0.5 s). The other sessions go on. When it was the last
-  one, the host then removes its virtual monitors until a headset connects again.
+  session ended (with goodbye `2`). A headset that also said `Asleep` (and has not
+  said `Presence{worn: true}` since) has it ended after 1 s instead. The host looks
+  every 0.5 s, so either may take up to 0.5 s longer. The other sessions go on. When
+  it was the last one, the host then removes its virtual monitors until a headset
+  connects again.
 - Host: after a session it keeps the virtual monitors for 30 s (`--linger`).
 
 ### Forward compatibility
