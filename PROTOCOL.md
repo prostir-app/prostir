@@ -1177,7 +1177,14 @@ PC sound (`Audio`, lane 1) is 48 kHz (`AUDIO_RATE`), 2 channels (`AUDIO_CHANNELS
 interleaved signed 16-bit little-endian, with no header or timestamp: each message is a
 whole number of sample frames, to be played in arrival order. Slices are 10 ms in the
 current host (1920 bytes), but the size is implementation-defined and a receiver must
-accept any length. It flows while the headset is worn and `Sound.to_headset` is on.
+accept any length. It flows while the headset is worn and `Sound.to_headset` is on,
+and while there is sound: after 200 ms of slices that are all zero (the PC plays
+nothing) the current host sends no more until a slice is not silent, and that one goes
+at once, after two slices of silence (20 ms) that fill the player's empty buffer, so
+the sound does not start with a click. A gap in `Audio` is silence to play, not a
+fault; the receiver needs no notice of it (the current client's player counts the
+gap as one underrun in its log, which it is not). Clients from 0.1 on behave so already: the player
+waits for the next slice, and its device plays nothing meanwhile.
 
 ### Up streams: the microphone
 

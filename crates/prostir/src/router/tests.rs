@@ -530,3 +530,39 @@ fn a_keyframe_going_out_answers_a_waiting_request() {
     assert_eq!(router.pending_keyframes(), 0, "answered by the keyframe");
     assert!(!frame(&router, s, false));
 }
+
+/// Sound stops going out after 200 ms of silence, and comes again with the first
+/// slice that is not silent.
+#[test]
+fn silence_stops_after_200_ms_and_sound_comes_at_once() {
+    let router = Router::new();
+    let outbox = attach(&router, 1, headset());
+    let audio = |outbox: &Outbox| {
+        sent(outbox)
+            .iter()
+            .filter(|m| matches!(m, HostMsg::Audio { .. }))
+            .count()
+    };
+    let silence = vec![0u8; 1920];
+    let mut sound = vec![0u8; 1920];
+    sound[1919] = 1;
+    for _ in 0..5 {
+        router.send_audio(sound.clone());
+    }
+    assert_eq!(audio(&outbox), 5);
+    // The outbox keeps 8 slices at most: read as they come.
+    let mut got = 0;
+    for _ in 0..50 {
+        router.send_audio(silence.clone());
+        got += audio(&outbox);
+    }
+    assert_eq!(got, 20, "200 ms of silence, then nothing");
+    router.send_audio(sound.clone());
+    assert_eq!(
+        audio(&outbox),
+        3,
+        "sound again at once, after 20 ms of silence"
+    );
+    router.send_audio(silence);
+    assert_eq!(audio(&outbox), 1, "silence after sound goes on for a while");
+}

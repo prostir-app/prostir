@@ -27,6 +27,58 @@ use crate::screen::ScreenId;
 /// How often the router logs what each stream sent (see [`Router::report`]).
 const REPORT_EVERY: Duration = Duration::from_secs(10);
 
+/// Slices of sound that are nothing but zeros, in a row, after which no more go out:
+/// 200 ms of silence. The first slice with sound goes at once, so nothing waits for
+/// it; the headset plays a gap as silence.
+const SILENT_SLICES: u32 = 20;
+/// Slices of silence sent right before the sound that ends a gap: the headset's
+/// player starts from an empty buffer, and these fill it, so the sound does not
+/// start with a click or run dry at once.
+const PRIME_SLICES: u32 = 2;
+
+/// Whether the sound is worth sending: not after [`SILENT_SLICES`] of silence.
+#[derive(Debug, Default)]
+struct Quiet {
+    /// Slices of silence in a row.
+    zeros: u32,
+    /// Slices not sent since the last report, being silence.
+    held: u32,
+}
+
+/// What goes out of a slice of sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// The slice, as it is.
+    Send,
+    /// This many slices of silence first, then the slice: sound after a gap.
+    AfterSilence(u32),
+    /// Nothing: silence after silence.
+    Hold,
+}
+
+impl Quiet {
+    /// What goes out of `pcm`.
+    fn pass(&mut self, pcm: &[u8]) -> Pass {
+        // No early exit: the whole slice is looked at in wide steps, about 100 ns.
+        if pcm.iter().fold(0, |a, b| a | b) != 0 {
+            let gap = self.zeros > SILENT_SLICES;
+            self.zeros = 0;
+            return if gap {
+                Pass::AfterSilence(PRIME_SLICES)
+            } else {
+                Pass::Send
+            };
+        }
+        self.zeros = self.zeros.saturating_add(1);
+        if self.zeros <= SILENT_SLICES {
+            Pass::Send
+        } else {
+            self.held += 1;
+            Pass::Hold
+        }
+    }
+}
+
 /// A keyframe is asked of an encoder at most this often, whichever headset waits.
 const KEYFRAME_EVERY: Duration = Duration::from_millis(300);
 /// A headset that keeps losing frames while others get the same stream asks for a
@@ -326,6 +378,8 @@ struct RouterInner {
     /// Every session's headset, by the session's number.
     receivers: BTreeMap<SessionId, Receiver>,
     report: Period,
+    /// The PC's sound, held back while silent.
+    quiet: Quiet,
 }
 
 impl RouterInner {
@@ -379,6 +433,7 @@ impl Router {
                 streams: BTreeMap::new(),
                 receivers: BTreeMap::new(),
                 report: Period::new(REPORT_EVERY),
+                quiet: Quiet::default(),
             }),
             failed: AtomicBool::new(false),
             broken: Mutex::new(Vec::new()),
@@ -601,12 +656,13 @@ impl Router {
             stats: crate::outbox::OutboxStats,
             streams: Vec<(ScreenId, String, Histogram, u32)>,
         }
-        let (window, encoded, lines) = {
+        let (window, encoded, silent, lines) = {
             let mut inner = self.inner.lock().unwrap();
             let RouterInner {
                 streams,
                 receivers,
                 report,
+                quiet,
             } = &mut *inner;
             if receivers.is_empty() {
                 return;
@@ -615,6 +671,7 @@ impl Router {
             let Some(window) = report.due(now) else {
                 return;
             };
+            let silent = std::mem::take(&mut quiet.held);
             // What each encoder made, whoever got it.
             let encoded: Vec<(String, StreamStats)> = streams
                 .values_mut()
@@ -641,7 +698,7 @@ impl Router {
                         .collect(),
                 })
                 .collect();
-            (window, encoded, lines)
+            (window, encoded, silent, lines)
         };
         // Logged without the lock, which every encoded frame takes.
         for (name, stats) in encoded {
@@ -675,9 +732,10 @@ impl Router {
                     video.summary(window),
                 );
             }
-            if stats.audio_wait.count() > 0 || stats.audio_dropped > 0 {
+            if stats.audio_wait.count() > 0 || stats.audio_dropped > 0 || silent > 0 {
                 info!(
-                    "sound: sent {} slices, waited in outbox {}; dropped {}{whose}",
+                    "sound: sent {} slices, waited in outbox {}; dropped {}; {silent} of \
+                     silence not sent{whose}",
                     stats.audio_wait.count(),
                     stats.audio_wait.summary_ms(),
                     stats.audio_dropped
@@ -924,9 +982,22 @@ impl Router {
     }
 
     /// Forwards a slice of PC sound to every headset on the head; dropped for one
-    /// whose network is backed up (a tiny gap in sound beats growing latency).
+    /// whose network is backed up (a tiny gap in sound beats growing latency). After
+    /// 200 ms of silence nothing goes until there is sound again.
     pub fn send_audio(&self, pcm: Vec<u8>) {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
+        let primed = match inner.quiet.pass(&pcm) {
+            Pass::Hold => return,
+            Pass::Send => 0,
+            Pass::AfterSilence(n) => n,
+        };
+        for r in inner.receivers.values().filter(|r| r.worn) {
+            for _ in 0..primed {
+                r.tx.audio(HostMsg::Audio {
+                    pcm: vec![0; pcm.len()],
+                });
+            }
+        }
         let mut worn = inner.receivers.values().filter(|r| r.worn).peekable();
         let mut pcm = Some(pcm);
         while let Some(r) = worn.next() {
