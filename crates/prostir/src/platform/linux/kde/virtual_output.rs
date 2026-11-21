@@ -13,6 +13,7 @@
 //! our own stream, connected again, makes KWin put the created size back.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -41,6 +42,20 @@ use wayland_protocols_plasma::screencast::v1::client::{
 /// Pointer mode from the protocol: render the cursor into the stream.
 const POINTER_EMBEDDED: u32 = 2;
 
+/// The refresh rate in mHz of an output whose rate KWin did not say.
+const DEFAULT_REFRESH: u32 = 60_000;
+
+/// A refresh rate in mHz as a frame rate for GStreamer: `60/1`, `144/1`, `59940/1000`
+/// reduced to `2997/50`.
+fn frame_rate(mhz: u32) -> String {
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let mhz = if mhz == 0 { DEFAULT_REFRESH } else { mhz };
+    let d = gcd(mhz, 1000);
+    format!("{}/{}", mhz / d, 1000 / d)
+}
+
 #[derive(Default)]
 struct StreamState {
     node: Option<u32>,
@@ -57,6 +72,10 @@ struct OutputInfo {
     mode: Option<(u32, u32)>,
     /// Current mode announced since that `done`.
     next_mode: Option<(u32, u32)>,
+    /// The current mode's refresh rate in mHz, as of the last `done`, and as announced
+    /// since.
+    refresh: Option<u32>,
+    next_refresh: Option<u32>,
     /// What the display says it is (its EDID, as KWin passes it on).
     make: String,
     model: String,
@@ -77,13 +96,15 @@ impl OutputInfo {
                 flags: WEnum::Value(flags),
                 width,
                 height,
-                ..
+                refresh,
             } if flags.contains(wl_output::Mode::Current) => {
                 self.next_mode = u32::try_from(width).ok().zip(u32::try_from(height).ok());
+                self.next_refresh = u32::try_from(refresh).ok().filter(|r| *r > 0);
             }
             wl_output::Event::Done => {
                 if let Some(mode) = self.next_mode.take() {
                     self.mode = Some(mode);
+                    self.refresh = self.next_refresh.take();
                 }
                 // xdg-output 3 and later: its sizes count with the output's `done`.
                 if let Some(size) = self.next_logical.take() {
@@ -394,14 +415,14 @@ impl Screencast {
     /// KWin streams a given display only once per connection, so use a fresh
     /// [`Screencast`] for every mirror.
     pub fn mirror(&self, number: u32, output_name: &str) -> Result<VirtualOutput> {
-        let output = self
+        let (output, refresh) = self
             .shared
             .outputs
             .lock()
             .unwrap()
             .values()
             .find(|(_, info)| info.name.as_deref() == Some(output_name))
-            .map(|(o, _)| o.clone())
+            .map(|(o, info)| (o.clone(), info.refresh))
             .with_context(|| format!("display {output_name} is gone"))?;
         self.shared
             .streams
@@ -417,6 +438,7 @@ impl Screencast {
             stream,
             output_name.to_owned(),
             None,
+            refresh.unwrap_or(DEFAULT_REFRESH),
             Duration::from_secs(2),
         )?;
         info!(
@@ -432,6 +454,7 @@ impl Screencast {
         stream: ZkdeScreencastStreamUnstableV1,
         name: String,
         made: Option<(u32, u32)>,
+        refresh: u32,
         timeout: Duration,
     ) -> Result<VirtualOutput> {
         self.conn.flush()?;
@@ -470,6 +493,7 @@ impl Screencast {
             node,
             name,
             made,
+            refresh,
             stream,
             conn: self.conn.clone(),
             shared: self.shared.clone(),
@@ -516,6 +540,7 @@ impl Screencast {
             stream,
             format!("Virtual-Prostir-{number}"),
             Some((spec.w, spec.h)),
+            u32::from(spec.refresh) * 1000,
             Duration::from_secs(10),
         )?;
         info!("Prostir-{number}: {spec}, PipeWire node {}", output.node);
@@ -551,6 +576,8 @@ pub struct VirtualOutput {
     /// Pixel size KWin made it with; `None` for a mirrored real display, whose size
     /// streams do not change.
     made: Option<(u32, u32)>,
+    /// Its refresh rate in mHz: what the encoder is told the frame rate is.
+    refresh: u32,
     stream: ZkdeScreencastStreamUnstableV1,
     conn: Connection,
     shared: Arc<Shared>,
@@ -598,12 +625,34 @@ impl VirtualOutput {
     }
 
     /// The encoder reads the stream from KWin's PipeWire node.
+    ///
+    /// KWin's stream says no frame rate (`0/1`, frames come when the screen changes),
+    /// and an encoder without one budgets badly: VA-API spends about twice the chosen
+    /// bitrate on a busy screen, x264 holds each frame back until the next one comes.
+    /// So the stream is told the output's refresh rate (`capssetter`); frames still
+    /// come only when something changes.
     pub fn input(&self) -> Input {
         let node = self.node;
+        let mut source = format!(
+            "pipewiresrc path={node} do-timestamp=true keepalive-time=500 always-copy=false"
+        );
+        if gstreamer::ElementFactory::find("capssetter").is_some() {
+            let _ = write!(
+                source,
+                " ! capssetter caps=\"video/x-raw,framerate={}\"",
+                frame_rate(self.refresh)
+            );
+        } else {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                warn!(
+                    "capssetter (gst-plugins-good) is missing: the encoder does not know \
+                     the frame rate and may spend more than the bitrate"
+                );
+            });
+        }
         Input {
-            source: format!(
-                "pipewiresrc path={node} do-timestamp=true keepalive-time=500 always-copy=false"
-            ),
+            source,
             label: format!("node {node}"),
         }
     }
@@ -699,6 +748,18 @@ mod tests {
         });
         out.on_xdg_event(&zxdg_output_v1::Event::Done);
         assert_eq!(out.scale(), Some(100));
+    }
+
+    #[test]
+    fn the_frame_rate_of_a_refresh_rate() {
+        assert_eq!(frame_rate(60_000), "60/1");
+        assert_eq!(frame_rate(144_000), "144/1");
+        assert_eq!(frame_rate(59_940), "2997/50");
+        assert_eq!(frame_rate(0), "60/1");
+        let mut out = info(vec![mode(2560, 1440, wl_output::Mode::Current)]);
+        assert_eq!(out.refresh, None, "not done");
+        out.on_event(wl_output::Event::Done);
+        assert_eq!(out.refresh, Some(60_000));
     }
 
     #[test]
