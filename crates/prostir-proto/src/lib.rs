@@ -443,6 +443,11 @@ wire_enum! {
         /// The headset closes the session on purpose, for `reason` (a
         /// [`HeadsetGoodbye`] code); the connection closes after it.
         130 => Goodbye { reason: u8 },
+        /// Right after [`Presence`] `worn: false`: the headset went to sleep, or the
+        /// system put the app away, so it does not come back by itself soon. The PC
+        /// may end the session at once instead of waiting for it; the next `worn: true`
+        /// undoes it. An older PC skips it and waits as for any headset taken off.
+        142 => Asleep,
     }
 }
 

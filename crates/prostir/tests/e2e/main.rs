@@ -23,7 +23,7 @@ mod start;
 mod window;
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pc::{Options, Pc, TestDir};
 use prostir_proto::request::{Outcome, Primary, Request};
@@ -433,7 +433,7 @@ fn a_headset_hears_only_what_it_can_show() {
     assert!(!limits.sizes.contains(&Mode::new(5120, 1440)));
 }
 
-/// Taken off for a moment, the monitors pause and come back; for longer than 10 s, the
+/// Taken off for a moment, the monitors pause and come back; for longer than 5 s, the
 /// PC gives the desktop back and makes them anew when the headset returns. Meanwhile
 /// the PC logs its numbers for each stream. A moving screen, so a pause that still
 /// sends frames shows (a still screen coming back is the next test).
@@ -491,6 +491,63 @@ fn taking_the_headset_off_pauses_and_then_ends_the_session() {
     back.wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
     assert_eq!(pc.count_log("fake desktop: created Fake-1 "), 2);
+}
+
+/// Asleep (the power button, or the system put the app away), the headset is gone at
+/// once: the session ends and the desktop goes back to the laptop within about a
+/// second, without the grace a headset merely taken off gets. Woken and worn again, it
+/// connects and the monitors are made anew.
+#[test]
+fn a_headset_put_to_sleep_ends_the_session_at_once() {
+    let (_dir, mut pc, mut keys, mut headset) = session("asleep-now", &Options::default());
+    let slept = Instant::now();
+    headset.sleep().unwrap();
+    headset.wait_closed(Duration::from_secs(5)).unwrap();
+    let gone = slept.elapsed();
+    assert!(
+        gone < Duration::from_millis(2500),
+        "ended {gone:?} after it slept"
+    );
+    assert_eq!(
+        headset.view().goodbye,
+        Some(prostir_proto::PcGoodbye::TakenOff.code())
+    );
+    pc.wait_log(SOON, "the headset went to sleep");
+    pc.wait_log(SOON, "headset asleep");
+    pc.wait_log(
+        SOON,
+        "removing virtual monitors until the headset is worn again",
+    );
+    pc.wait_log(SOON, "fake desktop: removed Fake-1");
+    let mut back = connect(&pc, &mut keys);
+    back.wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+}
+
+/// Taken off while awake, the headset may be put on again soon: the session goes on
+/// through the grace (5 s), then ends. Asleep said while worn changes nothing.
+#[test]
+fn a_headset_taken_off_while_awake_gets_a_grace() {
+    let (_dir, mut pc, _keys, mut headset) = session("taken-off-grace", &Options::default());
+    headset.send(&ClientMsg::Asleep).unwrap();
+    pc.wait_log(SOON, "the headset says it sleeps, though it is worn");
+    let off = Instant::now();
+    headset.send(&worn(false)).unwrap();
+    pc.wait_log(SOON, "paused: headset not worn or gone");
+    headset.take_for(Duration::from_secs(3)).unwrap();
+    assert_eq!(headset.view().goodbye, None, "still in the session");
+    headset.wait_closed(Duration::from_secs(10)).unwrap();
+    let gone = off.elapsed();
+    assert!(
+        gone >= Duration::from_millis(4900) && gone < Duration::from_secs(9),
+        "ended {gone:?} after it was taken off"
+    );
+    assert_eq!(
+        headset.view().goodbye,
+        Some(prostir_proto::PcGoodbye::TakenOff.code())
+    );
+    pc.wait_log(SOON, "headset taken off");
+    assert_eq!(pc.count_log("headset asleep"), 0);
 }
 
 /// Put on again after a moment, a still screen shows on every monitor again though

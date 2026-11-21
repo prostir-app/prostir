@@ -70,8 +70,12 @@ pub fn keep_screens(store: &mut Store, displays: &Displays, chosen: bool) {
 /// often the program looks whether it may leave.
 const LOOK_AGAIN: Duration = Duration::from_secs(2);
 
-/// Taken off for this long, the headset counts as gone.
-const TAKEN_OFF_GRACE: Duration = Duration::from_secs(10);
+/// Taken off for this long (awake: it may be put on again soon), the headset counts
+/// as gone.
+const TAKEN_OFF_GRACE: Duration = Duration::from_secs(5);
+/// Asleep for this long (it said `Asleep`: the power button, or the system put the app
+/// away), the headset counts as gone: at the next housekeeping, within half a second.
+const ASLEEP_GRACE: Duration = Duration::ZERO;
 
 /// Events handled one after the other before the next pass of the control loop, at
 /// most for this long: what a pass costs never adds up behind a stream of small
@@ -435,15 +439,26 @@ impl Brain {
         // The microphone may be free to go to the main headset now.
         self.headsets_changed();
         self.show();
-        // Each headset off the head for long enough counts as gone; the others go on.
+        // Each headset off the head for long enough counts as gone (asleep at once);
+        // the others go on.
+        let grace = |s: &Session| {
+            if s.asleep() {
+                ASLEEP_GRACE
+            } else {
+                TAKEN_OFF_GRACE
+            }
+        };
         let taken_off: Vec<[u8; 32]> = self
             .sessions
             .iter()
-            .filter(|(_, s)| s.taken_off_for() >= Some(TAKEN_OFF_GRACE))
+            .filter(|(_, s)| s.taken_off_for() >= Some(grace(s)))
             .map(|(key, _)| *key)
             .collect();
         if !taken_off.is_empty() {
-            info!("headset taken off");
+            let asleep = taken_off
+                .iter()
+                .any(|k| self.sessions.get(k).is_some_and(Session::asleep));
+            info!("headset {}", if asleep { "asleep" } else { "taken off" });
             self.end_sessions(
                 taken_off,
                 PcGoodbye::TakenOff,

@@ -13,6 +13,9 @@
 //!   [`AWAY_GRACE`]; being back counts at once.
 //!
 //! Worn means all three agree: shown, not paused, and the user not known to be away.
+//! Not worn comes in two kinds (see [`State`]): asleep (paused, or the session
+//! stopped), which the PC acts on at once, and merely off (taken off while awake,
+//! or the app hidden), which the PC gives a while to come back.
 
 #![forbid(unsafe_code)]
 
@@ -35,6 +38,18 @@ pub enum Session {
     Stopped,
 }
 
+/// What the PC is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    /// On the head, the app in front.
+    Worn,
+    /// Taken off while awake, or the app hidden: it may come back soon.
+    Off,
+    /// The headset went to sleep, or the system put the app away (the activity paused
+    /// or the session stopped): nothing comes back until it is woken up.
+    Asleep,
+}
+
 /// The signals as they came, and what the PC was last told.
 #[derive(Debug, Clone)]
 pub struct Presence {
@@ -45,7 +60,7 @@ pub struct Presence {
     user: Option<bool>,
     /// Since when the sensor says the user is away.
     away_since: Option<Instant>,
-    told: bool,
+    told: State,
 }
 
 impl Default for Presence {
@@ -62,7 +77,7 @@ impl Presence {
             paused: false,
             user: None,
             away_since: None,
-            told: true,
+            told: State::Worn,
         }
     }
 
@@ -92,24 +107,30 @@ impl Presence {
 
     /// Worn, as last told.
     pub fn worn(&self) -> bool {
-        self.told
+        self.told == State::Worn
     }
 
-    /// Worn by the signals so far, at `now`.
-    fn wanted(&self, now: Instant) -> bool {
+    /// The state by the signals so far, at `now`.
+    fn wanted(&self, now: Instant) -> State {
         let away = self
             .away_since
             .is_some_and(|since| now.saturating_duration_since(since) >= AWAY_GRACE);
-        self.session == Session::Shown && !self.paused && !away
+        if self.paused || self.session == Session::Stopped {
+            State::Asleep
+        } else if self.session == Session::Shown && !away {
+            State::Worn
+        } else {
+            State::Off
+        }
     }
 
-    /// Once a pass, after the signals of the pass: `Some(worn)` when the PC is to be
+    /// Once a pass, after the signals of the pass: `Some(state)` when the PC is to be
     /// told something new.
-    pub fn update(&mut self, now: Instant) -> Option<bool> {
-        let worn = self.wanted(now);
-        (worn != self.told).then(|| {
-            self.told = worn;
-            worn
+    pub fn update(&mut self, now: Instant) -> Option<State> {
+        let state = self.wanted(now);
+        (state != self.told).then(|| {
+            self.told = state;
+            state
         })
     }
 }
@@ -121,6 +142,7 @@ impl Presence {
 )]
 mod tests {
     use super::*;
+    use State::{Asleep, Off, Worn};
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
@@ -134,21 +156,32 @@ mod tests {
     }
 
     /// The power button: the activity pauses, the session stops a moment later. The
-    /// pause alone is enough.
+    /// pause alone is enough, and it says asleep, not merely off.
     #[test]
-    fn a_pause_is_told_at_once() {
+    fn a_pause_is_told_at_once_as_asleep() {
         let t = Instant::now();
         let mut p = Presence::new();
         p.paused(true);
-        assert_eq!(p.update(t), Some(false));
+        assert_eq!(p.update(t), Some(Asleep));
         p.session(Session::Hidden);
         p.session(Session::Stopped);
         assert_eq!(p.update(t + ms(50)), None);
         assert!(!p.worn());
     }
 
+    /// A session that stops (without a pause seen yet) is asleep too.
+    #[test]
+    fn a_stopped_session_is_asleep() {
+        let t = Instant::now();
+        let mut p = Presence::new();
+        p.session(Session::Hidden);
+        assert_eq!(p.update(t), Some(Off));
+        p.session(Session::Stopped);
+        assert_eq!(p.update(t), Some(Asleep));
+    }
+
     /// Taken off, the session may stay shown until the system sleeps: the sensor tells
-    /// it after the grace, not later.
+    /// it after the grace, as off; the sleep that follows says asleep.
     #[test]
     fn the_sensor_tells_a_taken_off_headset_after_the_grace() {
         let t = Instant::now();
@@ -158,10 +191,15 @@ mod tests {
         p.user(t + ms(100), false);
         assert_eq!(p.update(t + ms(100)), None);
         assert_eq!(p.update(t + ms(100) + AWAY_GRACE - ms(1)), None);
-        assert_eq!(p.update(t + ms(100) + AWAY_GRACE), Some(false));
+        assert_eq!(p.update(t + ms(100) + AWAY_GRACE), Some(Off));
         // Put on again: at once.
         p.user(t + ms(2000), true);
-        assert_eq!(p.update(t + ms(2000)), Some(true));
+        assert_eq!(p.update(t + ms(2000)), Some(Worn));
+        // Off again, and left until the system sleeps.
+        p.user(t + ms(3000), false);
+        assert_eq!(p.update(t + ms(4000)), Some(Off));
+        p.paused(true);
+        assert_eq!(p.update(t + ms(18_000)), Some(Asleep));
     }
 
     /// Adjusting the headset: the sensor flickers off and on within the grace, and the
@@ -185,7 +223,7 @@ mod tests {
         let mut p = Presence::new();
         p.user(t, false);
         p.user(t + ms(400), false);
-        assert_eq!(p.update(t + AWAY_GRACE), Some(false));
+        assert_eq!(p.update(t + AWAY_GRACE), Some(Off));
     }
 
     /// Without the sensor (a runtime without the extension) the session's states and
@@ -196,17 +234,17 @@ mod tests {
         let mut p = Presence::new();
         // The app starts: idle, then ready, then shown.
         p.session(Session::Stopped);
-        assert_eq!(p.update(t), Some(false));
+        assert_eq!(p.update(t), Some(Asleep));
         p.session(Session::Hidden);
-        assert_eq!(p.update(t), None);
+        assert_eq!(p.update(t), Some(Off));
         p.session(Session::Shown);
-        assert_eq!(p.update(t), Some(true));
+        assert_eq!(p.update(t), Some(Worn));
         // The system menu over the app keeps it shown (VISIBLE).
         p.session(Session::Shown);
         assert_eq!(p.update(t), None);
-        // Another app in front.
+        // Another app in front, this one still running.
         p.session(Session::Hidden);
-        assert_eq!(p.update(t), Some(false));
+        assert_eq!(p.update(t), Some(Off));
     }
 
     /// Asleep and woken up: what the sensor said before the sleep does not keep the
@@ -216,16 +254,16 @@ mod tests {
         let t = Instant::now();
         let mut p = Presence::new();
         p.user(t, false);
-        assert_eq!(p.update(t + AWAY_GRACE), Some(false));
+        assert_eq!(p.update(t + AWAY_GRACE), Some(Off));
         p.paused(true);
         p.session(Session::Stopped);
-        assert_eq!(p.update(t + ms(15_000)), None);
+        assert_eq!(p.update(t + ms(15_000)), Some(Asleep));
         // Woken up and put on.
         p.paused(false);
         p.session(Session::Hidden);
-        assert_eq!(p.update(t + ms(60_000)), None);
+        assert_eq!(p.update(t + ms(60_000)), Some(Off));
         p.session(Session::Shown);
-        assert_eq!(p.update(t + ms(60_100)), Some(true));
+        assert_eq!(p.update(t + ms(60_100)), Some(Worn));
     }
 
     /// Woken up while not on the head (the sensor says "away" as the session starts):
@@ -236,12 +274,12 @@ mod tests {
         let mut p = Presence::new();
         p.paused(true);
         p.session(Session::Stopped);
-        assert_eq!(p.update(t), Some(false));
+        assert_eq!(p.update(t), Some(Asleep));
         p.paused(false);
         p.session(Session::Shown);
         p.user(t, false);
-        assert_eq!(p.update(t), Some(true));
-        assert_eq!(p.update(t + AWAY_GRACE), Some(false));
+        assert_eq!(p.update(t), Some(Worn));
+        assert_eq!(p.update(t + AWAY_GRACE), Some(Off));
     }
 
     /// Resumed but not shown yet is not worn; shown while still paused is not either.
@@ -250,10 +288,10 @@ mod tests {
         let t = Instant::now();
         let mut p = Presence::new();
         p.paused(true);
-        assert_eq!(p.update(t), Some(false));
+        assert_eq!(p.update(t), Some(Asleep));
         p.session(Session::Shown);
         assert_eq!(p.update(t), None);
         p.paused(false);
-        assert_eq!(p.update(t), Some(true));
+        assert_eq!(p.update(t), Some(Worn));
     }
 }

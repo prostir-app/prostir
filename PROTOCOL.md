@@ -840,8 +840,9 @@ Without a goodbye, implementation-defined details of the current apps:
 - Both: a write blocked for 5 s ends the session.
 - Host: TCP keepalive (idle 4 s, interval 2 s, 3 probes) and `TCP_USER_TIMEOUT` 10 s
   also notice a headset that vanished, already while pairing.
-- Host: a headset reported as not worn (`Presence{worn: false}`) for 10 s has its
-  session ended (with goodbye `2`); the other sessions go on. When it was the last
+- Host: a headset reported as not worn (`Presence{worn: false}`) for 5 s has its
+  session ended (with goodbye `2`); one that also said `Asleep` at once (at the next
+  housekeeping, every 0.5 s). The other sessions go on. When it was the last
   one, the host then removes its virtual monitors until a headset connects again.
 - Host: after a session it keeps the virtual monitors for 30 s (`--linger`).
 
@@ -937,6 +938,7 @@ are marked as such (their bytes never change). "Part" marks a part of the state 
 | 128 | `Ping` | `seq:u32` | As the host's. |
 | 129 | `Pong` | `seq:u32` | The answer to the host's `Ping`. |
 | 130 | `Goodbye` | `reason:u8` | The headset ends the session on purpose. |
+| 142 | `Asleep` | | Right after `Presence{worn: false}`: the headset went to sleep, or the system put the app away, so it does not come back by itself soon; the next `Presence{worn: true}` undoes it. Not a part. |
 
 ### Types
 

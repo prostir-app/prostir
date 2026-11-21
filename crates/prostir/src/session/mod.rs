@@ -141,6 +141,8 @@ pub struct Session {
     via: &'static str,
     /// When the headset was taken off (as last reported by it).
     taken_off_at: Option<Instant>,
+    /// Off the head and asleep (it said `Asleep`), until it says it is worn again.
+    asleep: bool,
     /// Streams the headset needs a fresh picture of, put on again.
     fresh: Vec<ScreenId>,
     /// The PC's volume is shared with this headset.
@@ -324,6 +326,7 @@ impl Session {
             writer: Some(writer),
             via,
             taken_off_at: (!worn).then(Instant::now),
+            asleep: false,
             fresh: Vec::new(),
             shares_volume,
             notifications: None,
@@ -384,6 +387,11 @@ impl Session {
     /// On the head (a headset that never said counts as worn).
     pub fn worn(&self) -> bool {
         self.taken_off_at.is_none()
+    }
+
+    /// Off the head and asleep: it does not come back by itself soon.
+    pub fn asleep(&self) -> bool {
+        self.asleep
     }
 
     /// How long the headset has been off the head, if it is.

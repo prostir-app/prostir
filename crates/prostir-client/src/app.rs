@@ -808,14 +808,21 @@ impl Scene {
         }
     }
 
-    /// Tells the PC once the signals say the headset was put on or taken off, and
-    /// lets the network thread connect only while it is worn.
+    /// Tells the PC once the signals say the headset was put on, taken off or put to
+    /// sleep (asleep, the PC need not wait for it to come back), and lets the network
+    /// thread connect only while it is worn.
     fn presence_due(&mut self, now: Instant) {
-        if let Some(worn) = self.presence.update(now) {
-            info!("headset {}", if worn { "worn" } else { "not worn" });
-            self.tell_presence();
-            self.steering.set_worn(worn);
+        let Some(state) = self.presence.update(now) else {
+            return;
+        };
+        info!("headset {state:?}");
+        self.tell_presence();
+        if state == presence::State::Asleep
+            && let Some(f) = &self.feedback
+        {
+            let _ = f.send(ClientMsg::Asleep);
         }
+        self.steering.set_worn(self.presence.worn());
     }
 
     /// The battery was read (once a minute, more often on the palm menu): the menu
