@@ -369,9 +369,82 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
             "video/x-h265,stream-format=byte-stream,alignment=au",
         ),
     };
+    // In the test mode of the time code, the frames go through memory, where the code
+    // is drawn into them (see `draw_time_code`).
+    let stamp = if time_code() {
+        " ! videoconvert ! video/x-raw,format=I420 ! identity name=timecode"
+    } else {
+        ""
+    };
     Ok(format!(
-        "{source} ! queue max-size-buffers=2 leaky=downstream ! {encoder} ! {parser} ! {caps}"
+        "{source} ! queue max-size-buffers=2 leaky=downstream{stamp} ! {encoder} ! {parser} ! \
+         {caps}"
     ))
+}
+
+/// The test mode for measuring the latency from the PC to the eye (`prostir serve
+/// --time-code`, never on by itself): every monitor's frames get the time they were
+/// captured drawn into their top left corner as a code (`prostir_proto::timecode`),
+/// which the headset reads back from what it shows. The frames then go through
+/// memory (on KDE PipeWire hands them over so); with GPU buffers on Hyprland, use
+/// `--software`.
+static TIME_CODE: AtomicBool = AtomicBool::new(false);
+
+/// Turns the time code's test mode on, for every encoder started from now on.
+pub fn draw_time_codes() {
+    warn!("test mode: a time code is drawn into every monitor (--time-code)");
+    TIME_CODE.store(true, Ordering::Relaxed);
+}
+
+fn time_code() -> bool {
+    TIME_CODE.load(Ordering::Relaxed)
+}
+
+/// Draws the time each frame was captured (the clock's time of its timestamp, which
+/// is `CLOCK_MONOTONIC`, in ms) into the frames that pass `pad` (I420).
+fn draw_time_code(pad: &gst::Pad) {
+    pad.add_probe(gst::PadProbeType::BUFFER, |pad, info| {
+        let Some(video) = pad
+            .current_caps()
+            .and_then(|c| gst_video::VideoInfo::from_caps(&c).ok())
+        else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let base = pad
+            .parent_element()
+            .and_then(|e| e.base_time())
+            .map_or(0, gst::ClockTime::nseconds);
+        let Some(buffer) = info.buffer_mut() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let ns = match buffer.pts() {
+            Some(pts) => base + pts.nseconds(),
+            None => monotonic_ns(),
+        };
+        let ms = (ns / 1_000_000) as u32;
+        if let Ok(mut frame) =
+            gst_video::VideoFrameRef::from_buffer_ref_writable(buffer.make_mut(), &video)
+        {
+            use gst_video::prelude::*;
+            let (w, h) = (frame.width() as usize, frame.height() as usize);
+            let stride = frame.plane_stride()[0] as usize;
+            if let Ok(luma) = frame.plane_data_mut(0) {
+                prostir_proto::timecode::draw(luma, stride, w, h, ms);
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// `CLOCK_MONOTONIC` now, in nanoseconds.
+fn monotonic_ns() -> u64 {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: a timespec to fill, valid through the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut t) };
+    t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
 }
 
 impl Encoder {
@@ -397,6 +470,12 @@ impl Encoder {
             .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
             .ok_or_else(|| anyhow!("appsink missing"))?;
         tune(&pipeline, cfg);
+        if let Some(pad) = pipeline
+            .by_name("timecode")
+            .and_then(|e| e.static_pad("src"))
+        {
+            draw_time_code(&pad);
+        }
         let devices = gpu.share_with(&pipeline);
 
         let on_event = Arc::new(on_event);
@@ -943,6 +1022,48 @@ mod pause {
         pause.wake();
         assert!(stopped.join().unwrap() >= Duration::from_millis(90));
         assert!(pause.is_on(), "still paused, only woken");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+
+    /// A frame that passes the time code's pad has the time it was captured drawn
+    /// into it, on the PC's monotonic clock, as the headset reads it back.
+    #[test]
+    fn the_time_code_is_drawn_into_a_frame() {
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "videotestsrc num-buffers=1 is-live=true pattern=black ! \
+             video/x-raw,format=I420,width=704,height=32 ! identity name=timecode ! \
+             appsink name=out",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let pad = pipeline
+            .by_name("timecode")
+            .unwrap()
+            .static_pad("src")
+            .unwrap();
+        super::draw_time_code(&pad);
+        let out = pipeline
+            .by_name("out")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let sample = out.pull_sample().unwrap();
+        let now_ms = super::monotonic_ns() / 1_000_000;
+        pipeline.set_state(gst::State::Null).unwrap();
+        let map = sample.buffer().unwrap().map_readable().unwrap();
+        // I420 of 704 pixels across: the luma rows are 704 bytes.
+        let code = prostir_proto::timecode::read(map.as_slice(), 704, 704, 32)
+            .expect("a time code in the frame");
+        let late = (now_ms as u32).wrapping_sub(code);
+        assert!(late < 2000, "captured {late} ms ago");
     }
 }
 

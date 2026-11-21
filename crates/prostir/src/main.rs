@@ -873,6 +873,9 @@ fn full_with(
     if let Some(why) = why {
         info!("started: {why:?}");
     }
+    if args.time_code {
+        encoder::draw_time_codes();
+    }
     // Whether the PC can share its volume, found out meanwhile.
     platform::audio::prepare();
     // The command line holds for this run only.
