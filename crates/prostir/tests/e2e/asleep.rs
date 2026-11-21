@@ -31,6 +31,17 @@ fn silent(to: SocketAddr, keys: &Keys, name: &str) -> bool {
     find::ask(to, &find::query(keys, name), SILENCE).is_none()
 }
 
+/// Asks until the PC answers no more, for up to [`SOON`]. A pause between the
+/// questions: the PC answers 20 a second at most, and more would leave the next
+/// question unanswered.
+fn until_silent(to: SocketAddr, keys: &Keys, what: &str) {
+    let started = Instant::now();
+    while !silent(to, keys, "") {
+        assert!(started.elapsed() < SOON, "{what}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// The PC app's state on its local API, `None` without a session bus.
 fn state(pc: &Pc) -> Option<State> {
     let ctl = pc.ctl(&["status", "--json"])?;
@@ -132,7 +143,10 @@ fn the_pc_answers_everyone_until_paired_then_only_its_own() {
 }
 
 /// The pairing window answers strangers: opened from the notice's button, the tray
-/// and the local API; closed by "Stop pairing" and at its time.
+/// and the local API; closed by "Stop pairing" and at its time. Open, it stays so for
+/// as long as a release keeps it (a busy machine can take seconds between opening it
+/// and asking); that it closes at its time is seen with a short one, on a PC started
+/// again with it.
 #[test]
 fn the_pairing_window_lets_strangers_find_the_pc() {
     let dir = TestDir::new("find-pairing");
@@ -140,7 +154,8 @@ fn the_pairing_window_lets_strangers_find_the_pc() {
     dir.pair();
     let options = Options {
         discovery: true,
-        env: vec![("PROSTIR_TEST_PAIR_SECONDS".into(), "2".into())],
+        // Each query and whether it was answered, for a look when it fails.
+        env: vec![("RUST_LOG".into(), "info,prostir::find=debug".into())],
         ..Options::default()
     };
     let mut pc = Pc::start(&dir, &options);
@@ -151,29 +166,38 @@ fn the_pairing_window_lets_strangers_find_the_pc() {
     pc.wait_log(SOON, "pairing a new headset: from the notice");
     let a = asks(to, &stranger, "").expect("the window is open");
     assert_eq!(a.flags, flags::ANSWERS_ALL | flags::PAIRING);
-    // Closed at its time.
-    std::thread::sleep(Duration::from_millis(2500));
-    assert!(silent(to, &stranger, ""), "the window closed at its time");
+    pc.tray("pair stop");
+    until_silent(to, &stranger, "stopped");
 
     pc.tray("pair");
     pc.wait_log(SOON, "pairing a new headset: from the tray");
     assert!(asks(to, &stranger, "").is_some());
     pc.tray("pair stop");
-    let started = Instant::now();
-    while !silent(to, &stranger, "") {
-        assert!(started.elapsed() < SOON, "stopped");
-    }
+    until_silent(to, &stranger, "stopped");
 
     if let Some(ctl) = pc.ctl(&["pair", "--json"]) {
         assert_eq!(ctl.code, 0, "{ctl:?}");
-        assert_eq!(ctl.json()["seconds_left"], 2);
+        assert_eq!(ctl.json()["seconds_left"], 180);
         assert!(asks(to, &stranger, "").is_some());
         let s = state(&pc).unwrap();
         let p = s.pairing.expect("pairing");
-        assert_eq!(p.seconds_total, 2);
+        assert_eq!(p.seconds_total, 180);
         assert_eq!(pc.ctl(&["pair", "stop"]).unwrap().code, 0);
         assert!(silent(to, &stranger, ""));
     }
+    pc.quit();
+
+    // A window of a second closes by itself.
+    let short = Options {
+        discovery: true,
+        env: vec![("PROSTIR_TEST_PAIR_SECONDS".into(), "1".into())],
+        ..Options::default()
+    };
+    let mut pc = Pc::start(&dir, &short);
+    let to = pc.discovery.unwrap();
+    pc.tray("pair");
+    pc.wait_log(SOON, "pairing a new headset: from the tray");
+    until_silent(to, &stranger, "the window closed at its time");
     pc.quit();
 }
 

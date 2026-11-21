@@ -124,8 +124,8 @@ impl Brain {
                 );
             }
             TrayCommand::PairNewHeadset => {
-                info!("pairing a new headset: from the tray");
                 self.door.open_pairing(Instant::now(), door::pairing_time());
+                info!("pairing a new headset: from the tray");
             }
             TrayCommand::StopPairing => self.door.stop_pairing(),
             TrayCommand::Quit => {

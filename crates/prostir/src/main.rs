@@ -320,8 +320,8 @@ impl Brain {
                 }
             }
             Event::Notice(true) => {
-                info!("pairing a new headset: from the notice");
                 self.door.open_pairing(Instant::now(), door::pairing_time());
+                info!("pairing a new headset: from the notice");
             }
             Event::Notice(false) => self.door.notice_up(false, Instant::now()),
             Event::Window(on) => {
@@ -975,8 +975,8 @@ fn full_with(
     let now = Instant::now();
     let mut door = door::Door::new(pairing_open, origin != Origin::Own, now);
     if args.pair || why == Some(wake::Wake::Pair) {
-        info!("pairing a new headset: from the notice");
         door.open_pairing(now, door::pairing_time());
+        info!("pairing a new headset: from the notice");
     }
     let mut brain = Brain {
         linger: Duration::from_secs(args.linger),
