@@ -1016,6 +1016,11 @@ fn full_with(
     // On the bus as early as the state can be: GStreamer's start (a scan of its
     // plugins, the first time) comes after.
     gstreamer::init().context("GStreamer init")?;
+    // GStreamer's streaming threads come from GLib's pool, which would keep two of
+    // them after a pipeline stops, each waking to end 15 s later: an idle PC would
+    // wake once more long after the encoders' probe or a session. They end half a
+    // second after their last task instead; a pipeline starts new ones.
+    gstreamer::glib::ThreadPool::set_max_unused_threads(Some(0));
     // What the encoders can do, found on a thread of its own before a headset needs it.
     encoder::start_probing();
     if args.open_settings

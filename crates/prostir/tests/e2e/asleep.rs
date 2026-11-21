@@ -241,34 +241,59 @@ fn a_headset_pairs_through_the_settings_window() {
     pc.quit();
 }
 
-/// Waits until process `pid` does not wake for a second, then checks it does not
-/// wake at all for [`WATCH`].
-fn assert_asleep(pid: u32, what: &str) {
-    let woke = |before: &BTreeMap<u32, (String, u64)>, after: &BTreeMap<u32, (String, u64)>| {
-        after
-            .iter()
-            .filter_map(|(tid, (name, n))| {
-                let was = before.get(tid).map_or(0, |(_, n)| *n);
-                (*n > was).then(|| format!("{name} ({tid}): {}", n - was))
-            })
-            .collect::<Vec<_>>()
-    };
+type Wakeups = BTreeMap<u32, (String, u64)>;
+
+/// The threads that woke between `before` and `after`, with how often.
+fn woke(before: &Wakeups, after: &Wakeups) -> Vec<(String, u64)> {
+    after
+        .iter()
+        .filter_map(|(tid, (name, n))| {
+            let was = before.get(tid).map_or(0, |(_, n)| *n);
+            (*n > was).then(|| (format!("{name} ({tid})"), n - was))
+        })
+        .collect()
+}
+
+/// Waits until process `pid` keeps its threads for a second and only those named in
+/// `waking` wake in it.
+fn settle(pid: u32, waking: &[&str], what: &str) {
     let started = Instant::now();
     loop {
         let before = wakeups_of(pid);
         std::thread::sleep(Duration::from_secs(1));
         let after = wakeups_of(pid);
-        if before.keys().eq(after.keys()) && woke(&before, &after).is_empty() {
-            break;
+        let others = after.iter().any(|(tid, (name, n))| {
+            !waking.contains(&name.as_str()) && before.get(tid).is_none_or(|(_, was)| n > was)
+        });
+        if before.keys().eq(after.keys()) && !others {
+            return;
         }
-        assert!(started.elapsed() < SOON, "{what}: did not settle");
+        assert!(
+            started.elapsed() < SOON,
+            "{what}: did not settle: {:?}",
+            woke(&before, &after)
+        );
     }
+}
+
+/// Waits until process `pid` does not wake for a second, then checks it does not
+/// wake at all for [`WATCH`].
+fn assert_asleep(pid: u32, what: &str) {
+    settle(pid, &[], what);
     let before = wakeups_of(pid);
     std::thread::sleep(WATCH);
     let after = wakeups_of(pid);
+    let only_in = |a: &Wakeups, b: &Wakeups| {
+        a.iter()
+            .filter(|(tid, _)| !b.contains_key(tid))
+            .map(|(tid, (name, _))| format!("{name} ({tid})"))
+            .collect::<Vec<_>>()
+    };
     assert!(
         before.keys().eq(after.keys()),
-        "{what}: threads came or went"
+        "{what}: threads came {:?} or went {:?}",
+        only_in(&after, &before),
+        only_in(&before, &after)
     );
     let woke = woke(&before, &after);
     assert!(woke.is_empty(), "{what}: woke in {WATCH:?}: {woke:?}");
@@ -504,28 +529,25 @@ fn the_beacon_is_the_only_thing_that_wakes_a_running_pc() {
         beacon_to: Some(heard.local_addr().unwrap()),
         ..Options::default()
     };
-    let pc = Pc::start(&dir, &options);
+    let mut pc = Pc::start(&dir, &options);
     let mut buf = [0u8; 512];
     let n = heard.recv(&mut buf).expect("a beacon");
     let (port, name) = prostir_proto::decode_beacon(&buf[..n]).expect("a beacon");
     assert_eq!((port, name.as_str()), (pc.addr.port(), "fake-pc"));
-    // Settled, every wakeup is the beacon's, about one a second.
-    std::thread::sleep(Duration::from_secs(2));
+    // Settled, once the encoders' probe at the start is over, every wakeup is the
+    // beacon's, about one a second.
+    pc.wait_log(START, "video encoders probed in");
+    settle(pc.pid(), &["beacon"], "the running PC");
     let before = wakeups_of(pc.pid());
     std::thread::sleep(WATCH);
     let after = wakeups_of(pc.pid());
     let mut beacon = 0;
-    for (tid, (name, n)) in &after {
-        let was = before.get(tid).map_or(0, |(_, n)| *n);
-        if *n > was {
-            assert_eq!(
-                name,
-                "beacon",
-                "only the beacon wakes: {name} woke {}",
-                n - was
-            );
-            beacon += n - was;
-        }
+    for (who, n) in woke(&before, &after) {
+        assert!(
+            who.starts_with("beacon ("),
+            "only the beacon wakes: {who} woke {n}"
+        );
+        beacon += n;
     }
     assert!(
         (2..=5).contains(&beacon),
