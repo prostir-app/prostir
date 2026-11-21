@@ -59,9 +59,16 @@ pub struct DecoderJob {
 /// Frames that wait this long without a free input buffer: the codec is stuck, and
 /// one of them is dropped (and a keyframe asked for).
 const STALLED: Duration = Duration::from_secs(1);
+/// Frames wait and the codec has handed out no input buffer for this long, without
+/// saying it failed: it is made again, as after an error.
+const NO_INPUT: Duration = Duration::from_secs(3);
+/// After a codec failed, before it is made again.
+const RESTART_PAUSE: Duration = Duration::from_millis(200);
 /// The longest a decoder sleeps with nothing to do. Whatever gives it work wakes it at
 /// once (a frame, the codec, `stop`): this is only a safety net.
 const IDLE: Duration = Duration::from_secs(1);
+/// Passing codec errors are logged at most this often.
+const TRANSIENT_LOG_EVERY: Duration = Duration::from_secs(10);
 /// Room for the codec's buffer numbers, made once (more only if a codec has more).
 const BUFFERS: usize = 32;
 
@@ -119,8 +126,11 @@ struct Decoding<'a> {
     free: VecDeque<usize>,
     /// Pictures to hand to the compositor, taken from [`Told`].
     ready: VecDeque<(usize, u64)>,
-    /// Since when frames wait without a free input buffer.
+    /// Since when frames wait without a free input buffer (the last frame dropped
+    /// for it starts it over).
     stalled: Option<Instant>,
+    /// Since when frames wait and the codec handed out no input buffer at all.
+    no_input: Option<Instant>,
 }
 
 fn run(job: &DecoderJob) -> Result<()> {
@@ -154,6 +164,7 @@ fn run(job: &DecoderJob) -> Result<()> {
         free: VecDeque::with_capacity(BUFFERS),
         ready: VecDeque::with_capacity(BUFFERS),
         stalled: None,
+        no_input: None,
     };
     // A decoder error (a lost surface, a bad frame) recreates the decoder instead of
     // freezing the monitor; only repeated failures in a row give up.
@@ -163,6 +174,7 @@ fn run(job: &DecoderJob) -> Result<()> {
         d.free.clear();
         d.ready.clear();
         d.stalled = None;
+        d.no_input = None;
         let result = d.pump(&decoder, &told);
         let _ = decoder.stop();
         drop(decoder);
@@ -171,7 +183,16 @@ fn run(job: &DecoderJob) -> Result<()> {
             Err(e) if d.failures < 5 => {
                 d.failures += 1;
                 warn!("decoder {}: {e:#}; starting it again", stream.id.0);
-                std::thread::sleep(Duration::from_millis(200));
+                // A pause, cut short when the monitor goes.
+                let until = Instant::now() + RESTART_PAUSE;
+                while !d.stop.load(Ordering::Relaxed)
+                    && let Some(left) = until.checked_duration_since(Instant::now())
+                {
+                    std::thread::park_timeout(left);
+                }
+                if d.stop.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
                 d.gate.wait();
             }
             Err(e) => return Err(e),
@@ -188,6 +209,9 @@ impl Decoding<'_> {
                 let mut t = lock(told);
                 if let Some(why) = t.failed.take() {
                     bail!(why);
+                }
+                if !t.inputs.is_empty() {
+                    self.no_input = None;
                 }
                 self.free.extend(t.inputs.drain(..));
                 self.ready.extend(t.outputs.drain(..));
@@ -222,6 +246,13 @@ impl Decoding<'_> {
             let now = Instant::now();
             let wait = if self.free.is_empty() && self.frames.waiting() > 0 {
                 // Frames wait, and the codec frees no buffer for them.
+                let silent = *self.no_input.get_or_insert(now);
+                if now.saturating_duration_since(silent) >= NO_INPUT {
+                    bail!(
+                        "no input buffer from the codec for {} s",
+                        NO_INPUT.as_secs()
+                    );
+                }
                 let since = *self.stalled.get_or_insert(now);
                 let stuck = now.saturating_duration_since(since);
                 if stuck >= STALLED {
@@ -238,6 +269,9 @@ impl Decoding<'_> {
                 STALLED - stuck
             } else {
                 self.stalled = None;
+                if !self.free.is_empty() {
+                    self.no_input = None;
+                }
                 IDLE
             };
             self.timing.report();
@@ -307,9 +341,17 @@ fn callbacks(told: &Arc<Mutex<Told>>, decoder: Thread) -> AsyncNotifyCallback {
         d.unpark();
     };
     let t = told.clone();
+    let mut passing = (None::<Instant>, 0u32);
     let on_error = move |e: MediaError, action: ActionCode, detail: &CStr| {
         if action.is_transient() {
-            warn!("decoder: {e} ({detail:?}), going on");
+            let (logged, since) = &mut passing;
+            *since += 1;
+            let now = Instant::now();
+            if logged.is_none_or(|l| now.saturating_duration_since(l) >= TRANSIENT_LOG_EVERY) {
+                warn!("decoder: {e} ({detail:?}), going on ({since} such since the last line)");
+                *logged = Some(now);
+                *since = 0;
+            }
             return;
         }
         lock(&t).failed = Some(format!("codec error: {e} ({detail:?})"));
