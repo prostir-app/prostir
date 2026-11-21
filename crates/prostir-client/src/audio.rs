@@ -88,6 +88,8 @@ fn apply_gains(pcm: &mut [u8], current: &mut [f32; 2], gains: &Gains) {
 /// Plays until dropped.
 pub struct Player {
     tx: SyncSender<Vec<u8>>,
+    /// Slices played (or dropped), back to be received into again.
+    spare: Receiver<Vec<u8>>,
     /// Slices dropped because the audio thread was far behind (shared with it, which
     /// logs them).
     behind: Arc<AtomicU32>,
@@ -97,6 +99,7 @@ impl Player {
     /// Starts the audio thread, which places the sound with `gains`.
     pub fn spawn(gains: Arc<Gains>) -> Self {
         let (tx, rx) = mpsc::sync_channel(32);
+        let (back, spare) = mpsc::sync_channel(32);
         let behind = Arc::new(AtomicU32::new(0));
         let counted = behind.clone();
         let _ = std::thread::Builder::new()
@@ -108,7 +111,7 @@ impl Player {
                 let mut failures = 0;
                 while failures < 5 {
                     match Stream::open() {
-                        Ok(stream) => match play(&stream, &rx, &counted, &gains) {
+                        Ok(stream) => match play(&stream, &rx, &back, &counted, &gains) {
                             Ended::Closed => return,
                             Ended::Failed => failures = 0,
                         },
@@ -121,7 +124,12 @@ impl Player {
                 }
             })
             .inspect_err(|e| warn!("no sound: {e}"));
-        Self { tx, behind }
+        Self { tx, spare, behind }
+    }
+
+    /// A slice played, back to be received into again (see `Assembler::recycle`).
+    pub fn played(&self) -> Option<Vec<u8>> {
+        self.spare.try_recv().ok()
     }
 
     pub fn push(&self, pcm: Vec<u8>) {
@@ -253,8 +261,15 @@ impl Report {
     }
 }
 
-fn play(stream: &Stream, rx: &Receiver<Vec<u8>>, behind: &AtomicU32, target: &Gains) -> Ended {
-    let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
+fn play(
+    stream: &Stream,
+    rx: &Receiver<Vec<u8>>,
+    back: &SyncSender<Vec<u8>>,
+    behind: &AtomicU32,
+    target: &Gains,
+) -> Ended {
+    // Made once: never more than this waits (the rest is dropped below).
+    let mut queue: VecDeque<Vec<u8>> = VecDeque::with_capacity(MAX_QUEUED + 33);
     let mut gains = [1.0f32; 2];
     let mut report = Report {
         period: Period::new(REPORT_EVERY),
@@ -273,12 +288,18 @@ fn play(stream: &Stream, rx: &Receiver<Vec<u8>>, behind: &AtomicU32, target: &Ga
             queue.push_back(pcm);
         }
         while queue.len() > MAX_QUEUED {
-            queue.pop_front();
+            if let Some(late) = queue.pop_front() {
+                let _ = back.try_send(late);
+            }
             report.late += 1;
         }
         while let Some(mut pcm) = queue.pop_front() {
             apply_gains(&mut pcm, &mut gains, target);
-            if let Err(e) = stream.write(&pcm) {
+            let written = stream.write(&pcm);
+            // Back to the network, to be received into again; dropped when it has
+            // enough.
+            let _ = back.try_send(pcm);
+            if let Err(e) = written {
                 warn!("sound output: AAudio error {e}");
                 return Ended::Failed;
             }

@@ -223,10 +223,13 @@ fn record(input: &Input, up: u8, feedback: &Feedback, stop: &AtomicBool) -> bool
         match input.read(&mut buf) {
             Ok(0) => {}
             Ok(frames) => {
-                let pcm: Vec<u8> = buf[..(frames * MIC_CHANNELS as usize).min(buf.len())]
-                    .iter()
-                    .flat_map(|s| s.to_le_bytes())
-                    .collect();
+                let samples = &buf[..(frames * MIC_CHANNELS as usize).min(buf.len())];
+                // Into a slice sent before (see `Feedback::up_buffer`): nothing new
+                // for each 10 ms.
+                let mut pcm = feedback.up_buffer(samples.len() * 2);
+                for s in samples {
+                    pcm.extend_from_slice(&s.to_le_bytes());
+                }
                 if feedback.send(ClientMsg::Up { up, data: pcm }).is_err() {
                     break;
                 }

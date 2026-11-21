@@ -48,7 +48,7 @@ impl Media for SessionSound {
     }
 
     fn played(&mut self) -> Option<Vec<u8>> {
-        None
+        self.player.as_ref()?.played()
     }
 
     fn silence(&mut self) {

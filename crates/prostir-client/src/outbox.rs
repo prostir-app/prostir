@@ -318,11 +318,33 @@ mod tests {
             loop {
                 let pick = self.state.lock().unwrap().pick(lanes);
                 match pick {
-                    Some(pick) => drop(lanes.send(pick, tx).unwrap()),
+                    Some(pick) => {
+                        if let Some(done) = lanes.send(pick, tx).unwrap() {
+                            self.sent(done);
+                        }
+                    }
                     None => break,
                 }
             }
         }
+    }
+
+    /// A slice of the microphone sent is filled again: no new memory for each.
+    #[test]
+    fn microphone_slices_are_filled_again() {
+        let o = Outbox::default();
+        let first = o.up_buffer(960);
+        assert!(first.capacity() >= 960);
+        let at = first.as_ptr();
+        o.push(ClientMsg::Up { up: 0, data: first }).unwrap();
+        o.push(worn(true)).unwrap();
+        assert_eq!(sent(&o).len(), 2);
+        let again = o.up_buffer(960);
+        assert_eq!(again.as_ptr(), at, "the same memory");
+        assert!(again.is_empty());
+        // Only the microphone's: a control message's body is not kept.
+        let fresh = o.up_buffer(960);
+        assert_ne!(fresh.as_ptr(), at);
     }
 
     #[test]
