@@ -48,6 +48,10 @@ pub struct Options {
     pub seconds: u32,
     /// End without leaving the process, so the next start runs in the same one.
     pub relaunch: bool,
+    /// `decoder_rate=max`: the decoders are asked to run as fast as they can
+    /// (`operating-rate`), for an A/B of `decode_ms` against the battery; the app
+    /// never asks that otherwise.
+    pub decoder_rate_max: bool,
 }
 
 impl Default for Options {
@@ -55,6 +59,7 @@ impl Default for Options {
         Self {
             seconds: 30,
             relaunch: false,
+            decoder_rate_max: false,
         }
     }
 }
@@ -82,6 +87,8 @@ impl Options {
                         .ok_or_else(|| format!("seconds={v}: 1 to 7200"))?;
                 }
                 ("relaunch", "1") => options.relaunch = true,
+                ("decoder_rate", "max") => options.decoder_rate_max = true,
+                ("decoder_rate", "default") => options.decoder_rate_max = false,
                 ("relaunch", "0") | ("caps", "full") | ("perf", "default") | ("pc", "fake") => {}
                 ("caps", v) => return Err(format!("caps={v} is not in this build yet")),
                 ("perf", v) => return Err(format!("perf={v} is not in this build yet")),
@@ -281,6 +288,19 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// On only while a selftest runs: the decoders check it before anything else.
 static PROBING: AtomicBool = AtomicBool::new(false);
 static PROBE: Mutex<Option<Arc<Mutex<Probe>>>> = Mutex::new(None);
+/// The option `decoder_rate=max` of the selftest that runs.
+static DECODER_RATE_MAX: AtomicBool = AtomicBool::new(false);
+
+/// What the decoders are asked for while a selftest runs (see
+/// [`Options::decoder_rate_max`]); set before the decoders start.
+pub fn set_decoder_rate_max(max: bool) {
+    DECODER_RATE_MAX.store(max, Ordering::Relaxed);
+}
+
+/// Whether a selftest runs that asks the decoders to run as fast as they can.
+pub fn decoder_rate_max() -> bool {
+    PROBING.load(Ordering::Relaxed) && DECODER_RATE_MAX.load(Ordering::Relaxed)
+}
 
 /// Starts collecting from the decoders into a new probe.
 pub fn probe_start() -> Arc<Mutex<Probe>> {
@@ -293,6 +313,7 @@ pub fn probe_start() -> Arc<Mutex<Probe>> {
 /// Stops collecting.
 pub fn probe_stop() {
     PROBING.store(false, Ordering::Relaxed);
+    DECODER_RATE_MAX.store(false, Ordering::Relaxed);
     *lock(&PROBE) = None;
 }
 
@@ -377,8 +398,15 @@ mod tests {
             Options::parse("seconds=10, relaunch=1").unwrap(),
             Options {
                 seconds: 10,
-                relaunch: true
+                relaunch: true,
+                decoder_rate_max: false,
             }
+        );
+        assert!(Options::parse("decoder_rate=max").unwrap().decoder_rate_max);
+        assert!(
+            !Options::parse("decoder_rate=default")
+                .unwrap()
+                .decoder_rate_max
         );
         assert_eq!(
             Options::parse("seconds=5\tcaps=full perf=default")
@@ -392,6 +420,7 @@ mod tests {
             "pc=usb",
             "seconds=0",
             "speed=2",
+            "decoder_rate=fast",
             "x",
         ] {
             assert!(Options::parse(refused).is_err(), "{refused}");

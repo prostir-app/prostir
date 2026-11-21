@@ -9,12 +9,16 @@
 # started over, the connection dropped and back. Every build has the selftest but the
 # store's, which ignores it (no report comes: exit 3).
 #
-#   scripts/selftest-headset.sh [--seconds N] [--relaunch] [--package NAME] [--out DIR]
+#   scripts/selftest-headset.sh [--seconds N] [--relaunch] [--decoder-rate max]
+#                                [--package NAME] [--out DIR]
 #
 #   --seconds N    how long the calm part, where frame times are measured, lasts (30);
 #                  3600 makes an hour's run for battery and heat
 #   --relaunch     the first run ends without leaving the process, a second start runs
 #                  in the same one: its report must have the same pid and run=2
+#   --decoder-rate max  the decoders are asked to run as fast as they can
+#                  (operating-rate), which the app never asks otherwise: an A/B of
+#                  decode_ms against battery.* with a run without it
 #   --package      dev.prostir.client.preview (the preview build, the default when it
 #                  is installed) or dev.prostir.client (the default otherwise)
 #   --out DIR      where the reports and the app's log go (a new directory in /tmp)
@@ -24,18 +28,20 @@ set -euo pipefail
 
 SECONDS_CALM=30
 RELAUNCH=0
+DECODER_RATE=default
 PACKAGE=""
 OUT=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --seconds) SECONDS_CALM="$2"; shift 2 ;;
         --relaunch) RELAUNCH=1; shift ;;
+        --decoder-rate) DECODER_RATE="$2"; shift 2 ;;
         --package) PACKAGE="$2"; shift 2 ;;
         --out) OUT="$2"; shift 2 ;;
         --pc | --pc=*)
             echo "!! the selftest against a real prostir (pc=usb) comes in a later step" >&2
             exit 2 ;;
-        -h | --help) sed -n '2,22p' "$0"; exit 0 ;;
+        -h | --help) sed -n '2,26p' "$0"; exit 0 ;;
         *) echo "!! unknown option $1 (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -136,6 +142,7 @@ fi
 sleep 1
 OPTIONS="seconds=$SECONDS_CALM"
 (( RELAUNCH )) && OPTIONS+=",relaunch=1"
+[[ $DECODER_RATE != default ]] && OPTIONS+=",decoder_rate=$DECODER_RATE"
 echo ">> $PACKAGE on a $MAKER $(shell getprop ro.product.model): selftest $OPTIONS (up to ${WAIT}s)"
 STARTED=1
 start "$OPTIONS"

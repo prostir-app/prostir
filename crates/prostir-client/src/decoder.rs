@@ -270,6 +270,12 @@ fn start_decoder(
     format.set_i32("vendor.qti-ext-dec-low-latency.enable", 1);
     format.set_i32("vendor.qti-ext-dec-picture-order.enable", 1);
     format.set_i32("priority", 0);
+    // Only for the selftest's A/B (`decoder_rate=max`): as fast as the codec can,
+    // as some players ask of Qualcomm decoders, at the price of heat.
+    #[cfg(all(feature = "selftest", not(feature = "store")))]
+    if crate::selftest::decoder_rate_max() {
+        format.set_i32("operating-rate", i32::from(i16::MAX));
+    }
     decoder
         .configure(&format, Some(window), MediaCodecDirection::Decoder)
         .context("configure decoder")?;

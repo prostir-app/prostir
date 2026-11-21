@@ -81,6 +81,7 @@ const KEYS: &[&str] = &[
     "refresh_hz",
     "period_ms",
     "perf",
+    "decoder_rate",
     "threads_left",
     "battery.start",
     "connect_ms",
@@ -532,6 +533,10 @@ impl Selftest {
             Err(e) => test.end_early(Exit::NoStart, &e),
         }
         test.report.set("seconds", test.options.seconds);
+        let max = test.options.decoder_rate_max;
+        super::set_decoder_rate_max(max);
+        test.report
+            .set("decoder_rate", if max { "max" } else { "default" });
         info!("selftest: {extra:?}, start {run} in this process");
         Some(test)
     }
