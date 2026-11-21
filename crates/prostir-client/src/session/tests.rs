@@ -98,8 +98,8 @@ fn dest(cmd: &NetCmd) -> Dest {
     }
 }
 
-/// A round goes as the headset of 0.1 went: USB, listening, the typed address, the
-/// last PC's, the one PC heard, a probe of the network; then a pause, and again.
+/// A round goes: USB, the typed address, the last PC's, listening, the one PC heard, a
+/// probe of the network; then a pause, and again.
 #[test]
 fn a_round_tries_each_way_in_turn() {
     let mut sim = Sim::new(MAX_PCS);
@@ -108,13 +108,13 @@ fn a_round_tries_each_way_in_turn() {
     assert_eq!(dest(&cmd), Dest::Usb);
     sim.missed(s);
     let (s, cmd) = sim.step();
-    assert!(matches!(cmd, NetCmd::Listen { .. }));
-    sim.missed(s);
-    let (s, cmd) = sim.step();
     assert_eq!(dest(&cmd), Dest::HostFile);
     sim.missed(s);
     let (s, cmd) = sim.step();
     assert_eq!(dest(&cmd), Dest::LastHost);
+    sim.missed(s);
+    let (s, cmd) = sim.step();
+    assert!(matches!(cmd, NetCmd::Listen { .. }));
     sim.missed(s);
     // Nobody heard: no sole PC; the first probe of the network is due at once.
     let (s, cmd) = sim.step();

@@ -178,16 +178,16 @@ enum Round {
     },
 }
 
-/// The steps of a round, in their order (as the headset of 0.1 tried them): USB, the
-/// PC picked in the menu, listening for PCs, the typed address, the last PC's, the one
-/// PC heard, a probe of the network.
+/// The steps of a round, in their order: USB, the PC picked in the menu, the typed
+/// address, the last PC's (straight away: the 1.2 s of listening for PCs do not hold
+/// them up), listening for PCs, the one PC heard, a probe of the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Plan {
     Usb,
     Choice,
-    Listen,
     HostFile,
     LastHost,
+    Listen,
     Sole,
     Scan,
 }
@@ -771,10 +771,10 @@ impl Session {
             let next = match at {
                 None => Plan::Usb,
                 Some(Plan::Usb) => Plan::Choice,
-                Some(Plan::Choice) => Plan::Listen,
-                Some(Plan::Listen) => Plan::HostFile,
+                Some(Plan::Choice) => Plan::HostFile,
                 Some(Plan::HostFile) => Plan::LastHost,
-                Some(Plan::LastHost) => Plan::Sole,
+                Some(Plan::LastHost) => Plan::Listen,
+                Some(Plan::Listen) => Plan::Sole,
                 Some(Plan::Sole) => Plan::Scan,
                 Some(Plan::Scan) => break,
             };
@@ -796,11 +796,8 @@ impl Session {
                     return;
                 }
                 // The user is choosing (or their choice is unreachable): only listen.
-                Plan::HostFile | Plan::LastHost | Plan::Sole | Plan::Scan
-                    if picking || choice.is_some() =>
-                {
-                    break;
-                }
+                Plan::HostFile | Plan::LastHost if picking || choice.is_some() => {}
+                Plan::Sole | Plan::Scan if picking || choice.is_some() => break,
                 Plan::HostFile => return self.dial(next, Dest::HostFile, now),
                 Plan::LastHost => return self.dial(next, Dest::LastHost, now),
                 // Exactly one PC around: just use it. Several: wait for a pick.
