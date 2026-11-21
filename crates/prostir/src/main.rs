@@ -875,7 +875,7 @@ fn full_with(
     sockets: platform::sockets::Sockets,
     origin: Origin,
     why: Option<wake::Wake>,
-    _instance: Option<std::fs::File>,
+    _instance: Option<platform::Lock>,
 ) -> Result<i32> {
     let (events, received) = events::channel();
     // A signal from here on quits the usual way, putting everything back.
