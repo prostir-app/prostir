@@ -77,6 +77,8 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = tru
 
 [dev-dependencies]
 prostir-testkit.workspace = true
+# The headset app's network code, run against the PC app in the end-to-end tests.
+headset = { package = "prostir-client", path = "../prostir-client" }
 
 # Packages built in the release workflow: `cargo deb -p prostir` and
 # `cargo generate-rpm -p crates/prostir`, after scripts/package-release.sh (which writes
