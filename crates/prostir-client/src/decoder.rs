@@ -135,7 +135,9 @@ fn run(job: &DecoderJob) -> Result<()> {
     // From here on the network wakes this thread for each frame.
     frames.wake(std::thread::current());
     let mut gate = KeyframeGate::new(stream, feedback.clone());
-    gate.wait();
+    // The PC starts every stream with a keyframe and the network passes its frames
+    // from one on: only a codec made again after a failure asks for one.
+    gate.expect_keyframe();
     let mut d = Decoding {
         frames,
         stop,
@@ -328,6 +330,12 @@ impl KeyframeGate {
             waiting: false,
             asked: None,
         }
+    }
+
+    /// Skips frames until a keyframe that is on its way: asks for one only if a frame
+    /// other than a keyframe comes first.
+    fn expect_keyframe(&mut self) {
+        self.waiting = true;
     }
 
     fn wait(&mut self) {
