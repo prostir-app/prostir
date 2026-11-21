@@ -111,6 +111,8 @@ impl SocketOptions for TcpOptions {
             rtt: us(info.rtt),
             rtt_var: us(info.rtt_var),
             min_rtt: us(info.min_rtt),
+            retransmits: info.more_counters[6],
+            unsent: info.segments[2],
         })
     }
 }

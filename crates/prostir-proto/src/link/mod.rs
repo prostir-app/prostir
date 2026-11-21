@@ -52,6 +52,10 @@ pub struct LinkInfo {
     pub rtt_var: Duration,
     /// The shortest round trip seen on this connection.
     pub min_rtt: Duration,
+    /// Segments TCP sent again on this connection so far (lost on the way, or their
+    /// acknowledgement was), and bytes written but not sent yet.
+    pub retransmits: u32,
+    pub unsent: u32,
 }
 
 /// The receiving half of a link.
