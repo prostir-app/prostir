@@ -42,9 +42,9 @@ const LOOK_EVERY: Duration = Duration::from_millis(500);
 const CODE_WITHIN: Duration = Duration::from_secs(300);
 /// How often the session logs what it received.
 const REPORT_EVERY: Duration = Duration::from_secs(10);
-/// Nothing at all from the PC for this long (it pings every second): the session is
-/// over.
-pub const SILENCE: Duration = Duration::from_secs(5);
+/// Nothing at all from the PC for this long (it pings every second, so three pings
+/// missed): the session is over, and the search starts at once.
+pub const SILENCE: Duration = Duration::from_secs(3);
 /// Wrong codes in a row before the headset stops and asks again.
 const PAIR_ATTEMPTS: u32 = 3;
 
