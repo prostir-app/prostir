@@ -376,9 +376,15 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
     } else {
         ""
     };
+    // The queue's thread converts and encodes: named after the output (`q-node-42`,
+    // `q-Prostir-1`), so the system's list of threads tells whose it is.
+    let queue: String = format!("q-{}", input.label)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
     Ok(format!(
-        "{source} ! queue max-size-buffers=2 leaky=downstream{stamp} ! {encoder} ! {parser} ! \
-         {caps}"
+        "{source} ! queue name={queue} max-size-buffers=2 leaky=downstream{stamp} ! {encoder} \
+         ! {parser} ! {caps}"
     ))
 }
 
