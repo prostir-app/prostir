@@ -1,6 +1,6 @@
 //! The numbers of things in the headset, in one place: which PC ([`PcId`]), which of
-//! its displays ([`DisplayKey`]), and what stands in the room for a hand to point at
-//! or take ([`Thing`]).
+//! its displays ([`DisplayKey`]), what stands in the room for a hand to point at or
+//! take ([`Thing`]), and where a ray meets one ([`Target`]).
 //!
 //! A display's number alone is the PC's: two PCs may both have a display 3. Everything
 //! the headset keeps of a display (its place, its stream, the files) goes by the PC and
@@ -10,7 +10,9 @@
 
 use std::fmt;
 
-use prostir_proto::state::DisplayId;
+use prostir_proto::state::{DisplayId, ReqId};
+
+use crate::layout::Hit;
 
 /// A PC, by its key: the first 8 bytes of the SHA-256 of its public key (see
 /// `prostir_proto::secure::key_id`). The same between runs; never on the wire, the
@@ -88,6 +90,9 @@ impl fmt::Display for DisplayKey {
 pub enum Thing {
     /// A display of a PC.
     Display(DisplayKey),
+    /// The placeholder of a monitor being added: where it will appear, until its
+    /// picture comes (the request to its PC).
+    Adding { pc: PcId, req: ReqId },
     /// The menu.
     Menu,
     /// The round button that opens the menu.
@@ -108,6 +113,13 @@ impl Thing {
             _ => None,
         }
     }
+}
+
+/// Where a ray meets a thing: the thing, and the hit on it.
+#[derive(Debug, Clone, Copy)]
+pub struct Target {
+    pub thing: Thing,
+    pub hit: Hit,
 }
 
 #[cfg(test)]

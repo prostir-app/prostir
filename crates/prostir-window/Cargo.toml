@@ -25,7 +25,6 @@ toml = "1"
 skrifa = "0.44"
 log.workspace = true
 env_logger.workspace = true
-unicode-segmentation = "1"
 
 [dev-dependencies]
 # Pictures of every page without a screen: kittest renders with wgpu (lavapipe or the

@@ -22,20 +22,21 @@ use openxr as xr;
 use openxr::sys::Handle as _;
 use prostir_proto::request::{Asked, Command, Outcome, Primary, Request};
 use prostir_proto::state::{
-    self, Battery, DisplayId, DisplayKind, HeadsetCaps, HeadsetState, Mode, PcState, Prefs,
-    Presence, ReqId, caps,
+    self, Battery, DisplayId, HeadsetCaps, HeadsetState, Mode, PcState, Prefs, Presence, ReqId,
+    caps,
 };
 use prostir_proto::{ClientMsg, Codec};
 
 use crate::audio::Gains;
-use crate::ids::{DisplayKey, PcId, Thing};
+use crate::ids::{DisplayKey, PcId, Target, Thing};
 use crate::input::Controls;
 use crate::lang::{Lang, LangState, Moment, Texts};
 use crate::layout::{self, Cylinder, Grab, Hit, Placement, Ray};
 use crate::mic::Mic;
 use crate::net::{Feedback, NetEvent};
 use crate::overlay::{self, Overlay, Sphere};
-use crate::pending::{self, Asks, Made, ProfileSwitch};
+use crate::pending::{self, Asks, ProfileSwitch};
+use crate::presence;
 use crate::profiles::{self, Profile};
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 use crate::selftest::device::{self as selftest, Act, Selftest};
@@ -43,20 +44,23 @@ use crate::settings::{Background, HandMode, Settings};
 use crate::store::{StoreCheck, UpdateHint};
 use crate::system::SystemEvent;
 use crate::ui::{self, Action, MonitorEntry, Panel, Tab, UiState};
+use crate::world::{
+    ATTACH_PX, ATTACH_WIDTH, BUTTON_SIZE, KEYBOARD_ASPECT, Pickable, WRIST_MENU_WIDTH, World,
+    attach_height, panel_height, panel_width, wrist_menu_height,
+};
 use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
 use crate::{background, decoder, egl, net, passthrough, persist, physical};
 #[cfg(not(all(feature = "selftest", not(feature = "store"))))]
 use no_selftest::{self as selftest, Act, Selftest};
 
-/// The keyboard window's depth as a share of its width (a keyboard's shape).
-const KEYBOARD_ASPECT: f32 = 0.44;
-const PANEL_WIDTH: f32 = 0.62;
-const BUTTON_SIZE: f32 = 0.075;
 const CURSOR_PX: u32 = 64;
 const BUTTON_PX: u32 = 128;
 /// Toast texture and its size in the room.
 const TOAST_PX: (u32, u32) = (1024, 132);
 const TOAST_WIDTH: f32 = 0.46;
+/// While the app is put away, how often the screen is read (see
+/// `system::interactive`) until the headset is known to be asleep.
+const SCREEN_EVERY: Duration = Duration::from_millis(250);
 /// How long a toast stays.
 const TOAST_FOR: Duration = Duration::from_secs(4);
 const ERROR_SHOWN_FOR: Duration = Duration::from_secs(8);
@@ -76,19 +80,6 @@ const POKE_RELEASE: f32 = 0.025;
 /// A finger further behind the menu than this is not touching it (reaching past).
 const POKE_BEHIND: f32 = -0.06;
 
-/// A monitor being added: where it will appear (shown at once as a placeholder),
-/// its size, its request, and its number once the PC made it.
-struct Adding {
-    req: ReqId,
-    place: Placement,
-    size: (u32, u32),
-    id: Option<DisplayKey>,
-    since: Instant,
-}
-
-/// A placeholder that waited this long for its monitor goes (the monitor may not
-/// start; it then stands failed in the list, and the menu says why).
-const PLACEHOLDER_FOR: Duration = Duration::from_secs(15);
 /// Width of the placeholder's picture, in pixels (its height follows the monitor's
 /// shape).
 const PLACEHOLDER_PX: u32 = 1024;
@@ -242,16 +233,6 @@ impl ClockFace {
     }
 }
 
-/// The menu's width in the room, larger with the "Large" menu setting.
-fn panel_width(large: bool) -> f32 {
-    let scale: f32 = if large { 1.3 } else { 1.0 };
-    PANEL_WIDTH * scale
-}
-
-fn panel_height(large: bool) -> f32 {
-    panel_width(large) * ui::HEIGHT as f32 / ui::WIDTH as f32
-}
-
 /// One stream: the compositor surface it is decoded into and its decoder thread.
 struct Monitor {
     width_px: u32,
@@ -272,33 +253,22 @@ impl Drop for Monitor {
         // The decoder must stop writing into the surface before the swapchain goes away.
         self.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.decoder.take() {
+            // It sleeps until there is work: woken, it sees `stop` at once.
+            t.thread().unpark();
             let _ = t.join();
         }
     }
 }
 
-/// The "Attach" button under a pointed-at detached window: size in the room and in
-/// pixels, how far below the window, and how long it stays after the pointer left.
-const ATTACH_WIDTH: f32 = 0.11;
-const ATTACH_PX: (u32, u32) = (352, 96);
-const ATTACH_GAP: f32 = 0.03;
+/// How long the "Attach" button under a pointed-at detached window stays after the
+/// pointer left.
 const ATTACH_LINGER: Duration = Duration::from_millis(1200);
-
-fn attach_height() -> f32 {
-    ATTACH_WIDTH * ATTACH_PX.1 as f32 / ATTACH_PX.0 as f32
-}
-/// Width of the wrist menu in the room.
-const WRIST_MENU_WIDTH: f32 = 0.13;
 /// How long an open palm faces the face before its menu appears.
 const PALM_DWELL: Duration = Duration::from_millis(250);
 /// How long the gaze rests on another monitor before the mouse goes there.
 const GAZE_DWELL: Duration = Duration::from_millis(600);
 /// How long the "where is the mouse" rings show.
 const FINDER_FOR: Duration = Duration::from_millis(1600);
-
-fn wrist_menu_height() -> f32 {
-    WRIST_MENU_WIDTH * ui::WRIST_HEIGHT as f32 / ui::WRIST_WIDTH as f32
-}
 
 /// Where the palm menu goes: lying on the palm (a little above it, its top towards the
 /// fingers), while an open palm is turned to the face. It takes a quarter of a second
@@ -356,41 +326,23 @@ fn palm_menu_place(
     })
 }
 
-/// Lying flat (facing up) with its far edge pointing away from `head`, like a
-/// keyboard on a desk.
-fn lying_flat(position: Vec3, head: Vec3) -> glam::Quat {
-    let away = Vec3::new(position.x - head.x, 0.0, position.z - head.z).normalize_or(-Vec3::Z);
-    glam::Quat::from_rotation_y((-away.x).atan2(-away.z))
-        * glam::Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
-}
-
 /// Everything shown in the headset and how it is arranged.
 struct Scene {
     monitors: HashMap<DisplayKey, Monitor>,
-    /// Left-to-right order of the Quest monitors, shared with the host and its desktop.
-    order: Vec<DisplayKey>,
-    placements: HashMap<DisplayKey, Placement>,
-    primary: Option<DisplayKey>,
+    /// Where everything stands in the room, and the rules it is arranged by.
+    world: World,
     mirror_wanted: bool,
     audio_wanted: bool,
     mic_wanted: bool,
     /// The monitor the mouse is on (from the PC).
     focus: Option<DisplayKey>,
-    /// Current brightness of each monitor, easing towards 1 or the dimmed level.
-    brightness: HashMap<DisplayKey, f32>,
     /// Resizing a monitor with both hands.
     scaling: Option<Scaling>,
-    /// Where each monitor is drawn: follows `placements`, easing into new spots.
-    shown: HashMap<DisplayKey, Placement>,
-    /// How far each monitor has faded in (0 to 1) since it appeared.
-    appear: HashMap<DisplayKey, f32>,
-    /// The headset is on the head (the session is visible); streaming pauses otherwise.
-    worn: bool,
+    /// Whether the headset is on the head, from the session, the activity and the
+    /// headset's sensor; streaming pauses otherwise.
+    presence: presence::Presence,
     settings: Settings,
-    curve_supported: bool,
     panel_open: bool,
-    panel_place: Placement,
-    button_place: Option<Placement>,
     grabs: [Option<Grab>; 2],
     host: Option<String>,
     /// PCs announcing themselves while not connected.
@@ -404,9 +356,6 @@ struct Scene {
     /// The connected PC's state, as it last said it in this session: its displays,
     /// encoding, sound, limits, what it can do.
     pc: PcState,
-    /// Which PC that is: the one of this session, or of the last one. Its displays are
-    /// known by it and their numbers (see `key`).
-    pc_id: Option<PcId>,
     /// The menu's requests to the PC in this session: waiting, failed lately, and
     /// the PC's commands waiting for one of them (see `pending`).
     asks: Asks,
@@ -434,15 +383,8 @@ struct Scene {
     confirm_forget: Option<(usize, Instant)>,
     /// Menu page shown.
     tab: Tab,
-    /// Follow mode is moving the monitors right now.
-    following: bool,
-    /// Follow mode waits for the head to come back first: a monitor was just placed
-    /// with the head turned, and the arrangement must not swing after it.
-    follow_hold: bool,
     /// The detached window whose "Attach" button shows, and when it was pointed at.
     attach_for: Option<(DisplayKey, Instant)>,
-    /// The wrist menu, while the left palm is turned to the face.
-    wrist: Option<Placement>,
     /// The monitor picked on the menu's map.
     selected: Option<DisplayKey>,
     /// The headset's battery (percent, charging), read once a minute.
@@ -467,25 +409,6 @@ struct Scene {
     toast: Option<(String, Instant, Option<Placement>)>,
     /// The PC speaks another protocol: (the PC is newer, its app version).
     update_needed: Option<(bool, String)>,
-    /// Where layouts are centred and which way they face (head position, yaw).
-    center: (Vec3, f32),
-    /// The circle around the head the arrangement stands on (it grows for many
-    /// monitors, see `layout::preset_radius`).
-    radius: f32,
-    /// How far up the arrangement's frame is tilted (see `layout::frame`): lying down,
-    /// a band overhead seen from below. The arrangement's own, as a profile keeps it:
-    /// a preset sets it when it lays the monitors out.
-    tilt: f32,
-    /// The desktop last sent to the PC.
-    sent_layout: Option<layout::Desktop<DisplayKey>>,
-    /// The monitors far to near as drawn this frame and the frame before (see
-    /// `layout::draw_order`), kept to be filled again rather than made anew.
-    draw_order: Vec<(f32, DisplayKey)>,
-    drawn: Vec<DisplayKey>,
-    /// A changed desktop waiting to settle before it is sent.
-    pending_layout: Option<(layout::Desktop<DisplayKey>, Instant)>,
-    /// The desktop for the arrangement now, kept while nothing moves.
-    desktop_memo: layout::DesktopMemo<DisplayKey>,
     /// Head position and gaze this frame.
     head: (Vec3, Vec3),
     /// The head's right, rolled and tilted with it (where the right ear is).
@@ -495,8 +418,6 @@ struct Scene {
     view_eye: Option<Vec3>,
     /// Tracked hands are in view this frame (the menu then opens within reach).
     hands_in_view: bool,
-    /// Where the keyboard window lies (set the first time it is shown).
-    keyboard_place: Option<Placement>,
     /// The headset's own system language.
     system_lang: Option<Lang>,
     /// The menu's language: what it shows, and the one it waits for.
@@ -507,16 +428,6 @@ struct Scene {
     profiles: profiles::Slots,
     /// The profile last switched to, until something is changed by hand.
     active_profile: Option<usize>,
-    /// A profile being switched to, until its monitors stand where it says.
-    profile_switch: Option<ProfileSwitch>,
-    /// A monitor being added, shown as a placeholder where it will appear.
-    adding: Option<Adding>,
-    /// The desk arrangement as last kept, in memory (`layout.txt` follows it and is
-    /// never read again); see `save_layout`.
-    desk: layout::Desk,
-    /// The stream size each desk placement was made for (see `fit_to_stream`). Not
-    /// kept for the cinema view.
-    placed_for: HashMap<DisplayKey, layout::PixelSize>,
     /// The files changed in this pass, handed to the files' writer after it (see
     /// `save_due`).
     saves: persist::Dirty,
@@ -539,30 +450,18 @@ impl Drop for Scene {
 impl Scene {
     /// Display `id` of the PC of this session (or of the last one).
     fn key(&self, id: DisplayId) -> Option<DisplayKey> {
-        self.pc_id.map(|pc| DisplayKey::new(pc, id))
+        self.world.key(id)
     }
 
     /// The number display `k` has on the PC of this session; none for a display of
     /// another PC.
     fn on_pc(&self, k: DisplayKey) -> Option<DisplayId> {
-        (self.pc_id == Some(k.pc)).then_some(k.id)
-    }
-
-    /// Display `k` is another PC's than this session's: its place is kept, and
-    /// nothing here lays it out.
-    fn of_other_pc(&self, k: DisplayKey) -> bool {
-        self.pc_id.is_some_and(|pc| pc != k.pc)
+        self.world.on_pc(k)
     }
 
     /// Display `id` as its PC's list says (`None`: not listed, or another PC's).
     fn display(&self, id: DisplayKey) -> Option<&state::Display> {
         self.pc.displays.as_ref()?.get(self.on_pc(id)?)
-    }
-
-    /// What display `id` is, as its PC's list says (`None`: not listed, or another
-    /// PC's).
-    fn kind(&self, id: DisplayKey) -> Option<&DisplayKind> {
-        self.display(id).map(|d| &d.kind)
     }
 
     /// The PC can move the mouse (for following the gaze).
@@ -571,22 +470,6 @@ impl Scene {
             .caps
             .as_ref()
             .is_some_and(|c| c.has(caps::pc::MOVE_MOUSE))
-    }
-
-    /// A virtual monitor (not a window panel, nor a display of the PC itself).
-    fn is_monitor(&self, id: DisplayKey) -> bool {
-        matches!(self.kind(id), Some(DisplayKind::Virtual))
-    }
-
-    /// A window panel.
-    fn is_window(&self, id: DisplayKey) -> bool {
-        matches!(self.kind(id), Some(DisplayKind::Window { .. }))
-    }
-
-    /// The display of the PC itself shown in the headset, if one is (see
-    /// [`physical::mirror`]).
-    fn mirror_id(&self) -> Option<DisplayKey> {
-        self.key(physical::mirror(self.pc.displays.as_ref()?)?)
     }
 
     /// The display of the PC itself the switch shows or hides: one connected now,
@@ -600,170 +483,30 @@ impl Scene {
         physical::switch(self.pc.displays.as_ref()?).map(|d| physical::label(d, self.texts()))
     }
 
-    /// Quest monitors left to right: in the host's order, unknown ones at the end.
-    fn quest_sizes(&self) -> Vec<(DisplayKey, u32, u32)> {
-        let mut ids: Vec<DisplayKey> = self
-            .order
-            .iter()
-            .copied()
-            .filter(|id| self.monitors.contains_key(id))
-            .collect();
-        let mut rest: Vec<DisplayKey> = self
-            .monitors
-            .keys()
-            .copied()
-            .filter(|id| self.is_monitor(*id) && !ids.contains(id))
-            .collect();
-        rest.sort_unstable();
-        ids.extend(rest);
-        ids.into_iter()
-            .map(|id| {
-                let m = &self.monitors[&id];
-                (id, m.width_px, m.height_px)
-            })
-            .collect()
-    }
-
-    /// Sends a new left-to-right order to the host (which re-arranges its desktop to match).
-    /// Tells the PC how the monitors stand around the user (rows, left to right), so
-    /// the desktop's arrangement matches: the mouse leaves a monitor where the next one is,
-    /// sideways, up or down. Only sent when it changed.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "until step 7.7 passes the time in and moves the threads to the shell"
-    )]
-    fn send_layout(&mut self) {
-        let Some(pc) = self
-            .pc_id
-            .filter(|_| !self.settings.cinema && self.feedback.is_some())
-        else {
-            return;
-        };
-        // Wait until every monitor the PC has is placed: a partial picture would make
-        // the desktop rearrange (and blink) once per arriving monitor. One whose stream could
-        // not start keeps its place and does not hold the others up.
-        let complete = self.order.iter().any(|id| self.monitors.contains_key(id))
-            && self.order.iter().all(|id| self.placements.contains_key(id));
-        if !complete {
-            return;
+    /// What the world asks for after it changed: the PC is told the rows of its
+    /// desktop (see `World::settle`), and a hand lets go of what the world no longer
+    /// has it hold (laid out anew, or gone).
+    fn world_done(&mut self) {
+        if let Some(rows) = self.world.take_arrange() {
+            self.send(ClientMsg::Arrange { rows });
         }
-        // The laptop screen too: the PC puts it where it stands here. Monitors stay in
-        // the rows the PC has until clearly moved out of them, and its desktop stays
-        // while it fits as well as a new one would.
-        let desktop = self.desktop();
-        if desktop.rows.is_empty() || self.sent_layout.as_ref() == Some(&desktop) {
-            self.pending_layout = None;
-            return;
-        }
-        // Only an arrangement that has held for a moment: monitors arriving one by one
-        // or being laid out again pass through states the desktop should not be shown.
-        match &self.pending_layout {
-            Some((pending, since)) if *pending == desktop => {
-                if since.elapsed() < Duration::from_millis(800) {
-                    return;
-                }
-            }
-            _ => {
-                self.pending_layout = Some((desktop, Instant::now()));
-                return;
+        for grab in &mut self.grabs {
+            if grab.is_some_and(|g| !self.world.holds(g.id)) {
+                *grab = None;
             }
         }
-        self.pending_layout = None;
-        let rows = desktop.wire(|k| (k.pc == pc).then_some(k.id));
-        info!(
-            "desktop arrangement: {}",
-            rows.iter()
-                .map(|r| {
-                    let ids: Vec<u32> = r.ids().map(|id| id.0).collect();
-                    let centers: Vec<Option<i32>> = r.entries.iter().map(|e| e.center).collect();
-                    format!("{ids:?}@{centers:?}")
-                })
-                .collect::<Vec<_>>()
-                .join(" / ")
-        );
-        self.order = rows
-            .iter()
-            .flat_map(state::Row::ids)
-            .map(|id| DisplayKey::new(pc, id))
-            .filter(|id| self.is_monitor(*id))
-            .collect();
-        self.sent_layout = Some(desktop);
-        self.send(ClientMsg::Arrange { rows });
-    }
-
-    fn mirror_size(&self) -> Option<(DisplayKey, u32, u32)> {
-        let id = self.mirror_id()?;
-        self.monitors
-            .get(&id)
-            .map(|m| (id, m.width_px, m.height_px))
-    }
-
-    /// Puts the laptop mirror back under the primary monitor, leaving the rest alone.
-    fn place_mirror(&mut self) {
-        let all = self.around_user(layout::arrange(
-            self.settings.preset,
-            &self.quest_sizes(),
-            self.primary,
-            self.mirror_size(),
-            self.curve_factor(),
-        ));
-        if let Some(id) = self.mirror_id()
-            && let Some(p) = all.get(&id)
+        if self
+            .scaling
+            .is_some_and(|s| self.world.resizing() != Some(s.id))
         {
-            self.placements.insert(id, *p);
+            self.scaling = None;
         }
-    }
-
-    /// Moves the drawn monitors towards their places (held ones follow at once) and
-    /// fades new ones in.
-    fn animate(&mut self, dt: f32, held: &[DisplayKey]) {
-        // About a quarter of a second to settle.
-        let k = 1.0 - (-dt * 12.0).exp();
-        for (id, target) in &self.placements {
-            match self.shown.get_mut(id) {
-                Some(s) if !held.contains(id) => {
-                    s.position = s.position.lerp(target.position, k);
-                    s.rotation = s.rotation.slerp(target.rotation, k);
-                    s.width += (target.width - s.width) * k;
-                    if s.position.distance(target.position) < 0.0005 {
-                        *s = *target;
-                    }
-                }
-                Some(s) => *s = *target,
-                None => {
-                    self.shown.insert(*id, *target);
-                }
-            }
-        }
-        let placements = &self.placements;
-        self.shown.retain(|id, _| placements.contains_key(id));
-        for id in self.monitors.keys() {
-            let a = self.appear.entry(*id).or_insert(0.0);
-            *a = (*a + dt / 0.3).min(1.0);
-        }
-        let monitors = &self.monitors;
-        self.appear.retain(|id, _| monitors.contains_key(id));
     }
 
     /// The setup as it is now (see `Profile::of`): the monitors left to right with
     /// their scales, the primary, the PC's own displays shown, and where they stand (in
     /// cinema, the desk arrangement as kept before it).
     fn current_profile(&self) -> Profile {
-        let live = layout::Arrangement {
-            placements: self.placements.clone(),
-            sizes: HashMap::new(),
-            center: Some(self.center),
-            radius: Some(self.radius),
-            tilt: self.tilt,
-        };
-        let monitors: Vec<(DisplayKey, Mode)> = self
-            .quest_sizes()
-            .into_iter()
-            .map(|(k, w, h)| {
-                let scale = self.display(k).map_or(100, |d| d.mode.scale);
-                (k, Mode { w, h, scale })
-            })
-            .collect();
         let shown = self
             .pc
             .displays
@@ -772,70 +515,8 @@ impl Scene {
             .filter(|d| d.is_shown_physical())
             .filter_map(|d| self.key(d.id))
             .collect();
-        Profile::of(
-            &monitors,
-            self.primary,
-            shown,
-            &live,
-            self.settings.cinema.then(|| self.desk.arrangement()),
-            &self.sent_rows(),
-        )
-    }
-
-    /// Monitors without a place get one: all by the preset when none has any (the
-    /// first start), else each next to the others (see `layout::place_new`), which
-    /// stay where they are. The laptop screen goes under the primary monitor.
-    fn place_missing(&mut self) {
-        if self.settings.cinema || self.profile_switch.is_some() {
-            return;
-        }
-        let sizes = self.quest_sizes();
-        if sizes.is_empty() {
-            return;
-        }
-        if !sizes.iter().any(|m| self.placements.contains_key(&m.0)) {
-            self.arrange_all();
-            return;
-        }
-        let mut placed = false;
-        for m in sizes {
-            if self.placements.contains_key(&m.0) {
-                continue;
-            }
-            // Where its placeholder stood, for the monitor being added.
-            let at = match &self.adding {
-                Some(a) if a.id == Some(m.0) => a.place,
-                _ => self.place_for_new((m.1, m.2)),
-            };
-            info!("monitor {} placed next to the others", m.0);
-            self.placements.insert(m.0, at);
-            placed = true;
-        }
-        if let Some(id) = self.mirror_id()
-            && self.monitors.contains_key(&id)
-            && !self.placements.contains_key(&id)
-        {
-            self.place_mirror();
-            placed = true;
-        }
-        if placed {
-            self.save_layout();
-        }
-    }
-
-    /// Where a new monitor of `size` pixels goes next to the others (it has no place
-    /// yet).
-    fn place_for_new(&self, size: (u32, u32)) -> Placement {
-        layout::place_new(
-            &self.placements,
-            &self.layout_sizes(),
-            size,
-            self.center,
-            self.tilt,
-            self.head.1,
-            &self.sent_rows(),
-            self.radius,
-        )
+        self.world
+            .profile(shown, |k| self.display(k).map_or(100, |d| d.mode.scale))
     }
 
     /// The placeholder of a monitor being added goes once its picture is there, it
@@ -845,192 +526,40 @@ impl Scene {
         reason = "until step 7.7 passes the time in and moves the threads to the shell"
     )]
     fn adding_due(&mut self) {
-        let Some(a) = &self.adding else {
-            return;
-        };
-        let failed = a.id.is_some_and(|k| {
-            self.pc.displays.as_ref().is_some_and(|d| {
-                self.on_pc(k)
-                    .and_then(|id| d.get(id))
-                    .is_none_or(|d| matches!(d.state, state::DisplayState::Failed { .. }))
-            })
-        });
-        let shown = a.id.is_some_and(|id| self.monitors.contains_key(&id));
-        let asked = self.asks.waits(ui::Asked::AddMonitor) || a.id.is_some();
-        if shown
-            || failed
-            || !asked
-            || self.feedback.is_none()
-            || a.since.elapsed() >= PLACEHOLDER_FOR
-        {
-            self.adding = None;
-        }
+        let waits = self.asks.waits(ui::Asked::AddMonitor);
+        self.world.adding_due(Instant::now(), waits);
     }
 
-    /// Turns cinema mode on or off. The one place that switches it: the desk layout is
-    /// kept before the cinema view replaces it (follow mode may have moved it), and
-    /// comes back after from memory (not from its file, which may not be written yet),
-    /// window panels staying where they are.
+    /// Turns cinema mode on or off (see `World::set_cinema`).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn set_cinema(&mut self, on: bool) {
-        if on == self.settings.cinema {
-            return;
-        }
-        if on {
-            self.save_layout();
-            self.settings.cinema = true;
-            self.arrange_all();
-            return;
-        }
-        self.settings.cinema = false;
-        let saved = self.desk.arrangement().clone();
-        self.adopt_desk(saved);
-        self.place_missing();
+        self.world
+            .set_cinema(&self.settings, on, self.head.1, Instant::now());
+        self.settings.cinema = on;
+        self.world_done();
     }
 
-    /// Cinema mode with no view yet (started in cinema, or switched to a PC in it):
-    /// built once every monitor the PC has is here, so the chosen screen is among
-    /// them. A view that exists, moved by hand perhaps, is left alone.
-    fn build_cinema_view_if_due(&mut self) {
-        let due = self.settings.cinema
-            && !self.order.is_empty()
-            && self.order.iter().all(|id| self.monitors.contains_key(id))
-            && !self.order.iter().any(|id| self.placements.contains_key(id));
-        if due {
-            self.arrange_all();
-        }
-    }
-
-    /// A profile is being switched to: the monitors are not laid out one by one, nor
-    /// the desktop's arrangement sent, until it stands.
-    fn relayout_pending(&self) -> bool {
-        self.profile_switch.is_some()
-    }
-
-    /// The PC made a profile's monitors (`ids`, in the order of its monitors): they
-    /// take the profile's places, or, for a profile without places, the layout of the
-    /// preset once all of them stream. In cinema the profile's places become the desk
-    /// arrangement under the cinema view, shown once cinema ends.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "until step 7.7 passes the time in and moves the threads to the shell"
-    )]
-    fn profile_made(&mut self, ids: Vec<DisplayKey>) {
-        let Some(switch) = &mut self.profile_switch else {
-            return;
-        };
-        let (frame, rows) = (switch.frame, switch.rows.clone());
-        let radius = frame.map_or(layout::RADIUS, |f| f.radius);
-        match switch.made(ids, Instant::now()) {
-            Made::Places(made) if self.settings.cinema => {
-                self.profile_switch = None;
-                let mut desk = self.desk.arrangement().clone();
-                let at = desk.center.unwrap_or(self.center);
-                let (placed, rows) = profiles::standing(&made, frame, &rows, at);
-                for (id, p) in placed {
-                    desk.placements.insert(id, p);
-                    desk.sizes.remove(&id);
-                }
-                let tilt = frame.map_or(desk.tilt, |f| f.tilt);
-                self.desk
-                    .keep(desk.placements, &desk.sizes, (at, radius, tilt), false);
-                self.saves.mark(persist::File::Desk);
-                self.rows_from(rows);
-            }
-            Made::Places(made) => {
-                // Seen from the user's eye now as they were from the eye they were
-                // saved around. Worked out here, once the monitors are made: following
-                // the head meanwhile moves the center.
-                let (placed, rows) = profiles::standing(&made, frame, &rows, self.center);
-                for (id, p) in placed {
-                    self.placements.insert(id, p);
-                    self.placed_for.remove(&id);
-                }
-                self.radius = radius;
-                // The profile's arrangement is seen as it was, whatever the preset.
-                if let Some(f) = frame {
-                    self.tilt = f.tilt;
-                }
-                self.profile_switch = None;
-                self.rows_from(rows);
-                self.save_layout();
-                self.place_missing();
-            }
-            Made::Wait => self.profile_streams(),
-        }
-    }
-
-    /// A profile laid out by its preset, once every monitor it made streams (or could
-    /// not start: it keeps its place in the list), or once it waited long enough
-    /// (`pending::PROFILE_STANDS_WITHIN`), with what streams then.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "until step 7.7 passes the time in and moves the threads to the shell"
-    )]
-    fn profile_streams(&mut self) {
-        let settled = |k: DisplayKey| {
-            self.monitors.contains_key(&k)
-                || self.pc.displays.as_ref().is_some_and(|d| {
-                    self.on_pc(k)
-                        .and_then(|id| d.get(id))
-                        .is_none_or(|d| matches!(d.state, state::DisplayState::Failed { .. }))
-                })
-        };
-        let stands = self
-            .profile_switch
-            .as_ref()
-            .is_some_and(|s| s.stands(Instant::now(), settled));
-        if stands {
-            self.profile_switch = None;
-            self.rows_from(Vec::new());
-            self.arrange_all();
-        }
-    }
-
-    /// A profile switched to is another arrangement: its rows are those it was saved
-    /// with (by the PC's numbers now), or, for a profile without them, start afresh
-    /// (see `layout::Desktop::history`).
-    fn rows_from(&mut self, rows: Vec<Vec<DisplayKey>>) {
-        self.sent_layout = layout::Desktop::history(rows);
-        self.pending_layout = None;
-    }
-
-    /// Keeps the arrangement as the desk layout, and `layout.txt` is saved after this
-    /// pass. In cinema mode `placements` is the cinema view, which is not kept: the
-    /// desk layout stays as the user left it. Window panels are placed afresh when
-    /// they appear, so they are not kept.
-    fn save_layout(&mut self) {
-        // Taken out for the while (its maps keep their memory) so the rest of the
-        // scene can be read meanwhile.
-        let mut desk = std::mem::take(&mut self.desk);
-        let kept = desk.keep(
-            self.placements
-                .iter()
-                .filter(|(id, _)| !self.is_window(**id))
-                .map(|(id, p)| (*id, *p)),
-            &self.placed_for,
-            (self.center, self.radius, self.tilt),
-            self.settings.cinema,
-        );
-        self.desk = desk;
-        if kept {
-            self.saves.mark(persist::File::Desk);
-        }
-    }
-
-    /// The files changed in this pass (`saves`), handed to the files' writer: each
-    /// one's text written into the writer's buffer for it, once, whatever changed it
-    /// how often. The writing itself is done on the writer's thread.
+    /// The files changed in this pass (`saves`, and those the world changed), handed
+    /// to the files' writer: each one's text written into the writer's buffer for it,
+    /// once, whatever changed it how often. The writing itself is done on the writer's
+    /// thread.
     fn save_due(&mut self) {
         use persist::File;
+        self.saves.add(self.world.take_saves());
         for file in self.saves.take() {
             match file {
                 File::Settings => self.saver.save(file, |out| self.settings.write_text(out)),
-                File::Desk => self.saver.save(file, |out| self.desk.write_text(out)),
+                File::Desk => self
+                    .saver
+                    .save(file, |out| self.world.desk().write_text(out)),
                 File::Profiles => self
                     .saver
                     .save(file, |out| profiles::write_text(out, &self.profiles)),
                 File::Keyboard => {
-                    if let Some(place) = &self.keyboard_place {
+                    if let Some(place) = &self.world.keyboard() {
                         self.saver
                             .save(file, |out| layout::write_keyboard(out, place));
                     }
@@ -1091,238 +620,24 @@ impl Scene {
         self.put_error(text);
     }
 
-    /// PC `pc` was forgotten: the places of its displays go (from the arrangement, and
-    /// from the desk arrangement kept aside in cinema), so does the cinema's pick of
-    /// one, and no profile shows its displays any more. Paired again later, its
-    /// displays are laid out afresh.
+    /// PC `pc` was forgotten: the places of its displays go (see `World::forget_pc`),
+    /// and no profile shows its displays any more. Paired again later, its displays
+    /// are laid out afresh.
     fn forget_pc(&mut self, pc: PcId) {
-        let of_pc = |k: &DisplayKey| k.pc == pc;
-        self.placements.retain(|k, _| !of_pc(k));
-        self.placed_for.retain(|k, _| !of_pc(k));
-        let gone: Vec<DisplayKey> = self
-            .desk
-            .arrangement()
-            .placements
-            .keys()
-            .copied()
-            .chain(self.desk.cinema())
-            .filter(of_pc)
-            .collect();
-        if self.desk.forget(&gone) {
-            self.saves.mark(persist::File::Desk);
-        }
+        self.world.forget_pc(pc);
         if profiles::forget_pc(&mut self.profiles, pc) {
             self.saves.mark(persist::File::Profiles);
         }
     }
 
-    /// Takes `saved` as the desk arrangement. Window panels stay where they are; a
-    /// monitor whose stream changed size since keeps the size of its pixels; layouts
-    /// keep facing the way this one was laid out (from a file that does not say, the
-    /// way its monitors face).
-    fn adopt_desk(&mut self, saved: layout::Arrangement) {
-        let windows: Vec<DisplayKey> = self
-            .placements
-            .keys()
-            .copied()
-            .filter(|id| self.is_window(*id))
-            .collect();
-        self.placements.retain(|id, _| windows.contains(id));
-        self.placements.extend(saved.placements);
-        self.placed_for = saved.sizes;
-        self.radius = saved.radius.unwrap_or(layout::RADIUS);
-        // A desk never kept (none saved yet) keeps the tilt of the preset.
-        if saved.center.is_some() {
-            self.tilt = saved.tilt;
-        }
-        let live: Vec<(DisplayKey, layout::PixelSize)> = self
-            .monitors
-            .iter()
-            .map(|(id, m)| (*id, (m.width_px, m.height_px)))
-            .collect();
-        for (id, size) in live {
-            if !self.is_window(id) {
-                self.fit_to_stream(id, size);
-            }
-        }
-        self.center = saved.center.unwrap_or_else(|| {
-            let desk: HashMap<DisplayKey, Placement> = self
-                .placements
-                .iter()
-                .filter(|(id, _)| !self.is_window(**id))
-                .map(|(id, p)| (*id, *p))
-                .collect();
-            (
-                Vec3::ZERO,
-                layout::facing_yaw(&desk, Vec3::ZERO).unwrap_or(0.0),
-            )
-        });
-    }
-
-    /// The desk placement of monitor `id` follows its stream, now `size` pixels: the
-    /// same size of a pixel as before (see `layout::refit`).
-    fn fit_to_stream(&mut self, id: DisplayKey, size: layout::PixelSize) {
-        if let (Some(p), Some(&was)) = (self.placements.get_mut(&id), self.placed_for.get(&id)) {
-            *p = layout::refit(*p, was, size);
-        }
-        self.placed_for.insert(id, size);
-    }
-
-    /// Layouts are worked out around the origin facing -Z; this moves them to where
-    /// the user sat and looked when they last asked to bring everything in front.
-    fn around_user(
-        &self,
-        mut placements: HashMap<DisplayKey, Placement>,
-    ) -> HashMap<DisplayKey, Placement> {
-        for p in placements.values_mut() {
-            *p = layout::carried(p, (Vec3::ZERO, 0.0), self.center);
-        }
-        placements
-    }
-
-    /// Lays the monitors of this session's PC (and its own display shown) out by the
-    /// chosen preset, or in cinema its one screen. Only the places it lays out change:
-    /// window panels, another PC's displays and a display of this PC that shows
-    /// nothing now (a closed laptop's panel) stay where they are. With nothing to lay
-    /// out (no PC yet, or no monitor of it streams) nothing changes and nothing is
-    /// saved, so the arrangement waiting for its PC is not lost.
-    fn arrange_all(&mut self) {
-        let sizes = self.quest_sizes();
-        if self.settings.cinema {
-            // The view takes the place of the monitors here, which it does not show (the
-            // desk keeps theirs).
-            let view = self.around_user(layout::cinema(&sizes, self.desk.cinema()));
-            let hidden: Vec<DisplayKey> = self
-                .placements
-                .keys()
-                .copied()
-                .filter(|k| !self.is_window(*k) && !self.of_other_pc(*k))
-                .collect();
-            for k in &hidden {
-                self.placements.remove(k);
-            }
-            self.placements.extend(view);
-            self.grabs = [None, None];
-            return;
-        }
-        if sizes.is_empty() {
-            return;
-        }
-        self.radius = layout::preset_radius(self.settings.preset, &sizes);
-        self.tilt = layout::tilt(self.settings.preset);
-        let laid = self.around_user(layout::arrange(
-            self.settings.preset,
-            &sizes,
-            self.primary,
-            self.mirror_size(),
-            self.curve_factor(),
-        ));
-        self.placements.extend(laid);
-        self.grabs = [None, None];
-        self.save_layout();
-        self.send_layout();
-    }
-
-    /// A new window panel: in front of the user, a little closer than the monitors and
-    /// below eye level, beside panels already there. Flat, at the monitors' sharpness.
-    fn place_window_panel(&mut self, id: DisplayKey) {
-        let Some(m) = self.monitors.get(&id) else {
-            return;
-        };
-        const DISTANCE: f32 = 0.8;
-        let (head, forward) = self.head;
-        let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
-        let right = Vec3::new(-flat.z, 0.0, flat.x);
-        let others = self
-            .placements
-            .keys()
-            .filter(|k| self.is_window(**k) && **k != id)
-            .count();
-        let width =
-            (m.width_px as f32 * layout::METRES_PER_PIXEL * DISTANCE / self.radius).clamp(0.2, 1.2);
-        let position = head + flat * DISTANCE - Vec3::Y * 0.12 + right * (0.15 * others as f32);
-        self.placements.insert(
-            id,
-            Placement {
-                position,
-                rotation: layout::facing(position, Vec3::new(head.x, position.y, head.z)),
-                width,
-            },
-        );
-    }
-
-    /// Monitor `id` as seen from where the user sits, for the menu's map: centre
-    /// (right, up) and half size, in radians.
-    /// Where the map looks from, and how to turn the room so it looks straight ahead:
-    /// the eyes now, facing the arrangement; lying down, along the band tilted up
-    /// overhead (seen from below, right over the head, left and right would make no
-    /// sense), as the desktop does it.
-    fn map_view(&self) -> (Vec3, glam::Quat) {
-        let tilt = self.tilt;
-        (
-            self.view_eye.unwrap_or(self.center.0),
-            glam::Quat::from_rotation_x(-tilt) * glam::Quat::from_rotation_y(-self.center.1),
-        )
-    }
-
-    /// The monitors on the map: the desktop the PC gets (see `layout::Desktop`).
-    fn map_spots(&self) -> HashMap<DisplayKey, [f32; 4]> {
-        self.desktop().spots()
-    }
-
-    /// The rows the PC's desktop is laid out by, by id: those last sent, or those a
-    /// profile switched to was saved with until its desktop is sent (see `rows_from`).
-    /// Their neighbours stay neighbours until clearly moved apart (`rows::rows_of`).
-    fn sent_rows(&self) -> Vec<Vec<DisplayKey>> {
-        self.sent_layout
-            .as_ref()
-            .map(|d| d.rows.clone())
-            .unwrap_or_default()
-    }
-
-    /// The PC desktop for the monitors and the laptop screen as they stand now, seen
-    /// from where the arrangement faces.
-    fn desktop(&self) -> layout::Desktop<DisplayKey> {
-        self.desktop_memo.get(
-            &self.placements,
-            &self.layout_sizes(),
-            self.center,
-            self.tilt,
-            self.primary,
-            self.sent_layout.as_ref(),
-        )
-    }
-
-    fn place_of(&self, id: DisplayKey) -> ui::Place {
-        let Some(p) = self.placements.get(&id) else {
-            return ui::Place::Unknown;
-        };
-        let (eye, unturn) = self.map_view();
-        let local = unturn * (p.position - eye);
-        let side = local.x.atan2(-local.z);
-        let up = local.y.atan2(Vec2::new(local.x, local.z).length());
-        if up > 0.35 {
-            ui::Place::Above
-        } else if up < -0.35 {
-            ui::Place::Below
-        } else if side < -0.26 {
-            ui::Place::Left
-        } else if side > 0.26 {
-            ui::Place::Right
-        } else {
-            ui::Place::Center
-        }
-    }
-
     /// Mouse follows the gaze: after resting on another monitor for a moment, the
-    /// mouse goes to where the user looks on it.
+    /// mouse goes to where the user looks on it (as drawn).
     #[expect(
         clippy::disallowed_methods,
         reason = "until step 7.7 passes the time in and moves the threads to the shell"
     )]
     fn follow_gaze(&mut self) {
-        let busy =
-            self.wrist.is_some() || self.grabs.iter().any(Option::is_some) || self.settings.cinema;
+        let busy = self.world.wrist().is_some() || self.world.holding() || self.settings.cinema;
         if !self.settings.gaze_mouse || !self.can_move_mouse() || self.feedback.is_none() || busy {
             self.gaze_on = None;
             return;
@@ -1332,26 +647,13 @@ impl Scene {
             origin: head,
             dir: forward.normalize_or(-Vec3::Z),
         };
-        let curve = self.curve_radius();
+        let asks = &self.asks;
         let looked = self
-            .visible_monitors()
-            .filter_map(|id| {
-                let p = self.placements.get(id)?;
-                let c = curve.filter(|_| !self.is_window(*id));
-                let hit = layout::hit_surface(ray, p, self.height_of(*id), c)?;
-                Some((*id, hit, *p, c))
-            })
-            .min_by(|a, b| a.1.t.total_cmp(&b.1.t));
-        // Looking at the menu, not past it.
-        let at_menu = self.panel_open
-            && layout::hit_surface(
-                ray,
-                &self.panel_place,
-                panel_height(self.settings.large_menu),
-                None,
-            )
-            .is_some_and(|m| looked.as_ref().is_none_or(|l| m.t < l.1.t));
-        let Some((id, hit, p, c)) = looked.filter(|_| !at_menu) else {
+            .world
+            .looked_at(ray, &self.settings, self.panel_open, |k| {
+                asks.waits(ui::Asked::Remove(k))
+            });
+        let Some((id, uv)) = looked else {
             self.gaze_on = None;
             return;
         };
@@ -1365,7 +667,6 @@ impl Scene {
                     .gaze_moved
                     .is_some_and(|t| t.elapsed() < Duration::from_millis(1500));
                 if since.elapsed() >= GAZE_DWELL && !recently {
-                    let uv = layout::image_uv(&p, self.height_of(id), c, hit.local);
                     let f = |v: f32| (v * 65535.0) as u16;
                     info!("gaze: mouse to monitor {id} at {:.2},{:.2}", uv.x, uv.y);
                     if let Some(display) = self.on_pc(id) {
@@ -1396,7 +697,7 @@ impl Scene {
         if every == 0 {
             return;
         }
-        if !self.worn {
+        if !self.presence.worn() {
             self.off_since.get_or_insert_with(Instant::now);
             return;
         }
@@ -1426,7 +727,7 @@ impl Scene {
         let angle = self
             .sound_from
             .filter(|_| self.settings.sound_from_screen)
-            .and_then(|id| self.shown.get(&id))
+            .and_then(|id| self.world.shown(id))
             .map(|p| {
                 // In the head's own terms, so lying down or tilting the head keeps the
                 // ears right: how far towards the right ear, and how far in front.
@@ -1449,382 +750,53 @@ impl Scene {
         self.toast = Some((text, Instant::now(), None));
     }
 
+    /// Profile `i` as the menu names it ("Profile 2").
+    fn profile_name(&self, i: usize) -> String {
+        self.texts().f("profile-n", &[("n", (i + 1).into())])
+    }
+
     /// The monitor most straight ahead of the head (not a window panel).
     fn monitor_in_front(&self) -> Option<DisplayKey> {
-        let (head, forward) = self.head;
-        self.placements
-            .iter()
-            .filter(|(id, _)| {
-                !self.is_window(**id)
-                    && self.monitors.contains_key(*id)
-                    && !self.being_removed(**id)
-            })
-            .max_by(|a, b| {
-                let score = |p: &Placement| (p.position - head).normalize_or_zero().dot(forward);
-                score(a.1).total_cmp(&score(b.1))
-            })
-            .map(|(id, _)| *id)
+        let asks = &self.asks;
+        self.world
+            .monitor_in_front(self.head, |k| asks.waits(ui::Asked::Remove(k)))
     }
 
-    /// Follow mode: once the head has turned (or moved) well away from where the
-    /// monitors face, the whole arrangement glides after it until it is in front again.
-    /// Small head movements leave it still, so reading is not disturbed.
-    fn follow_head(&mut self, dt: f32) {
-        const START_TURN: f32 = 0.35; // about 20°
-        const START_MOVE: f32 = 0.25; // metres
-        if !self.settings.follow
-            || self.placements.is_empty()
-            || self.grabs.iter().any(Option::is_some)
-        {
-            self.following = false;
-            return;
-        }
-        let (head, forward) = self.head;
-        let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
-        let yaw = (-flat.x).atan2(-flat.z);
-        let (pos, center_yaw) = self.center;
-        let mut turn = yaw - center_yaw;
-        turn =
-            (turn + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
-        let shift = Vec3::new(head.x - pos.x, 0.0, head.z - pos.z);
-        if self.follow_hold {
-            if turn.abs() < START_TURN && shift.length() < START_MOVE {
-                self.follow_hold = false;
-            }
-            return;
-        }
-        if !self.following && (turn.abs() > START_TURN || shift.length() > START_MOVE) {
-            self.following = true;
-        }
-        if !self.following {
-            return;
-        }
-        // Ease towards the head: about a third of a second to catch up.
-        let k = (dt * 3.0).min(1.0);
-        let step_turn = turn * k;
-        let step_shift = shift * k;
-        let new_pos = pos + step_shift;
-        for p in self.placements.values_mut() {
-            // Its rotation unit after every step (see `layout::carried`): thousands of
-            // steps of following must not leave one that the last bits of a float have
-            // made other than a turn, nor a seam "Line up" closed no longer seen closed.
-            *p = layout::carried(p, (pos, 0.0), (new_pos, step_turn));
-        }
-        self.center = (new_pos, center_yaw + step_turn);
-        if turn.abs() < 0.02 && shift.length() < 0.02 {
-            self.following = false;
-            self.save_layout();
-        }
-    }
-
-    /// Turns the whole arrangement around the user so the primary monitor is straight
-    /// ahead, keeping how the monitors stand to each other.
+    /// Turns the whole arrangement around the user (see `World::recenter`).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn recenter(&mut self) {
-        let (head, forward) = self.head;
-        let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
-        let yaw = (-flat.x).atan2(-flat.z);
-        if self.settings.cinema || self.placements.is_empty() {
-            self.center = (head, yaw);
-            self.arrange_all();
-            return;
-        }
-        let (old_pos, _) = self.center;
-        // Straight ahead goes the primary monitor (else the middle of the monitors).
-        let ids: Vec<DisplayKey> = self.quest_sizes().iter().map(|m| m.0).collect();
-        let ahead =
-            layout::ahead(&self.placements, &ids, self.primary, old_pos).unwrap_or(self.center.1);
-        for p in self.placements.values_mut() {
-            *p = layout::carried(p, (old_pos, ahead), (head, yaw));
-        }
-        self.center = (head, yaw);
-        self.save_layout();
-        self.send_layout();
+        self.world
+            .recenter(&self.settings, self.head, Instant::now());
+        self.world_done();
     }
 
-    /// Brings the monitors closer (`steps` below 0) or further, a step at a time, as
-    /// they stand around the user: each keeps its size, the arrangement its shape.
+    /// Brings the monitors closer or further (see `World::closer`).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn closer(&mut self, steps: i8) {
-        const STEP: f32 = 1.15;
-        let (center, _) = self.center;
-        let wanted = self.radius * STEP.powi(i32::from(steps));
-        let k = wanted.clamp(0.5, 6.0) / self.radius.max(1e-3);
-        let windows: Vec<DisplayKey> = self
-            .placements
-            .keys()
-            .copied()
-            .filter(|id| self.is_window(*id))
-            .collect();
-        for (id, p) in &mut self.placements {
-            if !windows.contains(id) {
-                p.position = center + (p.position - center) * k;
-            }
-        }
-        self.radius *= k;
-        self.save_layout();
-        self.send_layout();
+        self.world.closer(steps, Instant::now());
+        self.world_done();
     }
 
-    /// The A button: lines up what the user arranged by hand, row by row (see
-    /// `layout::line_up`), instead of replacing it with the preset: every row keeps its
-    /// place and the way it stands, tilted back or overhead too. Cinema rebuilds its
-    /// own view.
+    /// The A button (see `World::tidy_up`).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "until step 7.7 passes the time in and moves the threads to the shell"
+    )]
     fn tidy_up(&mut self) {
-        if self.settings.cinema || self.placements.is_empty() {
-            self.arrange_all();
-            return;
-        }
-        let lid = self
-            .mirror_id()
-            .filter(|id| self.placements.contains_key(id));
-        let lined = layout::line_up(
-            &self.placements,
-            &self.layout_sizes(),
-            self.center,
-            self.tilt,
-            self.primary,
-            &self.sent_rows(),
-            lid,
-        );
-        // Window panels (and anything not laid out) stay as they are.
-        self.placements.extend(lined);
-        self.grabs = [None, None];
-        self.save_layout();
-        self.send_layout();
-    }
-
-    /// The cylinder curved monitors are drawn on, times the arrangement's radius.
-    fn curve_factor(&self) -> Option<f32> {
-        self.curve_supported
-            .then(|| self.settings.curve.radius_factor())
-            .flatten()
-    }
-
-    fn curve_radius(&self) -> Option<f32> {
-        self.curve_factor().map(|f| f * self.radius)
-    }
-
-    fn height_of(&self, id: DisplayKey) -> f32 {
-        match (self.placements.get(&id), self.monitors.get(&id)) {
-            (Some(p), Some(m)) => p.width * m.aspect(),
-            _ => 0.0,
-        }
-    }
-
-    /// "Move all together": monitor `id` went from `before` to `after` in the user's
-    /// hand, and the rest of the arrangement (monitors and the laptop screen, not
-    /// window panels) goes along as one piece: moved, turned and scaled with it.
-    fn carry_all(&mut self, id: DisplayKey, before: &Placement, after: &Placement) {
-        if !self.settings.move_all
-            || self.settings.cinema
-            || self.is_window(id)
-            || !self.monitors.contains_key(&id)
-        {
-            return;
-        }
-        let turn = after.rotation * before.rotation.inverse();
-        // One scale for all, kept so no monitor goes past the size limits: clamping
-        // each on its own would pull the arrangement apart.
-        let mut scale = after.width / before.width.max(1e-3);
-        let windows: Vec<DisplayKey> = self
-            .placements
-            .keys()
-            .copied()
-            .filter(|id| self.is_window(*id))
-            .collect();
-        for (other, p) in &self.placements {
-            if *other != id && !windows.contains(other) {
-                scale = scale.clamp(0.2 / p.width.max(1e-3), 8.0 / p.width.max(1e-3));
-            }
-        }
-        for (other, p) in &mut self.placements {
-            if *other == id || windows.contains(other) {
-                continue;
-            }
-            p.position = after.position + turn * (p.position - before.position) * scale;
-            p.rotation = (turn * p.rotation).normalize();
-            p.width *= scale;
-        }
-    }
-
-    /// What moves with the hands now: the held monitors, and with "move all together"
-    /// every monitor that goes along (drawn where it is, not catching up, or the
-    /// arrangement would tear apart while it moves).
-    fn moving_now(&self, held: &[DisplayKey]) -> Vec<DisplayKey> {
-        let carrying = self.settings.move_all
-            && !self.settings.cinema
-            && held
-                .iter()
-                .chain(self.scaling.as_ref().map(|s| &s.id))
-                .any(|id| self.monitors.contains_key(id) && !self.is_window(*id));
-        let mut ids = held.to_vec();
-        if carrying {
-            ids.extend(self.placements.keys().filter(|id| !self.is_window(**id)));
-        }
-        ids
-    }
-
-    /// The magnet: where monitor `id`, let go now, would stick (not on a wall, where
-    /// monitors stay in its plane, nor for the laptop screen or window panels).
-    fn stick_of(&self, id: DisplayKey) -> Option<layout::Stick<DisplayKey>> {
-        // Lying down the monitors are a tilted band the presets keep exact; window
-        // panels float on their own.
-        if self.settings.cinema
-            || !self.settings.magnet
-            || self.settings.move_all
-            || self.tilt != 0.0
-            || self.is_window(id)
-            || !self.monitors.contains_key(&id)
-        {
-            return None;
-        }
-        if self.settings.preset == crate::settings::Preset::Wall {
-            layout::stick_on_wall(&self.placements, &self.layout_sizes(), self.center, id)
-        } else {
-            layout::stick(&self.placements, &self.layout_sizes(), self.center.0, id)
-        }
-    }
-
-    /// The monitors that make up the arrangement: the Quest monitors and the laptop
-    /// screen, if it shows.
-    fn layout_sizes(&self) -> Vec<(DisplayKey, u32, u32)> {
-        let mut sizes = self.quest_sizes();
-        sizes.extend(self.mirror_size());
-        sizes
-    }
-
-    /// Where the "Attach" button under detached window `id` is (as drawn, while it
-    /// glides).
-    fn attach_place(&self, id: DisplayKey) -> Option<Placement> {
-        let p = self.shown.get(&id).or_else(|| self.placements.get(&id))?;
-        let down = p.width * self.monitors.get(&id)?.aspect() / 2.0 + ATTACH_GAP;
-        Some(Placement {
-            position: p.position + p.rotation * Vec3::new(0.0, -down, 0.005),
-            rotation: p.rotation,
-            width: ATTACH_WIDTH,
-        })
-    }
-
-    /// Nearest thing the ray points at.
-    fn pick(&self, ray: Ray) -> Option<(Thing, Hit)> {
-        let mut best: Option<(Thing, Hit)> = None;
-        let mut consider = |target: Thing, hit: Option<Hit>| {
-            if let Some(h) = hit
-                && best.is_none_or(|(_, b)| h.t < b.t)
-            {
-                best = Some((target, h));
-            }
-        };
-        if self.panel_open {
-            consider(
-                Thing::Menu,
-                layout::hit_surface(
-                    ray,
-                    &self.panel_place,
-                    panel_height(self.settings.large_menu),
-                    None,
-                ),
-            );
-        }
-        if self.settings.keyboard_window
-            && let Some(k) = &self.keyboard_place
-        {
-            consider(
-                Thing::Keyboard,
-                layout::hit_surface(ray, k, k.width * KEYBOARD_ASPECT, None),
-            );
-        }
-        if let Some(b) = &self.button_place {
-            consider(
-                Thing::MenuButton,
-                layout::hit_surface(ray, b, BUTTON_SIZE, None),
-            );
-        }
-        if let Some(w) = &self.wrist {
-            consider(
-                Thing::Wrist,
-                layout::hit_surface(ray, w, wrist_menu_height(), None),
-            );
-        }
-        if let Some((id, _)) = self.attach_for
-            && let Some(b) = self.attach_place(id)
-        {
-            consider(
-                Thing::Attach(id),
-                layout::hit_surface(ray, &b, attach_height(), None),
-            );
-        }
-        let curve = self.curve_radius();
-        for id in self.visible_monitors() {
-            if let Some(p) = self.placements.get(id) {
-                consider(
-                    Thing::Display(*id),
-                    layout::hit_surface(
-                        ray,
-                        p,
-                        self.height_of(*id),
-                        curve.filter(|_| !self.is_window(*id)),
-                    ),
-                );
-            }
-        }
-        best
-    }
-
-    /// Puts the menu button just under the primary monitor's bottom-left corner, and
-    /// left of the laptop mirror hanging there so it never covers it. When the primary
-    /// is not shown (cinema on another screen), under the first monitor that is: with
-    /// hands, the button is the only way back to the menu.
-    fn place_button(&mut self) {
-        // Hidden in the settings: the menu opens from the palm menu, the hand gesture
-        // or the controller.
-        if !self.settings.menu_button {
-            self.button_place = None;
-            return;
-        }
-        let shown = |id: &DisplayKey| self.placements.contains_key(id);
-        let anchor = self
-            .primary
-            .filter(shown)
-            .or_else(|| self.quest_sizes().iter().map(|m| m.0).find(|id| shown(id)));
-        let mirror = self
-            .mirror_id()
-            .filter(|id| self.monitors.contains_key(id))
-            .and_then(|id| Some((*self.placements.get(&id)?, self.height_of(id))));
-        self.button_place = anchor.and_then(|id| {
-            let p = self.placements.get(&id)?;
-            let h = self.height_of(id);
-            let mut x = -p.width / 2.0 + BUTTON_SIZE;
-            if let Some((m, mh)) = mirror {
-                let corner = m.position + m.rotation * Vec3::new(-m.width / 2.0, mh / 2.0, 0.0);
-                let local = p.rotation.inverse() * (corner - p.position);
-                // Only when the mirror actually hangs under this monitor.
-                if local.y < -h / 2.0 + 0.05 && local.y > -h / 2.0 - 0.3 {
-                    x = x.min(local.x - BUTTON_SIZE * 0.8);
-                }
-            }
-            let offset = Vec3::new(x, -h / 2.0 - BUTTON_SIZE * 0.9, 0.02);
-            Some(Placement {
-                position: p.position + p.rotation * offset,
-                rotation: p.rotation,
-                width: BUTTON_SIZE,
-            })
-        });
+        self.world.tidy_up(&self.settings, Instant::now());
+        self.world_done();
     }
 
     /// Opens the menu in front of the user: within arm's reach, a little lower, when
     /// hands are in view (to touch it), further away for controllers.
     fn open_panel(&mut self, head: Vec3, forward: Vec3, touch: bool) {
-        let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
-        let position = if touch {
-            head + flat * 0.5 - Vec3::Y * 0.22
-        } else {
-            head + flat * 0.7 - Vec3::Y * 0.12
-        };
-        self.panel_place = Placement {
-            position,
-            rotation: layout::facing(position, head),
-            width: panel_width(self.settings.large_menu),
-        };
+        self.world.open_menu((head, forward), touch, &self.settings);
         self.panel_open = true;
     }
 
@@ -1834,9 +806,43 @@ impl Scene {
         self.steering.set_headset(self.headset_state());
         if let Some(f) = &self.feedback {
             let _ = f.send(ClientMsg::Presence {
-                part: Presence { worn: self.worn },
+                part: Presence {
+                    worn: self.presence.worn(),
+                },
             });
         }
+    }
+
+    /// Tells the PC once the signals say the headset was put on, taken off or put to
+    /// sleep (asleep, the PC need not wait for it to come back), and lets the network
+    /// thread connect only while it is worn.
+    fn presence_due(&mut self, now: Instant) {
+        let Some(state) = self.presence.update(now) else {
+            return;
+        };
+        info!("headset {state:?}");
+        self.tell_presence();
+        if state == presence::State::Asleep
+            && let Some(f) = &self.feedback
+        {
+            let _ = f.send(ClientMsg::Asleep);
+        }
+        self.steering.set_worn(self.presence.worn());
+    }
+
+    /// Reads the screen where presence wants it (only while the app is put away, at
+    /// once and then at most every `SCREEN_EVERY`; see `Presence::wants_screen`),
+    /// then tells the PC what changed.
+    fn presence_now(&mut self, now: Instant, screen_read: &mut Option<Instant>) {
+        if !self.presence.wants_screen() {
+            *screen_read = None;
+        } else if screen_read.is_none_or(|at| now.saturating_duration_since(at) >= SCREEN_EVERY) {
+            *screen_read = Some(now);
+            if let Some(on) = crate::system::interactive() {
+                self.presence.interactive(on);
+            }
+        }
+        self.presence_due(now);
     }
 
     /// The battery was read (once a minute, more often on the palm menu): the menu
@@ -1862,7 +868,7 @@ impl Scene {
     fn headset_state(&self) -> HeadsetState {
         headset_state(
             &self.settings,
-            self.worn,
+            self.presence.worn(),
             self.headset_battery,
             &self.mic,
             &self.model,
@@ -1931,17 +937,6 @@ impl Scene {
         Some(ui::display_label(&d.name))
     }
 
-    /// The monitors with a stream that are shown: not those asked to go.
-    fn visible_monitors(&self) -> impl Iterator<Item = &DisplayKey> {
-        self.monitors.keys().filter(|id| !self.being_removed(**id))
-    }
-
-    /// Monitor `id` was asked to go and the PC has not answered yet: it is not shown
-    /// meanwhile, nor pointed at, looked at or taken as the one in front.
-    fn being_removed(&self, id: DisplayKey) -> bool {
-        self.asks.waits(ui::Asked::Remove(id))
-    }
-
     /// Request `req` was answered: which control asked it, `None` for one this side
     /// does not wait for (answered after it gave up on it).
     #[expect(
@@ -2005,19 +1000,13 @@ impl Scene {
         reason = "until step 7.7 passes the time in and moves the threads to the shell"
     )]
     fn expire_asks(&mut self) {
-        for (req, what) in self.asks.expire(Instant::now()) {
-            if self.profile_switch.as_ref().is_some_and(|s| s.req == req) {
-                self.profile_switch = None;
-            }
+        let now = Instant::now();
+        for (req, what) in self.asks.expire(now) {
+            self.world.switch_given_up(req);
             self.tell_failure(what, ui::Failure::TimedOut, "");
         }
-        if self
-            .profile_switch
-            .as_ref()
-            .is_some_and(|s| s.ids.is_some())
-        {
-            self.profile_streams();
-        }
+        self.world.switch_due(&self.settings, now);
+        self.world_done();
     }
 
     /// How each control's request stands, for the menu.
@@ -2091,7 +1080,7 @@ impl Scene {
         custom: bool,
         update_from: UpdateHint,
     ) -> UiState {
-        let spots = self.map_spots();
+        let spots = self.world.map_spots();
         UiState {
             host: self.host.clone(),
             found: self
@@ -2107,22 +1096,23 @@ impl Scene {
             limits: self.pc.limits.clone(),
             can_move_mouse: self.can_move_mouse(),
             monitors: self
-                .quest_sizes()
-                .into_iter()
+                .world
+                .monitors()
+                .iter()
                 .enumerate()
-                .map(|(i, (id, width, height))| MonitorEntry {
+                .map(|(i, &(id, width, height))| MonitorEntry {
                     id,
                     label: self.label_of(id).unwrap_or_else(|| (i + 1).to_string()),
                     width,
                     height,
-                    place: self.place_of(id),
+                    place: self.world.place_of(id, self.view_eye),
                     seen: spots.get(&id).copied(),
                 })
                 .collect(),
             windows: self
                 .monitors
                 .iter()
-                .filter(|(id, _)| self.is_window(**id))
+                .filter(|(id, _)| self.world.is_window(**id))
                 .map(|(id, m)| MonitorEntry {
                     id: *id,
                     label: self.label_of(*id).unwrap_or_default(),
@@ -2132,11 +1122,12 @@ impl Scene {
                     seen: None,
                 })
                 .collect(),
-            primary: self.primary,
-            cinema_screen: self.desk.cinema(),
+            primary: self.world.primary(),
+            cinema_screen: self.world.desk().cinema(),
             selected: self.selected.filter(|id| self.monitors.contains_key(id)),
             mirror_seen: self
-                .mirror_id()
+                .world
+                .mirror()
                 .filter(|id| self.monitors.contains_key(id))
                 .and_then(|id| spots.get(&id).copied()),
             mirror_wanted: self.mirror_wanted,
@@ -2148,7 +1139,7 @@ impl Scene {
             room_available: room,
             panorama_available: panorama,
             custom_available: custom,
-            curve_available: self.curve_supported,
+            curve_available: self.world.curve_supported(),
             keyboard_available: keyboard,
             error: self
                 .error
@@ -2291,6 +1282,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     exts.fb_hand_tracking_aim = available.fb_hand_tracking_aim;
     exts.fb_triangle_mesh = available.fb_triangle_mesh;
     exts.khr_composition_layer_color_scale_bias = available.khr_composition_layer_color_scale_bias;
+    exts.khr_android_thread_settings = available.khr_android_thread_settings;
+    // Taken off, said at once by the headset's sensor (the session may stay shown
+    // until the system sleeps).
+    exts.ext_user_presence = available.ext_user_presence;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
             application_name: "Prostir",
@@ -2304,11 +1299,12 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         &platform,
     )?;
     info!(
-        "Prostir {}: cylinder layers: {}, equirect: {}, hand interaction: {}",
+        "Prostir {}: cylinder layers: {}, equirect: {}, hand interaction: {}, user presence: {}",
         prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
         exts.khr_composition_layer_cylinder,
         exts.khr_composition_layer_equirect2,
-        exts.ext_hand_interaction
+        exts.ext_hand_interaction,
+        exts.ext_user_presence
     );
     let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
     let _ = instance.graphics_requirements::<Gfx>(system)?;
@@ -2333,6 +1329,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             },
         )
     }?;
+    xrutil::mark_main_thread(&instance, &session);
     let gl = xrutil::load_gl(&egl.egl);
 
     let data_dir: PathBuf = app
@@ -2498,32 +1495,23 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         .inspect_err(|e| warn!("Wi-Fi low-latency lock unavailable: {e:#}"))
         .ok();
 
+    let world = World::new(
+        desk,
+        keyboard_place,
+        exts.khr_composition_layer_cylinder,
+        &settings,
+    );
     let mut scene = Scene {
         monitors: HashMap::new(),
-        order: Vec::new(),
-        // Filled from the desk below; in cinema mode the view is built once the PC's
-        // monitors are here (see `build_cinema_view_if_due`) and the desk layout waits
-        // in `desk` until cinema ends.
-        placements: HashMap::new(),
-        primary: None,
+        world,
         mirror_wanted: true,
         audio_wanted: true,
         mic_wanted: settings.mic,
         focus: None,
-        brightness: HashMap::new(),
         scaling: None,
-        shown: HashMap::new(),
-        appear: HashMap::new(),
-        worn: true,
+        presence: presence::Presence::new(),
         settings,
-        curve_supported: exts.khr_composition_layer_cylinder,
         panel_open: false,
-        panel_place: Placement {
-            position: Vec3::new(0.0, -0.12, -0.7),
-            rotation: glam::Quat::IDENTITY,
-            width: panel_width(settings.large_menu),
-        },
-        button_place: None,
         grabs: [None, None],
         host: None,
         found: Vec::new(),
@@ -2532,7 +1520,6 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         pair_offer: None,
         unreachable: None,
         pc: PcState::default(),
-        pc_id: None,
         asks: Asks::default(),
         mic_permission: mic.permission(),
         mic,
@@ -2548,10 +1535,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         confirm_forget: None,
         tab: tab_from_code(settings.last_tab),
         update_needed: None,
-        following: false,
-        follow_hold: false,
         attach_for: None,
-        wrist: None,
         selected: None,
         headset_battery: battery,
         model,
@@ -2563,29 +1547,16 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         gaze_moved: None,
         finder: None,
         toast: None,
-        center: (Vec3::ZERO, 0.0),
-        radius: layout::RADIUS,
-        tilt: layout::tilt(settings.preset),
-        sent_layout: None,
-        draw_order: Vec::new(),
-        drawn: Vec::new(),
-        pending_layout: None,
-        desktop_memo: layout::DesktopMemo::default(),
         head: (Vec3::ZERO, -Vec3::Z),
         head_right: Vec3::X,
         view_eye: None,
         hands_in_view: false,
-        keyboard_place,
         system_lang,
         lang,
         clock: ClockFace::default(),
         language_page: 0,
         profiles: saved_profiles,
         active_profile: None,
-        profile_switch: None,
-        adding: None,
-        desk,
-        placed_for: HashMap::new(),
         saves: persist::Dirty::default(),
         save_failures_told: persist::Dirty::default(),
         saver,
@@ -2595,11 +1566,6 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         let text = warning.to_owned();
         scene.show_toast(text);
     }
-    if !scene.settings.cinema {
-        let saved = scene.desk.arrangement().clone();
-        scene.adopt_desk(saved);
-    }
-
     let mut hold_since: [Option<Instant>; 2] = [None, None];
     // A hand's pinch on a menu button: clicked when let go, unless it was held long
     // enough to drag the menu instead (as on the Quest's own windows).
@@ -2617,6 +1583,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     // What the person is told then, and the language it is in.
     let mut not_owned_text: Option<(Texts, String)> = None;
     let mut session_running = false;
+    // The microphone's asks for access seen so far (see `Mic::asks`).
+    let mut mic_asks = 0;
+    // When the screen was last read, while the app is put away.
+    let mut screen_read: Option<Instant> = None;
     // The input is the app's: false while the system menu is open over it (the app
     // keeps drawing, but shows no hands or rays of its own and takes no input).
     let mut focused = false;
@@ -2634,6 +1604,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         scene.save_due();
         let mut destroy = false;
         let mut paused = false;
+        // Paused (true) or resumed (false), the last one of this pass.
+        let mut activity = None;
         let timeout = if session_running {
             Duration::ZERO
         } else {
@@ -2642,12 +1614,28 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         let mut input_waiting = false;
         app.poll_events(Some(timeout), |event| match event {
             PollEvent::Main(MainEvent::Destroy) => destroy = true,
-            PollEvent::Main(MainEvent::Pause) => paused = true,
+            PollEvent::Main(MainEvent::Pause) => {
+                paused = true;
+                activity = Some(true);
+            }
+            PollEvent::Main(MainEvent::Resume { .. }) => activity = Some(false),
             PollEvent::Main(MainEvent::InputAvailable) => input_waiting = true,
             _ => {}
         });
         if destroy {
             break;
+        }
+        // The microphone asked the system for access: the prompt's pause is the app's
+        // own, not the user leaving.
+        let asks = scene.mic.asks();
+        if asks != mic_asks {
+            mic_asks = asks;
+            scene.presence.asked(Instant::now());
+        }
+        if let Some(paused) = activity {
+            // The system may freeze a paused app soon: the PC hears it first.
+            scene.presence.paused(paused);
+            scene.presence_now(Instant::now(), &mut screen_read);
         }
         if paused {
             // The system may end a paused app without a word: what waits is written now.
@@ -2703,28 +1691,26 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         // A drag cannot go on under the system menu.
                         scene.grabs = [None, None];
                         scene.scaling = None;
-                        scene.save_layout();
+                        scene.world.cancel_holds();
                     }
                     focused = now_focused;
-                    // Taking the headset off hides the app (and puts the headset to
-                    // sleep); the PC stops encoding until it is back on.
-                    let worn = matches!(
-                        e.state(),
-                        xr::SessionState::VISIBLE | xr::SessionState::FOCUSED
-                    );
-                    if worn != scene.worn
-                        && matches!(
-                            e.state(),
-                            xr::SessionState::VISIBLE
-                                | xr::SessionState::FOCUSED
-                                | xr::SessionState::SYNCHRONIZED
-                                | xr::SessionState::STOPPING
-                                | xr::SessionState::IDLE
-                        )
-                    {
-                        scene.worn = worn;
-                        scene.tell_presence();
-                        scene.steering.set_worn(worn);
+                    // Hidden or stopped, the PC stops encoding until the app is shown
+                    // again; told before the session ends and the files are written.
+                    let shown = match e.state() {
+                        xr::SessionState::VISIBLE | xr::SessionState::FOCUSED => {
+                            Some(presence::Session::Shown)
+                        }
+                        xr::SessionState::READY | xr::SessionState::SYNCHRONIZED => {
+                            Some(presence::Session::Hidden)
+                        }
+                        xr::SessionState::STOPPING | xr::SessionState::IDLE => {
+                            Some(presence::Session::Stopped)
+                        }
+                        _ => None,
+                    };
+                    if let Some(shown) = shown {
+                        scene.presence.session(shown);
+                        scene.presence_now(Instant::now(), &mut screen_read);
                     }
                     match e.state() {
                         xr::SessionState::READY => {
@@ -2755,10 +1741,17 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         _ => {}
                     }
                 }
+                xr::Event::UserPresenceChangedEXT(e) => {
+                    scene.presence.user(Instant::now(), e.is_user_present());
+                }
                 xr::Event::InstanceLossPending(_) => break 'main,
                 _ => {}
             }
         }
+        // The sensor's "away" counts once it lasted (see `presence::AWAY_GRACE`), and
+        // the screen is read while the app is put away: looked at every pass, also
+        // while nothing is drawn.
+        scene.presence_now(Instant::now(), &mut screen_read);
 
         while let Ok(event) = net_rx.try_recv() {
             if let Some(t) = test.as_deref_mut() {
@@ -2770,6 +1763,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 }
                 event => handle_net_event(&mut scene, &session, &vm, event),
             }
+            scene.world_done();
         }
         // Only the newest battery reading matters (several wait after a pause).
         let mut newest = None;
@@ -2869,7 +1863,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if scene.view_eye.is_none_or(|e| e.distance(head) > 0.05) && head != Vec3::ZERO {
             scene.view_eye = Some(head);
         }
-        scene.follow_head(dt);
+        scene.world.follow_head(&scene.settings, dt, scene.head);
         scene.place_sound();
         scene.remind_rest(dt);
         if std::mem::take(&mut scene.refresh_due) && exts.fb_display_refresh_rate {
@@ -2897,13 +1891,14 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         scene.hands_in_view = hands_in_view;
         controls.hands_from_joints(&joints, head, forward);
         let menu_hand = usize::from(scene.settings.left_handed);
-        scene.wrist = palm_menu_place(
+        let wrist = palm_menu_place(
             joints[menu_hand].as_ref(),
             menu_hand == 1,
             head,
-            scene.wrist,
+            scene.world.wrist(),
             &mut palm_since,
         );
+        scene.world.set_wrist(wrist);
 
         // Pairing needs the menu, and so do the first-run tips: open it where the
         // user is looking.
@@ -2944,7 +1939,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // What the selftest asks for, as the menu would do it.
         match std::mem::replace(&mut selftest_act, Act::Nothing) {
             Act::MoveMonitor => {
-                if let Some(&(id, _, _)) = scene.quest_sizes().first() {
+                if let Some(&(id, _, _)) = scene.world.monitors().first() {
                     let took = Instant::now();
                     let action = Action::Move { id, delta: 1 };
                     handle_action(&mut scene, action, &mut passthrough, &mut controls);
@@ -2979,7 +1974,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             }
             Act::Nothing | Act::Finish => {}
         }
-        scene.place_button();
+        scene.world.place_button(&scene.settings);
         scene.expire_asks();
         scene.adding_due();
         // The system may let the app record now, or not any more.
@@ -2988,18 +1983,28 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         }
         // The palm menu shows the battery: the system thread reads it afresh when the
         // menu appears, and more often while it shows.
-        if scene.wrist.is_some() != palm_was_shown {
-            palm_was_shown = scene.wrist.is_some();
+        if scene.world.wrist().is_some() != palm_was_shown {
+            palm_was_shown = scene.world.wrist().is_some();
             system_thread.palm_menu(palm_was_shown);
         }
 
         // Pointing, clicking and dragging.
-        let mut picks: [Option<(Thing, Hit)>; 2] =
-            std::array::from_fn(|h| controls.state[h].ray.and_then(|r| scene.pick(r)));
+        let can = Pickable {
+            menu: scene.panel_open,
+            attach: scene.attach_for.map(|(id, _)| id),
+        };
+        let mut picks: [Option<Target>; 2] = std::array::from_fn(|h| {
+            let asks = &scene.asks;
+            controls.state[h].ray.and_then(|r| {
+                scene.world.pick(r, &scene.settings, can, |k| {
+                    asks.waits(ui::Asked::Remove(k))
+                })
+            })
+        });
         // A detached window pointed at shows "Attach" under it; it lingers so the
         // pointer can move down onto it.
-        let pointed = picks.iter().flatten().find_map(|(t, _)| match t {
-            Thing::Display(id) | Thing::Attach(id) if scene.is_window(*id) => Some(*id),
+        let pointed = picks.iter().flatten().find_map(|p| match p.thing {
+            Thing::Display(id) | Thing::Attach(id) if scene.world.is_window(id) => Some(id),
             _ => None,
         });
         if let Some(id) = pointed {
@@ -3021,10 +2026,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         let mut wrist_hover = picks
             .iter()
             .flatten()
-            .find_map(|(t, hit)| matches!(t, Thing::Wrist).then(|| wrist_point(hit.local)));
+            .find_map(|p| matches!(p.thing, Thing::Wrist).then(|| wrist_point(p.hit.local)));
         let mut wrist_pressed = false;
         let poking_hand = 1 - usize::from(scene.settings.left_handed);
-        if let (Some(w), Some(tip)) = (scene.wrist, tips[poking_hand]) {
+        if let (Some(w), Some(tip)) = (scene.world.wrist(), tips[poking_hand]) {
             let local = w.rotation.inverse() * (tip - w.position);
             let inside =
                 local.x.abs() < WRIST_MENU_WIDTH / 2.0 && local.y.abs() < wrist_menu_height() / 2.0;
@@ -3042,7 +2047,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         } else {
             wrist_poke_armed = true;
         }
-        if scene.wrist.is_some() {
+        if scene.world.wrist().is_some() {
             let ui_state = scene.ui_state(
                 passthrough.is_some(),
                 passthrough
@@ -3077,7 +2082,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 };
                 continue;
             };
-            let place = scene.panel_place;
+            let place = scene.world.menu();
             let l = place.rotation.inverse() * (tip - place.position);
             let (half_w, half_h) = (
                 panel_width(scene.settings.large_menu) / 2.0,
@@ -3094,8 +2099,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 // The touched point follows the finger; pushing deeper moves it away.
                 let shift = Vec3::new(l.x - anchor.x, l.y - anchor.y, (l.z + 0.03).min(0.0));
                 let position = place.position + place.rotation * shift;
-                scene.panel_place.position = position;
-                scene.panel_place.rotation = layout::facing(position, head);
+                scene.world.move_menu(position, head);
                 picks[h] = None;
                 continue;
             }
@@ -3147,14 +2151,23 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         });
         let hover = poke_px.or_else(|| {
             [1, 0].into_iter().find_map(|h| match picks[h] {
-                Some((Thing::Menu, hit)) => Some(panel_point(&hit, scene.settings.large_menu)),
+                Some(Target {
+                    thing: Thing::Menu,
+                    hit,
+                }) => Some(panel_point(&hit, scene.settings.large_menu)),
                 _ => None,
             })
         });
         panel.hover(hover);
-        let over_button = picks
-            .iter()
-            .any(|p| matches!(p, Some((Thing::MenuButton, _))));
+        let over_button = picks.iter().any(|p| {
+            matches!(
+                p,
+                Some(Target {
+                    thing: Thing::MenuButton,
+                    ..
+                })
+            )
+        });
         if over_button != button_hovered {
             button_hovered = over_button;
             button_layer.upload(&gl, &ui::menu_button_image(BUTTON_PX, over_button))?;
@@ -3163,13 +2176,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // Both hands on one monitor: the distance between them sets its width.
         if let Some(s) = scene.scaling
             && let (Some(a), Some(b)) = (controls.state[0].ray, controls.state[1].ray)
-            && let Some(p) = scene.placements.get_mut(&s.id)
         {
-            let before = *p;
             let d = a.origin.distance(b.origin);
-            p.width = (s.start_width * d / s.start_distance.max(0.05)).clamp(0.2, 8.0);
-            let after = *p;
-            scene.carry_all(s.id, &before, &after);
+            let width = (s.start_width * d / s.start_distance.max(0.05)).clamp(0.2, 8.0);
+            scene.world.resize(&scene.settings, width);
         }
 
         #[allow(clippy::needless_range_loop)] // `hand` indexes several per-hand arrays
@@ -3187,7 +2197,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             if input.select.pressed {
                 let mut clicked = false;
                 match picks[hand] {
-                    Some((Thing::Attach(id), hit)) => {
+                    Some(Target {
+                        thing: Thing::Attach(id),
+                        hit,
+                    }) => {
                         clicked = true;
                         rings.push((hit.point, Instant::now()));
                         controls.pulse(&session, hand);
@@ -3199,7 +2212,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                             &mut controls,
                         );
                     }
-                    Some((Thing::Menu, hit)) => {
+                    Some(Target {
+                        thing: Thing::Menu,
+                        hit,
+                    }) => {
                         panel.hover(Some(panel_point(&hit, scene.settings.large_menu)));
                         if let Some(action) = panel.hovered_action() {
                             if input.is_hand {
@@ -3213,7 +2229,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                             }
                         }
                     }
-                    Some((Thing::Wrist, hit)) => {
+                    Some(Target {
+                        thing: Thing::Wrist,
+                        hit,
+                    }) => {
                         clicked = true;
                         wrist_panel.hover(Some(wrist_point(hit.local)));
                         if let Some(action) = wrist_panel.hovered_action() {
@@ -3222,7 +2241,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                             handle_action(&mut scene, action, &mut passthrough, &mut controls);
                         }
                     }
-                    Some((Thing::MenuButton, hit)) => {
+                    Some(Target {
+                        thing: Thing::MenuButton,
+                        hit,
+                    }) => {
                         rings.push((hit.point, Instant::now()));
                         clicked = true;
                         controls.pulse(&session, hand);
@@ -3257,70 +2279,29 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
 
             if end_grab && scene.scaling.is_some_and(|s| s.hand == hand) {
                 scene.scaling = None;
-                scene.save_layout();
+                scene.world.resize_end();
             }
             if end_grab && let Some(released) = scene.grabs[hand].take() {
-                // A monitor put somewhere new stays there until the head comes back
-                // near where it was (the menu and the keyboard do not count).
-                scene.follow_hold = scene.settings.follow
-                    && released
-                        .id
-                        .display()
-                        .is_some_and(|id| scene.placements.contains_key(&id));
                 // Letting go with the first hand ends resizing too.
                 scene.scaling = None;
-                match released.id {
-                    Thing::Keyboard => {
-                        if scene.keyboard_place.is_some() {
-                            scene.saves.mark(persist::File::Keyboard);
-                        }
-                    }
-                    Thing::Menu if !scene.settings.cinema => scene.save_layout(),
-                    Thing::Display(id) if !scene.settings.cinema => {
-                        // Let go next to another monitor: it sticks to it, edge to edge.
-                        if let Some(s) = scene.stick_of(id) {
-                            scene.placements.insert(id, s.placement);
-                            controls.pulse(&session, hand);
-                        }
-                        scene.save_layout();
-                        // Dropped somewhere else: the desktop's arrangement follows what the
-                        // eyes see.
-                        scene.send_layout();
-                    }
-                    // In cinema nothing is kept; the rest are never held.
-                    Thing::Menu
-                    | Thing::Display(_)
-                    | Thing::MenuButton
-                    | Thing::Wrist
-                    | Thing::Attach(_) => {}
+                // Let go next to another monitor: it sticks to it, edge to edge.
+                if scene
+                    .world
+                    .let_go(released.id, &scene.settings, Instant::now())
+                {
+                    controls.pulse(&session, hand);
                 }
+                scene.world_done();
             }
             let Some(ray) = input.ray else { continue };
             if let Some(mut grab) = scene.grabs[hand] {
-                let target = match grab.id {
-                    Thing::Menu => Some(&mut scene.panel_place),
-                    Thing::Keyboard => scene.keyboard_place.as_mut(),
-                    Thing::Display(id) => scene.placements.get_mut(&id),
-                    Thing::MenuButton | Thing::Wrist | Thing::Attach(_) => None,
-                };
-                let wall = scene.settings.preset == crate::settings::Preset::Wall
-                    && !scene.settings.cinema;
-                let wall_facing = glam::Quat::from_rotation_y(scene.center.1);
-                if let Some(p) = target {
-                    let before = *p;
-                    grab.update(p, ray, head, input.stick, dt);
-                    if grab.id == Thing::Keyboard {
-                        // It follows the hand but stays flat, like the desk.
-                        p.rotation = lying_flat(p.position, head);
-                    } else if wall && grab.id != Thing::Menu {
-                        // On a wall, monitors stay parallel to it wherever they go.
-                        p.rotation = wall_facing;
-                    }
-                    let after = *p;
+                // Moved from where it goes now; the world keeps the keyboard flat, a
+                // monitor on a wall parallel to it, and moves the rest along with
+                // "move all together".
+                if let Some(mut p) = scene.world.place(grab.id) {
+                    grab.update(&mut p, ray, head, input.stick, dt);
+                    scene.world.drag(&scene.settings, grab.id, p, head);
                     scene.grabs[hand] = Some(grab);
-                    if let Some(id) = grab.id.display() {
-                        scene.carry_all(id, &before, &after);
-                    }
                 }
             } else if start_grab {
                 hold_since[hand] = None;
@@ -3328,35 +2309,34 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 pending_click[hand] = None;
                 let other = scene.grabs[1 - hand].map(|g| g.id);
                 let grabbed = match picks[hand] {
-                    Some((Thing::Menu, hit)) if other != Some(Thing::Menu) => Some(Grab::start(
-                        Thing::Menu,
-                        hit.t,
-                        hit.local,
-                        &scene.panel_place,
-                    )),
-                    Some((Thing::Keyboard, hit)) if other != Some(Thing::Keyboard) => scene
-                        .keyboard_place
-                        .map(|k| Grab::start(Thing::Keyboard, hit.t, hit.local, &k)),
+                    Some(Target {
+                        thing: thing @ (Thing::Menu | Thing::Keyboard),
+                        hit,
+                    }) if other != Some(thing) => {
+                        take(&mut scene.world, thing, hit, &scene.settings)
+                    }
                     // The other hand already holds it: resize with both.
-                    Some((Thing::Display(id), _)) if other == Some(Thing::Display(id)) => {
-                        if let (Some(a), Some(b), Some(p)) = (
-                            controls.state[0].ray,
-                            controls.state[1].ray,
-                            scene.placements.get(&id),
-                        ) {
+                    Some(Target {
+                        thing: Thing::Display(id),
+                        ..
+                    }) if other == Some(Thing::Display(id)) => {
+                        if let (Some(a), Some(b)) = (controls.state[0].ray, controls.state[1].ray)
+                            && let Some(start_width) = scene.world.resize_start(id)
+                        {
                             scene.scaling = Some(Scaling {
                                 id,
                                 hand,
                                 start_distance: a.origin.distance(b.origin),
-                                start_width: p.width,
+                                start_width,
                             });
                             controls.pulse(&session, hand);
                         }
                         None
                     }
-                    Some((Thing::Display(id), hit)) if other != Some(Thing::Display(id)) => Some(
-                        Grab::start(Thing::Display(id), hit.t, hit.local, &scene.placements[&id]),
-                    ),
+                    Some(Target {
+                        thing: thing @ Thing::Display(_),
+                        hit,
+                    }) => take(&mut scene.world, thing, hit, &scene.settings),
                     _ => None,
                 }
                 .map(|g| {
@@ -3415,7 +2395,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             let lit = picks
                 .iter()
                 .flatten()
-                .any(|(t, _)| matches!(t, Thing::Attach(_)));
+                .any(|p| matches!(p.thing, Thing::Attach(_)));
             if attach_drawn
                 .as_ref()
                 .is_none_or(|(t, l)| t != scene.texts() || *l != lit)
@@ -3426,7 +2406,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 attach_drawn = Some((scene.texts().clone(), lit));
             }
         }
-        if let Some(a) = &scene.adding
+        if let Some(a) = scene.world.adding()
             && placeholder
                 .as_ref()
                 .is_none_or(|p| p.1 != a.size || p.2 != *scene.texts())
@@ -3438,7 +2418,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             layer.upload(&gl, &panel.placeholder_image(label, PLACEHOLDER_PX, px_h))?;
             placeholder = Some((layer, a.size, scene.texts().clone()));
         }
-        if scene.wrist.is_some()
+        if scene.world.wrist().is_some()
             && let Some(pixels) = wrist_panel.render_if_dirty()
         {
             wrist_layer.upload(&gl, pixels)?;
@@ -3465,7 +2445,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         let mut spheres: Vec<Sphere> = Vec::new();
         // Light on the menu where a fingertip is about to touch: wide and faint from a
         // few centimetres away, small and bright right before contact.
-        let place = scene.panel_place;
+        let place = scene.world.menu();
         for (h, hover) in poke_hover.iter().enumerate() {
             let Some((at, z)) = hover else { continue };
             let near = (1.0 - z.max(0.0) / POKE_HOVER).clamp(0.0, 1.0);
@@ -3493,21 +2473,28 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         }
         // Where a ray points: a small light on the menu, a wider faint one on monitors.
         for pick in picks.iter().flatten() {
-            let (radius, alpha) = match pick.0 {
+            let (radius, alpha) = match pick.thing {
                 Thing::Menu | Thing::MenuButton | Thing::Keyboard => (0.012, 0.55),
-                Thing::Display(_) => (0.03, 0.3),
+                Thing::Display(_) | Thing::Adding { .. } => (0.03, 0.3),
                 Thing::Attach(_) => (0.01, 0.5),
                 Thing::Wrist => (0.008, 0.55),
             };
-            spheres.push(Sphere::glow(pick.1.point, radius, [0.72, 0.84, 1.0, alpha]));
+            spheres.push(Sphere::glow(
+                pick.hit.point,
+                radius,
+                [0.72, 0.84, 1.0, alpha],
+            ));
         }
         // Where the mouse is: rings closing in on it, three times.
         if let Some((id, uv, at)) = scene.finder {
             let age = at.elapsed();
-            match (scene.shown.get(&id), age < FINDER_FOR) {
+            match (scene.world.shown(id), age < FINDER_FOR) {
                 (Some(p), true) => {
-                    let c = scene.curve_radius().filter(|_| !scene.is_window(id));
-                    let (point, _) = layout::image_point(p, scene.height_of(id), c, uv);
+                    let c = scene
+                        .world
+                        .curve_radius(&scene.settings)
+                        .filter(|_| !scene.world.is_window(id));
+                    let (point, _) = layout::image_point(p, scene.world.height_of(id), c, uv);
                     let t = age.as_secs_f32() / FINDER_FOR.as_secs_f32();
                     for k in 0..3 {
                         let phase = (t * 3.0 - k as f32 * 0.33).rem_euclid(1.0);
@@ -3524,13 +2511,16 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         }
         // The magnet while dragging: the edge the monitor would stick to lights up.
         for g in scene.grabs.iter().flatten() {
-            let Some(s) = g.id.display().and_then(|id| scene.stick_of(id)) else {
+            let Some(s) =
+                g.id.display()
+                    .and_then(|id| scene.world.stick_of(&scene.settings, id))
+            else {
                 continue;
             };
-            let Some(n) = scene.shown.get(&s.neighbour).copied() else {
+            let Some(n) = scene.world.shown(s.neighbour).copied() else {
                 continue;
             };
-            let (half_w, half_h) = (n.width / 2.0, scene.height_of(s.neighbour) / 2.0);
+            let (half_w, half_h) = (n.width / 2.0, scene.world.height_of(s.neighbour) / 2.0);
             let steps = 28;
             for i in 0..=steps {
                 let k = i as f32 / steps as f32 * 2.0 - 1.0;
@@ -3551,18 +2541,21 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // drawn, and a hand about to touch a menu is see-through.
         for (h, j) in joints.iter().enumerate() {
             let Some(j) = j else { continue };
-            if h == menu_hand && scene.wrist.is_some() {
+            if h == menu_hand && scene.world.wrist().is_some() {
                 continue;
             }
             let tip = j[INDEX_TIP].0;
-            let near_palm = scene.wrist.is_some_and(|w| w.position.distance(tip) < 0.15);
+            let near_palm = scene
+                .world
+                .wrist()
+                .is_some_and(|w| w.position.distance(tip) < 0.15);
             let near_panel = poke_hover[h].is_some();
             let alpha = if near_palm || near_panel { 0.3 } else { 1.0 };
             overlay::hand_spheres(j, alpha, &mut spheres);
         }
         for (input, pick) in controls.state.iter().zip(&picks) {
             if let Some(ray) = input.ray {
-                let length = pick.map_or(1.2, |(_, h)| h.t).min(4.0);
+                let length = pick.map_or(1.2, |p| p.hit.t).min(4.0);
                 overlay::ray_spheres(ray.origin, ray.dir, length, &mut spheres);
                 if !input.is_hand {
                     // Where the controller is, since it is not visible otherwise.
@@ -3624,17 +2617,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // The keyboard window: placed in front of the user at desk height the first
         // time, then wherever it was moved.
         if let Some(pt) = passthrough.as_mut().filter(|pt| pt.window_supported()) {
-            let place = scene.settings.keyboard_window.then(|| {
-                *scene.keyboard_place.get_or_insert_with(|| {
-                    let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
-                    let position = head + flat * 0.42 - Vec3::Y * 0.42;
-                    Placement {
-                        position,
-                        rotation: lying_flat(position, head),
-                        width: 0.5,
-                    }
-                })
-            });
+            let place = scene
+                .settings
+                .keyboard_window
+                .then(|| scene.world.keyboard_here((head, forward)));
             let shown = place.map(|p| (posef(&p), p.width, p.width * KEYBOARD_ASPECT));
             if let Err(e) = pt.set_window(&local, time, shown) {
                 warn!("keyboard window: {e:#}");
@@ -3678,64 +2664,31 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             });
 
         // Far monitors first so nearer (and grabbed) ones draw on top.
-        let grabbed: Vec<DisplayKey> = scene
-            .grabs
-            .iter()
-            .flatten()
-            .filter_map(|g| g.id.display())
-            .collect();
-        let moving = scene.moving_now(&grabbed);
-        scene.animate(dt, &moving);
+        scene.world.animate(&scene.settings, dt);
         // Keep the desktop's arrangement in step once nothing is being moved.
-        if grabbed.is_empty() && scene.scaling.is_none() && !scene.relayout_pending() {
-            scene.send_layout();
-        }
-        let mut order = std::mem::take(&mut scene.draw_order);
-        order.clear();
-        order.extend(
-            scene
-                .monitors
-                .keys()
-                // Gone from view as soon as asked to go; back if the PC does not remove it.
-                .filter(|id| !scene.being_removed(**id))
-                .filter_map(|id| {
-                    let d = scene.shown.get(id)?.position.distance(head);
-                    Some((if grabbed.contains(id) { -1.0 } else { d }, *id))
-                }),
-        );
-        // Far to near, two at about one distance (a monitor glued over a row and that
-        // row) in the order they had, so where they overlap never flickers.
-        layout::draw_order(&mut order, &scene.drawn);
-        scene.drawn.clear();
-        scene.drawn.extend(order.iter().map(|o| o.1));
-        let curve = scene.curve_radius();
-        // Focus mode: monitors without the mouse fade to DIMMED (colour scale on the
-        // compositor layer, no extra rendering).
-        const DIMMED: f32 = 0.4;
-        for id in scene.monitors.keys() {
-            let target = match scene.focus {
-                Some(f) if scene.settings.focus && f != *id && !grabbed.contains(id) => DIMMED,
-                _ => 1.0,
-            };
-            let b = scene.brightness.entry(*id).or_insert(1.0);
-            let step = dt * 5.0;
-            *b = if *b < target {
-                (*b + step).min(target)
-            } else {
-                (*b - step).max(target)
-            };
-        }
+        scene.world.settle(Instant::now());
+        scene.world_done();
+        let asks = &scene.asks;
+        // Gone from view as soon as asked to go; back if the PC does not remove it. Far
+        // to near, two at about one distance (a monitor glued over a row and that row)
+        // in the order they had, so where they overlap never flickers.
+        scene
+            .world
+            .order_drawing(head, |k| asks.waits(ui::Asked::Remove(k)));
+        // Focus mode: monitors without the mouse fade to a dim level (colour scale on
+        // the compositor layer, no extra rendering).
+        scene.world.brighten(&scene.settings, dt, scene.focus);
+        let curve = scene.world.curve_radius(&scene.settings);
+        let order = scene.world.draw_list();
         let dims: Vec<xr::sys::CompositionLayerColorScaleBiasKHR> = order
             .iter()
             .map(|(_, id)| {
                 // Fading in: premultiplied, so colour and alpha scale together.
-                let t = scene.appear.get(id).copied().unwrap_or(1.0);
+                let t = scene.world.appear(*id);
                 let t = t * t * (3.0 - 2.0 * t);
                 // Focus dimming, the brightness setting and fading in, together.
-                let b = scene.brightness.get(id).copied().unwrap_or(1.0)
-                    * t
-                    * f32::from(scene.settings.brightness)
-                    / 100.0;
+                let b =
+                    scene.world.brightness(*id) * t * f32::from(scene.settings.brightness) / 100.0;
                 xr::sys::CompositionLayerColorScaleBiasKHR {
                     ty: xr::sys::CompositionLayerColorScaleBiasKHR::TYPE,
                     next: video_next,
@@ -3769,8 +2722,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             } else {
                 video_next
             };
-            let m = &scene.monitors[id];
-            let p = &scene.shown[id];
+            let (Some(m), Some(p)) = (scene.monitors.get(id), scene.world.shown(*id)) else {
+                continue;
+            };
             let height = p.width * m.aspect();
             let sub_image = xr::sys::SwapchainSubImage {
                 swapchain: m.swapchain.as_raw(),
@@ -3784,7 +2738,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 image_array_index: 0,
             };
             // Window panels stay flat.
-            if let Some(radius) = curve.filter(|_| !scene.is_window(*id)) {
+            if let Some(radius) = curve.filter(|_| !scene.world.is_window(*id)) {
                 let c = Cylinder::new(p, radius);
                 cylinders.push(xr::sys::CompositionLayerCylinderKHR {
                     ty: xr::sys::CompositionLayerCylinderKHR::TYPE,
@@ -3815,14 +2769,14 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             }
         }
 
-        scene.draw_order = order;
         let button = scene
-            .button_place
+            .world
+            .button()
             .map(|b| button_layer.quad(&local, posef(&b), BUTTON_SIZE, BUTTON_SIZE));
         let panel_quad = (scene.panel_open && panel_layer.ready()).then(|| {
             panel_layer.quad(
                 &local,
-                posef(&scene.panel_place),
+                posef(&scene.world.menu()),
                 panel_width(scene.settings.large_menu),
                 panel_height(scene.settings.large_menu),
             )
@@ -3830,7 +2784,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         let mut cursors: Vec<xr::sys::CompositionLayerQuad> = picks
             .iter()
             .flatten()
-            .map(|(_, hit)| {
+            .map(|&Target { hit, .. }| {
                 let size = 0.011 * hit.t.clamp(0.3, 4.0);
                 let at = hit.point + hit.normal * 0.004;
                 cursor_layer.quad(
@@ -3843,7 +2797,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             .collect();
         // Under a fingertip near the menu: a dot that shrinks as the finger gets closer.
         for (at, z) in poke_hover.iter().flatten() {
-            let place = &scene.panel_place;
+            let place = &scene.world.menu();
             let normal = place.rotation * Vec3::Z;
             let point =
                 place.position + place.rotation * Vec3::new(at.x, at.y, 0.0) + normal * 0.002;
@@ -3865,10 +2819,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         layers.extend(keyboard_layer.iter().map(as_layer));
         layers.extend(cylinders.iter().map(as_layer));
         layers.extend(quads.iter().map(as_layer));
-        let placeholder_quad = scene.adding.as_ref().and_then(|a| {
+        let placeholder_quad = scene.world.adding().and_then(|a| {
             let (layer, _, _) = placeholder.as_ref()?;
-            let height = a.place.width * a.size.1 as f32 / a.size.0.max(1) as f32;
-            Some(layer.quad(&local, posef(&a.place), a.place.width, height))
+            Some(layer.quad(&local, posef(&a.place), a.place.width, a.height()))
         });
         layers.extend(placeholder_quad.iter().map(as_layer));
         layers.extend(button.iter().map(as_layer));
@@ -3885,11 +2838,12 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         let attach_quad = scene
             .attach_for
             .filter(|_| attach_drawn.is_some())
-            .and_then(|(id, _)| scene.attach_place(id))
+            .and_then(|(id, _)| scene.world.attach_place(id))
             .map(|p| attach_layer.quad(&local, posef(&p), ATTACH_WIDTH, attach_height()));
         layers.extend(attach_quad.iter().map(as_layer));
         let wrist_quad = scene
-            .wrist
+            .world
+            .wrist()
             .filter(|_| wrist_layer.ready())
             .map(|w| wrist_layer.quad(&local, posef(&w), WRIST_MENU_WIDTH, wrist_menu_height()));
         layers.extend(wrist_quad.iter().map(as_layer));
@@ -3927,6 +2881,14 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     Ok(())
 }
 
+/// A hand takes `thing`, pointed at with `hit`, where it is drawn: a monitor easing
+/// to its place goes on from there, under the hand (see `World::hold`).
+fn take(world: &mut World, thing: Thing, hit: Hit, s: &Settings) -> Option<Grab> {
+    world
+        .hold(thing, s)
+        .map(|at| Grab::start(thing, hit.t, hit.local, &at))
+}
+
 /// What to tell the user about a connection that ended; nothing where there is
 /// nothing to say (the headset was off the head, or the PC already said why).
 fn disconnect_text(why: net::Disconnect) -> Option<&'static str> {
@@ -3961,7 +2923,7 @@ fn handle_net_event(
             opened_with,
         } => {
             info!("connected to {addr} ({name:?}), PC {pc}, language {language:?}");
-            scene.pc_id = Some(pc);
+            scene.world.connected(pc);
             if language.is_some() && language != scene.settings.pc_language {
                 scene.settings.pc_language = language;
                 scene.saves.mark(persist::File::Settings);
@@ -3976,7 +2938,6 @@ fn handle_net_event(
             scene.host = Some(host);
             scene.feedback = Some(feedback);
             scene.asks.new_session();
-            scene.sent_layout = None;
             scene.update_needed = None;
             // Whether the system lets the app record (the PC shows when it does not).
             scene.mic.refresh_permission();
@@ -3991,6 +2952,12 @@ fn handle_net_event(
             if now.presence != opened_with.presence {
                 scene.tell_presence();
             }
+            // Asleep already as the session opened (`Open` says only "not worn").
+            if scene.presence.state() == presence::State::Asleep
+                && let Some(f) = &scene.feedback
+            {
+                let _ = f.send(ClientMsg::Asleep);
+            }
             scene.offline_since = None;
             scene.ip_input = None;
             scene.unreachable = None;
@@ -4002,7 +2969,7 @@ fn handle_net_event(
         NetEvent::Command { .. } => {}
         NetEvent::Notice(text) => scene.show_toast(text),
         NetEvent::Reply { req, outcome } => match (scene.answered(req, &outcome), outcome) {
-            (Some(ui::Asked::Profile(_)), Outcome::Failed { .. }) => scene.profile_switch = None,
+            (Some(ui::Asked::Profile(_)), Outcome::Failed { .. }) => scene.world.switch_to(None),
             (None, _) | (_, Outcome::Failed { .. }) => {}
             (_, Outcome::Saved { path }) => {
                 let text = scene
@@ -4017,21 +2984,24 @@ fn handle_net_event(
                     .map(|k| (k, Vec2::new(f(u), f(v)), Instant::now()));
             }
             (Some(ui::Asked::Profile(slot)), Outcome::Ids { ids }) => {
-                if scene.profile_switch.as_ref().is_some_and(|s| s.req == req) {
+                if scene.world.switching_with(req) {
                     // Switched to: the PC made its monitors (which it shows comes with
-                    // its list of displays).
+                    // its list of displays). The menu is closed by now: a toast says it.
                     scene.active_profile = Some(slot);
+                    let name = scene.profile_name(slot);
+                    let text = scene
+                        .texts()
+                        .f("toast-profile-switched", &[("name", name.into())]);
+                    scene.show_toast(text);
                     let keys = ids.into_iter().filter_map(|id| scene.key(id)).collect();
-                    scene.profile_made(keys);
+                    scene
+                        .world
+                        .profile_made(keys, &scene.settings, scene.head.1, Instant::now());
                 }
             }
             (Some(ui::Asked::AddMonitor), Outcome::Added { id }) => {
                 let key = scene.key(id);
-                if let Some(a) = &mut scene.adding
-                    && a.req == req
-                {
-                    a.id = key;
-                }
+                scene.world.adding_made(req, key);
             }
             (_, Outcome::Done | Outcome::Added { .. } | Outcome::Ids { .. }) => {}
         },
@@ -4088,9 +3058,8 @@ fn handle_net_event(
             scene.host = None;
             scene.feedback = None;
             // The next session's list is news, not displays removed.
-            scene.order.clear();
+            scene.world.disconnected();
             scene.pc = PcState::default();
-            scene.profile_switch = None;
             if let Some(id) = disconnect_text(why) {
                 let text = scene.texts().t(id).to_owned();
                 scene.show_toast(text);
@@ -4135,70 +3104,45 @@ fn handle_net_event(
                             swapchain,
                         },
                     );
-                    stream_shown(scene, id);
+                    scene.world.stream_started(
+                        id,
+                        (width, height),
+                        &scene.settings,
+                        scene.head,
+                        Instant::now(),
+                    );
                 }
-                Err(e) => error!("monitor {id}: {e:#}"),
+                Err(e) => {
+                    scene.world.stream_ended(id);
+                    error!("monitor {id}: {e:#}");
+                }
             }
         }
         // The stream stopped; the display keeps its place (only the list says it is gone).
         NetEvent::StreamEnd { id } => {
             if let Some(k) = scene.key(id) {
                 scene.monitors.remove(&k);
+                scene.world.stream_ended(k);
             }
         }
     }
 }
 
-/// A stream of display `id` shows: it gets its place (a display not listed yet waits
-/// for the list, unseen).
-fn stream_shown(scene: &mut Scene, id: DisplayKey) {
-    let Some(kind) = scene.kind(id).cloned() else {
+/// The PC listed its displays anew (see `World::listed`): the displays gone end their
+/// streams, and the switch of the PC's own displays shows how it stands.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "until step 7.7 passes the time in and moves the threads to the shell"
+)]
+fn displays_changed(scene: &mut Scene) {
+    let Some(displays) = scene.pc.displays.as_ref() else {
         return;
     };
-    let size = scene.monitors.get(&id).map(|m| (m.width_px, m.height_px));
-    if let (DisplayKind::Virtual, Some(size)) = (&kind, size)
-        && !scene.settings.cinema
-    {
-        scene.fit_to_stream(id, size);
-    }
-    match kind {
-        DisplayKind::Window { .. } => {
-            if !scene.placements.contains_key(&id) {
-                scene.place_window_panel(id);
-            }
-        }
-        _ if scene.relayout_pending() => scene.profile_streams(),
-        // A monitor the arrangement has no place for: next to the others, which
-        // stay. One it knows stays where it is.
-        _ if !scene.placements.contains_key(&id) => scene.place_missing(),
-        _ => {}
-    }
-    scene.build_cinema_view_if_due();
-}
-
-/// The PC listed its displays anew: the one source of which there are. Within a
-/// session, a display that left the list is gone, and its place goes with it (a
-/// display of the PC itself keeps its place: it comes back where it was).
-fn displays_changed(scene: &mut Scene, before: Option<&state::Displays>) {
-    let (Some(displays), Some(pc)) = (scene.pc.displays.clone(), scene.pc_id) else {
+    if scene.world.pc().is_none() {
         return;
-    };
-    let key = |id: DisplayId| DisplayKey::new(pc, id);
-    let gone: Vec<DisplayKey> = before
-        .iter()
-        .flat_map(|d| &d.displays)
-        .filter(|d| displays.get(d.id).is_none() && !d.is_physical())
-        .map(|d| key(d.id))
-        .collect();
-    let order: Vec<DisplayKey> = displays
-        .displays
-        .iter()
-        .filter(|d| d.is_virtual())
-        .map(|d| key(d.id))
-        .collect();
-    let primary = displays.primary.map(key);
+    }
     // As the switch says: its display shown; with none connected, any one kept shown.
-    scene.mirror_wanted = physical::switch(&displays).map_or_else(
+    scene.mirror_wanted = physical::switch(displays).map_or_else(
         || {
             displays
                 .displays
@@ -4207,47 +3151,17 @@ fn displays_changed(scene: &mut Scene, before: Option<&state::Displays>) {
         },
         state::Display::is_shown_physical,
     );
-    // Gone from the desk arrangement too, which cinema keeps aside.
-    if scene.desk.forget(&gone) {
-        scene.saves.mark(persist::File::Desk);
-    }
-    for id in &gone {
-        scene.placements.remove(id);
+    let gone = scene
+        .world
+        .listed(displays, &scene.settings, scene.head, Instant::now());
+    for id in gone {
         scene.monitors.remove(id);
-        for g in &mut scene.grabs {
-            if g.is_some_and(|g| g.id == Thing::Display(*id)) {
-                *g = None;
-            }
-        }
     }
-    if primary != scene.primary {
-        info!("primary display: {primary:?}");
-        scene.primary = primary;
-    }
-    scene.order = order;
-    if !gone.is_empty() {
-        scene.save_layout();
-    }
-    // A monitor of a profile being switched to that could not start.
-    scene.profile_streams();
-    // Streams that came before the list said what they are.
-    let waiting: Vec<DisplayKey> = scene
-        .monitors
-        .keys()
-        .copied()
-        .filter(|id| !scene.placements.contains_key(id))
-        .collect();
-    for id in waiting {
-        stream_shown(scene, id);
-    }
-    scene.place_missing();
-    scene.build_cinema_view_if_due();
 }
 
 /// A part of the PC's state came: kept, and what follows from it done.
 fn part_came(scene: &mut Scene, part: prostir_proto::HostMsg) {
     use prostir_proto::HostMsg as M;
-    let before = scene.pc.displays.clone();
     let follow = match &part {
         M::Displays { .. } => Some(true),
         M::Sound { part } => {
@@ -4273,7 +3187,7 @@ fn part_came(scene: &mut Scene, part: prostir_proto::HostMsg) {
         warn!("a part of the PC's state: {e}");
     }
     if follow.is_some() {
-        displays_changed(scene, before.as_ref());
+        displays_changed(scene);
     }
 }
 
@@ -4423,15 +3337,7 @@ fn handle_action(
     controls: &mut Controls,
 ) {
     // Changing the setup by hand leaves the profile it came from.
-    if matches!(
-        action,
-        Action::Add { .. }
-            | Action::Remove(_)
-            | Action::MakePrimary(_)
-            | Action::Move { .. }
-            | Action::SetMirror(_)
-            | Action::Preset(_)
-    ) {
+    if action.leaves_profile() {
         scene.active_profile = None;
     }
     match action {
@@ -4444,13 +3350,9 @@ fn handle_action(
             );
             // Shown at once where it will appear; the monitor takes that place once
             // its picture comes (not in cinema, where new monitors are not placed).
-            scene.adding = req.filter(|_| !scene.settings.cinema).map(|req| Adding {
-                req,
-                place: scene.place_for_new((width, height)),
-                size: (width, height),
-                id: None,
-                since: Instant::now(),
-            });
+            scene
+                .world
+                .adding_started(req, (width, height), scene.head.1, Instant::now());
         }
         Action::Remove(id) => {
             let confirmed = scene
@@ -4492,12 +3394,9 @@ fn handle_action(
             scene.saves.mark(persist::File::Settings);
         }
         Action::CinemaScreen(screen) => {
-            if scene.desk.pick_cinema(Some(screen)) {
-                scene.saves.mark(persist::File::Desk);
-            }
-            if scene.settings.cinema {
-                scene.arrange_all();
-            }
+            scene
+                .world
+                .pick_cinema(screen, &scene.settings, Instant::now());
         }
         Action::Cinema(on) => {
             scene.set_cinema(on);
@@ -4550,7 +3449,7 @@ fn handle_action(
         Action::LargeMenu(on) => {
             scene.settings.large_menu = on;
             scene.saves.mark(persist::File::Settings);
-            scene.panel_place.width = panel_width(on);
+            scene.world.menu_size(on);
         }
         Action::RestEvery(minutes) => {
             scene.settings.rest_every = minutes;
@@ -4610,11 +3509,8 @@ fn handle_action(
         }
         Action::Follow(on) => {
             scene.settings.follow = on;
-            scene.follow_hold = false;
             scene.saves.mark(persist::File::Settings);
-            if !on {
-                scene.save_layout();
-            }
+            scene.world.follow_chosen(&scene.settings);
         }
         Action::Hands(mode) => {
             scene.settings.hands = mode;
@@ -4630,26 +3526,7 @@ fn handle_action(
         }
         // Swaps the places of a monitor and its neighbour in the order; the others
         // stay.
-        Action::Move { id, delta } => {
-            let ids: Vec<DisplayKey> = scene.quest_sizes().iter().map(|m| m.0).collect();
-            if let Some(i) = ids.iter().position(|x| *x == id) {
-                let j = (i as i32 + delta).clamp(0, ids.len() as i32 - 1) as usize;
-                let other = ids[j];
-                if let (Some(a), Some(b)) = (
-                    scene.placements.get(&id).copied(),
-                    scene.placements.get(&other).copied(),
-                ) {
-                    // Each at the other's place, at the size of its own pixels.
-                    let size =
-                        |id: DisplayKey| scene.monitors.get(&id).map(|m| (m.width_px, m.height_px));
-                    if let (Some(sa), Some(sb)) = (size(id), size(other)) {
-                        scene.placements.insert(id, layout::refit(b, sb, sa));
-                        scene.placements.insert(other, layout::refit(a, sa, sb));
-                        scene.save_layout();
-                    }
-                }
-            }
-        }
+        Action::Move { id, delta } => scene.world.swap(id, delta),
         Action::SetMic(enabled) => {
             scene.mic_wanted = enabled;
             scene.settings.mic = enabled;
@@ -4678,17 +3555,14 @@ fn handle_action(
         }
         Action::Preset(preset) => {
             scene.settings.preset = preset;
-            scene.tilt = layout::tilt(preset);
             scene.saves.mark(persist::File::Settings);
-            scene.arrange_all();
+            scene.world.preset_chosen(&scene.settings, Instant::now());
         }
         Action::Curve(curve) => {
             scene.settings.curve = curve;
             scene.saves.mark(persist::File::Settings);
             // Flat it hangs tilted, curved it continues the cylinder.
-            if !scene.settings.cinema {
-                scene.place_mirror();
-            }
+            scene.world.curve_chosen(&scene.settings);
         }
         Action::Background(background) => {
             scene.settings.background = background;
@@ -4717,18 +3591,18 @@ fn handle_action(
             );
             // Placed once the PC answers with its monitors' numbers. Cinema, the
             // background, the curve and the preset are not the profile's: they stay.
-            scene.profile_switch = req.map(|req| ProfileSwitch {
+            scene.world.switch_to(req.map(|req| ProfileSwitch {
                 frame: p.frame,
                 rows: p.rows,
                 ..ProfileSwitch::new(req, p.places)
-            });
+            }));
             // The monitors changing is the answer: the menu gets out of the way.
             scene.panel_open = false;
         }
         Action::SaveProfile(i) => {
             // Nothing to save without monitors; a profile there is replaced on the
             // second press.
-            if scene.quest_sizes().is_empty() {
+            if scene.world.monitors().is_empty() {
                 return;
             }
             let replaces = scene.profiles.get(i).is_some_and(Option::is_some);
@@ -4743,6 +3617,11 @@ fn handle_action(
                     *slot = Some(profile);
                     scene.saves.mark(persist::File::Profiles);
                     scene.active_profile = Some(i);
+                    let name = scene.profile_name(i);
+                    let text = scene
+                        .texts()
+                        .f("toast-profile-saved", &[("name", name.into())]);
+                    scene.show_toast(text);
                 }
             } else {
                 scene.confirm_save = Some((i, Instant::now()));
@@ -4770,7 +3649,7 @@ fn handle_action(
                         scene.steering.trust_changed();
                         // Connected to it (by its key, not its name: two PCs may share
                         // one): leave, and do not come back on our own.
-                        if scene.pc_id == Some(pc) && scene.feedback.is_some() {
+                        if scene.world.pc() == Some(pc) && scene.feedback.is_some() {
                             scene.steering.forget_current();
                         }
                     }
@@ -4871,6 +3750,7 @@ fn handle_action(
             }
         }
     }
+    scene.world_done();
 }
 
 /// Builds without the selftest (the store's): the same calls, for a selftest that

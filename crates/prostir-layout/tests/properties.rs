@@ -443,7 +443,7 @@ fn noise_is_lined_up_and_offsets_are_kept() {
 #[test]
 fn a_single_row_is_reproduced_exactly() {
     let (c, lost) = measure("one row", 0x1a7e_0101, 2000, |r| {
-        rows_scene_of(r, 1, None, true, 0.0, false)
+        rows_scene_of(r, 1, None, true, 0.0, false, false)
     });
     assert_eq!(lost, 0);
     assert!(
@@ -453,7 +453,7 @@ fn a_single_row_is_reproduced_exactly() {
         c.side_ratio
     );
     let (c, lost) = measure("one row, 1 cm noise", 0x1a7e_0102, 2000, |r| {
-        rows_scene_of(r, 1, None, true, 0.01, false)
+        rows_scene_of(r, 1, None, true, 0.01, false, false)
     });
     assert_eq!(lost, 0);
     assert!(
@@ -475,7 +475,7 @@ fn rows_of_one_size_keep_their_side_seams() {
     let px = PixelSize::new(2560, 1440);
     let (c, _) = measure("rows of 2560", 0x1a7e_0103, 2000, |r| {
         let k = 1 + r.below(3);
-        rows_scene_of(r, k, Some(px), true, 0.0, false)
+        rows_scene_of(r, k, Some(px), true, 0.0, false, false)
     });
     assert!(
         c.side_ratio <= 1.0,

@@ -405,6 +405,7 @@ pub(crate) fn client_samples() -> Vec<ClientMsg> {
         ClientMsg::Ping { seq: 0 },
         ClientMsg::Pong { seq: 3 },
         ClientMsg::Goodbye { reason: 1 },
+        ClientMsg::Asleep,
     ];
     samples.extend(headset_state().parts());
     samples

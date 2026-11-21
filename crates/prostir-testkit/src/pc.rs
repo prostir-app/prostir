@@ -39,6 +39,9 @@ const PING_EVERY: Duration = Duration::from_secs(1);
 /// A stream that fell this many frames behind its clock skips ahead instead of
 /// sending them all at once.
 const MAX_BEHIND: u32 = 5;
+/// After a keyframe asked for went out, further asks for the same stream are ignored
+/// this long, as the PC app's router does.
+const KEYFRAME_ASKS_APART: Duration = Duration::from_millis(300);
 
 /// An encoded clip: access units of one codec and size, played in a loop.
 pub struct Clip {
@@ -175,6 +178,12 @@ pub enum Happened {
         id: DisplayId,
         generation: Gen,
     },
+    /// An ask for a keyframe came within 300 ms of the last one answered, and was
+    /// ignored (as the PC app does).
+    KeyframeIgnored {
+        id: DisplayId,
+        generation: Gen,
+    },
     /// A keyframe went out, as asked.
     KeyframeSent {
         id: DisplayId,
@@ -210,6 +219,7 @@ enum Cmd {
     Ended,
     Broken(DisplayId),
     Restart(DisplayId),
+    RestartWithoutKeyframe(DisplayId),
     Goodbye(u8),
 }
 
@@ -317,6 +327,15 @@ impl FakePc {
         self.shared.command(Cmd::Restart(id))
     }
 
+    /// Starts the stream of display `id` over, in a new generation, but from the
+    /// frame after its keyframe, as if a keyframe had just been asked for and sent:
+    /// the headset gets nothing it can decode, and an ask for a keyframe within
+    /// 300 ms is ignored, so it has to ask again to see a picture before the clip
+    /// comes round to its keyframe.
+    pub fn restart_stream_without_keyframe(&self, id: DisplayId) -> bool {
+        self.shared.command(Cmd::RestartWithoutKeyframe(id))
+    }
+
     /// Hangs up without a word, as a PC that lost the network would.
     pub fn drop_connection(&self) -> bool {
         match lock(&self.shared.current).as_ref() {
@@ -405,6 +424,8 @@ struct Streaming {
     unit: usize,
     next_due: Instant,
     broken_next: bool,
+    /// When a keyframe asked for last went out.
+    answered: Option<Instant>,
 }
 
 fn session(
@@ -591,6 +612,7 @@ fn stream_until_over(
             unit: 0,
             next_due: start,
             broken_next: false,
+            answered: None,
         })
         .collect();
     for s in &streams {
@@ -611,8 +633,16 @@ fn stream_until_over(
             Ok(Cmd::Pong(seq)) => send(tx, lane::CONTROL, HostMsg::Pong { seq })?,
             Ok(Cmd::Keyframe(id, g)) => {
                 if let Some(s) = streams.iter_mut().find(|s| s.id == id && s.generation == g) {
-                    // The clip starts with its keyframe: back to it.
-                    s.unit = 0;
+                    let now = Instant::now();
+                    if s.answered
+                        .is_some_and(|t| now.saturating_duration_since(t) < KEYFRAME_ASKS_APART)
+                    {
+                        shared.tell(Happened::KeyframeIgnored { id, generation: g });
+                    } else {
+                        // The clip starts with its keyframe: back to it.
+                        s.unit = 0;
+                        s.answered = Some(now);
+                    }
                 }
             }
             Ok(Cmd::Reply(req)) => {
@@ -634,8 +664,19 @@ fn stream_until_over(
             Ok(Cmd::Restart(id)) => {
                 if let Some(s) = streams.iter_mut().find(|s| s.id == id) {
                     s.generation = shared.next_generation();
-                    (s.seq, s.unit, s.broken_next) = (0, 0, false);
+                    (s.seq, s.unit, s.broken_next, s.answered) = (0, 0, false, None);
                     s.next_due = Instant::now();
+                    start_stream(tx, config, s, shared)?;
+                }
+            }
+            Ok(Cmd::RestartWithoutKeyframe(id)) => {
+                if let Some(s) = streams.iter_mut().find(|s| s.id == id) {
+                    let now = Instant::now();
+                    s.generation = shared.next_generation();
+                    let after_key = 1 % config.clips[s.clip].len();
+                    (s.seq, s.unit, s.broken_next) = (0, after_key, false);
+                    s.answered = Some(now);
+                    s.next_due = now;
                     start_stream(tx, config, s, shared)?;
                 }
             }
@@ -927,6 +968,86 @@ mod tests {
         let again = FakeHeadset::connect(pc.addr(), &mut keys, None).unwrap();
         assert_eq!(again.view().order(), [DisplayId(1), DisplayId(2)]);
         drop(again);
+        pc.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Like the PC app, the fake PC answers one ask for a keyframe and ignores the
+    /// next ones for 300 ms; a stream started over without its keyframe counts as
+    /// just answered.
+    #[test]
+    fn keyframe_asks_close_together_are_ignored() {
+        let dir = temp_dir("asks");
+        let (headset, _) = trust_each_other(&dir.join("headset"), &dir.join("pc"), "fake").unwrap();
+        let pc = FakePc::start(PcConfig {
+            identity: dir.join("pc"),
+            trusted: vec![headset],
+            // 5 s: no keyframe of its own comes round during the test.
+            clips: vec![clip(300, Codec::H264)],
+            monitors: 1,
+            name: "Fake".into(),
+        })
+        .unwrap();
+        let mut keys = Keys::load(&dir.join("headset")).unwrap();
+        let mut headset = FakeHeadset::connect(pc.addr(), &mut keys, None).unwrap();
+        headset
+            .wait(
+                Duration::from_secs(5),
+                "pictures",
+                crate::View::all_monitors_show,
+            )
+            .unwrap();
+        let id = DisplayId(1);
+        let ask = |headset: &mut FakeHeadset| {
+            let generation = headset.view().streams[&id].generation;
+            headset
+                .send(&ClientMsg::RequestKeyframe { id, generation })
+                .unwrap();
+        };
+        ask(&mut headset);
+        ask(&mut headset);
+        // The keyframe goes out with the next frame, maybe after the second ask.
+        let (mut ignored, mut sent) = (false, false);
+        while !(ignored && sent) {
+            match wait_for(&pc, |h| {
+                matches!(
+                    h,
+                    Happened::KeyframeSent { .. } | Happened::KeyframeIgnored { .. }
+                )
+            })
+            .what
+            {
+                Happened::KeyframeIgnored { .. } => ignored = true,
+                _ => sent = true,
+            }
+        }
+
+        assert!(pc.restart_stream_without_keyframe(id));
+        let Happened::StreamStarted { generation, .. } =
+            wait_for(&pc, |h| matches!(h, Happened::StreamStarted { .. })).what
+        else {
+            unreachable!()
+        };
+        headset
+            .wait(Duration::from_secs(5), "the new generation", |v| {
+                v.streams[&id].generation == generation
+            })
+            .unwrap();
+        ask(&mut headset);
+        wait_for(&pc, |h| matches!(h, Happened::KeyframeIgnored { .. }));
+        std::thread::sleep(KEYFRAME_ASKS_APART);
+        ask(&mut headset);
+        let sent = wait_for(&pc, |h| {
+            matches!(
+                h,
+                Happened::KeyframeSent { .. } | Happened::KeyframeIgnored { .. }
+            )
+        });
+        assert!(
+            matches!(sent.what, Happened::KeyframeSent { generation: g, .. } if g == generation),
+            "{sent:?}"
+        );
+        drop(headset);
         pc.stop();
         let _ = std::fs::remove_dir_all(&dir);
     }

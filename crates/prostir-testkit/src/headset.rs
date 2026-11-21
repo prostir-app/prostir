@@ -772,6 +772,14 @@ impl FakeHeadset {
         Ok(())
     }
 
+    /// Goes to sleep as the Quest app does (the power button): not worn, then asleep.
+    pub fn sleep(&mut self) -> Result<()> {
+        self.send(&ClientMsg::Presence {
+            part: Presence { worn: false },
+        })?;
+        self.send(&ClientMsg::Asleep)
+    }
+
     /// What the PC said so far in this session.
     pub fn view(&self) -> &View {
         &self.view

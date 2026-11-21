@@ -10,7 +10,9 @@
 
 pub mod background;
 pub mod commands;
+pub mod connecting;
 pub mod device;
+pub mod frames;
 pub mod ids;
 pub mod lang;
 pub mod layout;
@@ -18,12 +20,14 @@ pub mod outbox;
 pub mod pending;
 pub mod persist;
 pub mod physical;
+pub mod presence;
 pub mod profiles;
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 pub mod selftest;
 pub mod settings;
 pub mod store;
 pub mod ui;
+pub mod world;
 
 #[cfg(target_os = "android")]
 mod alloc_count;

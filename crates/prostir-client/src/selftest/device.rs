@@ -81,6 +81,7 @@ const KEYS: &[&str] = &[
     "refresh_hz",
     "period_ms",
     "perf",
+    "decoder_rate",
     "threads_left",
     "battery.start",
     "connect_ms",
@@ -101,10 +102,15 @@ const KEYS: &[&str] = &[
     "net_to_decoder_ms.p95",
     "net_to_decoder_ms.p99",
     "net_to_decoder_ms.max",
+    "decoder_queue_max",
+    "frames_dropped_to_keyframe",
+    "decoder_wakeups_per_s",
     "keyframe_asked_ms",
     "decoder_recovered_ms",
     "surface_recreated_ms",
     "stream_restart_ms",
+    "stream_unfreeze_ms",
+    "keyframe_asks_ignored",
     "reconnect_ms",
     "reconnect_picture_ms",
     "frame_samples",
@@ -123,6 +129,9 @@ const KEYS: &[&str] = &[
     "menu_redraw_ms.max",
     "menu_redraw_share.p95",
     "menu_redraw_share.max",
+    "image_uploads",
+    "image_upload_ms.p95",
+    "image_upload_ms.max",
     "frames",
     "frames_missed",
     "frames_missed_moving",
@@ -166,6 +175,9 @@ enum Phase {
     Broken,
     /// A stream started over in a new generation.
     Restart,
+    /// The stream started over without its keyframe, and the fake PC ignored the
+    /// first ask for one: waiting for the headset to ask again.
+    Frozen,
     /// The fake PC hangs up; waiting for the headset to come back.
     Dropped,
     Done,
@@ -214,6 +226,12 @@ pub struct Selftest {
     recovered_ms: Option<f64>,
     restart: Option<DisplayId>,
     restart_ms: Option<f64>,
+    /// The stream started over without its keyframe, and when; its first picture
+    /// after that.
+    frozen: Option<(DisplayId, Instant)>,
+    unfreeze_ms: Option<f64>,
+    /// Asks for a keyframe the fake PC ignored (within 300 ms of one it answered).
+    asks_ignored: u32,
     dropped_at: Option<Instant>,
     reconnect_ms: Option<f64>,
     reconnect_picture_ms: Option<f64>,
@@ -239,6 +257,10 @@ pub struct Selftest {
     /// All threads' allocations and when, at the start of the calm part.
     allocs_all: Option<(u64, Instant)>,
     allocs_all_per_s: Option<f64>,
+    /// The decoder threads' context switches (by thread) and when, at the start of the
+    /// calm part, and all of them together a second over it.
+    switches: Option<(BTreeMap<u32, u64>, Instant)>,
+    decoder_wakeups_per_s: Option<f64>,
     /// The menu's tab was switched (once, half way through its time).
     tab_switched: bool,
 }
@@ -378,6 +400,37 @@ fn threads_left() -> usize {
         .count()
 }
 
+/// Context switches of each decoder thread so far (voluntary and not), by thread:
+/// each one is the thread waking up.
+fn decoder_switches() -> BTreeMap<u32, u64> {
+    let mut found = BTreeMap::new();
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return found;
+    };
+    for task in tasks.flatten() {
+        let path = task.path();
+        let is_decoder = std::fs::read_to_string(path.join("comm"))
+            .is_ok_and(|name| name.trim().starts_with("decoder-"));
+        let tid = task
+            .file_name()
+            .to_str()
+            .and_then(|t| t.parse::<u32>().ok());
+        let (true, Some(tid)) = (is_decoder, tid) else {
+            continue;
+        };
+        let Ok(status) = std::fs::read_to_string(path.join("status")) else {
+            continue;
+        };
+        let switches = status
+            .lines()
+            .filter(|l| l.contains("ctxt_switches:"))
+            .filter_map(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
+            .sum();
+        found.insert(tid, switches);
+    }
+    found
+}
+
 /// The clips in the APK's `assets/selftest/` (every build but the store's has them).
 fn clips(app: &AndroidApp) -> Vec<Clip> {
     let assets = app.asset_manager();
@@ -450,6 +503,9 @@ impl Selftest {
             recovered_ms: None,
             restart: None,
             restart_ms: None,
+            frozen: None,
+            unfreeze_ms: None,
+            asks_ignored: 0,
             dropped_at: None,
             reconnect_ms: None,
             reconnect_picture_ms: None,
@@ -471,6 +527,8 @@ impl Selftest {
             calm_frame: false,
             allocs_all: None,
             allocs_all_per_s: None,
+            switches: None,
+            decoder_wakeups_per_s: None,
             tab_switched: false,
         };
         let r = &mut test.report;
@@ -489,6 +547,10 @@ impl Selftest {
             Err(e) => test.end_early(Exit::NoStart, &e),
         }
         test.report.set("seconds", test.options.seconds);
+        let max = test.options.decoder_rate_max;
+        super::set_decoder_rate_max(max);
+        test.report
+            .set("decoder_rate", if max { "max" } else { "default" });
         info!("selftest: {extra:?}, start {run} in this process");
         Some(test)
     }
@@ -769,6 +831,7 @@ impl Selftest {
             }
             Phase::Settle if in_phase >= SETTLE => {
                 self.allocs_all = crate::alloc_count::all().map(|n| (n, now));
+                self.switches = Some((decoder_switches(), now));
                 self.steady_period = self.period;
                 self.report.set_ms("period_ms", self.steady_period.map(ms));
                 self.next(Phase::Steady, now);
@@ -780,6 +843,16 @@ impl Selftest {
                 {
                     self.allocs_all_per_s =
                         Some(after.saturating_sub(before) as f64 / (now - at).as_secs_f64());
+                }
+                if let Some((before, at)) = self.switches.take() {
+                    // Only the threads there all along: one that started or ended
+                    // meanwhile is not a calm decoder.
+                    let after = decoder_switches();
+                    let woken: u64 = before
+                        .iter()
+                        .filter_map(|(tid, n)| after.get(tid).map(|m| m.saturating_sub(*n)))
+                        .sum();
+                    self.decoder_wakeups_per_s = Some(woken as f64 / (now - at).as_secs_f64());
                 }
                 self.next(Phase::Move, now);
                 Act::MoveMonitor
@@ -815,6 +888,16 @@ impl Selftest {
                 Act::Nothing
             }
             Phase::Restart if self.restart_ms.is_some() || in_phase >= RECOVER_WITHIN => {
+                let id = self.restart.or_else(|| self.monitors.first().copied());
+                if let (Some(id), Some(pc)) = (id, &self.pc)
+                    && pc.restart_stream_without_keyframe(id)
+                {
+                    self.frozen = Some((id, now));
+                }
+                self.next(Phase::Frozen, now);
+                Act::Nothing
+            }
+            Phase::Frozen if self.unfreeze_ms.is_some() || in_phase >= RECOVER_WITHIN => {
                 if let Some(pc) = &self.pc {
                     pc.drop_connection();
                 }
@@ -883,8 +966,20 @@ impl Selftest {
             if s.session == 1 && self.restart != Some(*id) {
                 self.first_frames.entry(*id).or_insert(first);
             }
-            if self.restart == Some(*id) && s.session == 1 && self.restart_ms.is_none() {
+            if self.restart == Some(*id)
+                && s.session == 1
+                && self.restart_ms.is_none()
+                && self.frozen.is_none()
+            {
                 self.restart_ms = Some(first);
+            }
+            if let Some((frozen, since)) = self.frozen
+                && frozen == *id
+                && s.session == 1
+                && s.started >= since
+                && self.unfreeze_ms.is_none()
+            {
+                self.unfreeze_ms = Some(ms(at.saturating_duration_since(since)));
             }
             if let Some(dropped) = self.dropped_at
                 && s.session > 1
@@ -955,6 +1050,7 @@ impl Selftest {
                 generation,
                 seq,
             } => self.broken = Some((id, generation, seq, at)),
+            Happened::KeyframeIgnored { .. } => self.asks_ignored += 1,
             Happened::KeyframeAsked { id, generation } => {
                 if let Some((b, g, _, since)) = self.broken
                     && (b, g) == (id, generation)
@@ -1041,6 +1137,7 @@ impl Selftest {
             keyframe_asked_ms: self.keyframe_asked_ms,
             decoder_recovered_ms: self.recovered_ms,
             reconnect_ms: self.reconnect_ms,
+            unfreeze_ms: self.unfreeze_ms,
             frame_share_p95: self.frame_share.percentile(0.95),
             frame_share_p99: self.frame_share.percentile(0.99),
         }
@@ -1071,12 +1168,16 @@ impl Selftest {
                 }
                 r.set_ms(&format!("{key}.max"), Some(ms(h.max())));
             }
+            r.set("decoder_queue_max", p.queue_max);
+            r.set("frames_dropped_to_keyframe", p.dropped_to_keyframe);
         }
         r.set_ms("keyframe_asked_ms", self.keyframe_asked_ms);
         r.set_ms("decoder_recovered_ms", self.recovered_ms);
         // The decoder's own fault hooks come with its rework (step 7.8b); until then
         // this stays `none`.
         r.set_ms("stream_restart_ms", self.restart_ms);
+        r.set_ms("stream_unfreeze_ms", self.unfreeze_ms);
+        r.set("keyframe_asks_ignored", self.asks_ignored);
         r.set_ms("reconnect_ms", self.reconnect_ms);
         r.set_ms("reconnect_picture_ms", self.reconnect_picture_ms);
         r.set("frame_samples", self.frame_cpu.len());
@@ -1089,6 +1190,13 @@ impl Selftest {
         r.set_ms("menu_redraw_ms.max", self.menu_ms.max());
         r.set_share("menu_redraw_share.p95", self.menu_share.percentile(0.95));
         r.set_share("menu_redraw_share.max", self.menu_share.max());
+        if let Some(p) = &probe {
+            r.set("image_uploads", p.upload.count());
+            if p.upload.count() > 0 {
+                r.set_ms("image_upload_ms.p95", Some(ms(p.upload.percentile(0.95))));
+                r.set_ms("image_upload_ms.max", Some(ms(p.upload.max())));
+            }
+        }
         r.set("frames", self.frames);
         r.set("frames_missed", self.missed_steady);
         r.set("frames_missed_moving", self.missed_moving);
@@ -1104,6 +1212,9 @@ impl Selftest {
         }
         if let Some(a) = self.allocs_all_per_s {
             r.set("alloc_all_threads_per_s", format!("{a:.0}"));
+        }
+        if let Some(w) = self.decoder_wakeups_per_s {
+            r.set("decoder_wakeups_per_s", format!("{w:.0}"));
         }
     }
 }

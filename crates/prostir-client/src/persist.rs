@@ -137,6 +137,11 @@ impl Dirty {
         self.0 == 0
     }
 
+    /// The files `other` marks are marked too.
+    pub fn add(&mut self, other: Dirty) {
+        self.0 |= other.0;
+    }
+
     /// The marked files, in the order of [`File::ALL`]; none is marked after.
     pub fn take(&mut self) -> impl Iterator<Item = File> + use<> {
         let taken = std::mem::take(self);
@@ -168,6 +173,16 @@ mod tests {
         );
         assert!(dirty.is_empty());
         assert_eq!(dirty.take().count(), 0);
+        // What another part changed in the pass is written with the rest, once.
+        let mut world = Dirty::default();
+        world.mark(File::Keyboard);
+        world.mark(File::Desk);
+        dirty.mark(File::Desk);
+        dirty.add(world);
+        assert_eq!(
+            dirty.take().collect::<Vec<_>>(),
+            [File::Desk, File::Keyboard]
+        );
     }
 
     /// A file of this format gives its lines after the first, numbered as an editor

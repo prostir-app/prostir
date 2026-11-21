@@ -443,7 +443,23 @@ pub enum Action {
     Close,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+impl Action {
+    /// Changes the setup by hand: the monitors are no longer as the active profile has
+    /// them, so no profile is the active one after it.
+    pub fn leaves_profile(&self) -> bool {
+        matches!(
+            self,
+            Action::Add { .. }
+                | Action::Remove(_)
+                | Action::MakePrimary(_)
+                | Action::Move { .. }
+                | Action::SetMirror(_)
+                | Action::Preset(_)
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Style {
     Normal,
     Selected,
@@ -476,6 +492,9 @@ enum Item {
         /// How wide it may be (the panel's edge when wider); a longer text is drawn
         /// smaller (see [`Panel::fit`]).
         room: f32,
+        /// It holds a name: shortened with an ellipsis where even the smallest size is
+        /// too wide.
+        shorten: bool,
     },
     Button {
         rect: Rect,
@@ -484,6 +503,11 @@ enum Item {
         size: f32,
         style: Style,
         action: Option<Action>,
+        /// The label is a name (a monitor's, as the PC calls it), not a text of the
+        /// menu, in full: where it does not fit even at the smallest size, the label is
+        /// shortened with an ellipsis (see [`Panel::fit`]), and pointed at, the button
+        /// shows it whole above itself.
+        full: Option<String>,
     },
     /// A ring sector around (`cx`, `cy`) from radius `r0` to `r1` and angle `a0` to
     /// `a1` (radians, clockwise from straight up), pressed like a button: the round
@@ -769,10 +793,17 @@ impl Panel {
         for item in items.iter_mut() {
             match item {
                 Item::Button {
-                    rect, label, size, ..
+                    rect,
+                    label,
+                    size,
+                    full,
+                    ..
                 } => {
                     let room = rect.width() - 16.0;
                     *size = self.fitting(label, *size, true, room);
+                    if full.is_some() {
+                        self.shorten(label, *size, true, room);
+                    }
                 }
                 Item::Text {
                     x,
@@ -780,10 +811,14 @@ impl Panel {
                     medium,
                     text,
                     room,
+                    shorten,
                     ..
                 } => {
                     let room = room.min(width - 32.0 - *x);
                     *size = self.fitting(text, *size, *medium, room);
+                    if *shorten {
+                        self.shorten(text, *size, *medium, room);
+                    }
                 }
                 _ => {}
             }
@@ -1290,11 +1325,25 @@ impl Panel {
     }
 
     fn glyph(&mut self, medium: bool, c: char, size: f32) -> &(Metrics, Vec<u8>) {
-        let key = (medium, c, size.to_bits());
         let font = if medium { &self.medium } else { &self.regular };
-        self.glyphs
-            .entry(key)
-            .or_insert_with(|| font.rasterize(c, size))
+        cached_glyph(&mut self.glyphs, font, medium, c, size)
+    }
+
+    /// `name`, at `size`, shortened with an ellipsis by whole letters where it is wider
+    /// than `room` (see `prostir_lang::shortened`); nothing where not even a letter
+    /// fits.
+    fn shorten(&self, name: &mut String, size: f32, medium: bool, room: f32) {
+        if self.measured(name, size, medium) > room {
+            *name = prostir_lang::shortened(name, |s| self.measured(s, size, medium) <= room)
+                .unwrap_or_default();
+        }
+    }
+
+    /// [`Panel::text_width`] without the glyph cache, for a question asked many times
+    /// over one text (how much of a name fits).
+    fn measured(&self, s: &str, size: f32, medium: bool) -> f32 {
+        let font = if medium { &self.medium } else { &self.regular };
+        s.chars().map(|c| font.metrics(c, size).advance_width).sum()
     }
 
     fn text_width(&mut self, s: &str, size: f32, medium: bool) -> f32 {
@@ -1409,8 +1458,46 @@ impl Panel {
                 }
             }
         }
+        // A name shortened on its button, pointed at: whole, above it.
+        if let Some(Item::Button {
+            rect: r,
+            label,
+            full: Some(full),
+            ..
+        }) = self.hovered.and_then(|i| items.get(i))
+            && label != full
+        {
+            self.draw_tip(&mut pixmap, *r, full);
+        }
         self.items = items;
         self.pixmap = pixmap;
+    }
+
+    /// `text` on a dark label just above `over` (below it where there is no room above),
+    /// within the panel, drawn smaller where it is wide.
+    fn draw_tip(&mut self, pixmap: &mut Pixmap, over: Rect, text: &str) {
+        let (pw, ph) = (pixmap.width() as f32, pixmap.height() as f32);
+        let size = self.fitting(text, 20.0, true, pw - 64.0);
+        let tw = self.text_width(text, size, true);
+        let (w, h) = (tw + 28.0, size + 18.0);
+        let x = (over.left() + over.width() / 2.0 - w / 2.0).clamp(16.0, (pw - 16.0 - w).max(16.0));
+        let y = if over.top() - h - 6.0 >= 8.0 {
+            over.top() - h - 6.0
+        } else {
+            (over.bottom() + 6.0).min(ph - h - 8.0)
+        };
+        let r = rect(x, y, w, h);
+        fill(pixmap, rounded(r, 10.0), [16, 18, 24, 245]);
+        stroke(pixmap, rounded(r, 10.0), [255, 255, 255, 40], 1.5);
+        self.draw_text(
+            pixmap,
+            x + 14.0,
+            y + h / 2.0 + size * 0.36,
+            size,
+            true,
+            TEXT,
+            text,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1425,23 +1512,26 @@ impl Panel {
         s: &str,
     ) {
         let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
+        let data = pixmap.data_mut();
+        // The cache and the fonts are separate fields: each glyph is borrowed from the
+        // cache, not copied out of it.
+        let font = if medium { &self.medium } else { &self.regular };
         let mut pen = x;
         for c in s.chars() {
-            let (m, coverage) = self.glyph(medium, c, size).clone();
+            let (m, coverage) = cached_glyph(&mut self.glyphs, font, medium, c, size);
             let gx = (pen + m.xmin as f32).round() as i32;
             let gy = (baseline - m.height as f32 - m.ymin as f32).round() as i32;
-            let data = pixmap.data_mut();
-            for row in 0..m.height as i32 {
+            let (w, h) = (m.width as i32, m.height as i32);
+            // Only the part of the glyph inside the pixmap.
+            let (rows, cols) = (
+                gy.max(0) - gy..h.min(ph - gy),
+                gx.max(0) - gx..w.min(pw - gx),
+            );
+            for row in rows {
                 let py = gy + row;
-                if py < 0 || py >= ph {
-                    continue;
-                }
-                for col in 0..m.width as i32 {
+                for col in cols.clone() {
                     let px = gx + col;
-                    if px < 0 || px >= pw {
-                        continue;
-                    }
-                    let cov = coverage[(row * m.width as i32 + col) as usize] as u32;
+                    let cov = coverage[(row * w + col) as usize] as u32;
                     let a = cov * color[3] as u32 / 255;
                     if a == 0 {
                         continue;
@@ -1457,6 +1547,20 @@ impl Panel {
             pen += m.advance_width;
         }
     }
+}
+
+/// Glyph `c` of `font` (the medium one if `medium`) at `size`, rasterized once and
+/// kept in `glyphs`.
+fn cached_glyph<'a>(
+    glyphs: &'a mut HashMap<(bool, char, u32), (Metrics, Vec<u8>)>,
+    font: &Font,
+    medium: bool,
+    c: char,
+    size: f32,
+) -> &'a (Metrics, Vec<u8>) {
+    glyphs
+        .entry((medium, c, size.to_bits()))
+        .or_insert_with(|| font.rasterize(c, size))
 }
 
 impl Panel {
@@ -1655,16 +1759,15 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         } else {
             Style::Normal
         };
-        items.push(button(r, "", style, Some(Action::SelectMonitor(m.id))));
-        let label = &m.label;
+        // Its name in the middle: smaller on a small tile, then shortened (in full
+        // under the map once picked).
         let size = (r.height() * 0.4).clamp(14.0, 30.0);
-        items.push(text(
-            r.left() + r.width() / 2.0 - size * 0.3,
-            r.top() + r.height() / 2.0 + size * 0.36,
+        items.push(name_button(
+            r,
+            &m.label,
             size,
-            true,
-            [255, 255, 255, 255],
-            label,
+            style,
+            Some(Action::SelectMonitor(m.id)),
         ));
     }
     // Monitors not placed in view (all but the one shown in cinema mode, say): a row
@@ -1679,9 +1782,10 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             Style::Normal
         };
         let r = rect(bx, y + map_h - 44.0, 40.0, 36.0);
-        items.push(button(
+        items.push(name_button(
             r,
             &m.label,
+            button_font_size(&m.label),
             style,
             Some(Action::SelectMonitor(m.id)),
         ));
@@ -1690,14 +1794,23 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
     y += map_h + 12.0;
     // The picked monitor: what it is, and what can be done with it.
     if let Some(m) = selected.and_then(|id| s.monitors.iter().find(|m| m.id == id)) {
-        items.push(text(
-            lx,
-            y + 24.0,
-            22.0,
-            true,
-            TEXT,
-            &l.f("monitor-n", &[("n", (&m.label).into())]),
-        ));
+        // Its name, left of its buttons: smaller when long, then shortened (whole on
+        // its tile when pointed at).
+        let mut title = text_in(
+            lw - 58.0 - 10.0 - 210.0 - 10.0,
+            text(
+                lx,
+                y + 24.0,
+                22.0,
+                true,
+                TEXT,
+                &l.f("monitor-n", &[("n", (&m.label).into())]),
+            ),
+        );
+        if let Item::Text { shorten, .. } = &mut title {
+            *shorten = true;
+        }
+        items.push(title);
         // Removing it or making it primary: how that stands, in place of its size.
         let note = s
             .ask_note(Asked::Remove(m.id))
@@ -1955,6 +2068,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
     }
 
     let st = s.settings;
+    let layouts = items.len();
     segmented(
         items,
         rx,
@@ -1982,6 +2096,18 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             ),
         ],
     );
+    // The chosen layout pressed again lays the monitors out by it anew, as choosing it
+    // does (without going through another one first).
+    for item in items.get_mut(layouts..).into_iter().flatten() {
+        if let Item::Button {
+            style: Style::Selected,
+            action,
+            ..
+        } = item
+        {
+            *action = Some(Action::Preset(st.preset));
+        }
+    }
     segmented(
         items,
         rx,
@@ -2066,6 +2192,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
                 }
             })
             .collect();
+        let from = items.len();
         segmented(
             items,
             rx,
@@ -2085,6 +2212,12 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
                 })
                 .collect(),
         );
+        // The monitors' names, as the PC calls them: shortened where long.
+        for item in items.get_mut(from..).into_iter().flatten() {
+            if let Item::Button { label, full, .. } = item {
+                *full = Some(label.clone());
+            }
+        }
     }
     y
 }
@@ -2606,10 +2739,13 @@ fn save_as_profile(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f3
         } else {
             l.f("profile-n", &[("n", (i + 1).into())])
         };
-        let style = match (can, armed) {
-            (false, _) => Style::Disabled,
-            (true, true) => Style::Armed,
-            (true, false) => Style::Normal,
+        // The profile the monitors are as now: saved to or switched to last.
+        let active = s.active_profile == Some(i);
+        let style = match (can, armed, active) {
+            (false, _, _) => Style::Disabled,
+            (true, true, _) => Style::Armed,
+            (true, false, true) => Style::Selected,
+            (true, false, false) => Style::Normal,
         };
         items.push(button(
             rect(x + i as f32 * (bw + 10.0), y, bw, 48.0),
@@ -3298,6 +3434,7 @@ fn text(x: f32, baseline: f32, size: f32, medium: bool, color: [u8; 4], s: &str)
         color,
         text: s.to_owned(),
         room: f32::INFINITY,
+        shorten: false,
     }
 }
 
@@ -3323,6 +3460,7 @@ fn text_in(room: f32, item: Item) -> Item {
             medium,
             color,
             text,
+            shorten,
             ..
         } => Item::Text {
             x,
@@ -3332,6 +3470,7 @@ fn text_in(room: f32, item: Item) -> Item {
             color,
             text,
             room,
+            shorten,
         },
         other => other,
     }
@@ -3344,6 +3483,20 @@ fn button(rect: Rect, label: &str, style: Style, action: Option<Action>) -> Item
         size: button_font_size(label),
         style,
         action,
+        full: None,
+    }
+}
+
+/// A button labelled with a monitor's `name` at `size`, centred on it: smaller where
+/// it does not fit, then shortened with an ellipsis (see [`Panel::fit`]).
+fn name_button(rect: Rect, name: &str, size: f32, style: Style, action: Option<Action>) -> Item {
+    Item::Button {
+        rect,
+        label: name.to_owned(),
+        size,
+        style,
+        action,
+        full: Some(name.to_owned()),
     }
 }
 
@@ -3705,6 +3858,231 @@ mod tests {
         assert!(!w.wedge_contains(0.0, 15.0));
     }
 
+    /// The PC names the monitors ("Selftest 2", or much longer): on the map each name
+    /// is centred on its tile, smaller where it does not fit, then shortened with an
+    /// ellipsis by whole letters; never past its tile. Picked, the monitor's name shows
+    /// in full under the map. In every language, the longer pseudo-language too.
+    #[test]
+    fn monitor_names_fit_their_tiles() {
+        let names = [
+            "Selftest 2",
+            "Selftest monitor with a much longer name 1",
+            "Монітор із дуже довгою назвою на ПК 3",
+            "Pre\u{301}sentation wall-12",
+        ];
+        for lang in [
+            crate::lang::builtin("uk"),
+            crate::lang::builtin("en"),
+            pseudo(),
+        ] {
+            let mut st = sample_state();
+            st.texts = lang;
+            st.tab = Tab::Monitors;
+            for (m, name) in st.monitors.iter_mut().zip(names) {
+                m.label = name.into();
+            }
+            // One not placed in view: on the row of small buttons under the map.
+            st.monitors[2].seen = None;
+            st.monitors[2].label = names[3].into();
+            st.selected = Some(st.monitors[1].id);
+            let mut p = Panel::new();
+            p.set_state(&st);
+            assert_eq!(p.overflows(), Vec::<String>::new(), "{:?}", st.texts);
+            let tiles: Vec<(Rect, String, f32)> = p
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Button {
+                        rect,
+                        label,
+                        size,
+                        full: Some(_),
+                        action: Some(Action::SelectMonitor(_)),
+                        ..
+                    } => Some((*rect, label.clone(), *size)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(tiles.len(), 3);
+            for (r, label, size) in &tiles {
+                assert!(!label.is_empty(), "something of it shows");
+                let w = p.text_width(label, *size, true);
+                assert!(w <= r.width() - 16.0 + 0.5, "{label:?} fits its tile");
+                let whole = names.contains(&label.as_str());
+                assert!(
+                    whole || label.contains('…'),
+                    "{label:?}: whole or shortened"
+                );
+            }
+            // The short one whole, the long ones shortened.
+            assert!(tiles.iter().any(|t| t.1 == names[0]));
+            assert!(
+                tiles
+                    .iter()
+                    .any(|t| t.1.starts_with("Selftest") && t.1.contains('…'))
+            );
+            assert!(
+                tiles
+                    .iter()
+                    .any(|t| t.1.contains('…') && t.1.ends_with(" 1")),
+                "the ending that tells it apart"
+            );
+            // Pointed at, a shortened one shows its name whole above it.
+            let (r, _, _) = tiles.iter().find(|t| t.1.contains('…')).unwrap();
+            let (cx, above) = (
+                (r.left() + r.width() / 2.0) as usize,
+                (r.top() - 25.0) as usize,
+            );
+            let at = |px: &[u8]| px[(above * WIDTH as usize + cx) * 4..][..4].to_vec();
+            let plain = at(p.render_if_dirty().unwrap());
+            p.hover(Some((cx as f32, r.top() + r.height() / 2.0)));
+            let pointed = at(p.render_if_dirty().unwrap());
+            assert_ne!(plain, pointed, "its whole name over the map");
+        }
+    }
+
+    /// Every layout can be pressed, the chosen one too: pressed again, it lays the
+    /// monitors out anew.
+    #[test]
+    fn the_chosen_layout_can_be_pressed_again() {
+        for preset in [Preset::Arc, Preset::Wall, Preset::Overhead] {
+            let mut st = sample_state();
+            st.tab = Tab::Monitors;
+            st.settings.preset = preset;
+            let presets: Vec<(Action, Style)> = Panel::new()
+                .build(&st)
+                .into_iter()
+                .filter_map(|i| match i {
+                    Item::Button {
+                        action: Some(a @ Action::Preset(_)),
+                        style,
+                        ..
+                    } => Some((a, style)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(presets.len(), 3, "{preset:?}");
+            assert!(presets.contains(&(Action::Preset(preset), Style::Selected)));
+        }
+    }
+
+    /// The profile buttons of a tab: label, style, action.
+    fn profile_buttons(st: &UiState) -> Vec<(String, Style, Option<Action>)> {
+        Panel::new()
+            .build(st)
+            .into_iter()
+            .filter_map(|i| match i {
+                Item::Button {
+                    label,
+                    style,
+                    action,
+                    ..
+                } if label.starts_with("Profile") || label == "Replace?" => {
+                    Some((label, style, action))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The profile saved to or switched to last is the one highlighted, where it is
+    /// switched to (Quick) and where it is saved (Monitors); saving to it again asks
+    /// first, as for any saved one.
+    #[test]
+    fn the_active_profile_is_highlighted() {
+        let mut st = sample_state();
+        st.texts = crate::lang::builtin("en");
+        st.active_profile = Some(1);
+        st.saved_profiles = [true, true, false];
+
+        st.tab = Tab::Quick;
+        let quick = profile_buttons(&st);
+        assert_eq!(
+            quick,
+            [
+                (
+                    "Profile 1".into(),
+                    Style::Normal,
+                    Some(Action::ApplyProfile(0))
+                ),
+                ("Profile 2".into(), Style::Selected, None),
+                ("Profile 3".into(), Style::Disabled, None),
+            ]
+        );
+
+        st.tab = Tab::Monitors;
+        let save = profile_buttons(&st);
+        assert_eq!(
+            save,
+            [
+                (
+                    "Profile 1".into(),
+                    Style::Normal,
+                    Some(Action::SaveProfile(0))
+                ),
+                (
+                    "Profile 2".into(),
+                    Style::Selected,
+                    Some(Action::SaveProfile(1))
+                ),
+                (
+                    "Profile 3".into(),
+                    Style::Normal,
+                    Some(Action::SaveProfile(2))
+                ),
+            ]
+        );
+
+        // Pressed once to save over it: it asks, and the question shows over the mark.
+        st.confirm_save = Some(1);
+        assert_eq!(
+            profile_buttons(&st)[1],
+            (
+                "Replace?".into(),
+                Style::Armed,
+                Some(Action::SaveProfile(1))
+            )
+        );
+
+        // Switching to a profile or saving one keeps it; a layout chosen, a monitor
+        // moved, added or removed by hand leaves it, and then none is marked.
+        st.confirm_save = None;
+        for keeps in [
+            Action::ApplyProfile(0),
+            Action::SaveProfile(1),
+            Action::Recenter,
+        ] {
+            assert!(!keeps.leaves_profile(), "{keeps:?}");
+        }
+        let by_hand = [
+            Action::Preset(Preset::Wall),
+            Action::Move {
+                id: k(102),
+                delta: 1,
+            },
+            Action::Add {
+                width: 1920,
+                height: 1080,
+            },
+            Action::Remove(k(102)),
+            Action::MakePrimary(k(103)),
+            Action::SetMirror(true),
+        ];
+        for action in by_hand {
+            let mut st = st.clone();
+            assert!(action.leaves_profile(), "{action:?}");
+            if action.leaves_profile() {
+                st.active_profile = None;
+            }
+            assert!(
+                profile_buttons(&st)
+                    .iter()
+                    .all(|(_, style, _)| *style == Style::Normal),
+                "after {action:?}"
+            );
+        }
+    }
+
     #[test]
     fn nothing_overflows() {
         let mut states = Vec::new();
@@ -3867,7 +4245,13 @@ mod tests {
                         .iter()
                         .filter_map(|i| match i {
                             Item::Text { text, size, .. } => Some((text.clone(), *size)),
-                            Item::Button { label, size, .. } => Some((label.clone(), *size)),
+                            // Names are the PC's, not the menu's texts.
+                            Item::Button {
+                                label,
+                                size,
+                                full: None,
+                                ..
+                            } => Some((label.clone(), *size)),
                             _ => None,
                         })
                         .collect()

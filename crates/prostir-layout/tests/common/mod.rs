@@ -257,23 +257,19 @@ pub fn preset_scene_curved(rng: &mut Rng) -> (Scene, Preset, Option<f32>) {
 /// it.
 pub fn rows_scene(rng: &mut Rng, deliberate: bool, noise: f32, below: bool) -> Scene {
     let k = 1 + rng.below(3);
-    rows_scene_of(rng, k, None, deliberate, noise, below)
+    rows_scene_of(rng, k, None, deliberate, noise, below, false)
 }
-
-/// Rows stand in columns: every row starts at the same azimuth as the main one.
-static COLUMNS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// [`rows_scene_of`] with every row starting where the main one starts (in columns,
 /// when the monitors are of one size).
 pub fn rows_in_columns(rng: &mut Rng, k: usize, only: PixelSize) -> Scene {
-    COLUMNS.store(true, std::sync::atomic::Ordering::SeqCst);
-    let s = rows_scene_of(rng, k, Some(only), false, 0.0, false);
-    COLUMNS.store(false, std::sync::atomic::Ordering::SeqCst);
-    s
+    rows_scene_of(rng, k, Some(only), false, 0.0, false, true)
 }
 
 /// [`rows_scene`] with `k` rows (and one more under the main one with `below`), every
-/// monitor of size `only` when given.
+/// monitor of size `only` when given; with `columns`, every row starts at the same
+/// azimuth as the main one. All it depends on comes in: tests running at once never
+/// see each other's scenes.
 pub fn rows_scene_of(
     rng: &mut Rng,
     k: usize,
@@ -281,6 +277,7 @@ pub fn rows_scene_of(
     deliberate: bool,
     noise: f32,
     below: bool,
+    columns: bool,
 ) -> Scene {
     let mut radius = rng.float(0.9, 1.6);
     let mut rows: Vec<Vec<(u8, PixelSize)>> = Vec::new();
@@ -379,7 +376,7 @@ pub fn rows_scene_of(
                 .fold(f32::NEG_INFINITY, f32::max);
             (l, r)
         };
-        let center = if COLUMNS.load(std::sync::atomic::Ordering::SeqCst) {
+        let center = if columns {
             // Starting where the main row starts.
             let total: f32 = row
                 .iter()

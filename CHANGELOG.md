@@ -211,6 +211,10 @@
 
 - A dropped connection, a PC gone to sleep or a headset switched off is noticed within
   5 s on both sides (it took about 10 s).
+- A headset put to sleep (its power button) gives the desktop back to the laptop
+  within about a second; one taken off while awake after 5 s (it was 10 s). Taken
+  off, the headset tells the PC within a second where it has a presence sensor
+  (`XR_EXT_user_presence`), instead of when the system put it to sleep 15 s later.
 - The headset says why a session ended: "The PC app was closed", "The PC ended the
   connection", or "No connection to the PC" when it fell silent. It looks for the PC
   again as before.
