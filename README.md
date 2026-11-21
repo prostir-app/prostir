@@ -369,6 +369,9 @@ rustup target add aarch64-linux-android
 # numbers as key=value lines, exit code 0 when everything passed (the preview build
 # when it is installed; --help says more)
 ./scripts/selftest-headset.sh
+# The same against a real PC app over USB, with its own settings next to a prostir
+# already running here, and the latency from the PC's picture to the headset
+./scripts/selftest-headset.sh --pc
 ```
 
 ## Use

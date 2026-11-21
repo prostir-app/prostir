@@ -17,6 +17,12 @@ publish = false
 name = "prostir-probe"
 path = "src/bin/probe.rs"
 
+# Makes a headset's and a PC's files trust each other, for the headset's selftest
+# against a real PC app (scripts/selftest-headset.sh --pc).
+[[bin]]
+name = "prostir-trust"
+path = "src/bin/trust.rs"
+
 [dependencies]
 prostir-proto.workspace = true
 anyhow.workspace = true

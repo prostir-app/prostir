@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -52,6 +52,9 @@ pub struct Options {
     /// (`operating-rate`), for an A/B of `decode_ms` against the battery; the app
     /// never asks that otherwise.
     pub decoder_rate_max: bool,
+    /// `pc=usb`: against a real PC app over USB (`adb reverse` to `127.0.0.1:47830`,
+    /// its keys put in place by the script) instead of the fake PC in the process.
+    pub pc_usb: bool,
 }
 
 impl Default for Options {
@@ -60,6 +63,7 @@ impl Default for Options {
             seconds: 30,
             relaunch: false,
             decoder_rate_max: false,
+            pc_usb: false,
         }
     }
 }
@@ -89,10 +93,12 @@ impl Options {
                 ("relaunch", "1") => options.relaunch = true,
                 ("decoder_rate", "max") => options.decoder_rate_max = true,
                 ("decoder_rate", "default") => options.decoder_rate_max = false,
-                ("relaunch", "0") | ("caps", "full") | ("perf", "default") | ("pc", "fake") => {}
+                ("pc", "usb") => options.pc_usb = true,
+                ("pc", "fake") => options.pc_usb = false,
+                ("relaunch", "0") | ("caps", "full") | ("perf", "default") => {}
                 ("caps", v) => return Err(format!("caps={v} is not in this build yet")),
                 ("perf", v) => return Err(format!("perf={v} is not in this build yet")),
-                ("pc", v) => return Err(format!("pc={v} is not in this build yet")),
+                ("pc", v) => return Err(format!("pc={v}: fake or usb")),
                 _ => return Err(format!("{key}={value}: unknown")),
             }
         }
@@ -247,6 +253,52 @@ pub fn check(m: &Measured) -> Vec<String> {
     fails
 }
 
+/// The limits against a real PC app (`pc=usb`): first pictures within 1 s and a frame's
+/// work as in [`check`]. What only the fake PC can do (a broken frame, a stream started
+/// over, a dropped connection) is not checked; what the real PC takes its own time for
+/// (starting again, making a monitor) is only recorded.
+pub fn check_usb(m: &Measured) -> Vec<String> {
+    let mut fails = Vec::new();
+    let mut within = |what: &str, value: Option<f64>, limit: f64| match value {
+        Some(v) if v <= limit => {}
+        Some(v) => fails.push(format!("{what} {v:.2} over {limit}")),
+        None => fails.push(format!("{what} not measured")),
+    };
+    if m.first_frames_ms.is_empty() {
+        within("first_frame_ms", None, 1000.0);
+    }
+    for (i, first) in m.first_frames_ms.iter().enumerate() {
+        within(&format!("stream.{}.first_frame_ms", i + 1), *first, 1000.0);
+    }
+    within("frame_cpu_share.p95", m.frame_share_p95, 0.15);
+    within("frame_cpu_share.p99", m.frame_share_p99, 0.3);
+    fails
+}
+
+/// The time from the PC's capture of a picture to it out of the headset's decoder, in
+/// ms, for each picture whose time code was read (see `prostir_proto::timecode`):
+/// `codes` holds the PC's time of each (its `CLOCK_MONOTONIC` in ms, low 32 bits) and
+/// the headset's when it was decoded (its `CLOCK_MONOTONIC` in µs); `offset_us` is the
+/// PC's clock less the headset's. A picture whose time does not make sense (before
+/// its capture, or a minute after) is left out.
+pub fn end_to_end_ms(codes: &[(u32, u64)], offset_us: i64) -> Samples {
+    let mut out = Samples::with_capacity(codes.len());
+    for &(pc_ms, at_us) in codes {
+        let on_pc_us = at_us as i64 + offset_us;
+        if on_pc_us < 0 {
+            continue;
+        }
+        // On the PC's clock, in its 32 bits of ms.
+        let now_ms = (on_pc_us / 1000) as u64 as u32;
+        let ms = now_ms.wrapping_sub(pc_ms) as i32;
+        let fraction = (on_pc_us % 1000) as f64 / 1000.0;
+        if (0..60_000).contains(&ms) {
+            out.add(f64::from(ms) + fraction);
+        }
+    }
+    out
+}
+
 /// How many pictures of the watched stream are kept (5 s at 120 Hz and some).
 const WATCHED: usize = 1024;
 
@@ -275,7 +327,13 @@ pub struct Probe {
     /// since: number, when.
     watch: Option<(u32, u32)>,
     pub watched: Vec<(u32, Instant)>,
+    /// The time codes read from the pictures of one stream (`pc=usb`): the PC's time
+    /// in each, and the headset's when it was decoded (see [`end_to_end_ms`]).
+    pub time_codes: Vec<(u32, u64)>,
 }
+
+/// How many time codes are kept (two minutes at 60 frames a second).
+const TIME_CODES: usize = 60 * 120;
 
 impl Probe {
     /// Keeps the pictures of display `id`'s generation `generation` from now on.
@@ -295,6 +353,46 @@ static PROBING: AtomicBool = AtomicBool::new(false);
 static PROBE: Mutex<Option<Arc<Mutex<Probe>>>> = Mutex::new(None);
 /// The option `decoder_rate=max` of the selftest that runs.
 static DECODER_RATE_MAX: AtomicBool = AtomicBool::new(false);
+/// Time codes are read (`pc=usb`), and from which display: none yet (0), or its number
+/// plus one.
+static READ_TIME_CODES: AtomicBool = AtomicBool::new(false);
+static TIME_CODE_STREAM: AtomicU32 = AtomicU32::new(0);
+
+/// Whether the decoders are to read the time code of one stream (see
+/// [`reads_time_code`]); set before they start.
+pub fn set_time_codes(on: bool) {
+    TIME_CODE_STREAM.store(0, Ordering::Relaxed);
+    READ_TIME_CODES.store(on, Ordering::Relaxed);
+}
+
+/// Whether the decoder of display `id` reads the time codes of its pictures: the first
+/// one to ask while a selftest that reads them runs (that monitor then shows nothing:
+/// its pictures go to the reader, not to the compositor).
+pub fn reads_time_code(id: u32) -> bool {
+    if !PROBING.load(Ordering::Relaxed) || !READ_TIME_CODES.load(Ordering::Relaxed) {
+        return false;
+    }
+    let me = id.saturating_add(1);
+    match TIME_CODE_STREAM.compare_exchange(0, me, Ordering::Relaxed, Ordering::Relaxed) {
+        Ok(_) => true,
+        Err(claimed) => claimed == me,
+    }
+}
+
+/// A decoded picture carried the PC's time `pc_ms`; it came out at `at_us` on the
+/// headset's clock.
+pub fn time_code(pc_ms: u32, at_us: u64) {
+    if !PROBING.load(Ordering::Relaxed) {
+        return;
+    }
+    let probe = lock(&PROBE).clone();
+    if let Some(probe) = probe {
+        let mut p = lock(&probe);
+        if p.time_codes.len() < TIME_CODES {
+            p.time_codes.push((pc_ms, at_us));
+        }
+    }
+}
 
 /// What the decoders are asked for while a selftest runs (see
 /// [`Options::decoder_rate_max`]); set before the decoders start.
@@ -319,6 +417,7 @@ pub fn probe_start() -> Arc<Mutex<Probe>> {
 pub fn probe_stop() {
     PROBING.store(false, Ordering::Relaxed);
     DECODER_RATE_MAX.store(false, Ordering::Relaxed);
+    READ_TIME_CODES.store(false, Ordering::Relaxed);
     *lock(&PROBE) = None;
 }
 
@@ -415,6 +514,7 @@ mod tests {
                 seconds: 10,
                 relaunch: true,
                 decoder_rate_max: false,
+                pc_usb: false,
             }
         );
         assert!(Options::parse("decoder_rate=max").unwrap().decoder_rate_max);
@@ -429,10 +529,12 @@ mod tests {
                 .seconds,
             5
         );
+        assert!(Options::parse("pc=usb").unwrap().pc_usb);
+        assert!(!Options::parse("pc=fake").unwrap().pc_usb);
         for refused in [
             "caps=minimal",
             "perf=low",
-            "pc=usb",
+            "pc=wifi",
             "seconds=0",
             "speed=2",
             "decoder_rate=fast",
@@ -498,6 +600,39 @@ mod tests {
         assert_eq!(check(&Measured::default()).len(), 7);
     }
 
+    /// Against a real PC only the first pictures and the frame's work are checked.
+    #[test]
+    fn checks_against_a_real_pc() {
+        let good = Measured {
+            first_frames_ms: vec![Some(180.0)],
+            frame_share_p95: Some(0.12),
+            frame_share_p99: Some(0.2),
+            ..Measured::default()
+        };
+        assert!(check_usb(&good).is_empty());
+        assert_eq!(check_usb(&Measured::default()).len(), 3);
+    }
+
+    /// The latency from the PC's clock to the headset's, through the offset of the two,
+    /// across the 32 bits of the PC's milliseconds wrapping, without nonsense.
+    #[test]
+    fn end_to_end_on_the_pcs_clock() {
+        // The PC's clock is 5 s ahead of the headset's.
+        let offset = 5_000_000;
+        let codes = [
+            // Captured at the PC's 10 000 ms, decoded at the headset's 5 042.5 ms.
+            (10_000, 5_042_500),
+            // Across the wrap of the PC's ms.
+            (u32::MAX - 10, (u64::from(u32::MAX) + 20) * 1000 - 5_000_000),
+            // Decoded before it was captured: a wrong offset, left out.
+            (20_000, 14_000_000),
+        ];
+        let e2e = end_to_end_ms(&codes, offset);
+        assert_eq!(e2e.len(), 2);
+        assert_eq!(e2e.percentile(0.5), Some(30.0));
+        assert_eq!(e2e.max(), Some(42.5));
+    }
+
     /// The decoders' pictures are kept for the selftest only while it runs, and only
     /// the watched stream's one by one.
     #[test]
@@ -520,6 +655,7 @@ mod tests {
         decoded(2, 3, 8, ms, ms);
         taken(5);
         dropped_to_keyframe();
+        time_code(1, 2);
         let p = lock(&probe);
         assert_eq!(
             (p.queue_max, p.dropped_to_keyframe),

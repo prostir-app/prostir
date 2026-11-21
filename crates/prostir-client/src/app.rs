@@ -2033,6 +2033,31 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     &mut controls,
                 );
             }
+            Act::AddMonitor(width, height) => {
+                let add = Action::Add { width, height };
+                handle_action(
+                    &mut scene,
+                    add,
+                    By::Elsewhere,
+                    &mut passthrough,
+                    &mut controls,
+                );
+            }
+            Act::RemoveMonitor(id) => {
+                // Pressed twice, as the menu asks to confirm.
+                if let Some(k) = scene.key(id) {
+                    for _ in 0..2 {
+                        let remove = Action::Remove(k);
+                        handle_action(
+                            &mut scene,
+                            remove,
+                            By::Elsewhere,
+                            &mut passthrough,
+                            &mut controls,
+                        );
+                    }
+                }
+            }
             Act::Nothing | Act::Finish => {}
         }
         scene.world.place_button(&scene.settings);
@@ -3842,7 +3867,7 @@ mod no_selftest {
 
     use android_activity::AndroidApp;
     use openxr as xr;
-    use prostir_proto::state::HeadsetCaps;
+    use prostir_proto::state::{DisplayId, HeadsetCaps};
 
     use crate::net::NetEvent;
 
@@ -3860,6 +3885,8 @@ mod no_selftest {
         OpenMenu,
         SwitchTab,
         CloseMenu,
+        AddMonitor(u32, u32),
+        RemoveMonitor(DisplayId),
         Finish,
     }
 

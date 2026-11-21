@@ -7,6 +7,15 @@
 //! The app does what it always does; the selftest only watches (events, frame
 //! times) and, at set moments, asks for what a person would do in the menu
 //! ([`Act`]), while the fake PC breaks things on purpose.
+//!
+//! With `pc=usb` (step 7 note, 10.3a) it runs against a real PC app instead, over USB
+//! (`127.0.0.1:47830`, which `adb reverse` takes to the PC): with the keys the script
+//! put in `selftest-usb/` of the external files, a monitor added and removed, a command
+//! from the PC (the script runs `prostir ctl recenter` when `selftest-ask.txt` says
+//! `command`), the PC app started again (when it says `restart`), and the latency from
+//! the PC's capture of a picture to the headset's decoder, by the time code the PC
+//! draws (`prostir serve --time-code`) and the offset of the two clocks (a small clock
+//! the script serves on `127.0.0.1:47931`, reversed too).
 
 #![expect(
     clippy::disallowed_methods,
@@ -15,6 +24,8 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
+use std::io::{BufRead, BufReader, Write as _};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,7 +39,10 @@ use openxr as xr;
 use prostir_proto::state::{DisplayId, Gen, HeadsetCaps};
 use prostir_testkit::pc::{Clip, Event, FakePc, Happened, PcConfig, trust_each_other};
 
-use super::{Exit, Measured, Options, Probe, Report, Samples, check, is_app_thread, lock};
+use super::{
+    Exit, Measured, Options, Probe, Report, Samples, check, check_usb, end_to_end_ms,
+    is_app_thread, lock,
+};
 use crate::net::NetEvent;
 
 /// How many times `android_main` started in this process (the first is 1).
@@ -60,6 +74,12 @@ const FRAMES_KEPT: usize = 120 * 120;
 const FROM_HISTORY: i32 = 0x0010_0000;
 /// The monitors the fake PC streams (it picks clips for each).
 const MONITORS: usize = 2;
+/// Where the script's clock of the PC answers, over `adb reverse` (`pc=usb`).
+const CLOCK_PORT: u16 = 47931;
+/// How long the script gets to do what `selftest-ask.txt` asks (`pc=usb`).
+const ASKED_WITHIN: Duration = Duration::from_secs(30);
+/// The monitor added against a real PC.
+const ADDED: (u32, u32) = (1280, 720);
 
 /// The report's keys, in their order: a report that ends early has them all.
 const KEYS: &[&str] = &[
@@ -113,6 +133,16 @@ const KEYS: &[&str] = &[
     "keyframe_asks_ignored",
     "reconnect_ms",
     "reconnect_picture_ms",
+    "pc",
+    "clock_offset_ms",
+    "end_to_end_samples",
+    "end_to_end_ms.p50",
+    "end_to_end_ms.p95",
+    "end_to_end_ms.p99",
+    "end_to_end_ms.max",
+    "added_first_frame_ms",
+    "removed_ms",
+    "command_ms",
     "frame_samples",
     "frame_cpu_ms.p50",
     "frame_cpu_ms.p95",
@@ -158,6 +188,10 @@ pub enum Act {
     /// Another tab of the menu (saved in the settings, and redrawn).
     SwitchTab,
     CloseMenu,
+    /// Add a monitor of this size, as the menu does (`pc=usb`).
+    AddMonitor(u32, u32),
+    /// Remove the monitor with this number on the PC, as the menu does (both presses).
+    RemoveMonitor(DisplayId),
     /// Done: leave the main loop.
     Finish,
 }
@@ -180,6 +214,14 @@ enum Phase {
     Frozen,
     /// The fake PC hangs up; waiting for the headset to come back.
     Dropped,
+    /// Against a real PC: a monitor added, until its first picture.
+    Add,
+    /// It removed again, until the PC's list no longer has it.
+    Remove,
+    /// The script runs a command on the PC; until it comes.
+    Command,
+    /// The script starts the PC app again; until the headset is back with pictures.
+    PcRestart,
     Done,
 }
 
@@ -263,6 +305,52 @@ pub struct Selftest {
     decoder_wakeups_per_s: Option<f64>,
     /// The menu's tab was switched (once, half way through its time).
     tab_switched: bool,
+    /// The app's external files, where `selftest-ask.txt` tells the script what to do
+    /// (`pc=usb`).
+    external: Option<PathBuf>,
+    /// The PC's clock less the headset's, in µs (`pc=usb`, from the script's clock).
+    clock_offset_us: Option<i64>,
+    /// The monitor added against a real PC, and when it was asked for; its first
+    /// picture since; when it was asked to go, and how long that took.
+    added: Option<DisplayId>,
+    add_at: Option<Instant>,
+    added_first_ms: Option<f64>,
+    remove_at: Option<Instant>,
+    removed_ms: Option<f64>,
+    /// The PC's command, from when it was asked of the script.
+    command_ms: Option<f64>,
+    /// The real PC's virtual monitors as its list says now.
+    listed: Vec<DisplayId>,
+}
+
+/// The PC's clock less the headset's, in µs, from the script's clock on the PC
+/// (`pc=usb`): a few questions, the answer of the quickest one, as if the PC read its
+/// clock half way through it. `None` without the clock.
+fn clock_offset_us() -> Option<i64> {
+    let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), CLOCK_PORT);
+    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+    let _ = stream.set_nodelay(true);
+    let mut writer = stream.try_clone().ok()?;
+    let mut reader = BufReader::new(stream);
+    let mut best: Option<(u64, i64)> = None;
+    let mut line = String::new();
+    for _ in 0..20 {
+        let sent = crate::decoder::monotonic_us();
+        writer.write_all(b"t\n").ok()?;
+        line.clear();
+        reader.read_line(&mut line).ok()?;
+        let back = crate::decoder::monotonic_us();
+        let pc_us: i64 = line.trim().parse().ok()?;
+        let round = back.saturating_sub(sent);
+        let mid = (sent + round / 2) as i64;
+        if best.is_none_or(|(r, _)| round < r) {
+            best = Some((round, pc_us - mid));
+        }
+    }
+    let (round, offset) = best?;
+    info!("selftest: the PC's clock is {offset} us off, to within {round} us");
+    Some(offset)
 }
 
 /// Runs `f` with the running activity (the Activity object of the NativeActivity,
@@ -530,6 +618,15 @@ impl Selftest {
             switches: None,
             decoder_wakeups_per_s: None,
             tab_switched: false,
+            external: app.external_data_path(),
+            clock_offset_us: None,
+            added: None,
+            add_at: None,
+            added_first_ms: None,
+            remove_at: None,
+            removed_ms: None,
+            command_ms: None,
+            listed: Vec::new(),
         };
         let r = &mut test.report;
         r.lay_out(KEYS);
@@ -549,6 +646,9 @@ impl Selftest {
         test.report.set("seconds", test.options.seconds);
         let max = test.options.decoder_rate_max;
         super::set_decoder_rate_max(max);
+        test.report
+            .set("pc", if test.options.pc_usb { "usb" } else { "fake" });
+        test.ask_script("");
         test.report
             .set("decoder_rate", if max { "max" } else { "default" });
         info!("selftest: {extra:?}, start {run} in this process");
@@ -572,13 +672,32 @@ impl Selftest {
     /// person's own. Settings start with the first-run tips read, as after any first
     /// run, so the menu opens only when the scenario opens it.
     pub fn data_dir(&mut self, internal: &Path) -> PathBuf {
-        let dir = internal.join("selftest");
+        let usb = self.options.pc_usb;
+        let dir = internal.join(if usb { "selftest-usb" } else { "selftest" });
         let _ = std::fs::remove_dir_all(&dir);
         if let Err(e) = std::fs::create_dir_all(&dir) {
             self.end_early(
                 Exit::NoStart,
                 &format!("cannot make {}: {e}", dir.display()),
             );
+        }
+        // Against a real PC: the keys the script put in the external files, the
+        // headset's and the trusted PC's (see `prostir-trust`).
+        if usb {
+            let from = self.external.as_ref().map(|e| e.join("selftest-usb"));
+            for name in ["identity", "paired_hosts"] {
+                let copied = from
+                    .as_ref()
+                    .map(|f| std::fs::copy(f.join(name), dir.join(name)));
+                if !matches!(copied, Some(Ok(_))) {
+                    self.end_early(
+                        Exit::NoStart,
+                        &format!(
+                            "no {name} in files/selftest-usb (the script puts the keys there)"
+                        ),
+                    );
+                }
+            }
         }
         let settings = crate::settings::Settings {
             intro_seen: true,
@@ -594,9 +713,26 @@ impl Selftest {
 
     /// Starts the fake PC with the clips of the APK, trusted by the headset's keys in
     /// `dir`: its address, which the app connects to and nothing else.
-    pub fn start_pc(&mut self, app: &AndroidApp, dir: &Path) -> Option<std::net::SocketAddr> {
+    pub fn start_pc(&mut self, app: &AndroidApp, dir: &Path) -> Option<SocketAddr> {
         if self.over() {
             return None;
+        }
+        if self.options.pc_usb {
+            // The real PC over USB, and nothing else.
+            self.clock_offset_us = clock_offset_us();
+            match self.clock_offset_us {
+                Some(us) => self
+                    .report
+                    .set("clock_offset_ms", format!("{:.1}", us as f64 / 1000.0)),
+                None => warn!("selftest: no clock of the PC on port {CLOCK_PORT}"),
+            }
+            super::set_time_codes(self.clock_offset_us.is_some());
+            self.probe = Some(super::probe_start());
+            self.begun = Instant::now();
+            return Some(SocketAddr::new(
+                Ipv4Addr::LOCALHOST.into(),
+                prostir_proto::TCP_PORT,
+            ));
         }
         let clips = clips(app);
         if clips.is_empty() {
@@ -711,6 +847,9 @@ impl Selftest {
     /// An event of the network thread, before the app handles it.
     pub fn net_event(&mut self, event: &NetEvent) {
         let now = Instant::now();
+        if self.options.pc_usb {
+            self.usb_event(event, now);
+        }
         match event {
             NetEvent::Connected { .. } if self.connected_at.is_none() => {
                 self.connected_at = Some(now);
@@ -726,6 +865,81 @@ impl Selftest {
             }
             _ => {}
         }
+    }
+
+    /// Against a real PC, its events stand in for the fake PC's: sessions, the list of
+    /// monitors, streams, its command, the session ending.
+    fn usb_event(&mut self, event: &NetEvent, now: Instant) {
+        match event {
+            NetEvent::Connected { .. } => {
+                self.sessions += 1;
+                if let Some(dropped) = self.dropped_at
+                    && self.sessions > 1
+                    && self.reconnect_ms.is_none()
+                {
+                    self.reconnect_ms = Some(ms(now.saturating_duration_since(dropped)));
+                }
+            }
+            NetEvent::Part(_, prostir_proto::HostMsg::Displays { part }) => {
+                self.listed.clear();
+                self.listed.extend(
+                    part.displays
+                        .iter()
+                        .filter(|d| d.is_virtual())
+                        .map(|d| d.id),
+                );
+                if self.monitors.is_empty() {
+                    self.monitors.clone_from(&self.listed);
+                }
+                if self.add_at.is_some() && self.added.is_none() {
+                    self.added = self
+                        .listed
+                        .iter()
+                        .find(|id| !self.monitors.contains(id))
+                        .copied();
+                }
+                if let (Some(id), Some(at)) = (self.added, self.remove_at)
+                    && !self.listed.contains(&id)
+                    && self.removed_ms.is_none()
+                {
+                    self.removed_ms = Some(ms(now.saturating_duration_since(at)));
+                }
+            }
+            NetEvent::StreamStart { id, generation, .. } => {
+                self.streams.insert(
+                    *id,
+                    Seen {
+                        generation: *generation,
+                        started: now,
+                        shown: None,
+                        session: self.sessions,
+                    },
+                );
+            }
+            NetEvent::Command { .. } if self.phase == Phase::Command => {
+                self.command_ms = Some(ms(now.saturating_duration_since(self.phase_since)));
+            }
+            NetEvent::Ended { pc: Some(_), .. }
+                if self.phase == Phase::PcRestart && self.dropped_at.is_none() =>
+            {
+                self.dropped_at = Some(now);
+            }
+            _ => {}
+        }
+    }
+
+    /// Tells the script what to do now on the PC (`pc=usb`): `command`, `restart`, or
+    /// nothing.
+    fn ask_script(&self, what: &str) {
+        if !self.options.pc_usb {
+            return;
+        }
+        let Some(dir) = &self.external else { return };
+        let path = dir.join("selftest-ask.txt");
+        if let Err(e) = std::fs::write(&path, what) {
+            warn!("selftest: cannot write {}: {e}", path.display());
+        }
+        info!("selftest: asks the script for {what:?}");
     }
 
     /// At the top of every pass of the main loop: a calm frame's allocations are all
@@ -803,8 +1017,14 @@ impl Selftest {
         self.take_pictures();
         let now = Instant::now();
         let in_phase = now - self.phase_since;
+        // Against a real PC the script gets its time for each thing asked of it.
+        let extra = if self.options.pc_usb {
+            EXTRA + ASKED_WITHIN * 4
+        } else {
+            EXTRA
+        };
         if self.phase != Phase::Done
-            && now - self.begun > Duration::from_secs(u64::from(self.options.seconds)) + EXTRA
+            && now - self.begun > Duration::from_secs(u64::from(self.options.seconds)) + extra
         {
             self.end_early(
                 Exit::Timeout,
@@ -860,6 +1080,38 @@ impl Selftest {
             Phase::Move if in_phase >= MOVE_FOR => {
                 self.next(Phase::Menu, now);
                 Act::OpenMenu
+            }
+            Phase::Menu if in_phase >= MENU_FOR * 2 && self.options.pc_usb => {
+                self.add_at = Some(now);
+                self.next(Phase::Add, now);
+                Act::AddMonitor(ADDED.0, ADDED.1)
+            }
+            Phase::Add if self.added_first_ms.is_some() || in_phase >= ASKED_WITHIN => {
+                self.next(Phase::Remove, now);
+                match self.added {
+                    Some(id) => {
+                        self.remove_at = Some(now);
+                        Act::RemoveMonitor(id)
+                    }
+                    None => Act::Nothing,
+                }
+            }
+            Phase::Remove if self.removed_ms.is_some() || in_phase >= RECOVER_WITHIN => {
+                self.ask_script("command");
+                self.next(Phase::Command, now);
+                Act::Nothing
+            }
+            Phase::Command if self.command_ms.is_some() || in_phase >= ASKED_WITHIN => {
+                self.ask_script("restart");
+                self.next(Phase::PcRestart, now);
+                Act::Nothing
+            }
+            Phase::PcRestart
+                if self.reconnect_picture_ms.is_some() || in_phase >= ASKED_WITHIN * 2 =>
+            {
+                self.ask_script("");
+                self.next(Phase::Done, now);
+                Act::Finish
             }
             Phase::Menu if in_phase >= MENU_FOR * 2 => {
                 if self.break_a_frame() {
@@ -963,6 +1215,12 @@ impl Selftest {
             };
             s.shown = Some(at);
             let first = ms(at.saturating_duration_since(s.started));
+            if self.added == Some(*id)
+                && self.added_first_ms.is_none()
+                && let Some(asked) = self.add_at
+            {
+                self.added_first_ms = Some(ms(at.saturating_duration_since(asked)));
+            }
             if s.session == 1 && self.restart != Some(*id) {
                 self.first_frames.entry(*id).or_insert(first);
             }
@@ -1093,7 +1351,11 @@ impl Selftest {
         let exit = match self.exit {
             Some(exit) => exit,
             None => {
-                let mut fails = check(&self.measured());
+                let mut fails = if self.options.pc_usb {
+                    check_usb(&self.measured())
+                } else {
+                    check(&self.measured())
+                };
                 if self.focus_lost > 0 {
                     fails.push(format!("the focus was lost {} times", self.focus_lost));
                 }
@@ -1180,6 +1442,14 @@ impl Selftest {
         r.set("keyframe_asks_ignored", self.asks_ignored);
         r.set_ms("reconnect_ms", self.reconnect_ms);
         r.set_ms("reconnect_picture_ms", self.reconnect_picture_ms);
+        r.set_ms("added_first_frame_ms", self.added_first_ms);
+        r.set_ms("removed_ms", self.removed_ms);
+        r.set_ms("command_ms", self.command_ms);
+        if let (Some(p), Some(offset)) = (&probe, self.clock_offset_us) {
+            let e2e = end_to_end_ms(&p.time_codes, offset);
+            r.set("end_to_end_samples", e2e.len());
+            r.set_spread("end_to_end_ms", &e2e);
+        }
         r.set("frame_samples", self.frame_cpu.len());
         r.set_spread("frame_cpu_ms", &self.frame_cpu);
         r.set_spread("frame_wall_ms", &self.frame_wall);

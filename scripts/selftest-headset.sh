@@ -11,7 +11,7 @@
 # store's, which ignores it (no report comes: exit 3).
 #
 #   scripts/selftest-headset.sh [--seconds N] [--relaunch] [--decoder-rate max]
-#                                [--package NAME] [--out DIR]
+#                                [--pc] [--pc-port PORT] [--package NAME] [--out DIR]
 #
 #   --seconds N    how long the calm part, where frame times are measured, lasts (30);
 #                  3600 makes an hour's run for battery and heat
@@ -20,6 +20,17 @@
 #   --decoder-rate max  the decoders are asked to run as fast as they can
 #                  (operating-rate), which the app never asks otherwise: an A/B of
 #                  decode_ms against battery.* with a run without it
+#   --pc           against a real PC app instead (pc=usb): this script builds and
+#                  starts `prostir serve` with the fake desktop and its own settings,
+#                  bus and runtime directory (`--no-adb --no-discovery --time-code`, on
+#                  host port PORT, 47930 by default), so a prostir already running
+#                  here is left alone; makes both sides trust each other (keys pushed to
+#                  files/selftest-usb/ of the app), points the headset's 127.0.0.1:47830
+#                  at it with `adb reverse` (a running prostir started without --no-adb
+#                  may point it back at itself when USB changes: run that one with
+#                  --no-adb meanwhile), serves the PC's clock on 47931 for the latency
+#                  measurement, runs `prostir ctl recenter` and starts the PC app again
+#                  when the app asks. Every reverse is put back as it was on the way out
 #   --package      dev.prostir.client.preview (the preview build, the default when it
 #                  is installed) or dev.prostir.client (the default otherwise)
 #   --out DIR      where the reports and the app's log go (a new directory in /tmp)
@@ -30,6 +41,9 @@ set -euo pipefail
 SECONDS_CALM=30
 RELAUNCH=0
 DECODER_RATE=default
+PC=0
+PC_PORT=47930
+CLOCK_PORT=47931
 PACKAGE=""
 OUT=""
 while [[ $# -gt 0 ]]; do
@@ -39,10 +53,9 @@ while [[ $# -gt 0 ]]; do
         --decoder-rate) DECODER_RATE="$2"; shift 2 ;;
         --package) PACKAGE="$2"; shift 2 ;;
         --out) OUT="$2"; shift 2 ;;
-        --pc | --pc=*)
-            echo "!! the selftest against a real prostir (pc=usb) comes in a later step" >&2
-            exit 2 ;;
-        -h | --help) sed -n '2,26p' "$0"; exit 0 ;;
+        --pc) PC=1; shift ;;
+        --pc-port) PC_PORT="$2"; shift 2 ;;
+        -h | --help) sed -n '2,38p' "$0"; exit 0 ;;
         *) echo "!! unknown option $1 (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -52,6 +65,9 @@ case "$PACKAGE" in
     "" | dev.prostir.client.preview | dev.prostir.client) ;;
     *) echo "!! --package: dev.prostir.client.preview or dev.prostir.client" >&2; exit 2 ;;
 esac
+(( PC && RELAUNCH )) && { echo "!! --pc and --relaunch: one at a time" >&2; exit 2; }
+[[ "$PC_PORT" =~ ^[0-9]+$ ]] && (( PC_PORT != 47830 )) \
+    || { echo "!! --pc-port: a port of its own (not 47830, which a running prostir may hold)" >&2; exit 2; }
 OUT="${OUT:-$(mktemp -d "${TMPDIR:-/tmp}/prostir-selftest.XXXXXX")}"
 mkdir -p "$OUT"
 
@@ -92,6 +108,121 @@ restore() {
     if [[ ${#PROX_OFF[@]} -gt 0 ]]; then
         shell "${PROX_OFF[@]}" >/dev/null || true
     fi
+    (( PC )) && pc_restore
+}
+
+# ---- Against a real PC app (--pc) ----
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PC_DIR="" PC_PID="" BUS_PID="" BUS_DIR="" CLOCK_PID="" REVERSE_BEFORE="" PC_ASKED=""
+# The test PC app's environment: nothing of the person's (settings, bus, desktop).
+pc_env() {
+    env -u WAYLAND_DISPLAY -u DISPLAY -u HYPRLAND_INSTANCE_SIGNATURE -u DESKTOP_AUTOSTART_ID \
+        XDG_CONFIG_HOME="$PC_DIR/config" XDG_RUNTIME_DIR="$PC_DIR/run" \
+        XDG_CACHE_HOME="$PC_DIR/cache" HOME="$PC_DIR/home" \
+        DBUS_SESSION_BUS_ADDRESS="${PC_BUS:-unix:path=$PC_DIR/run/no-bus}" \
+        PROSTIR_FAKE_DESKTOP=1 PROSTIR_NO_COUNT=1 PROSTIR_FAKE_FPS=30 \
+        PROSTIR_FAKE_PICTURE=bands LANGUAGE=en RUST_LOG=info "$@"
+}
+pc_start() {
+    pc_env "$PROSTIR" serve --port "$PC_PORT" --no-adb --no-discovery --stay --time-code \
+        >>"$OUT/pc.log" 2>&1 &
+    PC_PID=$!
+    local until=$(( $(date +%s) + 60 ))
+    while ! grep -q "waiting for the headset on port $PC_PORT" "$OUT/pc.log" 2>/dev/null; do
+        kill -0 "$PC_PID" 2>/dev/null || { echo "!! the test PC app ended (see $OUT/pc.log)" >&2; return 1; }
+        (( $(date +%s) < until )) || { echo "!! the test PC app did not start in 60 s" >&2; return 1; }
+        sleep 0.5
+    done
+}
+pc_stop() {
+    [[ -n "$PC_PID" ]] || return 0
+    kill -TERM "$PC_PID" 2>/dev/null || true
+    for _ in $(seq 1 100); do kill -0 "$PC_PID" 2>/dev/null || break; sleep 0.1; done
+    kill -KILL "$PC_PID" 2>/dev/null || true
+    wait "$PC_PID" 2>/dev/null || true
+    PC_PID=""
+}
+pc_setup() {
+    command -v python3 >/dev/null || { echo "!! --pc needs python3 (for the PC's clock)" >&2; exit 2; }
+    echo ">> building the PC app with the fake desktop, and prostir-trust"
+    (cd "$ROOT" && cargo build -q -p prostir --no-default-features --features fake-desktop \
+        && cargo build -q -p prostir-testkit --bin prostir-trust) || exit 2
+    local target="${CARGO_TARGET_DIR:-$ROOT/target}"
+    PROSTIR="$target/debug/prostir"
+    PC_DIR="$OUT/pc"
+    mkdir -p "$PC_DIR"/{config/prostir,run,home,cache,headset}
+    chmod 700 "$PC_DIR/run"
+    if command -v dbus-daemon >/dev/null; then
+        # A socket's path is short (108 bytes): its own directory, whatever --out is.
+        BUS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/prostir-bus.XXXXXX")"
+        dbus-daemon --session --nofork --print-address --address="unix:path=$BUS_DIR/bus" \
+            >"$PC_DIR/bus.address" 2>/dev/null &
+        BUS_PID=$!
+        for _ in $(seq 1 50); do [[ -s "$PC_DIR/bus.address" ]] && break; sleep 0.1; done
+        PC_BUS="$(head -1 "$PC_DIR/bus.address")"
+    else
+        echo ">> no dbus-daemon: \`prostir ctl recenter\` cannot run (command_ms stays none)"
+    fi
+    "$target/debug/prostir-trust" "$PC_DIR/headset" "$PC_DIR/config/prostir" >/dev/null || exit 2
+    local keys="/sdcard/Android/data/$PACKAGE/files/selftest-usb"
+    shell rm -rf "$keys"
+    shell mkdir -p "$keys"
+    adb push "$PC_DIR/headset/identity" "$PC_DIR/headset/paired_hosts" "$keys/" >/dev/null || exit 2
+    # The PC's clock, for the offset of the two clocks: CLOCK_MONOTONIC in µs a line.
+    python3 -I -c '
+import socket, sys, time, threading
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(4)
+def serve(c):
+    with c:
+        c.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        for _ in c.makefile("rb"):
+            c.sendall(b"%d\n" % (time.clock_gettime_ns(time.CLOCK_MONOTONIC) // 1000))
+while True:
+    threading.Thread(target=serve, args=(s.accept()[0],), daemon=True).start()
+' "$CLOCK_PORT" &
+    CLOCK_PID=$!
+    REVERSE_BEFORE="$(adb reverse --list 2>/dev/null | tr -d '\r')"
+    if grep -q "tcp:47830" <<<"$REVERSE_BEFORE"; then
+        echo ">> the headset's 127.0.0.1:47830 pointed at a prostir here; it points at the test one" \
+            "for now and back afterwards (a prostir without --no-adb may take it back meanwhile)"
+    fi
+    adb reverse tcp:47830 "tcp:$PC_PORT" >/dev/null || exit 2
+    adb reverse "tcp:$CLOCK_PORT" "tcp:$CLOCK_PORT" >/dev/null || exit 2
+    : >"$OUT/pc.log"
+    pc_start || exit 2
+}
+# What the app asks (files/selftest-ask.txt), done once each.
+pc_tick() {
+    local ask
+    ask="$(shell cat "/sdcard/Android/data/$PACKAGE/files/selftest-ask.txt" 2>/dev/null || true)"
+    [[ -n "$ask" && "$ask" != "$PC_ASKED" ]] || return 0
+    PC_ASKED="$ask"
+    case "$ask" in
+        command)
+            echo ">> the app asks for a command from the PC: prostir ctl recenter"
+            pc_env "$PROSTIR" ctl recenter >>"$OUT/pc-ctl.log" 2>&1 || true ;;
+        restart)
+            echo ">> the app asks for the PC app to start again"
+            pc_stop
+            pc_start || true ;;
+    esac
+}
+pc_restore() {
+    pc_stop
+    [[ -n "$CLOCK_PID" ]] && kill "$CLOCK_PID" 2>/dev/null
+    [[ -n "$BUS_PID" ]] && kill "$BUS_PID" 2>/dev/null
+    [[ -n "$BUS_DIR" ]] && rm -rf "$BUS_DIR"
+    adb reverse --remove "tcp:$CLOCK_PORT" >/dev/null 2>&1 || true
+    adb reverse --remove tcp:47830 >/dev/null 2>&1 || true
+    # Back as it was: what pointed the headset's ports somewhere before.
+    local line remote local_
+    while read -r _ remote local_; do
+        [[ "$remote" == tcp:47830 || "$remote" == "tcp:$CLOCK_PORT" ]] || continue
+        adb reverse "$remote" "$local_" >/dev/null 2>&1 || true
+    done <<<"$REVERSE_BEFORE"
+    shell rm -rf "/sdcard/Android/data/$PACKAGE/files/selftest-usb" \
+        "/sdcard/Android/data/$PACKAGE/files/selftest-ask.txt" >/dev/null 2>&1 || true
 }
 trap restore EXIT
 
@@ -105,6 +236,8 @@ battery() {
 
 REPORT="/sdcard/Android/data/$PACKAGE/files/selftest.txt"
 WAIT=$(( SECONDS_CALM + 90 ))
+# Against a real PC the app waits for this script for a few things.
+(( PC )) && WAIT=$(( WAIT + 150 ))
 
 # Waits for the report of a run (it ends with `exit=`) and copies it to $1.
 fetch() {
@@ -114,7 +247,12 @@ fetch() {
             shell cat "$REPORT" > "$into"
             return 0
         fi
-        sleep 2
+        if (( PC )); then
+            pc_tick
+            sleep 1
+        else
+            sleep 2
+        fi
     done
     return 1
 }
@@ -141,7 +279,9 @@ if [[ ${#PROX_ON[@]} -gt 0 ]]; then
     shell "${PROX_ON[@]}" >/dev/null
 fi
 sleep 1
+(( PC )) && pc_setup
 OPTIONS="seconds=$SECONDS_CALM"
+(( PC )) && OPTIONS+=",pc=usb"
 (( RELAUNCH )) && OPTIONS+=",relaunch=1"
 [[ $DECODER_RATE != default ]] && OPTIONS+=",decoder_rate=$DECODER_RATE"
 echo ">> $PACKAGE on a $MAKER $(shell getprop ro.product.model): selftest $OPTIONS (up to ${WAIT}s)"
@@ -188,6 +328,12 @@ for report in "$OUT"/selftest.txt "$OUT"/selftest-2.txt; do
     cat "$report"
 done
 echo "---- PC side"
+if (( PC )); then
+    echo "pc.app=$("$PROSTIR" --version 2>/dev/null | head -1)"
+    echo "pc.encoder=$(grep -o 'encoder [^,;]*' "$OUT/pc.log" | head -1 || true)"
+    echo "pc.log_errors=$(grep -c ' ERROR ' "$OUT/pc.log" || true)"
+    echo "pc.log=$OUT/pc.log"
+fi
 echo "pc.device_battery.start=$BATTERY_START"
 echo "pc.device_battery.end=$BATTERY_END"
 echo "pc.device_temp_c.start=${TEMP_START:-none}"
