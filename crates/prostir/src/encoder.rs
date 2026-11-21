@@ -72,6 +72,13 @@ impl Backend {
 const X264_GOP: u32 = 1 << 30;
 const VA_GOP: u32 = 1024;
 
+/// What NVENC takes from the CPU's converter: the desktop's own BGRx or BGRA where
+/// its version takes them (it turns them into YUV on the graphics card; the frames
+/// then pass the converter as they are), else NV12, converted on the CPU. The caps
+/// after the encoder ask for 4:2:0 profiles, which the headset decodes. Not tried on
+/// an NVIDIA card yet.
+const NVENC_IN: &str = "video/x-raw,format={ (string)BGRx, (string)BGRA, (string)NV12 }";
+
 /// The parser after the encoder of `codec`.
 fn parser(codec: Codec) -> &'static str {
     match codec {
@@ -243,7 +250,7 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         #[cfg(feature = "fake-desktop")]
         (Codec::H264, Backend::Fake) => (
             format!(
-                "videoconvert name=enc_in ! video/x-raw,format=I420 ! valve drop={} ! x264enc name=enc tune=zerolatency speed-preset=superfast \
+                "videoconvert name=enc_in n-threads=0 ! video/x-raw,format=I420 ! valve drop={} ! x264enc name=enc tune=zerolatency speed-preset=superfast \
                  bitrate={} key-int-max={X264_GOP} bframes=0",
                 !probe::fake::opens(),
                 cfg.bitrate_kbps
@@ -253,7 +260,7 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         ),
         (Codec::H264, Backend::X264) => (
             format!(
-                "videoconvert name=enc_in ! video/x-raw,format=I420 ! x264enc name=enc tune=zerolatency speed-preset=superfast \
+                "videoconvert name=enc_in n-threads=0 ! video/x-raw,format=I420 ! x264enc name=enc tune=zerolatency speed-preset=superfast \
                  bitrate={} key-int-max={X264_GOP} bframes=0",
                 cfg.bitrate_kbps
             ),
@@ -262,21 +269,21 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         ),
         (Codec::H264, Backend::Nvenc) => (
             format!(
-                "videoconvert name=enc_in ! video/x-raw,format=NV12 ! nvh264enc name=enc rc-mode=cbr \
+                "videoconvert name=enc_in n-threads=0 ! {NVENC_IN} ! nvh264enc name=enc rc-mode=cbr \
                  bitrate={} gop-size=-1 bframes=0 zerolatency=true",
                 cfg.bitrate_kbps
             ),
             "h264parse config-interval=-1",
-            "video/x-h264,stream-format=byte-stream,alignment=au",
+            "video/x-h264,stream-format=byte-stream,alignment=au,profile=high",
         ),
         (Codec::H265, Backend::Nvenc) => (
             format!(
-                "videoconvert name=enc_in ! video/x-raw,format=NV12 ! nvh265enc name=enc rc-mode=cbr \
+                "videoconvert name=enc_in n-threads=0 ! {NVENC_IN} ! nvh265enc name=enc rc-mode=cbr \
                  bitrate={} gop-size=-1 bframes=0 zerolatency=true",
                 cfg.bitrate_kbps
             ),
             "h265parse config-interval=-1",
-            "video/x-h265,stream-format=byte-stream,alignment=au",
+            "video/x-h265,stream-format=byte-stream,alignment=au,profile=main",
         ),
         (Codec::H264, Backend::Va) => (
             format!(
