@@ -219,7 +219,7 @@ def main():
     w("your option) any later version, with an additional permission for linking the")
     w("Meta Platform SDK. The full texts are in the files LICENSE and")
     w("LICENSE-EXCEPTION.md next to this one, and at")
-    w("https://github.com/OlexiyOdarchuk/prostir. The source code of every release is")
+    w("https://github.com/prostir-app/prostir. The source code of every release is")
     w("there too.")
     w("")
     w("Prostir's release files also contain the third-party software listed below. Each")

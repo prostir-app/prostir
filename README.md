@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci-pc.yml"><img src="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci-pc.yml/badge.svg" alt="CI PC"></a>
-  <a href="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci-headset.yml"><img src="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci-headset.yml/badge.svg" alt="CI headset"></a>
-  <a href="https://github.com/OlexiyOdarchuk/prostir/releases"><img src="https://img.shields.io/github/v/release/OlexiyOdarchuk/prostir?include_prereleases&label=release" alt="Release"></a>
+  <a href="https://github.com/prostir-app/prostir/actions/workflows/ci-pc.yml"><img src="https://github.com/prostir-app/prostir/actions/workflows/ci-pc.yml/badge.svg" alt="CI PC"></a>
+  <a href="https://github.com/prostir-app/prostir/actions/workflows/ci-headset.yml"><img src="https://github.com/prostir-app/prostir/actions/workflows/ci-headset.yml/badge.svg" alt="CI headset"></a>
+  <a href="https://github.com/prostir-app/prostir/releases"><img src="https://img.shields.io/github/v/release/prostir-app/prostir?include_prereleases&label=release" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License: GPL-3.0-or-later"></a>
   <img src="https://img.shields.io/badge/KDE%20Plasma%206%20%C2%B7%20Hyprland-Wayland-1d99f3" alt="KDE Plasma 6 and Hyprland, Wayland">
   <img src="https://img.shields.io/badge/Meta%20Quest-3%20%C2%B7%203S-1c1e20" alt="Meta Quest 3 and 3S">
@@ -293,11 +293,11 @@ x264, which costs CPU time and needs `x264enc` (see
 The repository is a flake with the PC part:
 
 ```sh
-nix run github:OlexiyOdarchuk/prostir          # try it
-nix profile install github:OlexiyOdarchuk/prostir
+nix run github:prostir-app/prostir          # try it
+nix profile install github:prostir-app/prostir
 ```
 
-On NixOS, add `github:OlexiyOdarchuk/prostir` as a flake input and put
+On NixOS, add `github:prostir-app/prostir` as a flake input and put
 `inputs.prostir.packages.${pkgs.system}.default` in `environment.systemPackages`.
 GStreamer and its plugins come with it. Encoding on the graphics card uses the
 system's VA-API driver on NixOS (`hardware.graphics.enable`), and the bundled Intel
@@ -554,13 +554,13 @@ exit code says what came of it: 0 done, 1 failed, 2 Prostir not running or no he
 3 no answer in time, 64 wrong arguments.
 
 Other programs reach the same on the session bus, as
-`io.github.OlexiyOdarchuk.Prostir` (only programs of your own user can). A command for
+`io.github.prostir_app.Prostir` (only programs of your own user can). A command for
 the headset may take up to 30 s, longer than `busctl` and `gdbus` wait by default, so
 give them `--timeout=35`:
 
 ```
-busctl --user --timeout=35 call io.github.OlexiyOdarchuk.Prostir \
-    /io/github/OlexiyOdarchuk/Prostir io.github.OlexiyOdarchuk.Prostir1 Recenter
+busctl --user --timeout=35 call io.github.prostir_app.Prostir \
+    /io/github/prostir_app/Prostir io.github.prostir_app.Prostir1 Recenter
 ```
 
 The methods, signals, errors and the JSON of the state are in
@@ -649,7 +649,7 @@ connection; when the two are too far apart, the headset says which side to updat
 ## Limitations
 
 - KDE Plasma 6 and Hyprland on Wayland. GNOME is not supported yet: if you want it,
-  add a 👍 to [issue #1](https://github.com/OlexiyOdarchuk/prostir/issues/1). X11 sessions are not supported.
+  add a 👍 to [issue #1](https://github.com/prostir-app/prostir/issues/1). X11 sessions are not supported.
 - Hyprland has no primary monitor, so "Make primary" there only picks the monitor the
   headset puts in front of you.
 - Hardware encoding is tested only on Intel graphics (VA-API). AMD through VA-API and
@@ -737,7 +737,7 @@ headset too, though the PC no longer lets that one connect. Ports are listed und
 [Firewall](#firewall).
 
 To report a security problem privately, use
-[GitHub's private vulnerability reporting](https://github.com/OlexiyOdarchuk/prostir/security/advisories/new).
+[GitHub's private vulnerability reporting](https://github.com/prostir-app/prostir/security/advisories/new).
 
 ## Troubleshooting and FAQ
 

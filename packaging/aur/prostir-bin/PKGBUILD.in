@@ -35,13 +35,13 @@ optdepends=('gst-plugins-ugly: encoding on the CPU with x264 (NVIDIA, or no VA-A
             'libxkbcommon-x11: the settings window in an X11 session')
 provides=('prostir')
 conflicts=('prostir')
-source=("https://github.com/OlexiyOdarchuk/prostir/releases/download/v${pkgver}/prostir-${pkgver}-x86_64-linux.tar.gz")
+source=("https://github.com/prostir-app/prostir/releases/download/v${pkgver}/prostir-${pkgver}-x86_64-linux.tar.gz")
 sha256sums=('@SHA256@')
 
 package() {
   cd "prostir-${pkgver}-x86_64-linux"
   install -Dm755 prostir "${pkgdir}/usr/bin/prostir"
-  install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.desktop "${pkgdir}/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.desktop"
+  install -Dm644 packaging/io.github.prostir_app.Prostir.desktop "${pkgdir}/usr/share/applications/io.github.prostir_app.Prostir.desktop"
   install -Dm644 packaging/prostir.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/prostir.svg"
   # Not enabled here: Prostir's first start enables the socket for its user (and the
   # preset for new users, where presets apply); the tray turns it off for good.

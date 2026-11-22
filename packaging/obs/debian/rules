@@ -36,7 +36,7 @@ endif
 
 override_dh_auto_install:
 	install -Dm755 target/release/prostir debian/prostir/usr/bin/prostir
-	install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.desktop debian/prostir/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.desktop
+	install -Dm644 packaging/io.github.prostir_app.Prostir.desktop debian/prostir/usr/share/applications/io.github.prostir_app.Prostir.desktop
 	install -Dm644 packaging/prostir.svg debian/prostir/usr/share/icons/hicolor/scalable/apps/prostir.svg
 	# Not enabled here: the first start of Prostir enables the socket for its user (and
 	# the preset for new users, where presets apply); the tray turns it off for good.

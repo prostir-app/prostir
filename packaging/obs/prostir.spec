@@ -121,7 +121,7 @@ cargo build --frozen --release \
 
 %install
 install -Dm755 target/release/prostir %{buildroot}%{_bindir}/prostir
-install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.desktop %{buildroot}%{_datadir}/applications/io.github.OlexiyOdarchuk.Prostir.desktop
+install -Dm644 packaging/io.github.prostir_app.Prostir.desktop %{buildroot}%{_datadir}/applications/io.github.prostir_app.Prostir.desktop
 install -Dm644 packaging/prostir.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/prostir.svg
 # Not enabled here: Prostir's first start enables the socket for its user (and the
 # preset for new users, where presets apply); the tray turns it off for good.
@@ -146,7 +146,7 @@ cargo test --frozen --release \
 %license LICENSE LICENSE-EXCEPTION.md THIRD-PARTY-LICENSES.txt
 %doc README.md README.uk.md CHANGELOG.md
 %{_bindir}/prostir
-%{_datadir}/applications/io.github.OlexiyOdarchuk.Prostir.desktop
+%{_datadir}/applications/io.github.prostir_app.Prostir.desktop
 %dir %{_datadir}/icons/hicolor
 %dir %{_datadir}/icons/hicolor/scalable
 %dir %{_datadir}/icons/hicolor/scalable/apps
