@@ -902,3 +902,93 @@ fn a_decline_is_the_pcs_and_the_last_address_wins() {
         "a trusted PC at the declined address"
     );
 }
+
+/// For `secs` seconds of rounds, each query answered by trusted PC `n` from `at` and
+/// every step missed: whether `at` (or the PC's last address) was dialed, and whether
+/// any dial was to pair.
+fn dials_its_answer(sim: &mut Sim, n: u8, at: SocketAddr, secs: u32) -> (bool, bool) {
+    let (mut dialed, mut pairs) = (false, false);
+    for _ in 0..secs {
+        sim.after(Duration::from_secs(1));
+        loop {
+            let cmds = sim.cmds();
+            if cmds.is_empty() {
+                break;
+            }
+            for cmd in cmds {
+                match cmd {
+                    NetCmd::Ask { step, .. } => {
+                        sim.answer(Some(n), at);
+                        sim.missed(step);
+                    }
+                    NetCmd::Dial { step, to, pair, .. } => {
+                        dialed |= to == Dest::Addr(at) || to == Dest::LastOf(pc(n));
+                        pairs |= pair.is_some();
+                        sim.missed(step);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    (dialed, pairs)
+}
+
+/// A pick is for one connection: paired over USB as the user agreed, once that
+/// session is over (the cable pulled) the PC's answers over Wi-Fi are dialed, and no
+/// dial pairs on the old agreement.
+#[test]
+fn after_pairing_over_usb_the_pc_is_found_on_wifi() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.s.dialed(s, usb());
+    sim.s.offered(key(5), usb(), OfferWhy::New, &sim.texts);
+    sim.end(s, None, &Ended::default(), Duration::from_millis(80));
+    sim.s.answer_offer(true, sim.now);
+    sim.after(Duration::ZERO);
+    let (s, _) = sim.step();
+    sim.s.dialed(s, usb());
+    sim.s
+        .pairing(s, key(5), usb(), Some("123 456".into()), &sim.texts);
+    sim.paired(&[5]);
+    sim.reach(s, 5, usb());
+    let _ = sim.cmds();
+    let opened = Ended {
+        opened: true,
+        ..Ended::default()
+    };
+    sim.end(s, Some(5), &opened, Duration::from_secs(60));
+    let (dialed, pairs) = dials_its_answer(&mut sim, 5, addr(9), 5);
+    assert!(dialed, "the trusted PC answering over Wi-Fi is dialed");
+    assert!(!pairs, "the agreement to pair was for that connection");
+}
+
+/// A PC picked in the list after "Change PC" is the user's choice until its session
+/// opens; when its address changes later (DHCP), its answer from the new one is
+/// dialed.
+#[test]
+fn a_picked_pc_that_moves_is_found_again() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.reach(s, 1, addr(7));
+    let _ = sim.cmds();
+    sim.s.change_pc();
+    let _ = sim.cmds();
+    sim.end(s, Some(1), &Ended::default(), Duration::from_secs(9));
+    sim.s.connect_to(addr(7), sim.now);
+    sim.after(RETRY_PAUSE);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(7)), "the pick first");
+    sim.reach(s, 1, addr(7));
+    let _ = sim.cmds();
+    let opened = Ended {
+        opened: true,
+        ..Ended::default()
+    };
+    sim.end(s, Some(1), &opened, Duration::from_secs(600));
+    let (dialed, _) = dials_its_answer(&mut sim, 1, addr(8), 5);
+    assert!(dialed, "the picked PC at its new address is dialed");
+}

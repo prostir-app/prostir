@@ -218,7 +218,8 @@ pub struct Search {
     /// The PC speaks another protocol: (the PC is newer, its app version). Kept until
     /// a session opens.
     pub update: Option<(bool, String)>,
-    /// Picked in the menu (or typed in): tried before anything else.
+    /// Picked in the menu (or typed in): tried before anything else, until a session
+    /// opens there.
     choice: Option<SocketAddr>,
     /// "Change PC": nothing reconnects on its own until the user picks one.
     picking: bool,
@@ -226,7 +227,7 @@ pub struct Search {
     /// not dialed on its own until the user picks something, while other trusted PCs
     /// still are.
     declined: Option<(SocketAddr, PcId)>,
-    /// The user agreed to pair with this PC (until when).
+    /// The user agreed to pair with this PC (until when, or until its session opens).
     approved: Option<([u8; 32], Instant)>,
     /// Pairing the other way round: the PC shows the code, the headset asks for it.
     pc_shows_code: bool,
@@ -500,8 +501,8 @@ impl Session {
         self.cmds.push(NetCmd::SetHeadset(state));
     }
 
-    /// The user picked the PC at `addr` (in the list, or typed): it is tried first,
-    /// and a session with another PC ends.
+    /// The user picked the PC at `addr` (in the list, or typed): it is tried first
+    /// until a session opens there, and a session with another PC ends.
     pub fn connect_to(&mut self, addr: SocketAddr, now: Instant) {
         self.search.choice = Some(addr);
         self.search.picking = false;
@@ -802,6 +803,19 @@ impl Session {
         };
         if its {
             self.search.attempt = None;
+        }
+        // A pick and an agreement to pair are for one connection: once its session is
+        // open, the search goes its own way again (USB, the answers with a trusted tag,
+        // the last address), so the PC is found when it moves or the cable goes.
+        if self.search.choice == Some(addr) {
+            self.search.choice = None;
+        }
+        if self
+            .search
+            .approved
+            .is_some_and(|(key, _)| PcId::of(&key) == pc)
+        {
+            self.search.approved = None;
         }
         let label = self.label(addr, texts);
         self.links.insert(
