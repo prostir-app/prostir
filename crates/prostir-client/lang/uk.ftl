@@ -300,6 +300,32 @@ bye-forgotten = ПК більше не знає цей шолом. Сполуч�
 bye-pc-ended = ПК завершив з'єднання
 bye-silence = Немає зв'язку з ПК
 
+## Під кнопкою, яку натиснули в меню
+
+note-monitor-added = Монітор додано
+note-monitor-removed = Монітор прибрано
+note-window-closed = Вікно повернуто на монітори
+note-primary = Тепер це головний монітор
+note-display-shown = Екран ПК показано
+note-display-hidden = Екран ПК приховано
+note-sound-headset = Звук ПК грає в шоломі
+note-sound-pc = Звук ПК грає на ПК
+note-encoding = Налаштування відео застосовано
+note-window-detached = Вікно відкріплено
+note-window-here = Вікно перенесено сюди
+note-layout = Монітори розставлено заново
+note-lined-up = Шви прибрано
+note-in-front = Усе перед вами
+note-mic-headset = Програми на ПК чують мікрофон шолома
+note-mic-pc = Програми на ПК чують мікрофон ПК
+note-mic-ask = Дозвіл на мікрофон спитає система
+note-mic-allowed = Доступ до мікрофона дозволено
+note-mic-denied = Немає доступу до мікрофона
+note-language = Мову меню змінено
+note-pc-forgotten = { $pc } прибрано зі сполучених ПК
+note-paired = Сполучено з { $pc }
+note-no-monitor-in-front = Перед вами немає монітора
+
 ## Що відповів ПК, коли запит не вдався
 
 failure-not-connected = Немає з'єднання з ПК
@@ -319,6 +345,7 @@ failure-sound = Звук не перемкнувся
 failure-not-on-displays = Миша не на моніторах
 failure-no-such-profile = У цьому слоті немає збереженого профілю
 failure-bad-argument = Неправильне значення
+failure-other = Не вдалося
 
 ## Дата й 12-годинний годинник на долоні
 

@@ -10,6 +10,7 @@ const UK: &str = include_str!("../lang/uk.ftl");
 /// The code that names messages.
 const SOURCES: &[(&str, &str)] = &[
     ("ui.rs", include_str!("../src/ui.rs")),
+    ("note.rs", include_str!("../src/note.rs")),
     ("app.rs", include_str!("../src/app.rs")),
     ("net.rs", include_str!("../src/net.rs")),
     ("physical.rs", include_str!("../src/physical.rs")),
