@@ -18,7 +18,8 @@ use super::{
     Connected, Done, Encoding, Gone, Job, JobId, JobOk, Primary, Start, Wanted, What, timed,
 };
 use crate::encoder::{
-    Backend, Choice, Encoder, EncoderConfig, GpuDevices, Kind, Next, NotOpened, Wanted as Asked,
+    Backend, Choice, Encoder, EncoderConfig, GpuDevices, Kind, Next, NotOpened, SourceFailed,
+    Wanted as Asked,
 };
 use crate::errors::{UserError, code_of};
 use crate::events::{Event, EventSink};
@@ -43,6 +44,8 @@ use outputs::show_sharing_tip;
 /// without it.
 const ENCODER_START: Duration = Duration::from_secs(10);
 const ENCODER_STOP: Duration = Duration::from_secs(5);
+/// A source that failed is tried once more after this long (see `start_encoder`).
+const SOURCE_AGAIN: Duration = Duration::from_millis(200);
 /// A screen that went on with the encoder it had, the one wanted not starting, tries
 /// the wanted one again after this.
 const KEPT_FOR: Duration = Duration::from_secs(60);

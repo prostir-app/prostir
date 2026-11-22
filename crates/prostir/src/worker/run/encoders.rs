@@ -22,7 +22,10 @@ impl Worker {
         let mut used = asked;
         let mut result =
             self.start_encoder(id, &w.name, physical, output.as_mut(), &wanted.encoding);
-        if let (Err(e), Some(cfg)) = (&result, fallback) {
+        // A source that fails fails the same with any encoder.
+        if let (Err(e), Some(cfg)) = (&result, fallback)
+            && e.downcast_ref::<SourceFailed>().is_none()
+        {
             warn!(
                 "{}: cannot encode with {:?} {:?}: {e:#}; back to {:?} {:?}",
                 w.name, wanted.encoding.backend, wanted.encoding.codec, cfg.backend, cfg.codec
@@ -165,7 +168,10 @@ impl Worker {
                 )
             );
         }
-        let source = output.source();
+        let mut source = output.source();
+        // A source that failed is tried once more, as it is then (not another encoder:
+        // each would fail the same on it).
+        let mut source_again = false;
         let wanted = Asked {
             codec: cfg.codec,
             software: cfg.backend == Backend::X264,
@@ -231,6 +237,21 @@ impl Worker {
             });
             let mut encoder = match started {
                 Ok(encoder) => encoder,
+                Err(e) if e.downcast_ref::<SourceFailed>().is_some() => {
+                    let text = format!("{e:#}");
+                    if source_again || output.health() == OutputHealth::Closed {
+                        return Err(e.context(t(
+                            "джерело кадрів не працює",
+                            "the source of the frames fails",
+                        )));
+                    }
+                    source_again = true;
+                    warn!("{name}: its source failed ({text}); trying it once more");
+                    // A node made a moment ago may not be known everywhere yet.
+                    std::thread::sleep(SOURCE_AGAIN);
+                    source = output.source();
+                    continue;
+                }
                 // As one that did not open after it started.
                 Err(e) => {
                     let text = format!("{e:#}");

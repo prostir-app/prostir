@@ -224,6 +224,35 @@ pub struct NotOpened {
     pub resumed: bool,
 }
 
+/// The source of the frames failed before the encoder started: its stream, not the
+/// encoder (KWin's PipeWire node is gone, or WirePlumber links it to nothing).
+/// Another encoder on the same source fails the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFailed(pub String);
+
+impl std::fmt::Display for SourceFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SourceFailed {}
+
+/// How long a failed start waits for its source to say why, on the bus: the state
+/// change and the source's error come from two threads.
+const SOURCE_SAYS: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A source's failure while the encoder starts: kept for [`Encoder::start`] to return
+/// rather than told as the encoder's (which would end the session); and whether the
+/// source failed at all, for [`Encoder`]'s drop.
+#[derive(Default)]
+struct SourceGate {
+    /// Started (failures are told from then on), and the failure kept before.
+    state: Mutex<(bool, Option<String>)>,
+    came: std::sync::Condvar,
+    failed: AtomicBool,
+}
+
 /// What encoders say when they have no session left: GStreamer's "no space left" and
 /// "busy" resource errors (the fake encoder of the tests says the first), NVENC's out
 /// of memory and client key errors (a consumer card's session cap), and VA-API's
@@ -260,6 +289,8 @@ pub struct Encoder {
     /// Sends a new picture again shortly after, for an encoder that keeps a frame
     /// until the next comes (see `encoder/nudge.rs`); stopped before the pipeline.
     nudger: Option<nudge::Nudger>,
+    /// Whether its source failed, and what it said while starting.
+    gate: Arc<SourceGate>,
     kind: Kind,
     codec: Codec,
     /// It has encoded a frame since it last started.
@@ -272,7 +303,7 @@ pub struct Encoder {
     copies: bool,
     /// The graphics devices it took, let go after the pipeline stopped (the fields
     /// drop after `Drop::drop` and in this order).
-    _devices: gpu::Lease,
+    devices: gpu::Lease,
     /// A fake hardware encoder that opened, counted until dropped.
     #[cfg(feature = "fake-desktop")]
     fake_open: bool,
@@ -653,6 +684,7 @@ impl Encoder {
         }
 
         let stop = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(SourceGate::default());
         let bus = pipeline
             .bus()
             .ok_or_else(|| anyhow!("pipeline without bus"))?;
@@ -660,6 +692,7 @@ impl Encoder {
             let stop = stop.clone();
             let encoded = encoded.clone();
             let resumed = resumed.clone();
+            let gate = gate.clone();
             std::thread::Builder::new()
                 .name(format!("gst-bus-{node}"))
                 .spawn(move || {
@@ -674,6 +707,22 @@ impl Encoder {
                         match msg.view() {
                             gst::MessageView::Error(e) => {
                                 let text = format!("{} ({:?})", e.error(), e.debug());
+                                // The source (an element taking nothing in): its
+                                // stream failed, not the encoder.
+                                let by_source = msg
+                                    .src()
+                                    .and_then(|s| s.downcast_ref::<gst::Element>())
+                                    .is_some_and(|e| e.sink_pads().is_empty());
+                                if by_source {
+                                    gate.failed.store(true, Ordering::Relaxed);
+                                    let mut state = gate.state.lock().unwrap();
+                                    if !state.0 {
+                                        warn!("encoder for {node}: its source failed: {text}");
+                                        state.1 = Some(text);
+                                        gate.came.notify_all();
+                                        break;
+                                    }
+                                }
                                 // The encoder (or its converter) before its first frame:
                                 // it did not open, and another encoder may.
                                 let by_encoder = msg
@@ -720,13 +769,14 @@ impl Encoder {
             takes_dmabuf: cfg.backend.takes_dmabuf(),
             bus_thread: Some(bus_thread),
             nudger,
+            gate,
             kind: (cfg.backend, adapter),
             codec: cfg.codec,
             encoded,
             resumed,
             note: None,
             copies: false,
-            _devices: devices,
+            devices,
             #[cfg(feature = "fake-desktop")]
             fake_open,
         };
@@ -734,10 +784,26 @@ impl Encoder {
         if fake_open {
             probe::fake::OPEN.fetch_add(1, Ordering::Relaxed);
         }
-        encoder
-            .pipeline
-            .set_state(gst::State::Playing)
-            .context("cannot start encoder pipeline")?;
+        let started = encoder.pipeline.set_state(gst::State::Playing);
+        // A source that failed is its own failure, at once (the encoder is dropped
+        // without waiting for it to stop: see `Drop`).
+        let failed = {
+            let mut state = encoder.gate.state.lock().unwrap();
+            if started.is_err() && state.1.is_none() {
+                state = encoder
+                    .gate
+                    .came
+                    .wait_timeout_while(state, SOURCE_SAYS, |s| s.1.is_none())
+                    .unwrap()
+                    .0;
+            }
+            state.0 = true;
+            state.1.take()
+        };
+        if let Some(why) = failed {
+            return Err(SourceFailed(why).into());
+        }
+        started.context("cannot start encoder pipeline")?;
         // One more fake hardware encoder than it opens says so, as a real one does once
         // it has the first frame's format.
         #[cfg(feature = "fake-desktop")]
@@ -977,7 +1043,23 @@ impl Drop for Encoder {
                 "prostir-stop",
             )));
         }
-        let _ = self.pipeline.set_state(gst::State::Null);
+        // A PipeWire source whose stream failed waits up to 30 s for a format that
+        // never comes before it stops (gst-plugin-pipewire 1.6, `wait_negotiated`):
+        // stopped on a thread of its own, holding nobody up; the graphics devices go
+        // after it.
+        let stopper = self.gate.failed.load(Ordering::Relaxed).then(|| {
+            let pipeline = self.pipeline.clone();
+            let devices = std::mem::take(&mut self.devices);
+            std::thread::Builder::new()
+                .name("gst-stop".into())
+                .spawn(move || {
+                    let _ = pipeline.set_state(gst::State::Null);
+                    drop(devices);
+                })
+        });
+        if !matches!(stopper, Some(Ok(_))) {
+            let _ = self.pipeline.set_state(gst::State::Null);
+        }
         if let Some(t) = self.bus_thread.take() {
             let _ = t.join();
         }
@@ -1157,6 +1239,53 @@ mod pause {
 mod tests {
     use gstreamer as gst;
     use gstreamer::prelude::*;
+
+    /// A source that fails as the encoder starts (a file that is not there here;
+    /// KWin's node gone on KDE): the start says so at once as the source's failure,
+    /// and the encoder is not told it failed (which would end the session).
+    #[test]
+    fn a_failed_source_is_the_starts_own_failure() {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        use super::{
+            Backend, Encoder, EncoderConfig, EncoderEvent, GpuDevices, Input, SourceFailed,
+        };
+        gst::init().unwrap();
+        if gst::ElementFactory::find("x264enc").is_none() {
+            eprintln!("skipped: no x264enc");
+            return;
+        }
+        let input = Input {
+            source: "filesrc location=/nonexistent/prostir-test ! \
+                     rawvideoparse width=64 height=64 format=i420"
+                .into(),
+            label: "test".into(),
+            frame_rate: None,
+        };
+        let cfg = EncoderConfig {
+            codec: prostir_proto::Codec::H264,
+            bitrate_kbps: 1000,
+            backend: Backend::X264,
+            sharp: false,
+        };
+        let told = Arc::new(Mutex::new(0));
+        let kept = told.clone();
+        let started = Instant::now();
+        let result = Encoder::start(&input, &cfg, None, &GpuDevices::default(), move |e| {
+            if matches!(e, EncoderEvent::Failed(_) | EncoderEvent::Unopened(_)) {
+                *kept.lock().unwrap() += 1;
+            }
+            false
+        });
+        let Err(e) = result else {
+            panic!("started on a file that is not there")
+        };
+        assert!(e.downcast_ref::<SourceFailed>().is_some(), "{e:#}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(*told.lock().unwrap(), 0, "not told as the encoder's");
+    }
 
     /// Caps that say no frame rate, or 0, get the one told; a rate said stays.
     #[test]

@@ -74,13 +74,18 @@ fn frame_rate(mhz: u32) -> gstreamer::Fraction {
 /// changes. Nothing may stand between `pipewiresrc` and the encoder that hides which
 /// formats the encoder takes (as `capssetter` does): `pipewiresrc` then offers
 /// PipeWire no format and is linked to nothing ("target not found").
+///
+/// Only that node: when it is gone, WirePlumber would otherwise link the stream to
+/// the default video source, a webcam (seen here with a node that was not there:
+/// linked to one, it failed only on its format). With `node.dont-fallback` it says
+/// "defined target not found" at once.
 fn input_for(node: u32, refresh: u32) -> Input {
     Input {
         // On a still screen KWin sends nothing; PipeWire's source repeats the last
         // frame every 2 s (see `KEEPALIVE_MS`).
         source: format!(
             "pipewiresrc path={node} do-timestamp=true keepalive-time={KEEPALIVE_MS} \
-             always-copy=false"
+             always-copy=false stream-properties=\"props,node.dont-fallback=true\""
         ),
         label: format!("node {node}"),
         frame_rate: Some(frame_rate(refresh)),
@@ -995,6 +1000,52 @@ mod tests {
         assert!(new.len() >= 4, "{new:?}");
         // The first opens the encoder.
         assert!(new[1..].iter().all(|ms| *ms < 150), "{new:?}");
+    }
+
+    /// KWin's node gone: the encoder's start says its source failed at once (not after
+    /// the 10 s limit), links to no other source, and is dropped at once, though
+    /// `pipewiresrc` takes 30 s to stop. Run by hand:
+    /// `cargo test -p prostir -- --ignored a_gone_node`; needs PipeWire, WirePlumber
+    /// and gst-plugin-pipewire.
+    #[test]
+    #[ignore = "by hand: asks PipeWire for a node that is not there"]
+    fn a_gone_node_fails_at_once() {
+        use crate::encoder::{
+            Backend, Encoder, EncoderConfig, EncoderEvent, GpuDevices, SourceFailed,
+        };
+        gstreamer::init().unwrap();
+        let cfg = EncoderConfig {
+            codec: prostir_proto::Codec::H264,
+            bitrate_kbps: 4000,
+            backend: Backend::X264,
+            sharp: false,
+        };
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let kept = told.clone();
+        let started = Instant::now();
+        let result = Encoder::start(
+            &input_for(4_000_000, 60_000),
+            &cfg,
+            None,
+            &GpuDevices::default(),
+            move |event| {
+                if let EncoderEvent::Failed(why) = event {
+                    kept.lock().unwrap().push(why);
+                }
+                false
+            },
+        );
+        let took = started.elapsed();
+        let Err(e) = result else {
+            panic!("started on a node that is not there")
+        };
+        eprintln!("failed after {took:?}: {e:#}");
+        let failed = e.downcast_ref::<SourceFailed>().expect("the source failed");
+        assert!(failed.0.contains("target not found"), "{failed}");
+        assert!(took < Duration::from_secs(3), "{took:?}");
+        // Its stop is left to a thread of its own.
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(told.lock().unwrap().is_empty(), "not told as the encoder's");
     }
 
     /// The thread reading KWin's events sleeps while nothing is said (no wake-ups),

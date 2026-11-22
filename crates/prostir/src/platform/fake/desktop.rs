@@ -18,6 +18,8 @@
 //! - `record on`, `record off`: a program records from the headset's microphone;
 //! - `sound-events stop`: the sound system's events end, as when `pactl subscribe`
 //!   dies;
+//! - `fail-source 2`: the next two starts of a monitor's picture source fail, as when
+//!   KWin's PipeWire node of an output is gone;
 //! - `hang make 20`, `hang place 20`, `hang encoder-stop 20`, `hang sound-start 20`:
 //!   the next monitor made, layout placed, encoder stopped or sound to the headset
 //!   started takes that many seconds, as a desktop, a driver or a sound system that
@@ -556,6 +558,11 @@ fn command(line: &str) -> Result<()> {
             return Ok(());
         }
         _ => {}
+    }
+    if let ["fail-source", n] = words[..] {
+        *screen::FAIL_STARTS.lock().unwrap() = n.parse()?;
+        info!("fake desktop: the next {n} source starts fail");
+        return Ok(());
     }
     if let [
         "hang",
