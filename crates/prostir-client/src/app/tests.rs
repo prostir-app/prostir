@@ -1381,3 +1381,23 @@ fn what_changes_nothing_leaves_the_profile() {
     });
     assert_eq!(sim.m.menu().active_profile, None, "asked");
 }
+
+/// A profile switched to by the PC's command, whose request the PC never answers: the
+/// command is answered too once the request is given up on, not left waiting.
+#[test]
+fn a_profile_command_is_answered_when_its_request_times_out() {
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    sim.menu(Action::NewProfile);
+    sim.saves();
+    sim.take();
+    sim.command(5, Command::Profile { name: "1".into() });
+    let fx = sim.take();
+    assert_eq!(reply_of(&fx, 5), None, "waits for the profile's own answer");
+    sim.after(pending::ANSWER_WITHIN + MS);
+    let fx = sim.take();
+    assert!(
+        matches!(reply_of(&fx, 5), Some(Outcome::Failed { .. })),
+        "the PC's command is answered: {fx:?}"
+    );
+}

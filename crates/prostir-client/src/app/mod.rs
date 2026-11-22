@@ -30,7 +30,7 @@ use log::{info, warn};
 use prostir_proto::ClientMsg;
 use prostir_proto::request::{Outcome, Request};
 use prostir_proto::state::{
-    self, Battery, DisplayId, HeadsetState, PcState, Prefs, Presence, ReqId, caps,
+    self, Battery, DisplayId, ErrorCode, HeadsetState, PcState, Prefs, Presence, ReqId, caps,
 };
 
 use crate::caps::{Caps, Offer};
@@ -1520,6 +1520,24 @@ impl Model {
     /// Request `req` of PC `pc` got no answer and never will (`why`: no answer in time,
     /// the connection broke): said under the button that asked.
     fn given_up(&mut self, pc: PcId, req: ReqId, why: ui::Failure) {
+        // A command of the PC waiting for it gets its answer: none came.
+        if let Some(command) = self
+            .session
+            .pc_mut(pc)
+            .and_then(|p| p.asks.take_command_after(req))
+        {
+            let detail = format!(
+                "no answer from the PC in {} s",
+                pending::ANSWER_WITHIN.as_secs()
+            );
+            self.send_to(
+                pc,
+                ClientMsg::Reply {
+                    req: command,
+                    outcome: Outcome::failed(ErrorCode::OTHER, &detail),
+                },
+            );
+        }
         let on = self.menu.notes.answered(pc, req).on;
         let note = Note::failure(on, why, "", self.texts());
         self.tell(note, true, on.is_some());

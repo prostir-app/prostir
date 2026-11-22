@@ -75,6 +75,12 @@ impl Asks {
         self.command_after.insert(req, command);
     }
 
+    /// The command of the PC answered with the answer to request `req`, which will
+    /// never come (given up on): taken, to be answered now.
+    pub fn take_command_after(&mut self, req: ReqId) -> Option<ReqId> {
+        self.command_after.remove(&req)
+    }
+
     /// Request `req` was answered with `outcome`, at `now`.
     pub fn answered(&mut self, req: ReqId, outcome: &Outcome, now: Instant) -> Answered {
         let command = self.command_after.remove(&req).map(|command| {
