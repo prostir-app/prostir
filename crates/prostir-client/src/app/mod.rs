@@ -978,6 +978,19 @@ impl Model {
         };
         info!("headset {state:?}");
         self.rev += 1;
+        // Off the head counts as a rest from when it was taken off, whether frames
+        // are drawn meanwhile or not (hidden, none are).
+        if self.presence.worn() {
+            if self
+                .off_since
+                .take()
+                .is_some_and(|t| now.saturating_duration_since(t) >= REST_OFF)
+            {
+                self.worn_for = Duration::ZERO;
+            }
+        } else {
+            self.off_since.get_or_insert(now);
+        }
         self.tell_presence();
         if state == presence::State::Asleep {
             self.tell_all(&ClientMsg::Asleep);
@@ -1235,17 +1248,9 @@ impl Model {
         if every == 0 {
             return;
         }
-        let now = self.now;
+        // Off the head is a rest (see `presence_due`).
         if !self.presence.worn() {
-            self.off_since.get_or_insert(now);
             return;
-        }
-        if self
-            .off_since
-            .take()
-            .is_some_and(|t| now.saturating_duration_since(t) >= REST_OFF)
-        {
-            self.worn_for = Duration::ZERO;
         }
         self.worn_for += Duration::from_secs_f32(dt);
         if self.worn_for.as_secs() < every {

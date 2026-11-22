@@ -1401,3 +1401,50 @@ fn a_profile_command_is_answered_when_its_request_times_out() {
         "the PC's command is answered: {fx:?}"
     );
 }
+
+/// Taken off for 10 minutes, the app hidden and no frame drawn meanwhile: that is a
+/// rest, and no reminder comes 5 minutes after it is put back on.
+#[test]
+fn off_the_head_without_frames_is_a_rest() {
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    sim.menu(Action::Close);
+    sim.menu(Action::RestEvery(20));
+    let frames = |sim: &mut Sim, d: Duration| {
+        let end = sim.now + d;
+        while sim.now < end {
+            sim.now += 100 * MS;
+            let input = FrameInput {
+                dt: 0.1,
+                ..frame(HandState::default())
+            };
+            sim.m.tick(sim.now, &input);
+            sim.m.animate(sim.now, &input);
+        }
+    };
+    frames(&mut sim, Duration::from_secs(15 * 60));
+    assert!(sim.m.toast().is_none());
+    sim.handle(Event::Platform(PlatformEvent::Session(
+        presence::Session::Hidden,
+    )));
+    sim.after(MS);
+    assert!(!sim.m.worn());
+    for _ in 0..600 {
+        sim.after(Duration::from_secs(1));
+    }
+    sim.handle(Event::Platform(PlatformEvent::Session(
+        presence::Session::Shown,
+    )));
+    sim.after(MS);
+    assert!(sim.m.worn());
+    let end = sim.now + Duration::from_secs(6 * 60);
+    while sim.now < end {
+        frames(&mut sim, Duration::from_secs(1));
+        assert!(
+            sim.m
+                .toast()
+                .is_none_or(|t| t.text != sim.m.texts().t("rest-eyes")),
+            "a reminder 5 min after a 10 min rest"
+        );
+    }
+}
