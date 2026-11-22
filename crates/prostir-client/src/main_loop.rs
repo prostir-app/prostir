@@ -488,6 +488,8 @@ impl Shell<'_> {
 /// Buffers of a frame's layers, kept from frame to frame and filled again.
 #[derive(Default)]
 struct LayerBuffers {
+    /// Where the eyes are, for the hands and rays.
+    views: [xr::View; 2],
     spheres: Vec<Sphere>,
     dims: Vec<xr::sys::CompositionLayerColorScaleBiasKHR>,
     quads: Vec<xr::sys::CompositionLayerQuad>,
@@ -1330,20 +1332,15 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 }
             }
         }
-        let views = if spheres.is_empty() {
-            None
-        } else {
-            session
-                .locate_views(xr::ViewConfigurationType::PRIMARY_STEREO, time, &local)
-                .ok()
-                .map(|(_, v)| v)
-        };
+        let views = (!spheres.is_empty()
+            && xrutil::locate_views(&session, time, &local, &mut buffers.views))
+        .then_some(&buffers.views[..]);
         if let Some(ov) = &mut overlay {
-            ov.render(&gl, views.as_deref().unwrap_or(&[]), spheres)?;
+            ov.render(&gl, views.unwrap_or(&[]), spheres)?;
         }
         let projection_views = overlay
             .as_ref()
-            .zip(views.as_ref())
+            .zip(views)
             .and_then(|(o, v)| o.layer_views(v));
         let hands_layer = projection_views
             .as_ref()
