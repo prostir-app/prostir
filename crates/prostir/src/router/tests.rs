@@ -514,6 +514,41 @@ fn a_still_screen_gets_one_keyframe() {
     assert_eq!(router.still_keyframes(still), 1);
 }
 
+/// A keyframe the router itself needs for a headset (one put on again, one that just
+/// came) within 300 ms of the one asked before is not lost when the screen then
+/// stands still: it waits, and the tick asks for it once the 300 ms are over.
+#[test]
+fn a_keyframe_the_router_needs_soon_after_another_is_not_lost() {
+    let router = Router::new();
+    let s = id(7);
+    let _first = attach(&router, 1, headset());
+    router.publish(1, &BTreeSet::from([s]));
+    router.add_stream(s, Codec::H264, "test".into(), false);
+    keyframe(&router, s);
+    // Taken off and put on again: the next frame asks for a keyframe for it.
+    router.set_worn(1, false);
+    frame(&router, s, false);
+    router.set_worn(1, true);
+    assert!(frame(&router, s, false), "asked at once");
+    // Another headset comes within the 300 ms, and the screen goes still after one
+    // more frame: that frame may not ask, the keyframe waits for the window.
+    let _second = attach(&router, 2, headset());
+    router.publish(2, &BTreeSet::from([s]));
+    assert!(!frame(&router, s, false), "not within the 300 ms");
+    assert_eq!(router.pending_keyframes(), 0, "not yet");
+    std::thread::sleep(KEYFRAME_EVERY + Duration::from_millis(20));
+    assert_eq!(
+        router.pending_keyframes(),
+        1,
+        "asked once the window is over"
+    );
+    assert_eq!(router.pending_keyframes(), 0, "only once");
+    // The keyframe answers it: nothing waits any more.
+    frame(&router, s, true);
+    std::thread::sleep(KEYFRAME_EVERY + Duration::from_millis(20));
+    assert_eq!(router.pending_keyframes(), 0);
+}
+
 /// A keyframe that goes out answers a request that waited for the window.
 #[test]
 fn a_keyframe_going_out_answers_a_waiting_request() {

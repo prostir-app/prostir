@@ -252,6 +252,11 @@ struct StreamSlot {
     /// A headset asked again within [`HEADSET_KEYFRAMES`] of that: one keyframe is
     /// asked for once the time is up (every request within it counts as this one).
     headset_pending: bool,
+    /// A headset waits for a keyframe the router could not ask for yet (within
+    /// [`KEYFRAME_EVERY`] of the one before, or not yet that headset's turn): asked for
+    /// with the next frame, or by the tick on a still screen (see
+    /// [`Router::pending_keyframes`]).
+    key_pending: bool,
     /// Where a frame's deliveries are listed, kept between frames so a frame
     /// allocates nothing for them (see [`Router::fan_out`]).
     outs: Vec<Out>,
@@ -815,6 +820,7 @@ impl Router {
             keyframer: None,
             headset_asked: None,
             headset_pending: false,
+            key_pending: false,
             outs: Vec::new(),
             tally: Tally::default(),
             measured: None,
@@ -924,20 +930,24 @@ impl Router {
     }
 
     /// Asks for the keyframes headsets asked for within 300 ms of the one before,
-    /// once that time is up (see [`Router::keyframe_asked`]); how many.
+    /// once that time is up (see [`Router::keyframe_asked`]), and those the router
+    /// could not ask for yet when a headset began to wait for one (see
+    /// [`Router::fan_out`]); how many.
     pub fn pending_keyframes(&self) -> usize {
         let now = Instant::now();
-        let keyframers: Vec<_> = self
-            .inner
-            .lock()
-            .unwrap()
-            .streams
+        let mut inner = self.inner.lock().unwrap();
+        let RouterInner {
+            streams, receivers, ..
+        } = &mut *inner;
+        let keyframers: Vec<_> = streams
             .iter_mut()
             .filter_map(|(id, s)| {
-                s.pending_due(now)
-                    .then(|| (*id, s.keyframer.clone(), !s.flowing(now)))
+                let headset = s.pending_due(now);
+                let router = Self::router_pending_due(s, receivers, *id, now);
+                (headset || router).then(|| (*id, s.keyframer.clone(), !s.flowing(now)))
             })
             .collect();
+        drop(inner);
         let n = keyframers.len();
         for (id, k, still) in keyframers {
             if let Some(k) = &k {
@@ -1317,9 +1327,51 @@ impl Router {
         if keyframe && want_key.is_empty() {
             slot.keyframe_asked = None;
         }
-        key_now
-            || (!want_key.is_empty()
-                && Self::ask_keyframe(slot, receivers, id, &want_key, takers > 1))
+        // Not asked now, it waits: on a still screen no frame comes to ask again.
+        let ask =
+            !want_key.is_empty() && Self::ask_keyframe(slot, receivers, id, &want_key, takers > 1);
+        slot.key_pending = !want_key.is_empty() && !ask;
+        key_now || ask
+    }
+
+    /// Whether the keyframe the router could not ask for of stream `id` (see
+    /// `key_pending`) is to be asked for now, as [`Router::fan_out`] would with the
+    /// next frame: for the headsets that still wait for one, once the time since the
+    /// last one asked is up, and each as often as it may ask.
+    fn router_pending_due(
+        slot: &mut StreamSlot,
+        receivers: &mut BTreeMap<SessionId, Receiver>,
+        id: ScreenId,
+        now: Instant,
+    ) -> bool {
+        if !slot.key_pending
+            || slot
+                .keyframe_asked
+                .is_some_and(|t| now.duration_since(t) < KEYFRAME_EVERY)
+        {
+            return false;
+        }
+        let takes = |r: &Receiver| r.worn && r.published.contains(&id);
+        let shared = receivers.values().filter(|r| takes(r)).count() > 1;
+        let (mut waiting, mut ask) = (false, false);
+        for r in receivers.values_mut().filter(|r| takes(r)) {
+            let queued = shared && r.tx.keyframe_waiting(id.wire());
+            if let Some(d) = r
+                .streams
+                .get_mut(&id)
+                .filter(|d| !d.too_big && d.need_keyframe)
+            {
+                waiting = true;
+                ask |= d.key_asks.due(now, shared, queued);
+            }
+        }
+        // Nobody waits any more (a keyframe came, the headset went): nothing to ask.
+        slot.key_pending = waiting && !ask;
+        if ask {
+            slot.keyframe_asked = Some(now);
+            debug!("{}: a keyframe that waited is asked for now", slot.name);
+        }
+        ask
     }
 
     /// Whether the headsets of `sessions`, which wait for a keyframe of stream `id`,
