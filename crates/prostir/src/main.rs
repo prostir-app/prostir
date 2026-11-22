@@ -155,6 +155,9 @@ impl Brain {
                 self.phase.due(),
                 self.closing.iter().map(|c| c.until).min(),
                 self.sessions.values().filter_map(Session::volume_at).min(),
+                // A headset off the head counts as gone at its time, not at the next
+                // housekeeping after it.
+                self.sessions.values().filter_map(gone_at).min(),
                 self.desk_due(),
                 self.door.due(),
                 // Looked at again now and then, by a program that leaves when idle,
@@ -385,6 +388,7 @@ impl Brain {
         }
         self.door.expire(now);
         self.desk_answers_due(now);
+        self.end_taken_off(now);
         if self.sessions.is_empty() {
             if let Some(d) = self.displays.as_mut() {
                 d.push();
@@ -446,33 +450,6 @@ impl Brain {
         // The microphone may be free to go to the main headset now.
         self.headsets_changed();
         self.show();
-        // Each headset off the head for long enough counts as gone (asleep at once);
-        // the others go on.
-        let grace = |s: &Session| {
-            if s.asleep() {
-                ASLEEP_GRACE
-            } else {
-                TAKEN_OFF_GRACE
-            }
-        };
-        let taken_off: Vec<[u8; 32]> = self
-            .sessions
-            .iter()
-            .filter(|(_, s)| s.taken_off_for() >= Some(grace(s)))
-            .map(|(key, _)| *key)
-            .collect();
-        if !taken_off.is_empty() {
-            let asleep = taken_off
-                .iter()
-                .any(|k| self.sessions.get(k).is_some_and(Session::asleep));
-            info!("headset {}", if asleep { "asleep" } else { "taken off" });
-            self.end_sessions(
-                taken_off,
-                PcGoodbye::TakenOff,
-                api::Reason::TakenOff,
-                || Ok(()),
-            );
-        }
         let Some(displays) = self.displays.as_mut() else {
             return;
         };
@@ -492,6 +469,30 @@ impl Brain {
                 Err(anyhow::anyhow!("virtual monitor or encoder stopped"))
             });
         }
+    }
+
+    /// Each headset off the head for long enough (see [`gone_at`]) counts as gone: its
+    /// session ends; the others go on.
+    fn end_taken_off(&mut self, now: Instant) {
+        let taken_off: Vec<[u8; 32]> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| gone_at(s).is_some_and(|t| t <= now))
+            .map(|(key, _)| *key)
+            .collect();
+        if taken_off.is_empty() {
+            return;
+        }
+        let asleep = taken_off
+            .iter()
+            .any(|k| self.sessions.get(k).is_some_and(Session::asleep));
+        info!("headset {}", if asleep { "asleep" } else { "taken off" });
+        self.end_sessions(
+            taken_off,
+            PcGoodbye::TakenOff,
+            api::Reason::TakenOff,
+            || Ok(()),
+        );
     }
 
     /// Asked to quit: every session ends with a goodbye, which each headset gets a
@@ -544,6 +545,17 @@ impl Brain {
         }
         None
     }
+}
+
+/// When the headset of `session`, off the head, counts as gone: after the grace of
+/// one taken off while awake, or the short one of one asleep (its power button).
+fn gone_at(session: &Session) -> Option<Instant> {
+    let grace = if session.asleep() {
+        ASLEEP_GRACE
+    } else {
+        TAKEN_OFF_GRACE
+    };
+    session.taken_off_at().map(|t| t + grace)
 }
 
 /// How long quitting waits for the desktop's worker to put everything back: with the

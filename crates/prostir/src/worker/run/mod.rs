@@ -37,7 +37,7 @@ mod jobs;
 mod outputs;
 mod place;
 
-use encoders::{restart_due, stop_encoder};
+use encoders::{restart_due, stop_encoder, stop_encoders};
 use outputs::show_sharing_tip;
 
 /// How long an encoder may take to start, and to stop, before the worker goes on
@@ -602,6 +602,18 @@ impl Worker {
     /// the outputs and their encoders, then the desktop.
     fn close(mut self) {
         self.begin("putting the desktop back");
+        // Every encoder stops at once (each driver takes its time to let go), then
+        // the outputs go one after the other, each at once.
+        let encoders: Vec<(Running, String)> = self
+            .slots
+            .values_mut()
+            .filter_map(|s| {
+                s.started_for = None;
+                Some((s.encoder.take()?, s.name.clone()))
+            })
+            .collect();
+        stop_encoders(encoders, &self.shared.steps, &self.behind);
+        self.begin("removing the outputs");
         let panels: Vec<ScreenId> = self
             .slots
             .iter()

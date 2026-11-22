@@ -12,7 +12,8 @@
 //!   `PROSTIR_FAKE_SLOW_MONITORS_MS` makes each monitor take that long to make, and
 //!   `PROSTIR_FAKE_BROKEN_MONITORS=2,3` makes those monitors (by number, from 1)
 //!   impossible to make. `PROSTIR_FAKE_SLOW_CONNECT_MS` makes connecting to the
-//!   desktop take that long.
+//!   desktop take that long, and `PROSTIR_FAKE_ENCODER_STOP_MS` stopping each
+//!   encoder.
 //! - Sound is silence, 10 ms at a time, each slice starting with the time it was
 //!   made (see [`audio`]), so a fake headset can tell how late it arrives; the
 //!   microphone goes nowhere. The sound system says its changes as `pactl subscribe`
@@ -115,6 +116,18 @@ pub fn hang(point: &str) {
         std::thread::sleep(long);
         log::info!("fake desktop: {point} is back");
     }
+}
+
+/// An encoder stops: it hangs, if a test said so (`hang encoder-stop 20`), and takes
+/// `PROSTIR_FAKE_ENCODER_STOP_MS` in any case, as a graphics driver letting its
+/// encoder go does.
+pub fn encoder_stops() {
+    hang("encoder-stop");
+    let ms = std::env::var("PROSTIR_FAKE_ENCODER_STOP_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    std::thread::sleep(std::time::Duration::from_millis(ms));
 }
 
 /// Where caches go: `$XDG_CACHE_HOME` and nowhere else, and only when the fake desktop

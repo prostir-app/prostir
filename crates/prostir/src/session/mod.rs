@@ -392,6 +392,11 @@ impl Session {
         self.taken_off_at.map(|t| t.elapsed())
     }
 
+    /// Since when the headset has been off the head, if it is.
+    pub fn taken_off_at(&self) -> Option<Instant> {
+        self.taken_off_at
+    }
+
     /// The streams this headset needs a fresh picture of since the last call (it was
     /// put on again).
     pub fn take_fresh(&mut self) -> Vec<ScreenId> {

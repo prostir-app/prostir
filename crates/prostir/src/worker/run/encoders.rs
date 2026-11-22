@@ -469,11 +469,53 @@ pub(super) fn stop_encoder(
     steps: &Steps,
     behind: &Arc<timed::Behind<Kind>>,
 ) {
-    let Some(Running { encoder, retired }) = encoder else {
+    let Some(running) = encoder else {
         return;
     };
-    retired.store(true, Ordering::Relaxed);
     steps.begin(format!("stopping the encoder of {name}"));
+    stop_now(running, name, behind);
+}
+
+/// Stops every encoder of `encoders` (each with its output's name) at once, as one
+/// step: each driver takes its time to let go, and the outputs go together after,
+/// not one after the other. Waits at most as long as for one.
+pub(super) fn stop_encoders(
+    encoders: Vec<(Running, String)>,
+    steps: &Steps,
+    behind: &Arc<timed::Behind<Kind>>,
+) {
+    if encoders.is_empty() {
+        return;
+    }
+    steps.begin(format!("stopping {} encoders", encoders.len()));
+    std::thread::scope(|scope| {
+        for (running, name) in encoders {
+            // The encoder goes in the call, so one without a thread of its own is
+            // stopped here instead.
+            let encoder = Arc::new(std::sync::Mutex::new(Some((running, name))));
+            let taken = encoder.clone();
+            let spawned = std::thread::Builder::new()
+                .name("encoder-stops".into())
+                .spawn_scoped(scope, move || {
+                    let mine = taken.lock().unwrap().take();
+                    if let Some((running, name)) = mine {
+                        stop_now(running, &name, behind);
+                    }
+                });
+            if spawned.is_err() {
+                let left = encoder.lock().unwrap().take();
+                if let Some((running, name)) = left {
+                    stop_now(running, &name, behind);
+                }
+            }
+        }
+    });
+}
+
+/// Stops `running`, waiting for it at most [`ENCODER_STOP`].
+fn stop_now(running: Running, name: &str, behind: &Arc<timed::Behind<Kind>>) {
+    let Running { encoder, retired } = running;
+    retired.store(true, Ordering::Relaxed);
     let kind = encoder.kind();
     let _ = timed::call_counted(
         behind,
@@ -483,7 +525,7 @@ pub(super) fn stop_encoder(
         ENCODER_STOP,
         move || {
             #[cfg(feature = "fake-desktop")]
-            crate::platform::hang("encoder-stop");
+            crate::platform::encoder_stops();
             drop(encoder);
         },
     );

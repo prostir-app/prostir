@@ -527,6 +527,44 @@ fn a_headset_put_to_sleep_ends_the_session_at_once() {
         .unwrap();
 }
 
+/// Asleep, the headset's monitors go right after the grace (1 s), and all together:
+/// each encoder takes its time to stop (here 400 ms, as a graphics driver letting go),
+/// and they stop at the same time, so four monitors go about as soon as one would.
+#[test]
+fn the_monitors_go_together_soon_after_the_headset_sleeps() {
+    const GRACE: Duration = Duration::from_secs(1);
+    const STOP: Duration = Duration::from_millis(400);
+    let dir = TestDir::new("asleep-together");
+    dir.save_monitors("row\n320x240\n320x240\n320x240\n320x240\nmirror off\n");
+    let mut keys = dir.pair();
+    let options = Options {
+        env: vec![(
+            "PROSTIR_FAKE_ENCODER_STOP_MS".into(),
+            STOP.as_millis().to_string(),
+        )],
+        ..Options::default()
+    };
+    let mut pc = Pc::start(&dir, &options);
+    let mut headset = connect(&pc, &mut keys);
+    headset
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    assert_eq!(headset.view().order().len(), 4);
+    let slept = Instant::now();
+    headset.sleep().unwrap();
+    for n in 1..=4 {
+        pc.wait_log(SOON, &format!("fake desktop: removed Fake-{n}"));
+    }
+    let gone = slept.elapsed();
+    eprintln!("4 monitors gone {gone:?} after the headset slept");
+    // The grace, one encoder's stop, and a moment: neither the next half-second
+    // round after the grace nor four stops one after the other.
+    assert!(
+        gone >= GRACE && gone < GRACE + STOP + Duration::from_millis(900),
+        "gone {gone:?} after the headset slept"
+    );
+}
+
 /// A tap of the power button that wakes the headset again at once: asleep and worn
 /// again within the second keeps the session; taken off after that, it gets the grace
 /// of one taken off while awake, not the short one of one asleep.
