@@ -1068,3 +1068,43 @@ fn the_other_way_after_a_refusal_pairs_again() {
         "{cmd:?}"
     );
 }
+
+/// A PC picked while another is in use over USB: once the pick's session opened and
+/// ended, the search looks for the PC picked (its answers, its last address), never
+/// USB first, nor the other PC's answers: the user's pick holds until the next.
+#[test]
+fn a_pick_holds_after_its_session() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1, 2]);
+    sim.after(MS);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    sim.reach(s, 1, usb());
+    let _ = sim.cmds();
+    sim.s.connect_to(addr(7), sim.now);
+    let _ = sim.cmds();
+    sim.end(s, Some(1), &Ended::default(), Duration::from_secs(9));
+    sim.after(RETRY_PAUSE);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
+    sim.reach(s, 2, addr(7));
+    let _ = sim.cmds();
+    let opened = Ended {
+        opened: true,
+        ..Ended::default()
+    };
+    sim.end(s, Some(2), &opened, Duration::from_secs(60));
+    sim.after(Duration::ZERO);
+    let (s, cmd) = sim.step();
+    assert!(
+        matches!(cmd, NetCmd::Ask { .. }),
+        "not USB, where the other PC is: {cmd:?}"
+    );
+    // The other PC answers: listed, not dialed; the one picked is.
+    sim.answer(Some(1), addr(5));
+    assert!(sim.cmds().is_empty(), "the other PC is not taken instead");
+    sim.answer(Some(2), addr(8));
+    let (_, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(8)), "the PC picked, moved");
+    sim.missed(s);
+}
