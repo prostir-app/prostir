@@ -1238,19 +1238,22 @@ pub fn wake_for_window() -> std::io::Result<crate::ctl::Woken> {
 /// session, say) only says so, since a new one would find it running too, and start
 /// one more.
 pub fn wake_running(pid: Option<u32>) -> std::io::Result<crate::ctl::Woken> {
-    wake(|| {
-        let who = pid.map_or_else(String::new, |pid| {
-            format!(" ({} {pid})", t("процес", "process"))
-        });
-        Err(std::io::Error::other(format!(
-            "{}{who}{}",
-            t("Prostir уже працює", "Prostir runs already"),
-            t(
-                ", але не на цій сеансовій шині: його вікно відкривається з сеансу, де його запущено",
-                ", but not on this session bus: its window opens from the session it was started in",
-            ),
-        )))
-    })
+    wake(|| Err(std::io::Error::other(not_on_this_bus(pid))))
+}
+
+/// What says that Prostir (`pid`, where known) runs, but not on this session bus.
+pub fn not_on_this_bus(pid: Option<u32>) -> String {
+    let who = pid.map_or_else(String::new, |pid| {
+        format!(" ({} {pid})", t("процес", "process"))
+    });
+    format!(
+        "{}{who}{}",
+        t("Prostir уже працює", "Prostir is already running"),
+        t(
+            ", але не на цій сеансовій шині: його вікно відкривається з сеансу, де його запущено",
+            ", but not on this session bus: its window opens from the session it was started in",
+        ),
+    )
 }
 
 /// Wakes Prostir for an agent (the tool `start` of `prostir mcp`), as for the window,
@@ -1309,9 +1312,10 @@ pub const STARTED_TO_OPEN: &str = "PROSTIR_STARTED_TO_OPEN";
 fn start_detached(errors: std::process::Stdio) -> std::io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
     if std::env::var_os(STARTED_TO_OPEN).is_some() {
-        return Err(std::io::Error::other(
+        return Err(std::io::Error::other(t(
+            "цей Prostir запустив інший, який не знайшов запущеного: цей не запускає ще один",
             "this Prostir was started by another one, which found none running: it starts no other",
-        ));
+        )));
     }
     let mut command = std::process::Command::new(this_program()?);
     command

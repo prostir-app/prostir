@@ -80,6 +80,12 @@ pub fn single_instance(role: &str) -> Result<crate::platform::Lock> {
     Ok(file)
 }
 
+/// The fake full program with these settings, while it holds the lock itself: its
+/// process id.
+pub fn serving() -> Option<u32> {
+    super::lock::holder(&config_home()?.join("prostir-fake.lock"), "serve")
+}
+
 /// The fake sockets' watcher with these settings, if one runs: its process id.
 pub fn watcher() -> Option<u32> {
     super::lock::holder(&config_home()?.join("prostir-fake.lock"), "watcher")

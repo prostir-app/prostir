@@ -177,8 +177,8 @@ fn marked(mark: &str) -> Vec<u32> {
 }
 
 /// Prostir runs, but on another session bus than the one `prostir` (or `prostir
-/// serve`) is started on, from another session say: the one started says so and ends,
-/// starting at most one other program on the way, never a chain of them.
+/// serve`) is started on, from another session say: the one started says so, once,
+/// and ends, starting no other program (never a chain of them).
 #[test]
 fn a_prostir_on_another_bus_is_not_started_again_and_again() {
     let dir = TestDir::new("start-other-bus");
@@ -225,10 +225,19 @@ fn a_prostir_on_another_bus_is_not_started_again_and_again() {
         );
         let ended = ended.unwrap_or_else(|| panic!("prostir {args:?} did not end: {err}"));
         assert_eq!(ended.code(), Some(2), "prostir {args:?}: {err}");
+        let said = err
+            .lines()
+            .filter(|l| l.starts_with("prostir: ") && l.contains("not on this session bus"))
+            .count();
+        assert_eq!(said, 1, "prostir {args:?}: said once: {err}");
+        // From the menu (a bare `prostir`), a notification says it too.
+        let noticed = err.contains("notification: Prostir: Prostir is already running");
+        assert_eq!(noticed, args.is_empty(), "prostir {args:?}: {err}");
         assert!(
-            err.contains("not on this session bus"),
+            !err.contains("ended before it started"),
             "prostir {args:?}: {err}"
         );
+        assert_eq!(most, 1, "prostir {args:?}: nothing started: {err}");
     }
     pc.quit();
 }

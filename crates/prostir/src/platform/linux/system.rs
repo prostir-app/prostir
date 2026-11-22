@@ -103,6 +103,13 @@ pub fn notice_mark() -> PathBuf {
     runtime_dir().join("prostir-notice")
 }
 
+/// The full program of this user while it holds the lock itself (`prostir serve
+/// --stay`, or one systemd started): its process id. Under its sockets' watcher, the
+/// watcher holds it (see [`watcher`]).
+pub fn serving() -> Option<u32> {
+    crate::platform::lock::holder(&runtime_dir().join("prostir.lock"), "serve")
+}
+
 /// The sockets' watcher of this user, if one runs: its process id.
 pub fn watcher() -> Option<u32> {
     crate::platform::lock::holder(&runtime_dir().join("prostir.lock"), "watcher")
