@@ -21,6 +21,7 @@ use prostir_proto::{AUDIO_RATE, ClientMsg, MIC_CHANNELS};
 
 use crate::net::Feedback;
 use crate::platform::android::with_app_context;
+use crate::platform::mic_permission::{LOOK_EVERY, PermissionWait, Prompt, Step};
 
 const PERMISSION: &str = "android.permission.RECORD_AUDIO";
 /// 10 ms per slice.
@@ -47,6 +48,9 @@ pub struct Mic {
     /// How many times the system was asked for access: its prompt pauses the app,
     /// which the main loop must not take for the user leaving.
     asks: AtomicU32,
+    /// What the last prompt went through (a `Prompt`'s code): answered without access
+    /// is a refusal at once.
+    prompt: AtomicU8,
     /// The running activity, which shows the system's prompt.
     app: AndroidApp,
 }
@@ -60,6 +64,7 @@ impl Mic {
             allowed: AtomicBool::new(allowed),
             denied: AtomicBool::new(false),
             asks: AtomicU32::new(0),
+            prompt: AtomicU8::new(Prompt::None.code()),
             app,
         }
     }
@@ -101,7 +106,18 @@ impl Mic {
     /// that follows is the prompt's).
     fn ask(&self) {
         self.asks.fetch_add(1, Ordering::Relaxed);
+        self.prompt.store(Prompt::Asked.code(), Ordering::Relaxed);
         request_permission(&self.app);
+    }
+
+    /// The app was paused (`true`, the system's prompt may be up) or came back (it
+    /// may have been answered).
+    pub fn activity(&self, paused: bool) {
+        let was = Prompt::from_code(self.prompt.load(Ordering::Relaxed));
+        let now = was.activity(paused);
+        if now != was {
+            self.prompt.store(now.code(), Ordering::Relaxed);
+        }
     }
 
     /// The user pressed "Ask again": show the system prompt now.
@@ -116,45 +132,55 @@ impl Mic {
         self.allowed.load(Ordering::Relaxed)
     }
 
-    /// Asks for the microphone permission once (the headset shows a system dialog)
-    /// and waits up to a minute for the answer.
-    fn ensure_permission(&self, stop: &AtomicBool) -> bool {
-        if has_permission() {
-            self.denied.store(false, Ordering::Relaxed);
-            self.allowed_by_system
-                .store(permission::GRANTED, Ordering::Relaxed);
-            return true;
-        }
-        if self.denied.load(Ordering::Relaxed) {
-            self.allowed_by_system
-                .store(permission::DENIED, Ordering::Relaxed);
-            return false;
-        }
-        self.allowed_by_system
-            .store(permission::ASKING, Ordering::Relaxed);
-        self.ask();
-        let until = Instant::now() + Duration::from_secs(60);
-        while Instant::now() < until && !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(500));
-            if has_permission() {
-                self.allowed_by_system
-                    .store(permission::GRANTED, Ordering::Relaxed);
-                return true;
+    /// Waits until the system lets the app record, or `stop` (see `mic_permission`):
+    /// the system is asked once unless a refusal stands; a refusal counts as soon as
+    /// its prompt was answered without access; and the wait goes on after one, looking
+    /// every 500 ms, so "Ask again" or access given in the system's settings bring the
+    /// microphone back while the PC still records.
+    fn wait_permission(&self, stop: &AtomicBool) -> bool {
+        let mut wait = PermissionWait::new(self.asks());
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                // Not an answer: the recording was no longer wanted (the session ended,
+                // the switch went off). The next recording looks again.
+                info!("stopped waiting for the microphone permission");
+                if !self.denied() {
+                    self.allowed_by_system
+                        .store(permission::UNKNOWN, Ordering::Relaxed);
+                }
+                return false;
             }
+            let prompt = Prompt::from_code(self.prompt.load(Ordering::Relaxed));
+            let step = wait.look(
+                Instant::now(),
+                has_permission(),
+                self.denied(),
+                self.asks(),
+                prompt,
+            );
+            let status = match step {
+                Step::Record => {
+                    self.denied.store(false, Ordering::Relaxed);
+                    self.allowed_by_system
+                        .store(permission::GRANTED, Ordering::Relaxed);
+                    return true;
+                }
+                Step::Ask => {
+                    self.ask();
+                    permission::ASKING
+                }
+                Step::Refused => {
+                    warn!("no microphone permission");
+                    self.denied.store(true, Ordering::Relaxed);
+                    permission::DENIED
+                }
+                // Refused before: the menu says where to allow it; else a prompt is up.
+                Step::Wait if self.denied() => permission::DENIED,
+                Step::Wait => permission::ASKING,
+            };
+            self.allowed_by_system.store(status, Ordering::Relaxed);
+            std::thread::sleep(LOOK_EVERY);
         }
-        if stop.load(Ordering::Relaxed) {
-            // Not an answer: the recording was no longer wanted (the session ended,
-            // the switch went off). The next recording looks again.
-            info!("stopped waiting for the microphone permission");
-            self.allowed_by_system
-                .store(permission::UNKNOWN, Ordering::Relaxed);
-            return false;
-        }
-        warn!("no microphone permission");
-        self.allowed_by_system
-            .store(permission::DENIED, Ordering::Relaxed);
-        self.denied.store(true, Ordering::Relaxed);
-        false
     }
 }
 
@@ -174,7 +200,7 @@ impl Recorder {
                 crate::platform::android::raise_thread_priority(
                     crate::platform::android::Priority::Audio,
                 );
-                if !mic.ensure_permission(&flag) {
+                if !mic.wait_permission(&flag) {
                     return;
                 }
                 let start = ClientMsg::UpStart {

@@ -5,6 +5,14 @@
 /// Width × height of the generated panorama (2:1 equirectangular).
 pub const WIDTH: u32 = 4096;
 pub const HEIGHT: u32 = 2048;
+/// The longest side of a panorama's picture the headset takes as it is.
+pub const MAX_SIDE: u32 = 4096;
+
+/// The box the user's picture of `width` × `height` is made smaller to fit (keeping
+/// its proportions), when either side is longer than [`MAX_SIDE`].
+pub fn fit_within(width: u32, height: u32) -> Option<(u32, u32)> {
+    (width > MAX_SIDE || height > MAX_SIDE).then_some((WIDTH, HEIGHT))
+}
 
 /// Small deterministic PRNG (xorshift) so the sky looks the same every launch.
 struct Rng(u64);
@@ -329,6 +337,14 @@ fn from_srgb(c: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    /// A picture too wide or too tall is made smaller; one within the limit is not.
+    #[test]
+    fn a_picture_over_the_limit_either_way_is_made_smaller() {
+        assert_eq!(super::fit_within(4096, 2048), None);
+        assert_eq!(super::fit_within(4096, 4096), None);
+        assert_eq!(super::fit_within(8192, 4096), Some((4096, 2048)));
+        assert_eq!(super::fit_within(3000, 5000), Some((4096, 2048)), "tall");
+    }
     #[test]
     fn sky_is_opaque_and_dark_below() {
         let px = super::night_sky();

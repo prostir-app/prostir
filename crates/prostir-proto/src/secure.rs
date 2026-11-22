@@ -258,21 +258,36 @@ impl TrustStore {
         &self.entries
     }
 
+    /// Stops trusting `key`, once its file says so: if it cannot be written, nothing
+    /// changes (the peer stays trusted, as the file has it).
     pub fn remove(&mut self, key: &[u8; 32]) -> io::Result<()> {
-        self.entries.retain(|(k, _)| k != key);
-        self.save()
+        let kept: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(k, _)| k != key)
+            .cloned()
+            .collect();
+        self.write(&kept)?;
+        self.entries = kept;
+        Ok(())
     }
 
+    /// Trusts nobody, once the file says so (see [`TrustStore::remove`]).
     pub fn clear(&mut self) -> io::Result<()> {
+        self.write(&[])?;
         self.entries.clear();
-        self.save()
+        Ok(())
     }
 
     fn save(&self) -> io::Result<()> {
+        self.write(&self.entries)
+    }
+
+    fn write(&self, entries: &[([u8; 32], String)]) -> io::Result<()> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let text = self.entries.iter().fold(String::new(), |mut s, (k, l)| {
+        let text = entries.iter().fold(String::new(), |mut s, (k, l)| {
             let _ = writeln!(s, "{} {l}", to_hex(k));
             s
         });
@@ -445,6 +460,25 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         let code = pairing_code();
         assert_eq!(code.len(), 6);
+    }
+
+    /// A removal that cannot be written changes nothing: the store keeps what its file
+    /// keeps.
+    #[test]
+    fn a_removal_not_written_keeps_the_entry() {
+        let dir = std::env::temp_dir().join(format!("prostir-unwritten-{}", std::process::id()));
+        let path = dir.join("paired");
+        let mut t = TrustStore::load(&path);
+        t.add([7; 32], "PC").unwrap();
+        t.add([8; 32], "Other").unwrap();
+        // A folder in the file's place: it cannot be written.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir_all(path.join("in-the-way")).unwrap();
+        assert!(t.remove(&[7; 32]).is_err());
+        assert!(t.contains(&[7; 32]), "still trusted");
+        assert!(t.clear().is_err());
+        assert_eq!(t.len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A store or a key that is there but does not read is an error, never an empty

@@ -214,9 +214,31 @@
   from the headset microphone: the sound system tells it, so the headset microphone
   starts within a few hundredths of a second of a program starting to record (before:
   up to half a second), and nothing on the PC wakes while the sound is idle.
+- The headset microphone starts as soon as it is allowed ("Ask again" in the menu, or
+  the system's settings) while a PC program records; before, it stayed off until the
+  program started recording again. A refusal in the system's prompt shows at once, not
+  after a minute.
+- The PC's sound no longer stays silent for the rest of a session when the headset's
+  sound output does not open for a moment: it is tried again until it plays.
 
 ### Connection
 
+- A PC picked in the menu, or paired with over USB, no longer holds the headset to
+  that address: once its session is open, the headset finds the PC again over Wi-Fi
+  when the cable is pulled, or at its new address when it gets one.
+- When the PC cannot pair (no window for the code, another headset pairing, too many
+  wrong codes), the headset shows what the PC said and asks again ("Pairing did not
+  start on the PC", with "the other way round"), instead of counting wrong codes and
+  trying again and again.
+- A PC that forgot the headset is offered as such ("The PC no longer knows this
+  headset"), not as a new PC, and pairing with it again says "Paired with".
+- Forgetting a PC while the headset is connecting to it opens no session with it; a
+  Forget that cannot be saved changes nothing.
+- "Blocked by the firewall" is said only after the PC refused the connection twice in a
+  row, and goes away once a connection opens.
+- Leaving a PC, or a dropped connection, no longer leaves monitors with a frozen
+  picture; a video decoder that fails is started again, and a background picture too
+  big for the headset no longer stops the app.
 - A dropped connection, a PC gone to sleep or a headset switched off is noticed within
   5 s on both sides (it took about 10 s).
 - A headset put to sleep (its power button) gives the desktop back to the laptop

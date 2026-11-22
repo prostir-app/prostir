@@ -121,10 +121,18 @@ const TRANSIENT_LOG_EVERY: Duration = Duration::from_secs(10);
 /// Room for the codec's buffer numbers, made once (more only if a codec has more).
 const BUFFERS: usize = 32;
 
+/// How a decoder thread ended: its job back (to make the decoder again with), and
+/// whether it gave up (its codec failed again and again) rather than the stream ending
+/// or `stop`.
+pub struct Stopped {
+    pub job: DecoderJob,
+    pub failed: bool,
+}
+
 /// Decodes the job's frames into its window until the stream ends or `stop` is set.
 /// Whoever sets `stop` then unparks the returned thread (`handle.thread().unpark()`),
 /// so it stops at once rather than after up to [`IDLE`].
-pub fn spawn(job: DecoderJob) -> JoinHandle<()> {
+pub fn spawn(job: DecoderJob) -> JoinHandle<Stopped> {
     let id = job.stream.id.0;
     std::thread::Builder::new()
         .name(format!("decoder-{id}"))
@@ -132,10 +140,15 @@ pub fn spawn(job: DecoderJob) -> JoinHandle<()> {
             crate::platform::android::raise_thread_priority(
                 crate::platform::android::Priority::Video,
             );
-            if let Err(e) = run(&job) {
-                error!("decoder {id}: {e:#}");
-            }
+            let failed = match run(&job) {
+                Ok(()) => false,
+                Err(e) => {
+                    error!("decoder {id}: {e:#}");
+                    true
+                }
+            };
             info!("decoder {id} stopped");
+            Stopped { job, failed }
         })
         .expect("spawn decoder thread")
 }
@@ -228,18 +241,25 @@ fn run(job: &DecoderJob) -> Result<()> {
         stalled: None,
         no_input: None,
     };
-    // A decoder error (a lost surface, a bad frame) recreates the decoder instead of
-    // freezing the monitor; only repeated failures in a row give up.
+    // A decoder error (a lost surface, a bad frame), or a codec that does not start,
+    // makes the decoder again instead of freezing the monitor; only repeated failures
+    // in a row give up (the frame loop then makes the thread again, or lets the
+    // stream go).
     loop {
         let told = Arc::new(Mutex::new(Told::new()));
-        let decoder = start_decoder(codec, width, height, window, &told)?;
-        d.free.clear();
-        d.ready.clear();
-        d.stalled = None;
-        d.no_input = None;
-        let result = d.pump(&decoder, &told);
-        let _ = decoder.stop();
-        drop(decoder);
+        let result = match start_decoder(codec, width, height, window, &told) {
+            Ok(decoder) => {
+                d.free.clear();
+                d.ready.clear();
+                d.stalled = None;
+                d.no_input = None;
+                let result = d.pump(&decoder, &told);
+                let _ = decoder.stop();
+                drop(decoder);
+                result
+            }
+            Err(e) => Err(e),
+        };
         match result {
             Ok(()) => return Ok(()),
             Err(e) if d.failures < 5 => {
@@ -337,6 +357,9 @@ impl Decoding<'_> {
                 IDLE
             };
             self.timing.report();
+            // An ask for a keyframe held back goes once its time comes, also when no
+            // frame follows: the sleep ends for it.
+            let wait = self.gate.held(now, wait);
             // Until a frame, the codec or `stop` wakes it. A wake that came meanwhile
             // is kept, so the thread does not sleep past it.
             std::thread::park_timeout(wait);
@@ -454,6 +477,17 @@ impl KeyframeGate {
         if self.wait.lost(Instant::now()) {
             self.ask();
         }
+    }
+
+    /// Sends the ask held back if its time came at `now`: how long the thread may
+    /// sleep (at most `sleep`) before the next one is due.
+    fn held(&mut self, now: Instant, sleep: Duration) -> Duration {
+        if self.wait.due(now) {
+            self.ask();
+        }
+        self.wait
+            .due_at()
+            .map_or(sleep, |at| sleep.min(at.saturating_duration_since(now)))
     }
 
     fn ask(&self) {

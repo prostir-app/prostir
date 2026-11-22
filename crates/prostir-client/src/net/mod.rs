@@ -351,6 +351,7 @@ impl Net {
             inbox: Mutex::new(tx.clone()),
             events,
             linked: Mutex::default(),
+            trusted: Mutex::default(),
             quitting: std::sync::atomic::AtomicBool::new(false),
         });
         let thread = std::thread::Builder::new()
@@ -460,6 +461,10 @@ pub(crate) struct Shared {
     /// The PCs a connection has, by key: never a second one to the same PC (the PC
     /// would take it for the headset coming back, and drop the first).
     linked: Mutex<std::collections::BTreeSet<PcId>>,
+    /// The keys of the trusted PCs, as the network thread's file has them now: a
+    /// connection looks its PC up once it knows it (a PC forgotten while its dial was
+    /// on the way is not trusted any more).
+    trusted: Mutex<std::collections::BTreeSet<[u8; 32]>>,
     /// The app is closing: no connection starts a session any more.
     quitting: std::sync::atomic::AtomicBool,
 }
@@ -491,6 +496,16 @@ impl Shared {
         lock(&self.linked).remove(&pc);
     }
 
+    /// Whether the PC of `key` is trusted now.
+    fn trusts(&self, key: &[u8; 32]) -> bool {
+        lock(&self.trusted).contains(key)
+    }
+
+    /// The trusted PCs are those of `store` from now on.
+    fn trusted_now(&self, store: &TrustStore) {
+        *lock(&self.trusted) = store.entries().iter().map(|(k, _)| *k).collect();
+    }
+
     fn quitting(&self) -> bool {
         self.quitting.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -513,6 +528,8 @@ pub(crate) struct Current {
 #[derive(Default)]
 struct CurrentState {
     feedback: Option<Feedback>,
+    /// The PC this connection took, once its key is known (before its session).
+    pc: Option<PcId>,
     /// The code typed for the PC's code while pairing.
     code: Option<String>,
     /// Given up on (or left): pairing stops waiting.
@@ -531,6 +548,12 @@ impl Current {
     /// The session is open: leaving it from now on says goodbye.
     fn opened(&self, feedback: &Feedback) {
         lock(&self.state).feedback = Some(feedback.clone());
+    }
+
+    /// The connection took PC `pc` (see `Shared::claim`): leaving or forgetting that
+    /// PC leaves it from now on.
+    fn took(&self, pc: PcId) {
+        lock(&self.state).pc = Some(pc);
     }
 
     /// Its session is open (it pairs no more).
@@ -580,10 +603,19 @@ struct Conn {
     current: Arc<Current>,
 }
 
+impl Conn {
+    /// Whether it is PC `pc`'s: as its session said, or as soon as the connection took
+    /// it (its dial still on the way).
+    fn is_of(&self, pc: PcId) -> bool {
+        self.pc == Some(pc) || lock(&self.current.state).pc == Some(pc)
+    }
+}
+
 /// The network thread: commands and news, in order, until the app closes.
 fn run(config: &Config, shared: &Arc<Shared>, inbox: &Receiver<Inbox>) {
     shared.media.raise_priority();
     let mut trusted = TrustStore::load(&config.trust_file);
+    shared.trusted_now(&trusted);
     shared.tell(NetEvent::Paired(paired(&trusted)));
     let mut conns: Vec<Conn> = Vec::new();
     let mut threads: Vec<JoinHandle<()>> = Vec::new();
@@ -632,6 +664,7 @@ fn run(config: &Config, shared: &Arc<Shared>, inbox: &Receiver<Inbox>) {
                 if let Err(e) = trusted.add(key, &name) {
                     warn!("cannot keep the PC paired with: {e}");
                 }
+                shared.trusted_now(&trusted);
                 shared.tell(NetEvent::Paired(paired(&trusted)));
             }
             Inbox::Thread(t) => threads.push(t),
@@ -739,7 +772,6 @@ impl Here<'_> {
                     pair,
                     pc_shows_code,
                     host_file: config.host_file.clone(),
-                    trusted: trusted.entries().iter().map(|(k, _)| *k).collect(),
                     busy: conns.iter().map(|c| c.addr).collect(),
                     shared: shared.clone(),
                 };
@@ -757,7 +789,7 @@ impl Here<'_> {
                 }
             }
             NetCmd::Leave(pc, why) => {
-                for c in conns.iter().filter(|c| c.pc == Some(pc)) {
+                for c in conns.iter().filter(|c| c.is_of(pc)) {
                     c.current.leave(why);
                 }
             }
@@ -773,17 +805,26 @@ impl Here<'_> {
                     .map(|(k, _)| *k)
                     .filter(|k| PcId::of(k) == pc)
                     .collect();
-                let mut failed = None;
+                let (mut removed, mut failed) = (false, None);
                 for key in &keys {
+                    // Kept as it was when its file cannot be written.
                     match trusted.remove(key) {
-                        Ok(()) => info!("forgot PC {pc}"),
+                        Ok(()) => {
+                            info!("forgot PC {pc}");
+                            removed = true;
+                        }
                         Err(e) => {
                             warn!("cannot forget PC {pc}: {e}");
                             failed = Some(e.to_string());
                         }
                     }
                 }
-                shared.tell(NetEvent::Paired(paired(trusted)));
+                if removed || keys.is_empty() {
+                    // First, so a connection that looks its PC up from now on finds it
+                    // gone; one that took it already is left below.
+                    shared.trusted_now(trusted);
+                    shared.tell(NetEvent::Paired(paired(trusted)));
+                }
                 if let Some(why) = failed {
                     // Still trusted: its session goes on, and the menu says why.
                     shared.tell(NetEvent::ForgetFailed { pc, why });
@@ -797,7 +838,7 @@ impl Here<'_> {
                 drop(known);
                 // Connected to it (by its key, not its name: two PCs may share one):
                 // left, telling it so (after the new list, which the core hears first).
-                for c in conns.iter().filter(|c| c.pc == Some(pc)) {
+                for c in conns.iter().filter(|c| c.is_of(pc)) {
                     c.current.leave(HeadsetGoodbye::Forgotten);
                 }
             }

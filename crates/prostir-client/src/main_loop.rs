@@ -142,10 +142,18 @@ fn moment(tm: &libc::tm) -> Moment {
 struct Monitor {
     width_px: u32,
     height_px: u32,
-    decoder: Option<JoinHandle<()>>,
+    decoder: Option<JoinHandle<decoder::Stopped>>,
+    /// How many times its decoder thread was made again lately, and when last (see
+    /// `Shell::decoders_now`).
+    restarts: (u32, Option<Instant>),
     stop: Arc<AtomicBool>,
     swapchain: xr::Swapchain<Gfx>,
 }
+
+/// A decoder thread that gave up is made again this many times for its stream within
+/// [`DECODER_RESTARTS_WITHIN`] of the last time; then the stream counts as failed.
+const DECODER_RESTARTS: u32 = 3;
+const DECODER_RESTARTS_WITHIN: Duration = Duration::from_secs(60);
 
 impl Monitor {
     fn aspect(&self) -> f32 {
@@ -187,10 +195,10 @@ fn load_panorama(choice: Background, dir: Option<&Path>) -> Panorama {
     {
         match image::open(&path) {
             Ok(img) => {
-                let img = if img.width() > 4096 {
-                    img.resize(4096, 2048, image::imageops::FilterType::Triangle)
-                } else {
-                    img
+                // Too wide or too tall for the compositor's layer: smaller, as it is.
+                let img = match background::fit_within(img.width(), img.height()) {
+                    Some((w, h)) => img.resize(w, h, image::imageops::FilterType::Triangle),
+                    None => img,
                 };
                 let rgba = img.to_rgba8();
                 info!("panorama from {}", path.display());
@@ -429,6 +437,7 @@ impl Shell<'_> {
                                 width_px: width,
                                 height_px: height,
                                 decoder: Some(decoder),
+                                restarts: (0, None),
                                 stop,
                                 swapchain,
                             },
@@ -449,6 +458,68 @@ impl Shell<'_> {
                 }
                 self.handle(now, Event::Net(event));
             }
+        }
+    }
+
+    /// A decoder thread that ended on its own while its monitor stays (its codec
+    /// failed again and again, or it panicked) is made again with its job, the PC asked
+    /// for a keyframe, up to [`DECODER_RESTARTS`] times; then (or after a panic) the
+    /// stream counts as failed and its monitor goes. Looked at once a pass: a look at
+    /// each monitor, nothing made; one stream failed a pass (another one is found on
+    /// the next).
+    fn decoders_now(&mut self, now: Instant) {
+        let mut failed = None;
+        for (id, m) in &mut self.monitors {
+            if m.stop.load(Ordering::Relaxed)
+                || !m.decoder.as_ref().is_some_and(JoinHandle::is_finished)
+            {
+                continue;
+            }
+            let Some(thread) = m.decoder.take() else {
+                continue;
+            };
+            // Made again long ago: it ran well since.
+            if m.restarts
+                .1
+                .is_some_and(|at| now.saturating_duration_since(at) >= DECODER_RESTARTS_WITHIN)
+            {
+                m.restarts.0 = 0;
+            }
+            let gave_up = match thread.join() {
+                // The stream ended: its end comes from the network.
+                Ok(decoder::Stopped { failed: false, .. }) => false,
+                Ok(decoder::Stopped { job, failed: true }) if m.restarts.0 < DECODER_RESTARTS => {
+                    m.restarts = (m.restarts.0 + 1, Some(now));
+                    warn!(
+                        "monitor {id}: its decoder gave up, made again ({} of {DECODER_RESTARTS})",
+                        m.restarts.0
+                    );
+                    let _ = job
+                        .feedback
+                        .send(prostir_proto::ClientMsg::RequestKeyframe {
+                            id: job.stream.id,
+                            generation: job.stream.generation,
+                        });
+                    m.decoder = Some(decoder::spawn(job));
+                    false
+                }
+                Ok(_) => {
+                    error!("monitor {id}: its decoder gave up for good");
+                    true
+                }
+                Err(_) => {
+                    error!("monitor {id}: its decoder panicked");
+                    true
+                }
+            };
+            if gave_up {
+                failed = Some(*id);
+                break;
+            }
+        }
+        if let Some(id) = failed {
+            self.monitors.remove(&id);
+            self.handle(now, Event::StreamFailed(id));
         }
     }
 
@@ -651,6 +722,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     // The panorama shown and the background it was made for.
     let mut pano_layer: Option<(Background, ImageLayer)> = None;
     let mut pano_job: Option<(Background, JoinHandle<Panorama>)> = None;
+    // The background whose panorama could not be shown (not tried again while it is
+    // chosen): the person's picture falls back to the generated sky first.
+    let mut pano_failed: Option<Background> = None;
     // The selftest reads nothing of the person's there (`host.txt`, a panorama).
     let external_dir = app.external_data_path().filter(|_| test.is_none());
     let custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
@@ -791,13 +865,19 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             Duration::from_millis(100)
         };
         let mut input_waiting = false;
+        // The microphone hears each pause and return: its prompt's answer shows so.
+        let mic = &shell.mic;
         app.poll_events(Some(timeout), |event| match event {
             PollEvent::Main(MainEvent::Destroy) => destroy = true,
             PollEvent::Main(MainEvent::Pause) => {
                 paused = true;
                 activity = Some(true);
+                mic.activity(true);
             }
-            PollEvent::Main(MainEvent::Resume { .. }) => activity = Some(false),
+            PollEvent::Main(MainEvent::Resume { .. }) => {
+                activity = Some(false);
+                mic.activity(false);
+            }
             PollEvent::Main(MainEvent::InputAvailable) => input_waiting = true,
             _ => {}
         });
@@ -999,6 +1079,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             }
             shell.net_event(now, event, &vm);
         }
+        shell.decoders_now(now);
         // Only the newest battery reading matters (several wait after a pause).
         let mut newest = None;
         while let Some(event) = shell.system.try_recv() {
@@ -1024,10 +1105,14 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // Panorama: generated or decoded off the main thread, uploaded once per choice.
         let wanted = shell.model.settings().background;
         let wants_pano = matches!(wanted, Background::Sky(_) | Background::Custom);
+        if pano_failed.is_some_and(|f| f != wanted) {
+            pano_failed = None;
+        }
         if wants_pano
             && exts.khr_composition_layer_equirect2
             && pano_layer.as_ref().is_none_or(|(b, _)| *b != wanted)
             && pano_job.is_none()
+            && pano_failed != Some(wanted)
         {
             let dir = shell.external_dir.clone();
             pano_job = Some((
@@ -1036,13 +1121,29 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             ));
         }
         if let Some((made_for, job)) = pano_job.take_if(|(_, j)| j.is_finished()) {
-            match job.join() {
-                Ok((w, h, pixels)) => {
-                    let mut layer = ImageLayer::new(&session, format, w, h, true)?;
-                    layer.upload(&gl, &pixels)?;
-                    pano_layer = Some((made_for, layer));
+            // A panorama that cannot be shown is no reason to stop the app.
+            let made = match job.join() {
+                Ok((w, h, pixels)) => ImageLayer::new(&session, format, w, h, true)
+                    .and_then(|mut layer| layer.upload(&gl, &pixels).map(|()| layer))
+                    .map_err(|e| format!("{e:#}")),
+                Err(_) => Err("its making panicked".to_owned()),
+            };
+            match made {
+                Ok(layer) => pano_layer = Some((made_for, layer)),
+                Err(e) => {
+                    warn!("the panorama for {made_for:?} cannot be shown: {e}");
+                    let first = pano_failed != Some(made_for);
+                    pano_failed = Some(made_for);
+                    if made_for == Background::Custom && first {
+                        info!("the generated sky instead of the picture");
+                        pano_job = Some((
+                            made_for,
+                            std::thread::spawn(|| {
+                                load_panorama(Background::Sky(background::Sky::Night), None)
+                            }),
+                        ));
+                    }
                 }
-                Err(_) => warn!("panorama generation panicked"),
             }
         }
 

@@ -225,7 +225,7 @@ fn a_round_tries_each_way_in_turn() {
 
 /// A trusted PC's answer leads to its connection at once, while the query still waits
 /// for more; the one PC that answers everyone is dialed at the end of the round, and
-/// refusing the connection, it is most likely behind a firewall.
+/// refusing the connection in two rounds in a row, it is most likely behind a firewall.
 #[test]
 fn answers_lead_to_the_pc() {
     let mut sim = Sim::new(MAX_PCS);
@@ -268,10 +268,30 @@ fn answers_lead_to_the_pc() {
     assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
     sim.missed(s);
     assert_eq!(
+        sim.s.search().unreachable,
+        None,
+        "once may be a connection slower than a dial waits"
+    );
+    // The next round the same.
+    sim.after(ASK_FAST);
+    let (s, _) = sim.step();
+    sim.missed(s);
+    let (s, _) = sim.asked(None);
+    sim.answer(None, addr(7));
+    sim.missed(s);
+    let (s, _) = sim.step();
+    sim.missed(s);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
+    sim.missed(s);
+    assert_eq!(
         sim.s.search().unreachable.as_deref(),
         Some("Desk"),
-        "it answers but refuses: a firewall"
+        "it answers but refuses again: a firewall"
     );
+    // Any connection that opens takes it back.
+    sim.s.dialed(StepId(999), addr(7));
+    assert_eq!(sim.s.search().unreachable, None);
     // Two of them: none is picked for the user.
     sim.after(ASK_FAST);
     let (s, _) = sim.step();
@@ -513,7 +533,7 @@ fn an_unknown_pc_waits_for_the_users_answer() {
     sim.s.dialed(s, usb());
     sim.s.pairing(s, key(5), usb(), None, &sim.texts);
     sim.s.pairing_mut().unwrap().typed.push('1');
-    sim.s.switch_pairing_side();
+    sim.s.switch_pairing_side(sim.now);
     assert_eq!(sim.cmds(), [NetCmd::Hangup]);
     sim.end(s, None, &Ended::default(), Duration::from_secs(5));
     sim.after(RETRY_PAUSE);
@@ -901,4 +921,190 @@ fn a_decline_is_the_pcs_and_the_last_address_wins() {
         Dest::Addr(usb()),
         "a trusted PC at the declined address"
     );
+}
+
+/// For `secs` seconds of rounds, each query answered by trusted PC `n` from `at` and
+/// every step missed: whether `at` (or the PC's last address) was dialed, and whether
+/// any dial was to pair.
+fn dials_its_answer(sim: &mut Sim, n: u8, at: SocketAddr, secs: u32) -> (bool, bool) {
+    let (mut dialed, mut pairs) = (false, false);
+    for _ in 0..secs {
+        sim.after(Duration::from_secs(1));
+        loop {
+            let cmds = sim.cmds();
+            if cmds.is_empty() {
+                break;
+            }
+            for cmd in cmds {
+                match cmd {
+                    NetCmd::Ask { step, .. } => {
+                        sim.answer(Some(n), at);
+                        sim.missed(step);
+                    }
+                    NetCmd::Dial { step, to, pair, .. } => {
+                        dialed |= to == Dest::Addr(at) || to == Dest::LastOf(pc(n));
+                        pairs |= pair.is_some();
+                        sim.missed(step);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    (dialed, pairs)
+}
+
+/// A pick is for one connection: paired over USB as the user agreed, once that
+/// session is over (the cable pulled) the PC's answers over Wi-Fi are dialed, and no
+/// dial pairs on the old agreement.
+#[test]
+fn after_pairing_over_usb_the_pc_is_found_on_wifi() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.s.dialed(s, usb());
+    sim.s.offered(key(5), usb(), OfferWhy::New, &sim.texts);
+    sim.end(s, None, &Ended::default(), Duration::from_millis(80));
+    sim.s.answer_offer(true, sim.now);
+    sim.after(Duration::ZERO);
+    let (s, _) = sim.step();
+    sim.s.dialed(s, usb());
+    sim.s
+        .pairing(s, key(5), usb(), Some("123 456".into()), &sim.texts);
+    sim.paired(&[5]);
+    sim.reach(s, 5, usb());
+    let _ = sim.cmds();
+    let opened = Ended {
+        opened: true,
+        ..Ended::default()
+    };
+    sim.end(s, Some(5), &opened, Duration::from_secs(60));
+    let (dialed, pairs) = dials_its_answer(&mut sim, 5, addr(9), 5);
+    assert!(dialed, "the trusted PC answering over Wi-Fi is dialed");
+    assert!(!pairs, "the agreement to pair was for that connection");
+}
+
+/// A PC picked in the list after "Change PC" is the user's choice until its session
+/// opens; when its address changes later (DHCP), its answer from the new one is
+/// dialed.
+#[test]
+fn a_picked_pc_that_moves_is_found_again() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.reach(s, 1, addr(7));
+    let _ = sim.cmds();
+    sim.s.change_pc();
+    let _ = sim.cmds();
+    sim.end(s, Some(1), &Ended::default(), Duration::from_secs(9));
+    sim.s.connect_to(addr(7), sim.now);
+    sim.after(RETRY_PAUSE);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(7)), "the pick first");
+    sim.reach(s, 1, addr(7));
+    let _ = sim.cmds();
+    let opened = Ended {
+        opened: true,
+        ..Ended::default()
+    };
+    sim.end(s, Some(1), &opened, Duration::from_secs(600));
+    let (dialed, _) = dials_its_answer(&mut sim, 1, addr(8), 5);
+    assert!(dialed, "the picked PC at its new address is dialed");
+}
+
+/// Forgetting the PC in use fails (its file cannot be written): the search goes on as
+/// before, and once the session ends the PC is connected to again on its own.
+#[test]
+fn a_failed_forget_changes_nothing() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.reach(s, 1, usb());
+    let _ = sim.cmds();
+    sim.s.forget(pc(1));
+    assert_eq!(sim.cmds(), [NetCmd::Forget(pc(1))]);
+    sim.s.forget_failed(pc(1));
+    let broke = Ended {
+        opened: true,
+        ..Ended::default()
+    };
+    sim.end(s, Some(1), &broke, Duration::from_secs(60));
+    sim.after(Duration::ZERO);
+    let (_, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb, "not picking: it goes its own way");
+}
+
+/// The PC refused to pair (no dialog for the code): "the other way round" on the
+/// offer pairs again at once, with the other side showing the code.
+#[test]
+fn the_other_way_after_a_refusal_pairs_again() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.s.dialed(s, usb());
+    let why = OfferWhy::PcRefused { pc_shows: false };
+    sim.s.offered(key(5), usb(), why, &sim.texts);
+    let refused = Ended {
+        refused: Some(sim.now),
+        ..Ended::default()
+    };
+    sim.end(s, None, &refused, MS);
+    sim.after(Duration::from_secs(1));
+    assert!(sim.cmds().is_empty(), "waiting for the user");
+    sim.s.switch_pairing_side(sim.now);
+    sim.after(Duration::ZERO);
+    let (_, cmd) = sim.step();
+    assert!(
+        matches!(
+            cmd,
+            NetCmd::Dial {
+                pair: Some(k),
+                pc_shows_code: true,
+                ..
+            } if k == key(5)
+        ),
+        "{cmd:?}"
+    );
+}
+
+/// A PC picked while another is in use over USB: once the pick's session opened and
+/// ended, the search looks for the PC picked (its answers, its last address), never
+/// USB first, nor the other PC's answers: the user's pick holds until the next.
+#[test]
+fn a_pick_holds_after_its_session() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1, 2]);
+    sim.after(MS);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    sim.reach(s, 1, usb());
+    let _ = sim.cmds();
+    sim.s.connect_to(addr(7), sim.now);
+    let _ = sim.cmds();
+    sim.end(s, Some(1), &Ended::default(), Duration::from_secs(9));
+    sim.after(RETRY_PAUSE);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
+    sim.reach(s, 2, addr(7));
+    let _ = sim.cmds();
+    let opened = Ended {
+        opened: true,
+        ..Ended::default()
+    };
+    sim.end(s, Some(2), &opened, Duration::from_secs(60));
+    sim.after(Duration::ZERO);
+    let (s, cmd) = sim.step();
+    assert!(
+        matches!(cmd, NetCmd::Ask { .. }),
+        "not USB, where the other PC is: {cmd:?}"
+    );
+    // The other PC answers: listed, not dialed; the one picked is.
+    sim.answer(Some(1), addr(5));
+    assert!(sim.cmds().is_empty(), "the other PC is not taken instead");
+    sim.answer(Some(2), addr(8));
+    let (_, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(8)), "the PC picked, moved");
+    sim.missed(s);
 }

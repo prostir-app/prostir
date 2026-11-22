@@ -261,6 +261,115 @@ fn a_session_opens_streams_and_comes_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Forgetting a PC the file does not have (gone already) is still answered with the
+/// list, which the menu waits for.
+#[test]
+fn forgetting_a_pc_not_kept_still_answers() {
+    let dir = temp_dir("forget-unknown");
+    let (pc, mut net, rx, _) = start(&dir, false, false);
+    wait(&rx, |e| matches!(e, NetEvent::Paired(_)).then_some(()));
+    net.send(NetCmd::Forget(PcId::of(&[42; 32])));
+    let list = wait(&rx, |e| match e {
+        NetEvent::Paired(list) => Some(list),
+        _ => None,
+    });
+    assert_eq!(list.len(), 1, "the PC trusted stays");
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The events until the connection of step `step` ended (within 10 s), in order.
+fn until_ended(rx: &Receiver<NetEvent>, step: u32) -> Vec<NetEvent> {
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut seen = Vec::new();
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        let e = rx
+            .recv_timeout(left)
+            .expect("the connection did not end in time");
+        let end = matches!(e, NetEvent::Ended { step: s, .. } if s == StepId(step));
+        seen.push(e);
+        if end {
+            return seen;
+        }
+    }
+}
+
+/// Forgotten while its dial is still on the way (before the PC said who it is): no
+/// session opens with it; it is a PC like any other now, offered to the user.
+#[test]
+fn forgetting_during_a_dial_opens_no_session() {
+    let dir = temp_dir("forget-dialing");
+    let (pc, mut net, rx, _) = start(&dir, false, false);
+    let id = PcId::of(&pc.key());
+    wait(&rx, |e| matches!(e, NetEvent::Paired(_)).then_some(()));
+    dial(&net, 1, pc.addr());
+    net.send(NetCmd::Forget(id));
+    let seen = until_ended(&rx, 1);
+    assert!(
+        !seen.iter().any(|e| matches!(e, NetEvent::Connected { .. })),
+        "a session with the PC forgotten"
+    );
+    assert!(
+        seen.iter().any(|e| matches!(
+            e,
+            NetEvent::PairOffer {
+                why: OfferWhy::New,
+                ..
+            }
+        )),
+        "offered as a new PC"
+    );
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Forgetting a PC whose file cannot be written changes nothing: it is still trusted
+/// (the list says so), and its session goes on.
+#[test]
+fn a_forget_that_cannot_be_kept_changes_nothing() {
+    let dir = temp_dir("forget-failed");
+    let (pc, mut net, rx, _) = start(&dir, false, false);
+    let id = PcId::of(&pc.key());
+    dial(&net, 1, pc.addr());
+    wait(&rx, |e| {
+        matches!(e, NetEvent::Connected { .. }).then_some(())
+    });
+    // The file's place taken by a folder: it cannot be written.
+    let file = dir.join("headset/paired_hosts");
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    std::fs::write(file.join("in-the-way"), "").unwrap();
+    net.send(NetCmd::Forget(id));
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left).expect("no word of the forget") {
+            NetEvent::Paired(list) => {
+                assert!(list.iter().any(|p| p.pc == id), "still trusted: {list:?}");
+            }
+            NetEvent::ForgetFailed { pc: p, .. } => {
+                assert_eq!(p, id);
+                break;
+            }
+            NetEvent::Ended { .. } => panic!("the session ended"),
+            _ => {}
+        }
+    }
+    // Still in its session a while later.
+    let until = Instant::now() + Duration::from_millis(500);
+    while let Some(left) = until.checked_duration_since(Instant::now()) {
+        if let Ok(e) = rx.recv_timeout(left) {
+            assert!(!matches!(e, NetEvent::Ended { .. }), "the session ended");
+        }
+    }
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn forgetting_leaves_and_drops_the_pc() {
     let dir = temp_dir("forget");
@@ -316,8 +425,156 @@ fn forgetting_leaves_and_drops_the_pc() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Leaving a PC (another picked, say) ends every stream before the connection, also
+/// when the PC's ping crossed the goodbye: nothing is sent any more, and the monitors
+/// must not keep their decoders.
+#[test]
+fn leaving_ends_every_stream() {
+    let dir = temp_dir("leave-streams");
+    let (pc, mut net, rx, _) = start(&dir, false, false);
+    let pc_id = PcId::of(&pc.key());
+    dial(&net, 1, pc.addr());
+    let stream = wait(&rx, |e| match e {
+        NetEvent::StreamStart { pc: p, id, .. } if p == pc_id => Some(id),
+        _ => None,
+    });
+    pc.ping_when_left(true);
+    net.send(NetCmd::Leave(pc_id, HeadsetGoodbye::OtherPc));
+    let seen = until_ended(&rx, 1);
+    assert!(
+        seen.iter().any(
+            |e| matches!(e, NetEvent::StreamEnd { pc: p, id: s } if *p == pc_id && *s == stream)
+        ),
+        "the stream did not end"
+    );
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A PC that takes the connection and the versions, then refuses each request to pair
+/// with `text` (as the PC app does when it has no dialog for the code, or another
+/// headset is pairing), and its answer that ends the attempt unless `no_result`: its
+/// address and key, and what the headset asked of it, by the messages' names, once the
+/// headset is gone.
+fn refusing_pc(
+    dir: &Path,
+    text: &'static str,
+    no_result: bool,
+) -> (SocketAddr, [u8; 32], JoinHandle<Vec<String>>) {
+    use prostir_proto::handshake;
+    use prostir_proto::link::tcp::{NoiseTcp, Plain};
+    use prostir_proto::packet::{self, lane};
+    let identity = Identity::load_or_create(&dir.join("pc-identity")).unwrap();
+    let key = identity.public;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let pc = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut link = NoiseTcp::accept(stream, &identity, Arc::new(Plain)).unwrap();
+        handshake::read_first(&mut *link.receiver).unwrap();
+        handshake::send_from_pc(
+            &mut *link.sender,
+            &HostMsg::Welcome {
+                version: prostir_proto::PROTOCOL_VERSION,
+                language: "en".into(),
+            },
+        )
+        .unwrap();
+        let mut packets = ClientMsg::assembler();
+        let mut asked = Vec::new();
+        while let Ok(msg) = ClientMsg::recv(&mut *link.receiver, &mut packets) {
+            let name = format!("{msg:?}");
+            asked.push(name.split([' ', '{', '(']).next().unwrap_or("").to_owned());
+            if matches!(msg, ClientMsg::PairBegin { .. }) {
+                let replies = [
+                    HostMsg::Error { text: text.into() },
+                    HostMsg::PairResult { tag: None },
+                ];
+                let n = if no_result { 1 } else { 2 };
+                for reply in replies.into_iter().take(n) {
+                    let sent = reply.encode().and_then(|m| {
+                        packet::send_whole(&mut *link.sender, lane::CONTROL, m, 1200)
+                    });
+                    if sent.is_err() {
+                        return asked;
+                    }
+                }
+            }
+        }
+        asked
+    });
+    (addr, key, pc)
+}
+
+/// The PC refuses to pair (no dialog for the code, or another headset pairing): the
+/// headset says the PC's words and asks the user again at once, with no new request
+/// and no count of wrong codes; the search pauses as after a refusal. Whichever side
+/// was to show the code: also while the user waits for the PC's code to type. Its
+/// answer that ends the attempt is waited for a moment only (not the minutes a code
+/// takes).
+#[test]
+fn a_pc_that_refuses_to_pair_is_not_asked_again() {
+    for (pc_shows_code, no_result) in [(false, false), (true, false), (false, true), (true, true)] {
+        let dir = temp_dir(&format!("refused-{pc_shows_code}-{no_result}"));
+        let headset_dir = dir.join("headset");
+        std::fs::create_dir_all(&headset_dir).unwrap();
+        let (addr, key, pc) = refusing_pc(&dir, "No dialog", no_result);
+        let (tx, rx) = mpsc::channel();
+        let mut net = Net::start(
+            Config {
+                discovery_port: None,
+                broadcast: false,
+                ..Config::in_dir(&headset_dir, None, "Test headset")
+            },
+            tx,
+            Arc::new(FakeSource(Arc::default())),
+            HeadsetState::default(),
+        )
+        .unwrap();
+        net.send(NetCmd::Dial {
+            step: StepId(1),
+            to: Dest::Addr(addr),
+            pair: Some(key),
+            pc_shows_code,
+        });
+        let seen = until_ended(&rx, 1);
+        let said = seen
+            .iter()
+            .any(|e| matches!(e, NetEvent::HostError(t) if t == "No dialog"));
+        assert!(said, "the PC's words: {pc_shows_code}");
+        let offers: Vec<OfferWhy> = seen
+            .iter()
+            .filter_map(|e| match e {
+                NetEvent::PairOffer { why, .. } => Some(*why),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(offers.len(), 1, "asked again: {pc_shows_code}");
+        assert_eq!(
+            offers[0],
+            OfferWhy::PcRefused {
+                pc_shows: pc_shows_code
+            },
+            "not wrong codes"
+        );
+        let refused = seen
+            .iter()
+            .any(|e| matches!(e, NetEvent::Ended { ended, .. } if ended.refused.is_some()));
+        assert!(refused, "the search pauses: {pc_shows_code}");
+        assert!(net.stop(Duration::from_secs(2)));
+        let asked = pc.join().unwrap();
+        let begins = asked.iter().filter(|m| *m == "PairBegin").count();
+        assert_eq!(begins, 1, "{asked:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// A PC the headset does not trust is offered (before anything is sent); one that no
-/// longer trusts the headset too, when it says so.
+/// longer trusts the headset too, when it says so, as a PC that forgot it.
 #[test]
 fn strangers_are_offered_to_the_user() {
     let dir = temp_dir("unknown");
@@ -338,7 +595,7 @@ fn strangers_are_offered_to_the_user() {
         NetEvent::PairOffer { why, .. } => Some(why),
         _ => None,
     });
-    assert_eq!(why, OfferWhy::New);
+    assert_eq!(why, OfferWhy::Forgotten, "a PC of its own that forgot it");
     let ended = wait(&rx, |e| match e {
         NetEvent::Ended { pc, ended, .. } => Some((pc, ended.opened)),
         _ => None,

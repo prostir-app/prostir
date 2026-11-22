@@ -16,8 +16,17 @@ use ndk_sys as ffi;
 use prostir_proto::stats::Period;
 use prostir_proto::{AUDIO_CHANNELS, AUDIO_RATE};
 
+use crate::backoff::Backoff;
+
 /// How often the player logs underruns and dropped slices.
 const REPORT_EVERY: Duration = Duration::from_secs(10);
+/// A sound output that does not open is tried again after this, then twice as long
+/// each time up to [`OPEN_AGAIN_MAX`].
+const OPEN_AGAIN_FIRST: Duration = Duration::from_millis(300);
+const OPEN_AGAIN_MAX: Duration = Duration::from_secs(5);
+/// A sound output that broke after playing this long worked: the next one opens after
+/// the first pause again.
+const PLAYED_A_WHILE: Duration = Duration::from_secs(1);
 
 /// Most audio kept waiting before older slices are dropped (10 ms each), so sound
 /// never drifts behind the picture after a Wi-Fi hiccup.
@@ -109,20 +118,39 @@ impl Player {
                     crate::platform::android::Priority::Audio,
                 );
                 // An AAudio stream dies when the audio route changes (headphones in or
-                // out): open a new one and keep playing.
-                let mut failures = 0;
-                while failures < 5 {
-                    match Stream::open() {
-                        Ok(stream) => match play(&stream, &rx, &back, &counted, &gains) {
-                            Ended::Closed => return,
-                            Ended::Failed => failures = 0,
-                        },
-                        Err(e) => {
-                            warn!("no sound: AAudio error {e}");
-                            failures += 1;
+                // out): open a new one and keep playing. One that does not open is
+                // tried again, less often while it goes on failing, for as long as the
+                // session sends sound: it never gives up for the rest of the session.
+                let mut backoff = Backoff::new(OPEN_AGAIN_FIRST, OPEN_AGAIN_MAX);
+                loop {
+                    let pause = match Stream::open() {
+                        Ok(stream) => {
+                            let opened = Instant::now();
+                            match play(&stream, &rx, &back, &counted, &gains) {
+                                Ended::Closed => return,
+                                // Broke right after it opened: as one that did not open,
+                                // so the pauses grow.
+                                Ended::Failed if opened.elapsed() < PLAYED_A_WHILE => {
+                                    backoff.failed()
+                                }
+                                Ended::Failed => {
+                                    backoff.worked();
+                                    OPEN_AGAIN_FIRST
+                                }
+                            }
                         }
+                        Err(e) => {
+                            let pause = backoff.failed();
+                            warn!(
+                                "no sound: AAudio error {e}; trying again in {} ms",
+                                pause.as_millis()
+                            );
+                            pause
+                        }
+                    };
+                    if !pass_while_silent(pause, &rx, &back, &counted) {
+                        return;
                     }
-                    std::thread::sleep(Duration::from_millis(300));
                 }
             })
             .inspect_err(|e| warn!("no sound: {e}"));
@@ -214,6 +242,28 @@ impl Drop for Stream {
 
 fn check(result: i32) -> Result<(), i32> {
     if result < 0 { Err(result) } else { Ok(()) }
+}
+
+/// While no stream plays, for `pause`: the slices that come go back to be received
+/// into again (counted as dropped). `false` once the session is over.
+fn pass_while_silent(
+    pause: Duration,
+    rx: &Receiver<Vec<u8>>,
+    back: &SyncSender<Vec<u8>>,
+    behind: &AtomicU32,
+) -> bool {
+    let until = Instant::now() + pause;
+    while let Some(left) = until.checked_duration_since(Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(slice) => {
+                behind.fetch_add(1, Ordering::Relaxed);
+                let _ = back.try_send(slice);
+            }
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+    true
 }
 
 /// Why playing stopped.

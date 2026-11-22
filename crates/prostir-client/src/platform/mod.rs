@@ -5,10 +5,12 @@
 //! The core sees none of it: what the headset can do comes to it as [`crate::caps::Caps`],
 //! made here at the start ([`caps`]).
 //!
-//! The controllers' table and the stores build on any system (they are data and an
-//! interface); the rest only for Android.
+//! The controllers' table, the stores and the microphone's wait for access build on
+//! any system (they are data, an interface and plain logic); the rest only for
+//! Android.
 
 pub mod controllers;
+pub mod mic_permission;
 pub mod store;
 
 #[cfg(target_os = "android")]

@@ -72,6 +72,9 @@ pub const NEW_HINT_AFTER: Duration = Duration::from_secs(5);
 pub const SILENT_HINT_AFTER: Duration = Duration::from_secs(30);
 /// The most PCs listed from answers (the rest of a flood of forged ones is dropped).
 pub const FOUND_MAX: usize = 8;
+/// A PC that answers but is not reached this many times in a row is most likely
+/// behind a firewall (once may be a connection slower than a dial waits).
+pub const UNREACHABLE_AFTER: u8 = 2;
 
 /// A PC this headset trusts, as the network thread's file of them says.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,23 +213,34 @@ pub enum Attempt {
 pub struct Search {
     /// PCs that answered lately (within [`HEARD_WITHIN`]), the latest last.
     pub found: Vec<FoundHost>,
-    /// A PC that answers but does not accept the connection (a firewall).
+    /// A PC that answers but does not accept the connection (a firewall): after
+    /// [`UNREACHABLE_AFTER`] dials in a row, until a connection opens.
     pub unreachable: Option<String>,
+    /// The address of a PC that answered and was not reached, and how many times in a
+    /// row.
+    missed_at: Option<(SocketAddr, u8)>,
     /// What the search screen says while nothing answers.
     pub hint: Option<Hint>,
     pub attempt: Option<Attempt>,
     /// The PC speaks another protocol: (the PC is newer, its app version). Kept until
     /// a session opens.
     pub update: Option<(bool, String)>,
-    /// Picked in the menu (or typed in): tried before anything else.
+    /// Picked in the menu (or typed in): tried before anything else, until a session
+    /// opens there.
     choice: Option<SocketAddr>,
+    /// The PC whose session opened from the user's pick (and whether over USB): the
+    /// round goes its own way again, but for that PC alone (its answers, its last
+    /// address; USB only if it was there), so it is found when it moves or the cable
+    /// goes, and another PC is never connected to instead of it. Until the user picks
+    /// again or forgets it.
+    preferred: Option<(PcId, bool)>,
     /// "Change PC": nothing reconnects on its own until the user picks one.
     picking: bool,
     /// The PC the user said "Not now" to (its address, and its number once known):
     /// not dialed on its own until the user picks something, while other trusted PCs
     /// still are.
     declined: Option<(SocketAddr, PcId)>,
-    /// The user agreed to pair with this PC (until when).
+    /// The user agreed to pair with this PC (until when, or until its session opens).
     approved: Option<([u8; 32], Instant)>,
     /// Pairing the other way round: the PC shows the code, the headset asks for it.
     pc_shows_code: bool,
@@ -310,6 +324,15 @@ pub enum Disconnect {
     Closed,
 }
 
+/// The search's pick before a PC was forgotten (see `Session::forget`).
+#[derive(Debug, Clone, Copy)]
+struct Forgetting {
+    pc: PcId,
+    choice: Option<SocketAddr>,
+    picking: bool,
+    preferred: Option<(PcId, bool)>,
+}
+
 /// What follows the end of a link for the menu.
 #[derive(Debug, Default)]
 pub struct LinkEnded {
@@ -339,6 +362,9 @@ pub struct Session {
     cmds: Vec<NetCmd>,
     /// The state of no PC, for when none is connected.
     empty: PcState,
+    /// A PC in use being forgotten, and the user's pick before: back as it was if
+    /// forgetting fails.
+    forgetting: Option<Forgetting>,
 }
 
 impl Session {
@@ -357,6 +383,7 @@ impl Session {
             offline_since: Some(now),
             cmds: Vec::new(),
             empty: PcState::default(),
+            forgetting: None,
         }
     }
 
@@ -500,10 +527,11 @@ impl Session {
         self.cmds.push(NetCmd::SetHeadset(state));
     }
 
-    /// The user picked the PC at `addr` (in the list, or typed): it is tried first,
-    /// and a session with another PC ends.
+    /// The user picked the PC at `addr` (in the list, or typed): it is tried first
+    /// until a session opens there, and a session with another PC ends.
     pub fn connect_to(&mut self, addr: SocketAddr, now: Instant) {
         self.search.choice = Some(addr);
+        self.search.preferred = None;
         self.search.picking = false;
         self.search.declined = None;
         let others: Vec<PcId> = self
@@ -525,6 +553,7 @@ impl Session {
     /// user picks one. The search starts anew (its hint for a new PC too).
     pub fn change_pc(&mut self) {
         self.search.choice = None;
+        self.search.preferred = None;
         self.search.picking = true;
         self.search.declined = None;
         self.search.since = None;
@@ -537,11 +566,35 @@ impl Session {
     /// The user forgot PC `pc`: the network thread leaves it, telling it so, and drops
     /// it; the headset does not come back to it on its own.
     pub fn forget(&mut self, pc: PcId) {
-        if self.links.get(&pc).is_some_and(|l| link_addr(l).is_some()) {
+        let in_use = self.links.get(&pc).is_some_and(|l| link_addr(l).is_some());
+        let preferred = self.search.preferred.is_some_and(|(p, _)| p == pc);
+        if in_use || preferred {
+            let s = &self.search;
+            self.forgetting = Some(Forgetting {
+                pc,
+                choice: s.choice,
+                picking: s.picking,
+                preferred: s.preferred,
+            });
+        }
+        if in_use {
             self.search.choice = None;
             self.search.picking = true;
         }
+        if preferred {
+            self.search.preferred = None;
+        }
         self.cmds.push(NetCmd::Forget(pc));
+    }
+
+    /// Forgetting PC `pc` failed (the network thread kept it): the search goes on as
+    /// before it was asked.
+    pub fn forget_failed(&mut self, pc: PcId) {
+        if let Some(f) = self.forgetting.take_if(|f| f.pc == pc) {
+            self.search.choice = f.choice;
+            self.search.picking = f.picking;
+            self.search.preferred = f.preferred;
+        }
     }
 
     /// The user's answer to "Pair with this PC?".
@@ -570,9 +623,19 @@ impl Session {
         self.cmds.push(NetCmd::SubmitCode(code));
     }
 
-    /// Pairing: which side shows the code is swapped, and pairing starts over.
-    pub fn switch_pairing_side(&mut self) {
+    /// Pairing: which side shows the code is swapped, and pairing starts over; asked
+    /// again after the PC refused, it is the user's "Pair" too.
+    pub fn switch_pairing_side(&mut self, now: Instant) {
         self.search.pc_shows_code = !self.search.pc_shows_code;
+        if matches!(
+            self.search.attempt,
+            Some(Attempt::PairOffer {
+                why: OfferWhy::PcRefused { .. },
+                ..
+            })
+        ) {
+            return self.answer_offer(true, now);
+        }
         if matches!(self.search.attempt, Some(Attempt::Pairing { .. })) {
             self.search.attempt = None;
         }
@@ -600,6 +663,20 @@ impl Session {
     pub fn paired_list(&mut self, list: Vec<PairedPc>) {
         self.paired = list;
         let paired = &self.paired;
+        // Forgotten: nothing to put back, nor to prefer.
+        if self
+            .forgetting
+            .is_some_and(|f| paired.iter().all(|p| p.pc != f.pc))
+        {
+            self.forgetting = None;
+        }
+        if self
+            .search
+            .preferred
+            .is_some_and(|(pc, _)| paired.iter().all(|p| p.pc != pc))
+        {
+            self.search.preferred = None;
+        }
         self.search
             .last_dialed
             .retain(|(pc, _)| paired.iter().any(|p| p.pc == *pc));
@@ -660,7 +737,7 @@ impl Session {
             }
         } else if self.search.choice.is_none()
             && !self.search.picking
-            && pc.is_some_and(|pc| self.wants(pc))
+            && pc.is_some_and(|pc| self.wants(pc) && self.may_prefer(pc))
             && !self.is_declined(addr, pc)
         {
             self.dial(Plan::Answer, Dest::Addr(addr), now);
@@ -679,8 +756,16 @@ impl Session {
         if let Some(addr) = self.addr_of(at)
             && let Some(h) = self.search.found.iter().find(|h| h.addr == addr)
         {
-            // It answers but refuses the connection: most likely a firewall.
-            self.search.unreachable = Some(h.name.clone());
+            // It answers but refuses the connection again and again: most likely a
+            // firewall.
+            let times = match self.search.missed_at {
+                Some((a, n)) if a == addr => n.saturating_add(1),
+                _ => 1,
+            };
+            self.search.missed_at = Some((addr, times));
+            if times >= UNREACHABLE_AFTER {
+                self.search.unreachable = Some(h.name.clone());
+            }
         }
         if matches!(
             self.search.attempt,
@@ -694,6 +779,9 @@ impl Session {
     /// The connection of step `step` is open (TCP): an attempt until the PC's key
     /// says whose it is.
     pub fn dialed(&mut self, step: StepId, addr: SocketAddr) {
+        // A connection opened: no firewall in the way.
+        self.search.unreachable = None;
+        self.search.missed_at = None;
         if !matches!(self.search.round, Round::Waiting { step: s, .. } if s == step) {
             return;
         }
@@ -802,6 +890,21 @@ impl Session {
         };
         if its {
             self.search.attempt = None;
+        }
+        // A pick and an agreement to pair are for one connection: once its session is
+        // open, the search goes its own way again (the answers with a trusted tag, the
+        // last address), so the PC is found when it moves or the cable goes; but for
+        // this PC alone (see `Search::preferred`).
+        if self.search.choice == Some(addr) {
+            self.search.choice = None;
+            self.search.preferred = Some((pc, addr.ip().is_loopback()));
+        }
+        if self
+            .search
+            .approved
+            .is_some_and(|(key, _)| PcId::of(&key) == pc)
+        {
+            self.search.approved = None;
         }
         let label = self.label(addr, texts);
         self.links.insert(
@@ -983,6 +1086,7 @@ impl Session {
                 Plan::Usb
                     if !picking
                         && choice.is_none_or(|c| c.ip().is_loopback())
+                        && self.search.preferred.is_none_or(|(_, usb)| usb)
                         && !self.declined_addr(usb_addr()) =>
                 {
                     return self.dial(next, Dest::Usb, now);
@@ -1003,7 +1107,12 @@ impl Session {
                 }
                 // Its address is not known here: not while a PC is declined (it may be
                 // that one).
-                Plan::HostFile if own_way && self.search.declined.is_none() => {
+                // Not for a PC preferred either (it may be another one).
+                Plan::HostFile
+                    if own_way
+                        && self.search.declined.is_none()
+                        && self.search.preferred.is_none() =>
+                {
                     return self.dial(next, Dest::HostFile, now);
                 }
                 Plan::LastHost if own_way => {
@@ -1075,12 +1184,18 @@ impl Session {
                 .is_none_or(|l| matches!(l, Link::Lost { .. }))
     }
 
+    /// Whether the search may connect to PC `pc` on its own: any trusted one, or the
+    /// one preferred alone while there is one.
+    fn may_prefer(&self, pc: PcId) -> bool {
+        self.search.preferred.is_none_or(|(p, _)| p == pc)
+    }
+
     /// The address of a trusted PC that answered and is wanted, the latest first.
     fn trusted_answer(&self) -> Option<SocketAddr> {
         self.search
             .found
             .iter()
-            .filter(|h| h.pc.is_some_and(|pc| self.wants(pc)))
+            .filter(|h| h.pc.is_some_and(|pc| self.wants(pc) && self.may_prefer(pc)))
             .filter(|h| !self.is_declined(h.addr, h.pc))
             .max_by_key(|h| h.heard)
             .map(|h| h.addr)
@@ -1116,6 +1231,7 @@ impl Session {
     fn last_due(&self, now: Instant) -> Option<PcId> {
         self.paired.iter().map(|p| p.pc).find(|pc| {
             self.wants(*pc)
+                && self.may_prefer(*pc)
                 && self.search.declined.is_none_or(|(_, d)| d != *pc)
                 && self
                     .search

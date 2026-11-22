@@ -51,6 +51,9 @@ const REPORT_EVERY: Duration = Duration::from_secs(10);
 pub const SILENCE: Duration = Duration::from_secs(5);
 /// Wrong codes in a row before the headset stops and asks again.
 const PAIR_ATTEMPTS: u32 = 3;
+/// After the PC's words of refusal, how long its answer that ends the attempt is
+/// waited for.
+const REFUSAL_ENDS_WITHIN: Duration = Duration::from_secs(2);
 
 /// A dial the core asked for, with what the network thread knew then.
 pub(super) struct Dial {
@@ -62,8 +65,6 @@ pub(super) struct Dial {
     pub pair: Option<[u8; 32]>,
     pub pc_shows_code: bool,
     pub host_file: Option<PathBuf>,
-    /// The keys of the trusted PCs.
-    pub trusted: Vec<[u8; 32]>,
     /// The addresses of the connections already open: never dialed twice (a second
     /// connection from this headset would replace the first on the PC).
     pub busy: Vec<SocketAddr>,
@@ -255,6 +256,11 @@ fn before_trust(conn: &mut Conn, stream: TcpStream) -> io::Result<Option<(Wire, 
         return Ok(None);
     }
     conn.claimed = Some(pc);
+    conn.current.took(pc);
+    // Trusted as the network thread's file has it now, not as it was when the dial
+    // began: a PC forgotten meanwhile is a stranger (and should Forget come after this
+    // look, it leaves this connection, which it knows as the PC's from `took`).
+    let trusted = shared.trusts(&peer.key);
     // Versions first, before pairing: this exchange is the same in every version, so
     // a PC of any version says which side to update.
     let app = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
@@ -282,22 +288,22 @@ fn before_trust(conn: &mut Conn, stream: TcpStream) -> io::Result<Option<(Wire, 
     };
     // A PC we have never paired with: pair only once the user said so in the menu,
     // and never on our own (a hostile PC on the network could keep guessing codes).
-    if !conn.d.trusted.contains(&wire.peer.key) && !pair_if_approved(conn, &mut wire)? {
+    if !trusted && !pair_if_approved(conn, &mut wire, OfferWhy::New)? {
         return Ok(None);
     }
     Ok(Some((wire, language)))
 }
 
-/// Pairs if the user agreed to (`true` once paired); otherwise asks them and ends the
-/// connection (the PC must not be held waiting for an answer).
-fn pair_if_approved(conn: &mut Conn, wire: &mut Wire) -> io::Result<bool> {
+/// Pairs if the user agreed to (`true` once paired); otherwise asks them (saying
+/// `why`) and ends the connection (the PC must not be held waiting for an answer).
+fn pair_if_approved(conn: &mut Conn, wire: &mut Wire, why: OfferWhy) -> io::Result<bool> {
     if conn.d.pair == Some(wire.peer.key) {
         return pair(conn, wire);
     }
     conn.d.shared.tell(NetEvent::PairOffer {
         key: wire.peer.key,
         addr: conn.addr,
-        why: OfferWhy::New,
+        why,
     });
     info!(
         "an unknown PC at {}: waiting for the user to approve pairing",
@@ -336,21 +342,71 @@ fn alive(wire: &mut Wire) -> bool {
     alive
 }
 
-/// Waits for the code the user types, looking at the connection meanwhile; `None` if
-/// it was dropped, the PC left, or nobody typed in time.
-fn wait_code(conn: &Conn, wire: &mut Wire) -> Option<String> {
+/// How the wait for the code the user types ended.
+enum Typed {
+    Code(String),
+    /// The PC gave up this attempt meanwhile (it said why): no code to type.
+    PcGaveUp,
+    /// Dropped, the PC left, or nobody typed in time.
+    Gone,
+}
+
+/// Waits for the code the user types, looking at the connection meanwhile.
+fn wait_code(conn: &Conn, wire: &mut Wire) -> Typed {
     conn.current.forget_code();
     let deadline = Instant::now() + CODE_WITHIN;
     loop {
         match conn.current.code_within(Duration::from_millis(10)) {
-            Ok(Some(code)) => return Some(code),
+            Ok(Some(code)) => return Typed::Code(code),
             Ok(None) => {}
-            Err(()) => return None,
+            Err(()) => return Typed::Gone,
         }
         if !alive(wire) || Instant::now() >= deadline {
-            return None;
+            return Typed::Gone;
+        }
+        // The PC refused (another headset is pairing, too many wrong codes): its
+        // answer came while the user waits for a code it never showed.
+        let gave_up = wire
+            .pending
+            .iter()
+            .any(|m| matches!(m, HostMsg::PairResult { .. } | HostMsg::Error { .. }));
+        if gave_up {
+            return Typed::PcGaveUp;
         }
     }
+}
+
+/// A line of the PC's before trust, as the menu shows it: short plain text.
+fn short_text(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).take(160).collect()
+}
+
+/// The PC gave up the attempt (no dialog for the code, the code not typed there,
+/// another headset pairing): what it said is shown, the search pauses as after a
+/// refusal, and the user is asked again (not a wrong code, and no new request on
+/// its own, which the PC would only refuse again).
+fn pc_refused(conn: &mut Conn, wire: &mut Wire, pc_shows: bool) -> io::Result<bool> {
+    // What it said, up to its answer (a moment for it: the PC sends both together).
+    wire.receiver.set_idle_limit(Some(REFUSAL_ENDS_WITHIN));
+    loop {
+        match read(wire) {
+            Ok(HostMsg::PairResult { .. }) => break,
+            Ok(HostMsg::Error { text }) => {
+                conn.d.shared.tell(NetEvent::HostError(short_text(&text)));
+            }
+            Ok(other) => return Err(io::Error::other(format!("unexpected {other:?}"))),
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => break,
+            Err(e) => return Err(e),
+        }
+    }
+    info!("pairing with {}: the PC did not take part", conn.addr);
+    conn.ended.refused = Some(Instant::now());
+    conn.d.shared.tell(NetEvent::PairOffer {
+        key: wire.peer.key,
+        addr: conn.addr,
+        why: OfferWhy::PcRefused { pc_shows },
+    });
+    Ok(false)
 }
 
 /// What the PC is kept as when paired with, until its session says its own name: its
@@ -380,7 +436,11 @@ fn pair(conn: &mut Conn, wire: &mut Wire) -> io::Result<bool> {
                 addr,
                 code: None,
             });
-            wait_code(conn, wire).ok_or_else(|| io::Error::other("pairing interrupted"))?
+            match wait_code(conn, wire) {
+                Typed::Code(code) => code,
+                Typed::PcGaveUp => return pc_refused(conn, wire, pc_shows),
+                Typed::Gone => return Err(io::Error::other("pairing interrupted")),
+            }
         } else {
             let code = (shared.pairing_code)();
             shared.tell(NetEvent::Pairing {
@@ -393,22 +453,15 @@ fn pair(conn: &mut Conn, wire: &mut Wire) -> io::Result<bool> {
         };
         let (pairing, msg) = Pairing::start(&code);
         wire.feedback.send(ClientMsg::PairMsg { msg })?;
-        let theirs = loop {
-            match read(wire)? {
-                HostMsg::PairMsg { msg } => break Some(msg),
-                // The PC gave up this attempt (e.g. its dialog was cancelled).
-                HostMsg::PairResult { .. } => break None,
-                // Not trusted yet: only a short line of plain text gets shown.
-                HostMsg::Error { text } => {
-                    let text: String = text.chars().filter(|c| !c.is_control()).take(160).collect();
-                    shared.tell(NetEvent::HostError(text));
-                }
-                other => return Err(io::Error::other(format!("unexpected {other:?}"))),
+        let theirs = match read(wire)? {
+            HostMsg::PairMsg { msg } => msg,
+            // The PC gave up this attempt (its dialog was cancelled, it has none), and
+            // said why first.
+            msg @ (HostMsg::PairResult { .. } | HostMsg::Error { .. }) => {
+                wire.pending.push_front(msg);
+                return pc_refused(conn, wire, pc_shows);
             }
-        };
-        let Some(theirs) = theirs else {
-            shared.tell(NetEvent::PairingFailed);
-            continue;
+            other => return Err(io::Error::other(format!("unexpected {other:?}"))),
         };
         let secret = pairing.finish(&theirs)?;
         let own = &shared.identity.public;
@@ -426,7 +479,6 @@ fn pair(conn: &mut Conn, wire: &mut Wire) -> io::Result<bool> {
                     key,
                     name: pairing_name(addr),
                 });
-                conn.d.trusted.push(key);
                 conn.ended.paired = true;
                 wire.receiver.set_idle_limit(Some(Duration::from_secs(10)));
                 return Ok(true);
@@ -464,6 +516,39 @@ impl Drop for StreamSlot {
     }
 }
 
+/// A session's streams. However the session ends (an error, a panic), each one left
+/// is told ended, so no monitor keeps the decoder of a connection that is gone (and a
+/// frozen picture after the next one opens).
+struct Streams<'a> {
+    pc: PcId,
+    shared: &'a Shared,
+    slots: HashMap<DisplayId, StreamSlot>,
+}
+
+impl Drop for Streams<'_> {
+    fn drop(&mut self) {
+        let pc = self.pc;
+        for (id, slot) in self.slots.drain() {
+            drop(slot);
+            self.shared.tell(NetEvent::StreamEnd { pc, id });
+        }
+    }
+}
+
+/// Asks the PC for a keyframe for each stream whose ask held back is due at `now`
+/// (see `KeyframeWait::due`).
+fn ask_held(streams: &mut Streams<'_>, feedback: &Feedback, now: Instant) -> io::Result<()> {
+    for (&id, slot) in &mut streams.slots {
+        if slot.keyframe.due(now) {
+            feedback.send(ClientMsg::RequestKeyframe {
+                id,
+                generation: slot.generation,
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// A trusted PC's session: `Open`, its snapshot, then everything it sends until the
 /// connection ends.
 fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Result<()> {
@@ -480,9 +565,11 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
     let snapshot = loop {
         match read(wire)? {
             HostMsg::Snapshot { parts } => break parts,
+            // A PC this headset trusts no longer knows it: one of its own that forgot
+            // it, not a new one.
             HostMsg::PairingRequired => {
                 wire.packets.set_limits(HostMsg::limits(false));
-                if !pair_if_approved(conn, wire)? {
+                if !pair_if_approved(conn, wire, OfferWhy::Forgotten)? {
                     return Ok(());
                 }
                 wire.feedback.send(open.clone())?;
@@ -533,7 +620,11 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
     for part in state.parts() {
         shared.tell(NetEvent::Part(pc, part));
     }
-    let mut streams: HashMap<DisplayId, StreamSlot> = HashMap::new();
+    let mut streams = Streams {
+        pc,
+        shared: &shared,
+        slots: HashMap::new(),
+    };
     let mut media = shared.media.open();
     // Recording only while a PC program records from the headset microphone, the
     // user's switch on the headset is on, and this session has the microphone.
@@ -544,13 +635,47 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
     let mut media_bytes = 0u64;
     let mut report = Period::new(REPORT_EVERY);
     let caps = opened_with.caps.unwrap_or_default();
+    // When the last message came, and how long the next one is waited for: SILENCE,
+    // or less while an ask for a keyframe is held back (it goes once its time comes,
+    // also when nothing else does).
+    let mut heard = Instant::now();
+    let mut idle = SILENCE;
     let result = loop {
+        let wanted = match streams
+            .slots
+            .values()
+            .filter_map(|s| s.keyframe.due_at())
+            .min()
+        {
+            Some(at) => {
+                let quiet_left = SILENCE.saturating_sub(heard.elapsed());
+                at.saturating_duration_since(Instant::now())
+                    .min(quiet_left)
+                    .max(Duration::from_millis(1))
+            }
+            None => SILENCE,
+        };
+        if wanted != idle {
+            idle = wanted;
+            wire.receiver.set_idle_limit(Some(idle));
+        }
         let msg = match HostMsg::recv(&mut *wire.receiver, &mut wire.packets) {
             Ok(m) => m,
+            // Cut short for an ask held back, not silence yet.
+            Err(e) if e.kind() == io::ErrorKind::TimedOut && heard.elapsed() < SILENCE => {
+                if let Err(e) = ask_held(&mut streams, &feedback, Instant::now()) {
+                    break Err(e);
+                }
+                continue;
+            }
             Err(e) => break Err(e),
         };
         let now = Instant::now();
+        heard = now;
         gaps.event(now);
+        if let Err(e) = ask_held(&mut streams, &feedback, now) {
+            break Err(e);
+        }
         media_bytes += match &msg {
             HostMsg::Frame { data, .. } => data.len(),
             HostMsg::Audio { pcm } => pcm.len(),
@@ -611,7 +736,7 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 codec,
             } => {
                 info!("stream {} {generation:?}: {w}x{h} {codec:?}", id.0);
-                if streams.remove(&id).is_some() {
+                if streams.slots.remove(&id).is_some() {
                     shared.tell(NetEvent::StreamEnd { pc, id });
                 }
                 // The PC sends only what this headset decodes. One that does not
@@ -639,7 +764,7 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 let mut keyframe = KeyframeWait::default();
                 // The PC starts every stream with one.
                 keyframe.expect();
-                streams.insert(
+                streams.slots.insert(
                     id,
                     StreamSlot {
                         generation,
@@ -667,14 +792,22 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 data,
             } => {
                 // A frame of another start of the stream is of no use.
-                let Some(slot) = streams.get_mut(&id).filter(|s| s.generation == generation) else {
+                let Some(slot) = streams
+                    .slots
+                    .get_mut(&id)
+                    .filter(|s| s.generation == generation)
+                else {
                     continue;
                 };
                 // Asked again while frames come and no keyframe: the PC may have
                 // ignored the last ask (it answers one every 300 ms at most).
                 let verdict = slot.keyframe.passes(keyframe, now);
-                if verdict.ask {
-                    feedback.send(ClientMsg::RequestKeyframe { id, generation })?;
+                // A send that fails (the outbox closed, or the goodbye said) ends the
+                // session, never skipping what follows the loop.
+                if verdict.ask
+                    && let Err(e) = feedback.send(ClientMsg::RequestKeyframe { id, generation })
+                {
+                    break Err(e);
                 }
                 // Its decoder is gone (the monitor was closed here): nobody takes it.
                 if !verdict.pass || slot.queue.abandoned() {
@@ -689,16 +822,22 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 };
                 if slot.queue.push(frame, now) == Pushed::Behind {
                     warn!("decoder {} is behind, dropping until next keyframe", id.0);
-                    if slot.keyframe.lost(now) {
-                        feedback.send(ClientMsg::RequestKeyframe { id, generation })?;
+                    if slot.keyframe.lost(now)
+                        && let Err(e) = feedback.send(ClientMsg::RequestKeyframe { id, generation })
+                    {
+                        break Err(e);
                     }
                     #[cfg(all(feature = "selftest", not(feature = "store")))]
                     crate::selftest::dropped_to_keyframe();
                 }
             }
             HostMsg::StreamEnd { id, generation } => {
-                if streams.get(&id).is_some_and(|s| s.generation == generation) {
-                    streams.remove(&id);
+                if streams
+                    .slots
+                    .get(&id)
+                    .is_some_and(|s| s.generation == generation)
+                {
+                    streams.slots.remove(&id);
                     shared.tell(NetEvent::StreamEnd { pc, id });
                 }
             }
@@ -735,7 +874,11 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 secret,
             }),
             // Answered at once, from here: the round trip is the network's.
-            HostMsg::Ping { seq } => feedback.send(ClientMsg::Pong { seq })?,
+            HostMsg::Ping { seq } => {
+                if let Err(e) = feedback.send(ClientMsg::Pong { seq }) {
+                    break Err(e);
+                }
+            }
             HostMsg::Pong { seq } => feedback.outbox.pong(seq),
             HostMsg::Goodbye { reason } => {
                 let reason = PcGoodbye::from_code(reason);
@@ -758,8 +901,7 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
     if recording {
         media.record(false, &feedback);
     }
-    for id in streams.into_keys() {
-        shared.tell(NetEvent::StreamEnd { pc, id });
-    }
+    // Every stream left ends here (see `Streams`), before the connection does.
+    drop(streams);
     result
 }

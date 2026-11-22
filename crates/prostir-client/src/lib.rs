@@ -13,6 +13,7 @@
 
 pub mod app;
 pub mod background;
+pub mod backoff;
 pub mod caps;
 pub mod commands;
 pub mod connecting;
