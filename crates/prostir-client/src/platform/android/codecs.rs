@@ -1,7 +1,8 @@
 //! The decoders the system has (`MediaCodecList`), asked once at the start: for each
-//! codec the app plays, the decoder it would get, the largest picture that decoder
-//! takes at 60 frames a second, and how many of it run at once. What the PC is told
-//! comes from this, not from a list of headsets.
+//! codec the app plays, the decoder it would get, the widest and the tallest picture
+//! it takes, how many pixels a picture may have to decode at 60 frames a second, and
+//! how many of it run at once. What the PC is told comes from this, not from a list of
+//! headsets.
 
 use jni::objects::{JObject, JObjectArray, JString, JValue};
 use jni::strings::JNIStr;
@@ -27,31 +28,24 @@ pub struct Found {
     pub name: String,
     pub codec: Codec,
     pub hardware: bool,
-    /// The largest picture as the system's ranges say it: the widest, and the tallest
-    /// at that width.
-    pub said: (u32, u32),
-    /// The largest that decodes at 60 frames a second (0×0: none found).
-    pub size: (u32, u32),
+    /// The widest and the tallest picture, as the system's ranges say them
+    /// (`getSupportedWidths`, `getSupportedHeights`).
+    pub sides: (u32, u32),
+    /// The most pixels of a picture that decodes at 60 frames a second, and that
+    /// picture (none found: `None`).
+    pub budget: Option<(u32, (u32, u32))>,
     /// `getMaxSupportedInstances`, when the system says.
     pub instances: Option<u32>,
 }
 
 impl Found {
-    /// What is told of it: the size it keeps up at.
+    /// What is told of it: its sides and its pixel budget.
     pub fn decoder(&self) -> Decoder {
         Decoder {
             codec: self.codec,
-            max_w: self.size.0,
-            max_h: self.size.1,
-        }
-    }
-
-    /// What the system's ranges said, before the check at 60 frames a second.
-    pub fn said(&self) -> Decoder {
-        Decoder {
-            codec: self.codec,
-            max_w: self.said.0,
-            max_h: self.said.1,
+            max_w: self.sides.0,
+            max_h: self.sides.1,
+            max_pixels: self.budget.map(|b| b.0),
         }
     }
 }
@@ -70,14 +64,14 @@ pub fn decoders() -> Option<Vec<Found>> {
             continue;
         };
         let chosen = found.swap_remove(i);
+        let (pixels, (w, h)) = chosen.budget.unwrap_or((0, (0, 0)));
         info!(
-            "decoder for {}: {}, said up to {}x{}, at {DECODE_RATE} fps {}x{}, {} at once{}",
+            "decoder for {}: {}, up to {}x{}, at {DECODE_RATE} fps up to {pixels} pixels \
+             ({w}x{h}), {} at once{}",
             codec.mime(),
             chosen.name,
-            chosen.said.0,
-            chosen.said.1,
-            chosen.size.0,
-            chosen.size.1,
+            chosen.sides.0,
+            chosen.sides.1,
             chosen
                 .instances
                 .map_or_else(|| "unsaid".to_owned(), |n| n.to_string()),
@@ -227,18 +221,16 @@ fn of_codec(env: &mut Env<'_>, info: &JObject<'_>, sdk: i32) -> jni::errors::Res
         if video.is_null() {
             continue;
         }
-        let range = env
-            .call_method(
-                &video,
-                jni_str!("getSupportedWidths"),
-                jni_sig!("()Landroid/util/Range;"),
-                &[],
-            )?
-            .l()?;
-        let max_w = upper(env, &range)?;
+        let side = |env: &mut Env<'_>, method| -> jni::errors::Result<u32> {
+            let range = env
+                .call_method(&video, method, jni_sig!("()Landroid/util/Range;"), &[])?
+                .l()?;
+            upper(env, &range)
+        };
+        let max_w = side(env, jni_str!("getSupportedWidths"))?;
+        let max_h = side(env, jni_str!("getSupportedHeights"))?;
         let mut asked = Video { env, video: &video };
-        let max_h = asked.tallest_at(max_w).unwrap_or(0);
-        let size = caps::largest_size(max_w, max_h, &mut asked);
+        let budget = caps::pixel_budget(max_w, max_h, &mut asked);
         let instances = env
             .call_method(
                 &caps,
@@ -251,8 +243,8 @@ fn of_codec(env: &mut Env<'_>, info: &JObject<'_>, sdk: i32) -> jni::errors::Res
             name: name.clone(),
             codec,
             hardware,
-            said: (max_w, max_h),
-            size,
+            sides: (max_w, max_h),
+            budget,
             instances: u32::try_from(instances).ok().filter(|n| *n > 0),
         });
     }
@@ -282,11 +274,6 @@ impl Video<'_, '_, '_> {
         let range = quietly(self.env, r)?;
         let r = upper(self.env, &range);
         quietly(self.env, r).filter(|n| *n > 0)
-    }
-
-    /// The tallest picture `width` wide.
-    fn tallest_at(&mut self, width: u32) -> Option<u32> {
-        self.range_for(jni_str!("getSupportedHeightsFor"), width)
     }
 }
 

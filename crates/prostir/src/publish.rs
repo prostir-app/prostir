@@ -172,10 +172,11 @@ impl Publisher {
 }
 
 /// What the PC allows this headset: its own hard limits, more with "No limits", and
-/// sizes only as large as the headset decodes in the codec the PC sends.
+/// sizes only as large as the headset decodes in the codec the PC sends (its sides and
+/// its pixel budget, see [`HeadsetCaps::fits`]).
 pub fn limits(prefs: Prefs, headset: &HeadsetCaps, codec: Codec) -> Limits {
     let decoder = headset.decoder(codec);
-    let fits = |(w, h): (u32, u32)| decoder.is_none_or(|d| w <= d.max_w && h <= d.max_h);
+    let fits = |(w, h): (u32, u32)| decoder.is_none() || headset.fits(codec, w, h);
     let max = decoder.map_or(MAX_SIZE, |d| {
         (MAX_SIZE.0.min(d.max_w), MAX_SIZE.1.min(d.max_h))
     });
@@ -317,5 +318,37 @@ mod tests {
         assert!(wide.sizes.contains(&Mode::new(5120, 1440)));
         assert_eq!(wide.max, (7680, 4320));
         assert!(wide.check().is_ok());
+    }
+
+    /// Quest 3 says its sides (8192 by 4320) and how many pixels decode at 60 frames a
+    /// second (8192x1600 worth for H.265, 8192x2880 for H.264): every size offered
+    /// fits, 4K and portrait among them; a headset that cannot do 4K at 60 is not
+    /// offered it.
+    #[test]
+    fn sizes_follow_the_pixel_budget() {
+        let decoder = |codec| Decoder {
+            codec,
+            max_w: 8192,
+            max_h: 4320,
+        };
+        let budget = |codec, max_pixels| state::PixelBudget { codec, max_pixels };
+        let quest = HeadsetCaps {
+            pixels: vec![budget(0, 8192 * 2880), budget(1, 8192 * 1600)],
+            ..headset(vec![decoder(0), decoder(1)])
+        };
+        for codec in [Codec::H264, Codec::H265] {
+            let l = limits(Prefs::default(), &quest, codec);
+            for (w, h) in SIZES {
+                assert!(l.sizes.contains(&Mode::new(w, h)), "{codec:?} {w}x{h}");
+            }
+        }
+        let weak = HeadsetCaps {
+            pixels: vec![budget(0, 2560 * 1600)],
+            ..headset(vec![decoder(0)])
+        };
+        let l = limits(Prefs::default(), &weak, Codec::H264);
+        assert!(!l.sizes.contains(&Mode::new(3840, 2160)));
+        assert!(l.sizes.contains(&Mode::new(2560, 1440)));
+        assert!(l.sizes.contains(&Mode::new(1440, 2560)));
     }
 }

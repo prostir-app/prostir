@@ -52,9 +52,9 @@ use link::RecordReceiver;
 use packet::{Assembler, Encoded, Limits, Message};
 use request::{Asked, Command, Outcome, Request};
 use state::{
-    Access, Battery, DisplayId, Displays, Encoding, ErrorCode, Focus, Gen, HeadsetCaps, HostCaps,
-    MAX_DETAIL, MAX_DISPLAYS, MAX_GROWING, Part, PcInfo, Prefs, Presence, Profiles, ReqId, Row,
-    Sound, SoundFrom, UpFormat, UpKind, UpState, UpWanted, Volume, VolumeAsk,
+    Access, Battery, DecoderPixels, DisplayId, Displays, Encoding, ErrorCode, Focus, Gen,
+    HeadsetCaps, HostCaps, MAX_DETAIL, MAX_DISPLAYS, MAX_GROWING, Part, PcInfo, Prefs, Presence,
+    Profiles, ReqId, Row, Sound, SoundFrom, UpFormat, UpKind, UpState, UpWanted, Volume, VolumeAsk,
 };
 use wire::{Reader, Wire, WireError, wire_enum};
 
@@ -395,6 +395,9 @@ wire_enum! {
         /// Part: the profiles saved in the headset, their names and the one in use (from
         /// 0.2.0 step 7.10; an older PC skips it).
         143 => Profiles { part: Profiles },
+        /// Part: the pixel budget of the headset's decoders (in `Open` only, from 0.2.0
+        /// B6; an older PC skips it and goes by the decoders' sides alone).
+        144 => DecoderPixels { part: DecoderPixels },
         /// The headset starts an up stream `up` (the microphone) of `kind`, in `format`.
         /// In the sound lane, so it never overtakes the stream's data.
         139 => UpStart { up: u8, kind: UpKind, format: UpFormat },
@@ -821,6 +824,7 @@ impl ClientMsg {
             // Each display once, so the order the PC makes from it fits in a message.
             Self::Arrange { rows } => state::check_rows(rows),
             Self::HeadsetCaps { part } => part.check(),
+            Self::DecoderPixels { part } => part.check(),
             Self::Volume { part } => part.check(),
             Self::UpStart { format, .. } => format.check(),
             _ => Ok(()),

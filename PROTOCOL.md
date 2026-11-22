@@ -689,15 +689,16 @@ one `Open` or `Snapshot` (of the same kind, for the parts kept per kind) is an e
 | Side | Parts | Kept |
 |---|---|---|
 | Host | `Displays`, `PcInfo`, `HostCaps`, `Access`, `Limits`, `Encoding`, `Sound`, `UpWanted`, `Focus`, `SoundFrom` | one of each; `UpWanted` one per kind |
-| Headset | `HeadsetCaps`, `Prefs`, `Presence`, `Battery`, `Volume`, `UpState`, `Profiles` | one of each; `UpState` one per kind |
+| Headset | `HeadsetCaps`, `DecoderPixels`, `Prefs`, `Presence`, `Battery`, `Volume`, `UpState`, `Profiles` | one of each; `UpState` one per kind |
 
 `HeadsetCaps` is always in `Open`, and `HostCaps` in `Snapshot`; neither changes in a
-session. The host sends `Displays` first and `Focus` and `SoundFrom` last, in one pass,
+session. `DecoderPixels`, when the headset sends it, is in `Open` only too. The host sends `Displays` first and `Focus` and `SoundFrom` last, in one pass,
 so a part that names a display comes after the `Displays` that lists it.
 
 **Checked on arrival**, on both sides: the ids in `Displays` differ, `primary`, `Focus`
 and `SoundFrom` are among them or none, every scale is above 0, a `Volume` is at most
-100 %, an up stream is 48 kHz with 1 or 2 channels, a decoder is bigger than 0×0, and
+100 %, an up stream is 48 kHz with 1 or 2 channels, a decoder is bigger than 0×0, a
+pixel budget is above 0, and
 an `Arrange` lists each display once. A state that breaks these is the other side's
 bug: the session ends, as for a message that does not parse. Bad arguments of a
 request are not: they get a failed reply.
@@ -974,7 +975,8 @@ are marked as such (their bytes never change). "Part" marks a part of the state 
 | 110 | `PairMsg` | `msg:bytes[33]` | The headset's SPAKE2 message. |
 | 111 | `PairConfirm` | `tag:bytes[32]` | Proof that the headset derived the same pairing key. |
 | 127 | `Open` | `parts:list<part>(max 65535)` | Start the session, with every part of the headset's state (`HeadsetCaps` always). |
-| 138 | `HeadsetCaps` | `features:list<u16>(max 65535), decoders:list<Decoder>(max 64), streams_max:u8, layers_max:u8, model:str(32)` | Part, in `Open` only. What the headset can do: features, a decoder for each codec with the largest picture, streams it decodes at once, compositor layers it shows at once, its model. |
+| 138 | `HeadsetCaps` | `features:list<u16>(max 65535), decoders:list<Decoder>(max 64), streams_max:u8, layers_max:u8, model:str(32)` | Part, in `Open` only. What the headset can do: features, a decoder for each codec with the widest and the tallest picture, streams it decodes at once, compositor layers it shows at once, its model. |
+| 144 | `DecoderPixels` | `budgets:list<PixelBudget>(max 64)` | Part, in `Open` only (from 0.2.0 B6; an older host skips it and goes by the decoders' sides alone). How many pixels a picture may have for each decoder to decode 60 of them a second: a decoder's limit is pixels per frame and per second, not a box. The host sends a picture of `w`x`h` in a codec only when `w <= max_w`, `h <= max_h` and, where the codec has a budget, `w * h <= max_pixels`. |
 | 134 | `Prefs` | `notifications:bool, sound_from_screen:bool, focus_mode:bool, gaze_mouse_ms:opt<u16>, no_limits:bool` | Part. The headset's settings the PC acts on: pass notifications, say where the sound comes from, fewer frames for displays out of focus, the mouse follows the gaze after resting this long, "No limits". |
 | 115 | `Presence` | `worn:bool` | Part. Whether the headset is worn; streaming pauses while it is not. |
 | 119 | `Battery` | `percent:u8, charging:bool` | Part. For the PC's tray. |
@@ -1013,7 +1015,8 @@ are marked as such (their bytes never change). "Part" marks a part of the state 
 | `MicDevice` | `0 Off`, `1 Ready`, `2 Failed{error:ErrorCode, detail:str(512)}` | The virtual microphone programs on the PC record from. |
 | `UpKind` | `0 Mic`, `1 Camera`, `2 Poses` | |
 | `UpFormat` | `0 Pcm16{rate:u32, channels:u8}`, `1 Video{codec:Codec, w:u32, h:u32}`, `2 Poses{hz:u8}` | The microphone: 48000 Hz, 1 or 2 channels. |
-| `Decoder` | `codec:u8, max_w:u32, max_h:u32` | The codec as `Codec`'s number, kept raw so a codec the host does not know simply does not match. |
+| `Decoder` | `codec:u8, max_w:u32, max_h:u32` | The codec as `Codec`'s number, kept raw so a codec the host does not know simply does not match; the widest and the tallest picture. |
+| `PixelBudget` | `codec:u8, max_pixels:u32` | The codec as in `Decoder`; the most pixels of a picture its decoder takes at 60 frames a second. |
 | `Row` | `entries:list<Placed>(max 32)` | |
 | `Placed` | `id:DisplayId, center:opt<i32>, middle:opt<i32>` | See [Layout](#7-layout). |
 | `Primary` | `0 Index{index:u8}`, `1 Display{id:DisplayId}` | The monitor made for `modes[index]`, or a display of the PC itself. |

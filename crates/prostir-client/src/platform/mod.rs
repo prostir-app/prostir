@@ -56,33 +56,27 @@ mod found {
             }
             _ => caps::LAYERS_AT_LEAST,
         };
-        let (decoders, said, streams_max) = match android::codecs::decoders() {
+        let (decoders, streams_max) = match android::codecs::decoders() {
             Some(found) if !found.is_empty() => {
                 let streams = caps::streams_max(found.iter().map(|f| f.instances), layers_max);
-                // A decoder of no size at 60 frames a second is told as taken for
-                // granted for its codec, never as "any size".
+                // A decoder of no size or none in time at 60 frames a second is told as
+                // taken for granted for its codec, never as "any size".
                 let told = found
                     .iter()
                     .filter_map(|f| caps::decoder_or_unsaid(f.decoder()))
                     .collect();
-                (
-                    told,
-                    found.iter().map(android::codecs::Found::said).collect(),
-                    streams,
-                )
+                (told, streams)
             }
             _ => {
                 warn!("the system's decoders unknown: the ones taken for granted before");
                 let streams = caps::streams_max([], layers_max);
-                let unsaid = caps::DECODERS_UNSAID.to_vec();
-                (unsaid.clone(), unsaid, streams)
+                (caps::DECODERS_UNSAID.to_vec(), streams)
             }
         };
         let volume = android::volume();
         info!("volume: {volume:?} (steps above silence, fixed)");
         let volume_steps = caps::volume_steps(volume.map(|(s, _)| s), volume.is_some_and(|v| v.1));
         let mut c = Caps::without_extensions(model, decoders, streams_max, volume_steps);
-        c.decoders_said = said;
         c.layers_max = layers_max;
         c.refresh_rates = meta::display_rates(session).0;
         c.perf_levels = on.ext_performance_settings;

@@ -618,6 +618,7 @@ impl FakeHeadset {
                 streams_max: 30,
                 layers_max: 16,
                 model: "prostir-testkit".into(),
+                pixels: Vec::new(),
             }),
             prefs: Some(Prefs::default()),
             presence: Some(Presence { worn: true }),
