@@ -1601,3 +1601,27 @@ fn swapping_monitors_of_different_widths_keeps_them_apart() {
         none_cut(&sim, &sizes);
     }
 }
+
+/// A monitor comes back at a larger resolution under the same number (the PC changed
+/// it): the same size of a pixel, so it is wider, and its neighbours in the row move
+/// out of its way; none is over another.
+#[test]
+fn a_monitor_grown_pushes_its_neighbours_clear() {
+    for n in 1..=3 {
+        let mut sim = Sim::at_desk();
+        sim.world.stream_ended(k(n));
+        let mut list = three();
+        list[n as usize - 1] = monitor(n, (3840, 2160));
+        sim.list(list);
+        sim.stream(n, (3840, 2160));
+        sim.settled();
+        let mut sizes = vec![(1, QHD), (2, QHD), (3, QHD)];
+        sizes[n as usize - 1].1 = (3840, 2160);
+        assert!(
+            (sim.place(k(n)).width - 1.875).abs() < 1e-4,
+            "as large a pixel"
+        );
+        none_seen_over(&sim, &sizes);
+        none_cut(&sim, &sizes);
+    }
+}

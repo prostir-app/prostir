@@ -607,8 +607,16 @@ impl World {
         let size = self.streams.get(&id).copied();
         if let (Kind::Monitor, Some(size)) = (kind, size)
             && !self.cinema
+            && self.fit_to_stream(id, size)
         {
-            self.fit_to_stream(id, size);
+            // Larger now: the neighbours it reaches into make room along the row.
+            layout::make_room(
+                &mut self.placements,
+                &self.sizes,
+                (self.center, self.tilt),
+                s.preset == Preset::Wall,
+                id,
+            );
         }
         match kind {
             Kind::Window => {
@@ -1204,12 +1212,16 @@ impl World {
     }
 
     /// The desk placement of monitor `id` follows its stream, now `size` pixels: the
-    /// same size of a pixel as before (see `layout::refit`).
-    fn fit_to_stream(&mut self, id: DisplayKey, size: PixelSize) {
+    /// same size of a pixel as before (see `layout::refit`). Whether its size changed.
+    fn fit_to_stream(&mut self, id: DisplayKey, size: PixelSize) -> bool {
+        let mut changed = false;
         if let (Some(p), Some(&was)) = (self.placements.get_mut(&id), self.placed_for.get(&id)) {
-            *p = layout::refit(*p, was, size);
+            let now = layout::refit(*p, was, size);
+            changed = now != *p;
+            *p = now;
         }
         self.placed_for.insert(id, size);
+        changed
     }
 
     /// Turns cinema mode on or off (`s`: the settings, for the preset it lays out
