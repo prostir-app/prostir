@@ -5,37 +5,9 @@ use anyhow::Result;
 use glam::{Vec2, Vec3};
 use openxr as xr;
 
+use crate::interaction::{Button, HandState};
 use crate::layout::Ray;
 use crate::xrutil::{Gfx, quat, vec3};
-
-/// Analog press with hysteresis, so a half-pulled trigger does not flicker.
-#[derive(Default, Clone, Copy)]
-pub struct Button {
-    pub down: bool,
-    /// Went down during this frame.
-    pub pressed: bool,
-    /// Went up during this frame.
-    pub released: bool,
-}
-
-impl Button {
-    fn update(&mut self, value: f32) {
-        let was = self.down;
-        self.down = if was { value > 0.4 } else { value > 0.75 };
-        self.pressed = self.down && !was;
-        self.released = !self.down && was;
-    }
-}
-
-#[derive(Default, Clone, Copy)]
-pub struct HandState {
-    pub ray: Option<Ray>,
-    pub select: Button,
-    pub grab: Button,
-    pub stick: Vec2,
-    /// Driven by a tracked hand (pinch to click, pinch and hold to drag).
-    pub is_hand: bool,
-}
 
 pub struct Controls {
     set: xr::ActionSet,
@@ -288,7 +260,7 @@ impl Controls {
             let value =
                 |a: &xr::Action<f32>| a.state(session, path).map_or(0.0, |s| s.current_state);
             s.select.update(value(&self.select));
-            // Hands have no grip: the main loop turns pinch-and-hold into a drag.
+            // Hands have no grip: `interaction` turns pinch-and-hold into a drag.
             s.grab.update(if is_hand { 0.0 } else { value(&self.grab) });
             s.stick = self
                 .thumbstick

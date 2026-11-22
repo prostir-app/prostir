@@ -373,6 +373,14 @@ impl World {
         self.streams.contains_key(&id)
     }
 
+    /// The window panels whose streams show, with their sizes in pixels (in no order).
+    pub fn windows(&self) -> impl Iterator<Item = (DisplayKey, PixelSize)> + '_ {
+        self.streams
+            .iter()
+            .filter(|(id, _)| self.is_window(**id))
+            .map(|(id, size)| (*id, *size))
+    }
+
     /// The monitors left to right: in the PC's order, unknown ones at the end, with
     /// their stream sizes.
     pub fn monitors(&self) -> &[(DisplayKey, u32, u32)] {
@@ -649,6 +657,11 @@ impl World {
     /// A hand holds something.
     pub fn holding(&self) -> bool {
         self.held.iter().any(Option::is_some)
+    }
+
+    /// Follow mode is moving the monitors after the head right now.
+    pub fn following(&self) -> bool {
+        self.following
     }
 
     /// The monitor resized with both hands.

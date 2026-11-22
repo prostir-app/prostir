@@ -13,6 +13,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("note.rs", include_str!("../src/note.rs")),
     ("app/mod.rs", include_str!("../src/app/mod.rs")),
     ("app/session.rs", include_str!("../src/app/session.rs")),
+    ("app/hands.rs", include_str!("../src/app/hands.rs")),
     (
         "app/actions/mod.rs",
         include_str!("../src/app/actions/mod.rs"),
@@ -38,6 +39,11 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../src/app/actions/settings.rs"),
     ),
     ("main_loop.rs", include_str!("../src/main_loop.rs")),
+    ("view.rs", include_str!("../src/view.rs")),
+    (
+        "interaction/mod.rs",
+        include_str!("../src/interaction/mod.rs"),
+    ),
     ("net/mod.rs", include_str!("../src/net/mod.rs")),
     ("net/link.rs", include_str!("../src/net/link.rs")),
     ("net/discovery.rs", include_str!("../src/net/discovery.rs")),
@@ -51,6 +57,11 @@ const SOURCES: &[(&str, &str)] = &[
 /// The rest of the code, for the dash check.
 const OTHER_CODE: &[(&str, &str)] = &[
     ("alloc_count.rs", include_str!("../src/alloc_count.rs")),
+    ("app/tests.rs", include_str!("../src/app/tests.rs")),
+    (
+        "interaction/tests.rs",
+        include_str!("../src/interaction/tests.rs"),
+    ),
     ("audio.rs", include_str!("../src/audio.rs")),
     ("background.rs", include_str!("../src/background.rs")),
     ("commands.rs", include_str!("../src/commands.rs")),
