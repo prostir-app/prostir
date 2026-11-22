@@ -1054,7 +1054,7 @@ impl Scene {
     fn expire_asks(&mut self) {
         let now = Instant::now();
         for (pc, req, _) in self.session.expire(now) {
-            self.world.switch_given_up(req);
+            self.world.switch_given_up(pc, req);
             self.given_up(pc, req, ui::Failure::TimedOut);
         }
         self.notes.expire(now);
@@ -3095,7 +3095,7 @@ fn handle_net_event(
                     scene.finder = Some((DisplayKey::new(pc, id), Vec2::new(f(u), f(v)), now));
                 }
                 (Some(ui::Asked::Profile(slot)), Outcome::Ids { ids }) => {
-                    if scene.world.switching_with(req) {
+                    if scene.world.switching_with(pc, req) {
                         // Switched to: the PC made its monitors (which it shows comes
                         // with its list of displays). The menu is closed by now: a toast
                         // says it.
@@ -3113,7 +3113,9 @@ fn handle_net_event(
                     }
                 }
                 (Some(ui::Asked::AddMonitor), Outcome::Added { id }) => {
-                    scene.world.adding_made(req, Some(DisplayKey::new(pc, id)));
+                    scene
+                        .world
+                        .adding_made(pc, req, Some(DisplayKey::new(pc, id)));
                 }
                 (_, Outcome::Done | Outcome::Added { .. } | Outcome::Ids { .. }) => {}
             }
@@ -3698,10 +3700,14 @@ fn handle_action(
             );
             // Placed once the PC answers with its monitors' numbers. Cinema, the
             // background, the curve and the preset are not the profile's: they stay.
-            scene.world.switch_to(req.map(|req| ProfileSwitch {
-                frame: p.frame,
-                rows: p.rows,
-                ..ProfileSwitch::new(req, p.places)
+            let pc = scene.session.main();
+            scene.world.switch_to(pc.zip(req).map(|(pc, req)| {
+                let switch = ProfileSwitch {
+                    frame: p.frame,
+                    rows: p.rows,
+                    ..ProfileSwitch::new(req, p.places)
+                };
+                (pc, switch)
             }));
             // The monitors changing is the answer: the menu gets out of the way.
             scene.panel_open = false;

@@ -237,6 +237,8 @@ pub struct World {
     adding: Option<Adding>,
     /// A profile being switched to, until its monitors stand where it says.
     switch: Option<ProfileSwitch>,
+    /// The PC its request went to: its answers are known by that PC and the number.
+    switch_pc: Option<PcId>,
 
     // The person's things.
     menu: Placement,
@@ -301,6 +303,7 @@ impl World {
             follow_hold: false,
             adding: None,
             switch: None,
+            switch_pc: None,
             menu: Placement {
                 position: Vec3::new(0.0, -0.12, -0.7),
                 rotation: Quat::IDENTITY,
@@ -1213,8 +1216,11 @@ impl World {
 
     /// A profile is being switched to (`None`: none any more): the monitors are not
     /// laid out one by one, nor the desktop's arrangement sent, until it stands.
-    pub fn switch_to(&mut self, switch: Option<ProfileSwitch>) {
+    /// `switch`: the PC asked, and how it stands.
+    pub fn switch_to(&mut self, switch: Option<(PcId, ProfileSwitch)>) {
+        let (pc, switch) = switch.unzip();
         self.switch = switch;
+        self.switch_pc = pc;
     }
 
     /// A profile is being switched to.
@@ -1222,9 +1228,10 @@ impl World {
         self.switch.is_some()
     }
 
-    /// The profile being switched to is the one of request `req`.
-    pub fn switching_with(&self, req: ReqId) -> bool {
-        self.switch.as_ref().is_some_and(|s| s.req == req)
+    /// The profile being switched to is the one of request `req` to PC `pc` (two
+    /// PCs number their requests each on their own).
+    pub fn switching_with(&self, pc: PcId, req: ReqId) -> bool {
+        self.switch_pc == Some(pc) && self.switch.as_ref().is_some_and(|s| s.req == req)
     }
 
     /// The PC made a profile's monitors (`ids`, in the order of its monitors): they
@@ -1278,8 +1285,8 @@ impl World {
 
     /// The request of the profile being switched to went without an answer: it is not
     /// switched to.
-    pub fn switch_given_up(&mut self, req: ReqId) {
-        if self.switching_with(req) {
+    pub fn switch_given_up(&mut self, pc: PcId, req: ReqId) {
+        if self.switching_with(pc, req) {
             self.switch = None;
         }
     }
@@ -1336,9 +1343,10 @@ impl World {
         });
     }
 
-    /// The PC made the monitor of request `req`: display `id`.
-    pub fn adding_made(&mut self, req: ReqId, id: Option<DisplayKey>) {
+    /// PC `pc` made the monitor of its request `req`: display `id`.
+    pub fn adding_made(&mut self, pc: PcId, req: ReqId, id: Option<DisplayKey>) {
         if let Some(a) = &mut self.adding
+            && a.pc == pc
             && a.req == req
         {
             a.id = id;

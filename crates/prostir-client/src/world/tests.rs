@@ -297,7 +297,7 @@ fn a_new_monitor_takes_its_placeholders_place() {
         }
     );
     // The PC made display 4; its list says so before its stream starts.
-    sim.world.adding_made(ReqId(5), Some(k(4)));
+    sim.world.adding_made(PC, ReqId(5), Some(k(4)));
     let mut list = three();
     list.push(starting(monitor(4, QHD)));
     sim.list(list.clone());
@@ -316,7 +316,7 @@ fn a_new_monitor_takes_its_placeholders_place() {
     // Display 5 never streams: its placeholder waits 15 s, then goes.
     sim.world
         .adding_started(Some(ReqId(6)), QHD, sim.head.1, sim.now);
-    sim.world.adding_made(ReqId(6), Some(k(5)));
+    sim.world.adding_made(PC, ReqId(6), Some(k(5)));
     list.push(starting(monitor(5, QHD)));
     sim.list(list.clone());
     let asked = sim.now;
@@ -333,7 +333,7 @@ fn a_new_monitor_takes_its_placeholders_place() {
     sim.list(list);
     sim.world.adding_due(sim.now, true);
     assert!(sim.world.adding().is_some(), "waits for the PC's answer");
-    sim.world.adding_made(ReqId(7), Some(k(6)));
+    sim.world.adding_made(PC, ReqId(7), Some(k(6)));
     sim.world.adding_due(sim.now, false);
     assert!(sim.world.adding().is_none(), "failed");
 
@@ -515,12 +515,19 @@ fn a_profile_places_its_monitors_by_their_numbers() {
     let order: Vec<DisplayKey> = sim.world.monitors().iter().map(|m| m.0).collect();
 
     // Switched to: the PC makes three new monitors, 11, 12 and 13.
-    sim.world.switch_to(Some(ProfileSwitch {
-        frame: saved.frame,
-        rows: saved.rows,
-        ..ProfileSwitch::new(ReqId(3), saved.places)
-    }));
-    assert!(sim.world.switching_with(ReqId(3)));
+    sim.world.switch_to(Some((
+        PC,
+        ProfileSwitch {
+            frame: saved.frame,
+            rows: saved.rows,
+            ..ProfileSwitch::new(ReqId(3), saved.places)
+        },
+    )));
+    assert!(sim.world.switching_with(PC, ReqId(3)));
+    assert!(
+        !sim.world.switching_with(OTHER_PC, ReqId(3)),
+        "another PC's number 3"
+    );
     sim.world
         .profile_made(vec![k(11), k(12), k(13)], &sim.s, sim.head.1, sim.now);
     assert!(!sim.world.switching());
@@ -542,7 +549,7 @@ fn a_profile_places_its_monitors_by_their_numbers() {
     // A profile saved before its monitors had places: laid out once they stream, or
     // after 8 s with what streams then.
     sim.world
-        .switch_to(Some(ProfileSwitch::new(ReqId(4), Vec::new())));
+        .switch_to(Some((PC, ProfileSwitch::new(ReqId(4), Vec::new()))));
     sim.list(vec![starting(monitor(21, QHD)), starting(monitor(22, QHD))]);
     sim.world
         .profile_made(vec![k(21), k(22)], &sim.s, sim.head.1, sim.now);
@@ -837,6 +844,43 @@ fn two_pcs_at_once_keep_their_own_desktops() {
     assert!(all.len() == 2 && all.iter().all(|m| m.pc == PC), "{all:?}");
 }
 
+/// Two PCs number their requests each on their own: an answer of the other PC with
+/// the same number neither takes the placeholder's monitor nor ends the profile being
+/// switched to.
+#[test]
+fn answers_are_known_by_their_pc() {
+    let mut sim = Sim::new(None);
+    sim.connect(OTHER_PC);
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD)]);
+    sim.stream(1, QHD);
+    sim.settled();
+    sim.world
+        .adding_started(Some(ReqId(5)), QHD, sim.head.1, sim.now);
+    let theirs = DisplayKey::new(OTHER_PC, DisplayId(4));
+    // The world's main PC is the first in a session, by number.
+    let main = sim.world.pc().unwrap();
+    let other = if main == PC { OTHER_PC } else { PC };
+    sim.world.adding_made(other, ReqId(5), Some(theirs));
+    assert_eq!(
+        sim.world.adding().and_then(|a| a.id),
+        None,
+        "not the other PC's"
+    );
+    let ours = DisplayKey::new(main, DisplayId(4));
+    sim.world.adding_made(main, ReqId(5), Some(ours));
+    assert_eq!(sim.world.adding().and_then(|a| a.id), Some(ours));
+    sim.world
+        .switch_to(Some((main, ProfileSwitch::new(ReqId(7), Vec::new()))));
+    sim.world.switch_given_up(other, ReqId(7));
+    assert!(
+        sim.world.switching(),
+        "another PC's request 7 timed out, not ours"
+    );
+    sim.world.switch_given_up(main, ReqId(7));
+    assert!(!sim.world.switching());
+}
+
 /// Scenario 16 (step 7 note, 10.1), the world's part: the desktop's arrangement is told
 /// once it stood, also with no frame drawn (the headset off the head): the passes of
 /// the main loop without frames settle it.
@@ -1029,11 +1073,14 @@ fn a_profile_switched_to_in_cinema() {
     sim.settled();
 
     cinema(&mut sim, true);
-    sim.world.switch_to(Some(ProfileSwitch {
-        frame: saved.frame,
-        rows: saved.rows,
-        ..ProfileSwitch::new(ReqId(3), saved.places)
-    }));
+    sim.world.switch_to(Some((
+        PC,
+        ProfileSwitch {
+            frame: saved.frame,
+            rows: saved.rows,
+            ..ProfileSwitch::new(ReqId(3), saved.places)
+        },
+    )));
     sim.list(vec![monitor(11, QHD), monitor(12, QHD), monitor(13, QHD)]);
     sim.world
         .profile_made(vec![k(11), k(12), k(13)], &sim.s, sim.head.1, sim.now);
