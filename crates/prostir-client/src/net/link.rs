@@ -79,7 +79,7 @@ pub(super) fn dial(d: Dial) {
         )),
         Dest::Addr(a) => Some(*a),
         Dest::HostFile => d.host_file.as_deref().and_then(read_addr),
-        Dest::LastHost => read_addr(&d.last_host_file),
+        Dest::LastHost => discovery::read_last(&d.last_host_file).map(|(_, addr)| addr),
     };
     match addr.filter(|a| !d.busy.contains(a)).and_then(try_connect) {
         Some(stream) => connection(d, stream),
@@ -147,7 +147,8 @@ impl Conn {
         // to anything else must not redirect the next start.
         if self.ended.opened
             && !addr.ip().is_loopback()
-            && let Err(e) = discovery::keep_last(&self.d.last_host_file, addr)
+            && let Some(pc) = self.pc
+            && let Err(e) = discovery::keep_last(&self.d.last_host_file, pc, addr)
         {
             warn!("cannot keep the last PC's address: {e}");
         }

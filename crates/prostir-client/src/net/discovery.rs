@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use log::{info, warn};
 
 use super::{FoundHost, NetEvent, Shared, lock};
+use crate::ids::PcId;
 
 /// How long a dial waits for the PC to take the connection.
 pub const CONNECT_WITHIN: Duration = Duration::from_millis(400);
@@ -157,10 +158,36 @@ pub fn parse_addr(text: &str) -> Option<SocketAddr> {
     })
 }
 
-/// Remembers `addr` as the last PC that worked over the network (the next start tries
-/// it before searching).
-pub fn keep_last(path: &Path, addr: SocketAddr) -> io::Result<()> {
-    std::fs::write(path, addr.to_string())
+/// Remembers `addr` as the last PC that worked over the network, PC `pc` (the next
+/// start tries it before searching): `<PcId> <address>`.
+pub fn keep_last(path: &Path, pc: PcId, addr: SocketAddr) -> io::Result<()> {
+    std::fs::write(path, format!("{pc} {addr}\n"))
+}
+
+/// The last PC's address, and its PC when the file says it (an older one has the
+/// address alone). Lenient: a line it cannot read is no address.
+pub fn read_last(path: &Path) -> Option<(Option<PcId>, SocketAddr)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    parse_last(&text)
+}
+
+fn parse_last(text: &str) -> Option<(Option<PcId>, SocketAddr)> {
+    let mut fields = text.split_whitespace();
+    let first = fields.next()?;
+    match fields.next() {
+        Some(addr) => Some((PcId::parse(first), parse_addr(addr)?)),
+        None => Some((None, parse_addr(first)?)),
+    }
+}
+
+/// PC `pc` was forgotten: its address is no longer the last PC's, when the file says
+/// it is that PC's (or, in the older format, it is one of `addrs`, where that PC is).
+pub fn forget_last_of(path: &Path, pc: PcId, addrs: &[SocketAddr]) -> io::Result<()> {
+    match read_last(path) {
+        Some((Some(of), _)) if of == pc => forget_last(path),
+        Some((None, addr)) if addrs.contains(&addr) => forget_last(path),
+        _ => Ok(()),
+    }
 }
 
 /// Forgets the last PC's address (that PC was forgotten).
@@ -208,4 +235,25 @@ pub fn scan_subnet() -> Option<TcpStream> {
         stream.peer_addr()
     );
     Some(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The last PC's file: its PC and address, or the address alone as older builds
+    /// wrote it; anything else is no address.
+    #[test]
+    fn the_last_pc_is_read_both_ways() {
+        let pc = PcId([0xab; 8]);
+        let addr: SocketAddr = "192.168.1.5:47830".parse().unwrap();
+        assert_eq!(
+            parse_last(&format!("{pc} {addr}\n")),
+            Some((Some(pc), addr))
+        );
+        assert_eq!(parse_last("192.168.1.5\n"), Some((None, addr)));
+        assert_eq!(parse_last("not-a-pc 192.168.1.5"), Some((None, addr)));
+        assert_eq!(parse_last(""), None);
+        assert_eq!(parse_last("garbage"), None);
+    }
 }

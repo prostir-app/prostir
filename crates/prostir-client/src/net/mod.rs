@@ -730,13 +730,14 @@ fn command(
             }
         }
         NetCmd::Forget(pc) => {
-            // Its address as the last PC's: not tried again on the next start.
-            let last = discovery::read_addr(&config.last_host_file);
-            if conns
+            // Its address as the last PC's: not tried again on the next start (also
+            // while it is not connected: the file says whose address it is).
+            let addrs: Vec<SocketAddr> = conns
                 .iter()
-                .any(|c| c.pc == Some(pc) && Some(c.addr) == last)
-                && let Err(e) = discovery::forget_last(&config.last_host_file)
-            {
+                .filter(|c| c.pc == Some(pc))
+                .map(|c| c.addr)
+                .collect();
+            if let Err(e) = discovery::forget_last_of(&config.last_host_file, pc, &addrs) {
                 warn!("cannot forget the last PC's address: {e}");
             }
             let keys: Vec<[u8; 32]> = trusted
