@@ -410,7 +410,7 @@ impl Hands {
         self.menu_gesture_held = input.menu_gesture;
         if input.menu_button || gesture_pressed {
             scene.toggle_menu();
-            self.sync(scene);
+            self.pressed(scene);
         }
         if input.align {
             scene.align(now);
@@ -529,7 +529,7 @@ impl Hands {
             {
                 scene.haptic(poking_hand);
                 scene.press(now, action);
-                self.sync(scene);
+                self.pressed(scene);
             }
         }
     }
@@ -595,7 +595,7 @@ impl Hands {
                 match menus.press(Menu::Main, plane_point(at, large)) {
                     Some(action) => {
                         scene.press_menu(now, action);
-                        self.sync(scene);
+                        self.pressed(scene);
                     }
                     None => self.pokes[h].drag = Some(at),
                 }
@@ -620,7 +620,16 @@ impl Hands {
         // forgotten.
         let switched = self.was_hand[hand].is_some_and(|was| was != input.is_hand);
         self.was_hand[hand] = Some(input.is_hand);
-        if switched {
+        // The button or pinch that holds is seen neither down nor let go: its input
+        // stopped (hands that no longer point, as the settings say, give nothing), and
+        // it will never be seen let go either.
+        let holding = if input.is_hand {
+            input.select
+        } else {
+            input.grab
+        };
+        let stopped = !holding.down && !holding.released;
+        if switched || (input.is_hand && stopped) {
             self.pending_click[hand] = None;
             self.hold_since[hand] = None;
         }
@@ -645,7 +654,7 @@ impl Hands {
                     scene.haptic(hand);
                     self.attach_for = None;
                     scene.press(now, Action::CloseWindow(id));
-                    self.sync(scene);
+                    self.pressed(scene);
                 }
                 Some(Target {
                     thing: Thing::Menu,
@@ -661,7 +670,7 @@ impl Hands {
                             clicked = true;
                             scene.haptic(hand);
                             scene.press_menu(now, action);
-                            self.sync(scene);
+                            self.pressed(scene);
                         }
                     }
                 }
@@ -674,7 +683,7 @@ impl Hands {
                         self.rings.push((hit.point, now));
                         scene.haptic(hand);
                         scene.press(now, action);
-                        self.sync(scene);
+                        self.pressed(scene);
                     }
                 }
                 Some(Target {
@@ -685,7 +694,7 @@ impl Hands {
                     clicked = true;
                     scene.haptic(hand);
                     scene.toggle_menu();
-                    self.sync(scene);
+                    self.pressed(scene);
                 }
                 _ => {}
             }
@@ -696,11 +705,14 @@ impl Hands {
         }
         if input.select.released {
             self.hold_since[hand] = None;
-            if let Some((action, point)) = self.pending_click[hand].take() {
+            // On the menu as it still is (not closed, nothing else pressed meanwhile).
+            if let Some((action, point)) = self.pending_click[hand].take()
+                && scene.menu().is_some()
+            {
                 self.rings.push((point, now));
                 scene.haptic(hand);
                 scene.press_menu(now, action);
-                self.sync(scene);
+                self.pressed(scene);
             }
         }
         let (start_grab, end_grab) = if input.is_hand {
@@ -711,7 +723,7 @@ impl Hands {
         } else {
             (input.grab.pressed, input.grab.released)
         };
-        let end_grab = end_grab || switched;
+        let end_grab = end_grab || switched || stopped;
 
         if end_grab && self.scaling.is_some_and(|s| s.hand == hand) {
             self.scaling = None;
@@ -788,6 +800,13 @@ impl Hands {
 
     /// A hand lets go of what the room no longer has it hold (laid out anew, or gone),
     /// and resizing ends when the room ended it.
+    /// A press was made (a button, the menu toggled): what the menu showed changed, so a
+    /// pinch waiting to click on it clicks nothing.
+    fn pressed(&mut self, scene: &impl Scene) {
+        self.pending_click = [None, None];
+        self.sync(scene);
+    }
+
     fn sync(&mut self, scene: &impl Scene) {
         for grab in &mut self.grabs {
             if grab.is_some_and(|g| !scene.holds(g.id)) {
