@@ -76,11 +76,115 @@ fn a_burst_keeps_three_pieces_and_a_large_one_goes() {
 fn a_stopped_player_is_noticed() {
     let mut feed = Feed::spawn(&mut Command::new("true")).unwrap();
     let _ = feed.pacat.wait();
-    // Another test's child forked at the same moment holds the pipe's other end
-    // until it runs its program: give it that moment.
-    let until = Instant::now() + Duration::from_secs(2);
+    // Another test's child forked at the same moment may hold the pipe's other end
+    // (the other tests' players live up to 10 s): give it that long.
+    let until = Instant::now() + Duration::from_secs(12);
     while feed.write(&[0; 960]) {
         assert!(Instant::now() < until, "the stopped player was not noticed");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// `pw-cli info` of a node: its number, serial and name.
+#[test]
+fn a_node_is_read_from_pw_cli() {
+    let text = "\tid: 52\n\tpermissions: rwxm\n\ttype: PipeWire:Interface:Node/3\n\
+                *\tproperties:\n*\t\tobject.serial = \"57940\"\n\
+                *\t\tnode.name = \"prostir_headset\"\n*\t\tobject.id = \"52\"\n";
+    assert_eq!(
+        parse_info(text),
+        Some(NodeInfo {
+            id: 52,
+            serial: Some(57940),
+            name: Some("prostir_headset".into()),
+        })
+    );
+    assert_eq!(parse_info("Error: \"unknown global 'x'\"\n"), None);
+}
+
+/// A device let go late (the sound system was slow, and the sound thread went on
+/// without waiting) leaves alone the one made after it under the same name, though
+/// PipeWire may have given the new one the old one's number. By hand, on this PC's
+/// PipeWire: `cargo test -p prostir -- --ignored a_late_drop`. It makes only nodes of
+/// its own (`prostir_test_late_drop`) and removes them.
+#[test]
+#[ignore = "by hand: makes PipeWire nodes of its own"]
+fn a_late_drop_leaves_the_new_device_alone() {
+    const NAME: &str = "prostir_test_late_drop";
+    let old = VirtualNode::create(NAME, "Prostir test", "Audio/Sink").unwrap();
+    // Made while the old one is still being let go: it removes the old node as one
+    // left over, and may well get its number.
+    let new = VirtualNode::create(NAME, "Prostir test", "Audio/Sink").unwrap();
+    eprintln!(
+        "old #{} {:?}, new #{} {:?}",
+        old.id, old.serial, new.id, new.serial
+    );
+    let new_id = new.id;
+    drop(old);
+    let there = node_id(NAME);
+    drop(new);
+    let gone = node_id(NAME);
+    assert_eq!(there, Some(new_id), "the late drop removed the new device");
+    assert_eq!(gone, None, "the new device goes with its own drop");
+}
+
+/// Waits up to 3 s for `done`.
+fn within_3_s(done: impl Fn() -> bool) -> bool {
+    let until = Instant::now() + Duration::from_secs(3);
+    while !done() {
+        if Instant::now() > until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+/// The headset's sound device removed while the sound goes to it (as when the sound
+/// system restarts): the capture says nothing and moves to another device (the PC's
+/// speakers), and that is noticed. By hand, on this PC's PipeWire: `cargo test -p
+/// prostir -- --ignored a_removed_sound_device`. It makes only a device of its own
+/// (`prostir_test_gone_sink`, never the default) and removes it.
+#[test]
+#[ignore = "by hand: makes a PipeWire node of its own"]
+fn a_removed_sound_device_is_noticed() {
+    const NAME: &str = "prostir_test_gone_sink";
+    gst::init().unwrap();
+    let out = AudioOut::start_as(NAME, "Prostir test", false, |_| {}).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(out.alive(), "fine while its device is there");
+    let id = node_id(NAME).unwrap();
+    run(
+        Command::new("pw-cli").args(["destroy", &id.to_string()]),
+        TIMEOUT,
+    )
+    .unwrap();
+    assert!(within_3_s(|| !out.alive()), "the device went unnoticed");
+    drop(out);
+    assert_eq!(node_id(NAME), None);
+}
+
+/// The headset microphone's device removed (as when the sound system restarts): its
+/// `pw-loopback` ends, and that is noticed; closed, it runs nothing more when it goes.
+/// By hand, on this PC's PipeWire: `cargo test -p prostir -- --ignored
+/// a_removed_microphone`. It makes only devices of its own (`prostir_test_gone_mic`,
+/// never the default) and removes them.
+#[test]
+#[ignore = "by hand: makes PipeWire nodes of its own"]
+fn a_removed_microphone_is_noticed() {
+    const NAME: &str = "prostir_test_gone_mic";
+    const FEED: &str = "prostir_test_gone_feed";
+    let mic = MicIn::start_as(NAME, FEED, false).unwrap();
+    assert!(mic.alive(), "fine while its device is there");
+    let id = node_id(NAME).unwrap();
+    run(
+        Command::new("pw-cli").args(["destroy", &id.to_string()]),
+        TIMEOUT,
+    )
+    .unwrap();
+    assert!(within_3_s(|| !mic.alive()), "the microphone went unnoticed");
+    mic.close();
+    assert!(!mic.alive());
+    drop(mic);
+    assert_eq!(node_id(FEED), None);
 }

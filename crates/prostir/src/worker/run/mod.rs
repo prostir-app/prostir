@@ -37,7 +37,7 @@ mod jobs;
 mod outputs;
 mod place;
 
-use encoders::{restart_due, stop_encoder};
+use encoders::{restart_due, stop_encoder, stop_encoders};
 use outputs::show_sharing_tip;
 
 /// How long an encoder may take to start, and to stop, before the worker goes on
@@ -52,6 +52,10 @@ const SOURCE_AGAIN: Duration = Duration::from_millis(200);
 const KEPT_FOR: Duration = Duration::from_secs(60);
 /// An encoder (by kind) left behind this many times is not used any more.
 const HANGS_OF_A_KIND: u32 = 3;
+/// An encoder that broke this many times in a row on one screen, each soon after it
+/// started ([`BROKE_SOON`]), is not used for it for a while: the next one is.
+const BREAKS_OF_A_KIND: u32 = 2;
+const BROKE_SOON: Duration = Duration::from_secs(60);
 /// With this many encoders left behind and still running, no more are started.
 const BEHIND_AT_MOST: u32 = 6;
 /// How long a display of the PC whose stream stopped (or did not start) rests before
@@ -161,6 +165,8 @@ impl Made {
 struct Running {
     encoder: Encoder,
     retired: Arc<AtomicBool>,
+    /// When it started.
+    since: Instant,
 }
 
 impl std::ops::Deref for Running {
@@ -187,8 +193,9 @@ struct Slot {
     /// had (`started_for`), and when to try the wanted one again.
     kept: Option<((Backend, Codec), Instant)>,
     size_guard: SizeGuard,
-    /// The desktop closing it was said.
-    closed_told: bool,
+    /// Its encoder broke soon after it started this many times in a row, with this
+    /// encoder and codec (see [`Worker::encoder_broke`]).
+    breaks: Option<((Kind, Codec), u32)>,
     /// A scale the desktop was seen to have it at on the last tick, not the one it was
     /// made with; and whether it was seen at that one since it was made.
     scale_seen: Option<u16>,
@@ -207,7 +214,7 @@ impl Slot {
             rest_until: None,
             kept: None,
             size_guard: SizeGuard::default(),
-            closed_told: false,
+            breaks: None,
             scale_seen: None,
             seen_own: false,
         }
@@ -602,6 +609,18 @@ impl Worker {
     /// the outputs and their encoders, then the desktop.
     fn close(mut self) {
         self.begin("putting the desktop back");
+        // Every encoder stops at once (each driver takes its time to let go), then
+        // the outputs go one after the other, each at once.
+        let encoders: Vec<(Running, String)> = self
+            .slots
+            .values_mut()
+            .filter_map(|s| {
+                s.started_for = None;
+                Some((s.encoder.take()?, s.name.clone()))
+            })
+            .collect();
+        stop_encoders(encoders, &self.shared.steps, &self.behind);
+        self.begin("removing the outputs");
         let panels: Vec<ScreenId> = self
             .slots
             .iter()

@@ -124,6 +124,9 @@ pub enum Job {
     LookPhysical,
     /// These streams start over, for a fresh picture.
     Fresh(BTreeSet<ScreenId>),
+    /// The encoders that failed on these screens are tried for them again (a new
+    /// session, or a retry asked for).
+    Forgive(BTreeSet<ScreenId>),
     /// A job with an answer someone waits for until `until`: past it, nobody does,
     /// and it is dropped instead of done late.
     Screenshot {
@@ -165,7 +168,7 @@ impl Mergeable for Job {
             (Job::Tick, Job::Tick)
             | (Job::Focus, Job::Focus)
             | (Job::LookPhysical, Job::LookPhysical) => true,
-            (Job::Fresh(ids), Job::Fresh(more)) => {
+            (Job::Fresh(ids), Job::Fresh(more)) | (Job::Forgive(ids), Job::Forgive(more)) => {
                 ids.extend(more);
                 true
             }
@@ -256,12 +259,10 @@ pub enum Done {
     Stopped {
         id: ScreenId,
     },
-    /// The stream of display `id` of the PC stopped: it is shown again shortly.
+    /// Screen `id` lost its output and its stream: a display of the PC whose stream
+    /// stopped (it is shown again shortly), or a monitor that failed (made again
+    /// after its pause).
     Lost {
-        id: ScreenId,
-    },
-    /// The desktop closed the output of monitor `id`.
-    Closed {
         id: ScreenId,
     },
     /// The window of panel `id` closed or left it: the panel is gone.

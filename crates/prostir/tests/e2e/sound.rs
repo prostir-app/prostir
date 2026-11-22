@@ -433,6 +433,75 @@ fn the_sound_watcher_stays_while_the_device_cannot_be_made() {
     assert!(watcher_woke(&pc).is_some(), "no watcher");
 }
 
+/// The sound system went away in the middle of a session (PipeWire restarted) and took
+/// the headset's sound device and microphone with it, saying nothing but that they
+/// are gone: the PC notices within a few seconds, says the sound is not in the
+/// headset meanwhile, and makes both again, so its sound does not stay on its own
+/// speakers. The session goes on.
+#[test]
+fn sound_and_microphone_come_back_after_the_sound_system_went() {
+    const DEVICE: &str = "fake desktop: the headset's sound device made";
+    const MIC: &str = "fake desktop: the headset microphone made";
+    const OFF: &str = "sound: PC sound stays on the PC";
+    const ON: &str = "sound: PC sound HeadsetOnly";
+    let (_dir, mut pc, _keys, mut headset) = session("sound-gone", &Options::default());
+    pc.wait_log(SOON, "headset microphone ready");
+    let (devices, mics) = (pc.count_log(DEVICE), pc.count_log(MIC));
+    let (offs, ons) = (pc.count_log(OFF), pc.count_log(ON));
+    pc.desktop("sound-gone");
+    pc.wait_log(
+        SOON,
+        "fake desktop: the sound system lost Prostir's devices",
+    );
+    let gone = Instant::now();
+    pc.wait_log_after(SOON, OFF, offs);
+    let noticed = Instant::now();
+    pc.wait_log_after(SOON, DEVICE, devices);
+    // Made a moment before (the session just began), it waits the pause of a
+    // failure, so one that breaks again and again is not made every few seconds.
+    let remade = noticed.elapsed();
+    assert!(
+        remade >= Duration::from_secs(3),
+        "made again {remade:?} after"
+    );
+    pc.wait_log_after(SOON, MIC, mics);
+    let back = pc.wait_log_after(SOON, ON, ons);
+    eprintln!(
+        "sound back in the headset {:?} after it went",
+        gone.elapsed()
+    );
+    assert!(
+        pc.lines(OFF)[offs..]
+            .iter()
+            .any(|l| l.contains("microphone is not ready")),
+        "the microphone said gone meanwhile: {:?}",
+        pc.lines("sound: ")
+    );
+    // The status ends where it was.
+    let until = Instant::now() + SOON;
+    while !pc
+        .lines("sound: ")
+        .last()
+        .is_some_and(|l| l.contains("HeadsetOnly") && l.contains("headset microphone ready"))
+    {
+        assert!(Instant::now() < until, "{back}: {:?}", pc.lines("sound: "));
+        headset.take_for(Duration::from_millis(100)).unwrap();
+    }
+    // Gone again soon after: the pause is twice as long.
+    let devices = pc.count_log(DEVICE);
+    let offs = pc.count_log(OFF);
+    pc.desktop("sound-gone");
+    pc.wait_log_after(SOON, OFF, offs);
+    let noticed = Instant::now();
+    pc.wait_log_after(SOON + SOON, DEVICE, devices);
+    let remade = noticed.elapsed();
+    assert!(
+        remade >= Duration::from_secs(7),
+        "made again {remade:?} after the second time"
+    );
+    assert_eq!(headset.view().goodbye, None, "still in the session");
+}
+
 /// The sound switched off and on (or the headset taken off and put on) makes the
 /// headset's sound device anew, at the sound system's level for a new device: the PC
 /// puts the headset's level on it, and asks the headset nothing.

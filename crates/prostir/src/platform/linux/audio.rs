@@ -7,7 +7,8 @@
 
 use std::os::fd::AsRawFd;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -42,8 +43,17 @@ pub fn prepare() {
 /// nothing of it (`state.restore-props=false`): the headset owns the level of its
 /// sound device, which a remembered volume or mute would only fight, and a node of a
 /// test leaves nothing behind.
+///
+/// It is destroyed as the node it was made as (its number and serial), never by its
+/// name: one let go late (the sound system was slow) leaves alone the node made
+/// after it under the same name.
 struct VirtualNode {
     name: &'static str,
+    /// Its number, which PipeWire gives to another node once this one is gone.
+    id: u32,
+    /// Its serial, which PipeWire never gives again (none from a PipeWire too old to
+    /// have one).
+    serial: Option<u64>,
 }
 
 impl VirtualNode {
@@ -60,12 +70,24 @@ impl VirtualNode {
         }
         // The node shows up asynchronously.
         for _ in 0..20 {
-            if node_id(name).is_some() {
-                return Ok(Self { name });
+            if let Some(node) = node_info(name) {
+                return Ok(Self {
+                    name,
+                    id: node.id,
+                    serial: node.serial,
+                });
             }
             std::thread::sleep(Duration::from_millis(50));
         }
         bail!("PipeWire did not create {name}")
+    }
+
+    /// Whether the node with its number is still this one.
+    fn is_there(&self) -> bool {
+        node_info(&self.id.to_string()).is_some_and(|n| match self.serial {
+            Some(serial) => n.serial == Some(serial),
+            None => n.name.as_deref() == Some(self.name),
+        })
     }
 }
 
@@ -81,15 +103,50 @@ fn node_props(name: &str, description: &str, class: &str) -> String {
 
 impl Drop for VirtualNode {
     fn drop(&mut self) {
-        destroy_node(self.name);
+        if self.is_there() {
+            let _ = run(
+                Command::new("pw-cli").args(["destroy", &self.id.to_string()]),
+                TIMEOUT,
+            );
+        }
     }
 }
 
-fn node_id(name: &str) -> Option<u32> {
-    let out = run(Command::new("pw-cli").args(["info", name]), TIMEOUT).ok()?;
-    String::from_utf8_lossy(&out.stdout)
+/// A PipeWire object as `pw-cli info` tells it.
+#[derive(Debug, PartialEq, Eq)]
+struct NodeInfo {
+    id: u32,
+    serial: Option<u64>,
+    name: Option<String>,
+}
+
+/// The object `target` (a name or a number), if there is one.
+fn node_info(target: &str) -> Option<NodeInfo> {
+    let out = run(Command::new("pw-cli").args(["info", target]), TIMEOUT).ok()?;
+    parse_info(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// What `pw-cli info` printed: `id: 52`, then `object.serial = "57940"` and
+/// `node.name = "…"` among the properties (a `*` before those that changed).
+fn parse_info(text: &str) -> Option<NodeInfo> {
+    let id = text
         .lines()
-        .find_map(|l| l.trim().strip_prefix("id: ")?.trim().parse().ok())
+        .find_map(|l| l.trim().strip_prefix("id: ")?.trim().parse().ok())?;
+    let property = |key: &str| {
+        text.lines().find_map(|l| {
+            let (k, v) = l.trim().trim_start_matches('*').split_once(" = ")?;
+            (k.trim() == key).then(|| v.trim().trim_matches('"').to_owned())
+        })
+    };
+    Some(NodeInfo {
+        id,
+        serial: property("object.serial").and_then(|s| s.parse().ok()),
+        name: property("node.name"),
+    })
+}
+
+fn node_id(name: &str) -> Option<u32> {
+    node_info(name).map(|n| n.id)
 }
 
 fn destroy_node(name: &str) {
@@ -112,6 +169,12 @@ pub fn restore_after_crash() {
 /// Sound going to the headset while this exists.
 pub struct AudioOut {
     pipeline: gst::Pipeline,
+    /// The capture, and the device it is to capture (the sink's monitor).
+    capture: gst::Element,
+    monitor: String,
+    /// The capture stopped (an error, the end of its stream) or moved to another
+    /// device: the sound no longer reaches the headset.
+    failed: Arc<AtomicBool>,
     previous_default: Option<String>,
     // Dropped last: the device disappears after capture stops.
     _sink: VirtualNode,
@@ -120,21 +183,72 @@ pub struct AudioOut {
 impl AudioOut {
     /// `on_sound` gets each slice of PC sound (raw PCM) as it is captured.
     pub fn start(on_sound: impl Fn(Vec<u8>) + Send + Sync + 'static) -> Result<Self> {
-        let sink = VirtualNode::create(
+        Self::start_as(
             SINK,
             crate::i18n::t("Prostir — шолом", "Prostir headset"),
-            "Audio/Sink",
-        )?;
-        let previous_default = pactl(&["get-default-sink"]).filter(|s| s != SINK);
+            true,
+            on_sound,
+        )
+    }
+
+    /// The sound device `name`; with `make_default`, the PC's default output (and the
+    /// old default comes back when it goes).
+    fn start_as(
+        name: &'static str,
+        description: &str,
+        make_default: bool,
+        on_sound: impl Fn(Vec<u8>) + Send + Sync + 'static,
+    ) -> Result<Self> {
+        let sink = VirtualNode::create(name, description, "Audio/Sink")?;
+        let previous_default = make_default
+            .then(|| pactl(&["get-default-sink"]))
+            .flatten()
+            .filter(|s| s != name);
+        let monitor = format!("{name}.monitor");
         // Low latency: 10 ms slices, at most 40 ms buffered on the PC.
         let desc = format!(
-            "pulsesrc device={SINK}.monitor buffer-time=40000 latency-time=10000 \
+            "pulsesrc name=capture device={monitor} buffer-time=40000 latency-time=10000 \
              ! audio/x-raw,format=S16LE,rate={AUDIO_RATE},channels={AUDIO_CHANNELS} \
              ! appsink name=sink sync=false max-buffers=8 drop=true"
         );
         let pipeline = gst::parse::launch(&desc)?
             .downcast::<gst::Pipeline>()
             .map_err(|_| anyhow!("not a pipeline"))?;
+        let capture = pipeline
+            .by_name("capture")
+            .ok_or_else(|| anyhow!("pulsesrc missing"))?;
+        let failed = Arc::new(AtomicBool::new(false));
+        // The device removed (the sound system restarted, or someone removed it), the
+        // capture says nothing of it: it moves to another device, the PC's speakers.
+        let moved = failed.clone();
+        let ours = monitor.clone();
+        capture.connect_notify(Some("current-device"), move |capture, _| {
+            let now = capture.property::<Option<String>>("current-device");
+            if now.as_deref().is_some_and(|d| !d.is_empty() && d != ours)
+                && !moved.swap(true, Ordering::Relaxed)
+            {
+                warn!("PC sound: the capture moved to {now:?}: {ours} is gone");
+            }
+        });
+        // Nothing else reads the bus: its messages are looked at as they are posted,
+        // and none waits there.
+        let stopped = failed.clone();
+        pipeline
+            .bus()
+            .ok_or_else(|| anyhow!("pipeline without bus"))?
+            .set_sync_handler(move |_, msg| {
+                let why = match msg.view() {
+                    gst::MessageView::Error(e) => Some(e.error().to_string()),
+                    gst::MessageView::Eos(_) => Some("the capture ended".to_owned()),
+                    _ => None,
+                };
+                if let Some(why) = why
+                    && !stopped.swap(true, Ordering::Relaxed)
+                {
+                    warn!("PC sound to the headset stopped: {why}");
+                }
+                gst::BusSyncReply::Drop
+            });
         let appsink = pipeline
             .by_name("sink")
             .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
@@ -154,15 +268,30 @@ impl AudioOut {
         );
         pipeline.set_state(gst::State::Playing)?;
         // Like plugging in headphones: sound follows the headset.
-        if pactl(&["set-default-sink", SINK]).is_none() {
-            warn!("cannot make {SINK} the default output");
+        if make_default && pactl(&["set-default-sink", name]).is_none() {
+            warn!("cannot make {name} the default output");
         }
         info!("PC sound goes to the headset");
         Ok(Self {
             pipeline,
+            capture,
+            monitor,
+            failed,
             previous_default,
             _sink: sink,
         })
+    }
+
+    /// Whether the sound still reaches the headset: the capture runs, from the
+    /// headset's device. Looked at now and then: when the sound system goes away
+    /// nothing else tells (see `worker/sound.rs`).
+    pub fn alive(&self) -> bool {
+        if self.failed.load(Ordering::Relaxed) {
+            return false;
+        }
+        // Not known yet right after the start: as good as ours.
+        let now = self.capture.property::<Option<String>>("current-device");
+        now.is_none_or(|d| d.is_empty() || d == self.monitor)
     }
 }
 
@@ -217,12 +346,13 @@ const FEED_QUEUED: usize = 3 * 960;
 /// so a mute once set silenced the microphone on every later run), and they are set
 /// again at the start of each recording.
 pub struct MicIn {
-    loopback: Child,
+    /// None once closed.
+    loopback: Mutex<Option<Child>>,
     mic: String,
     feed_sink: String,
     /// The way in while an app records; none in between.
     feed: Mutex<Option<Feed>>,
-    previous_default: Option<String>,
+    previous_default: Mutex<Option<String>>,
 }
 
 impl MicIn {
@@ -258,12 +388,43 @@ impl MicIn {
         };
         info!("headset microphone is the PC's microphone");
         Ok(Self {
-            loopback,
+            loopback: Mutex::new(Some(loopback)),
             mic: mic.to_owned(),
             feed_sink: feed.to_owned(),
             feed: Mutex::new(None),
-            previous_default,
+            previous_default: Mutex::new(previous_default),
         })
+    }
+
+    /// Whether the microphone is still there: its `pw-loopback` runs (it ends when the
+    /// sound system goes away or its devices are removed). Looked at now and then:
+    /// nothing else tells (see `worker/sound.rs`).
+    pub fn alive(&self) -> bool {
+        self.loopback
+            .lock()
+            .unwrap()
+            .as_mut()
+            .is_some_and(|l| matches!(l.try_wait(), Ok(None)))
+    }
+
+    /// Lets the microphone go, for every share of it (the default input back as it
+    /// was, the loopback stopped); what is left to do when the last share goes is
+    /// nothing. The sound thread closes one that broke, so the control loop's share
+    /// runs nothing of this.
+    pub fn close(&self) {
+        let previous = self.previous_default.lock().unwrap().take();
+        if let Some(prev) = previous
+            && pactl(&["get-default-source"]).as_deref() == Some(self.mic.as_str())
+        {
+            let _ = pactl(&["set-default-source", &prev]);
+        }
+        drop(self.feed.lock().unwrap().take());
+        let loopback = self.loopback.lock().unwrap().take();
+        if let Some(mut loopback) = loopback {
+            let _ = loopback.kill();
+            let _ = loopback.wait();
+            info!("microphone back on the PC");
+        }
     }
 
     /// Plays a slice of the headset's microphone into the PC microphone, if an app
@@ -309,15 +470,7 @@ impl MicIn {
 
 impl Drop for MicIn {
     fn drop(&mut self) {
-        if let Some(prev) = &self.previous_default
-            && pactl(&["get-default-source"]).as_deref() == Some(self.mic.as_str())
-        {
-            let _ = pactl(&["set-default-source", prev]);
-        }
-        *self.feed.get_mut().unwrap() = None;
-        let _ = self.loopback.kill();
-        let _ = self.loopback.wait();
-        info!("microphone back on the PC");
+        self.close();
     }
 }
 

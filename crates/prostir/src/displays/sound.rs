@@ -86,9 +86,13 @@ impl Displays {
                 self.mic = None;
                 self.mic_failed = Some(why);
             }
+            // Also when it broke: the sound thread closed it, and this share goes on a
+            // thread of its own all the same.
             SoundDone::MicOff => {
                 self.mic_tap.set(None);
-                self.mic = None;
+                if let Some(share) = self.mic.take() {
+                    worker::sound::let_go_of_mic(share);
+                }
             }
         }
         self.sync_audio();

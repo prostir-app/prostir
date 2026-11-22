@@ -10,7 +10,7 @@
 //! and a stream too big for one headset still goes to the rest.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -233,8 +233,6 @@ impl Tally {
 struct StreamSlot {
     /// The screen's name, for the log.
     name: String,
-    /// A display of the PC: a broken stream is started again, not the end of all.
-    physical: bool,
     size: Option<(u32, u32)>,
     /// What the encoder makes, announced with the stream.
     codec: Codec,
@@ -252,6 +250,11 @@ struct StreamSlot {
     /// A headset asked again within [`HEADSET_KEYFRAMES`] of that: one keyframe is
     /// asked for once the time is up (every request within it counts as this one).
     headset_pending: bool,
+    /// A headset waits for a keyframe the router could not ask for yet (within
+    /// [`KEYFRAME_EVERY`] of the one before, or not yet that headset's turn): asked for
+    /// with the next frame, or by the tick on a still screen (see
+    /// [`Router::pending_keyframes`]).
+    key_pending: bool,
     /// Where a frame's deliveries are listed, kept between frames so a frame
     /// allocates nothing for them (see [`Router::fan_out`]).
     outs: Vec<Out>,
@@ -397,6 +400,14 @@ impl RouterInner {
     }
 }
 
+/// How a stream broke: why, and whether its source lost its stream (the desktop's)
+/// rather than its encoder failing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Broke {
+    pub why: String,
+    pub by_source: bool,
+}
+
 /// A stream larger than every headset decodes: its display, size and codec.
 pub type TooBig = (ScreenId, (u32, u32), Codec);
 
@@ -414,10 +425,9 @@ pub struct Router {
     /// A screenshot waiting for the next keyframe of stream `id` (see `screenshot`).
     pub snapshot: Mutex<Option<(ScreenId, std::sync::mpsc::SyncSender<Vec<u8>>)>>,
     inner: Mutex<RouterInner>,
-    /// A stream that is no display of the PC broke: the monitors are made anew.
-    pub failed: AtomicBool,
-    /// Displays of the PC whose stream broke, to start again.
-    broken: Mutex<Vec<ScreenId>>,
+    /// Streams whose encoder broke, with why: each is started again by itself (see
+    /// `Worker::check_closed`), the others go on.
+    broken: Mutex<Vec<(ScreenId, Broke)>>,
     /// Streams whose encoder did not open, with why: each goes on with the next
     /// encoder for it (see `Displays::tick`).
     unopened: Mutex<Vec<(ScreenId, crate::encoder::NotOpened)>>,
@@ -438,7 +448,6 @@ impl Router {
                 report: Period::new(REPORT_EVERY),
                 quiet: Quiet::default(),
             }),
-            failed: AtomicBool::new(false),
             broken: Mutex::new(Vec::new()),
             unopened: Mutex::new(Vec::new()),
             too_big: Mutex::new(Vec::new()),
@@ -566,6 +575,17 @@ impl Router {
             .values()
             .map(|r| r.headset.clone())
             .collect()
+    }
+
+    /// Whether stream `id` sends frames now (its picture moves), so a keyframe asked of
+    /// its encoder comes with the next one.
+    pub fn flowing(&self, id: ScreenId) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .streams
+            .get(&id)
+            .is_some_and(|s| s.flowing(Instant::now()))
     }
 
     /// Whether stream `id` goes to a headset on the head already and sends frames now
@@ -797,16 +817,16 @@ impl Router {
             .is_some_and(|d| d.announced && d.generation == generation)
     }
 
-    /// Stream `id` (named `name`, a display of the PC with `physical`) starts, or
-    /// starts over with a new encoder making `codec`: every headset gets it announced
-    /// anew, and one that had it is told when it ends.
-    pub fn add_stream(&self, id: ScreenId, codec: Codec, name: String, physical: bool) {
+    /// Stream `id` (named `name`) starts, or starts over with a new encoder making
+    /// `codec`: every headset gets it announced anew, and one that had it is told when
+    /// it ends.
+    pub fn add_stream(&self, id: ScreenId, codec: Codec, name: String) {
         // What an encoder before this one said is no news of the new one.
         self.unopened.lock().unwrap().retain(|(i, _)| *i != id);
+        self.broken.lock().unwrap().retain(|(i, _)| *i != id);
         let mut inner = self.inner.lock().unwrap();
         let slot = StreamSlot {
             name,
-            physical,
             size: None,
             codec,
             keyframe_asked: None,
@@ -815,6 +835,7 @@ impl Router {
             keyframer: None,
             headset_asked: None,
             headset_pending: false,
+            key_pending: false,
             outs: Vec::new(),
             tally: Tally::default(),
             measured: None,
@@ -924,20 +945,24 @@ impl Router {
     }
 
     /// Asks for the keyframes headsets asked for within 300 ms of the one before,
-    /// once that time is up (see [`Router::keyframe_asked`]); how many.
+    /// once that time is up (see [`Router::keyframe_asked`]), and those the router
+    /// could not ask for yet when a headset began to wait for one (see
+    /// [`Router::fan_out`]); how many.
     pub fn pending_keyframes(&self) -> usize {
         let now = Instant::now();
-        let keyframers: Vec<_> = self
-            .inner
-            .lock()
-            .unwrap()
-            .streams
+        let mut inner = self.inner.lock().unwrap();
+        let RouterInner {
+            streams, receivers, ..
+        } = &mut *inner;
+        let keyframers: Vec<_> = streams
             .iter_mut()
             .filter_map(|(id, s)| {
-                s.pending_due(now)
-                    .then(|| (*id, s.keyframer.clone(), !s.flowing(now)))
+                let headset = s.pending_due(now);
+                let router = Self::router_pending_due(s, receivers, *id, now);
+                (headset || router).then(|| (*id, s.keyframer.clone(), !s.flowing(now)))
             })
             .collect();
+        drop(inner);
         let n = keyframers.len();
         for (id, k, still) in keyframers {
             if let Some(k) = &k {
@@ -994,8 +1019,8 @@ impl Router {
         }
     }
 
-    /// Displays of the PC whose stream broke since the last call.
-    pub fn take_broken(&self) -> Vec<ScreenId> {
+    /// Streams whose encoder broke since the last call, with why.
+    pub fn take_broken(&self) -> Vec<(ScreenId, Broke)> {
         std::mem::take(&mut *self.broken.lock().unwrap())
     }
 
@@ -1129,15 +1154,25 @@ impl Router {
                 }
                 !too_big
             }
-            EncoderEvent::Failed(reason) => {
-                error!("{}: {reason}", slot.name);
-                // A display of the PC is started again by `Displays::tick`; anything
-                // else ends the sessions.
-                if slot.physical {
-                    self.broken.lock().unwrap().push(id);
-                } else {
-                    self.failed.store(true, Ordering::Relaxed);
-                }
+            // Not the end of anything either: the desktop's worker starts this stream
+            // again by itself, after a pause (see `Worker::check_closed`), and the
+            // others go on.
+            EncoderEvent::Failed(why) => {
+                error!("{}: {why}", slot.name);
+                let broke = Broke {
+                    why,
+                    by_source: false,
+                };
+                self.broken.lock().unwrap().push((id, broke));
+                false
+            }
+            EncoderEvent::SourceLost(why) => {
+                warn!("{}: its source is gone: {why}", slot.name);
+                let broke = Broke {
+                    why,
+                    by_source: true,
+                };
+                self.broken.lock().unwrap().push((id, broke));
                 false
             }
             // Not the end of anything: `Displays` starts the next encoder for it.
@@ -1317,9 +1352,51 @@ impl Router {
         if keyframe && want_key.is_empty() {
             slot.keyframe_asked = None;
         }
-        key_now
-            || (!want_key.is_empty()
-                && Self::ask_keyframe(slot, receivers, id, &want_key, takers > 1))
+        // Not asked now, it waits: on a still screen no frame comes to ask again.
+        let ask =
+            !want_key.is_empty() && Self::ask_keyframe(slot, receivers, id, &want_key, takers > 1);
+        slot.key_pending = !want_key.is_empty() && !ask;
+        key_now || ask
+    }
+
+    /// Whether the keyframe the router could not ask for of stream `id` (see
+    /// `key_pending`) is to be asked for now, as [`Router::fan_out`] would with the
+    /// next frame: for the headsets that still wait for one, once the time since the
+    /// last one asked is up, and each as often as it may ask.
+    fn router_pending_due(
+        slot: &mut StreamSlot,
+        receivers: &mut BTreeMap<SessionId, Receiver>,
+        id: ScreenId,
+        now: Instant,
+    ) -> bool {
+        if !slot.key_pending
+            || slot
+                .keyframe_asked
+                .is_some_and(|t| now.duration_since(t) < KEYFRAME_EVERY)
+        {
+            return false;
+        }
+        let takes = |r: &Receiver| r.worn && r.published.contains(&id);
+        let shared = receivers.values().filter(|r| takes(r)).count() > 1;
+        let (mut waiting, mut ask) = (false, false);
+        for r in receivers.values_mut().filter(|r| takes(r)) {
+            let queued = shared && r.tx.keyframe_waiting(id.wire());
+            if let Some(d) = r
+                .streams
+                .get_mut(&id)
+                .filter(|d| !d.too_big && d.need_keyframe)
+            {
+                waiting = true;
+                ask |= d.key_asks.due(now, shared, queued);
+            }
+        }
+        // Nobody waits any more (a keyframe came, the headset went): nothing to ask.
+        slot.key_pending = waiting && !ask;
+        if ask {
+            slot.keyframe_asked = Some(now);
+            debug!("{}: a keyframe that waited is asked for now", slot.name);
+        }
+        ask
     }
 
     /// Whether the headsets of `sessions`, which wait for a keyframe of stream `id`,

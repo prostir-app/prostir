@@ -18,6 +18,14 @@
 //! - `record on`, `record off`: a program records from the headset's microphone;
 //! - `sound-events stop`: the sound system's events end, as when `pactl subscribe`
 //!   dies;
+//! - `sound-gone`: the sound system loses Prostir's devices (the sound device and
+//!   the microphone), as when PipeWire restarts;
+//! - `close Fake-2`: the desktop closes that output, as KWin may, and its stream
+//!   ends (as KWin's PipeWire node goes);
+//! - `break-encoder Fake-2 3`: the next three fake hardware encoders of that output
+//!   (the one running now among them) break once they have sent a frame, as a
+//!   driver that fails in the middle of a stream; `break-encoder Fake-2 3 any`: the
+//!   next three of any encoder;
 //! - `fail-source Fake-3 2`: the next two starts of that output's picture source fail
 //!   (it may not be made yet), as when KWin's PipeWire node of an output is gone;
 //! - `hang make 20`, `hang place 20`, `hang encoder-stop 20`, `hang sound-start 20`:
@@ -188,7 +196,10 @@ impl FakeDesktop {
                 origin_is_primary: false,
                 scales: Scales::Any { min: 50, max: 400 },
                 refresh: vec![60],
-                screenshot_one_output: true,
+                // With `PROSTIR_FAKE_SCREENSHOT=stream`, as on KDE: the picture of
+                // one monitor comes from its own stream.
+                screenshot_one_output: std::env::var_os("PROSTIR_FAKE_SCREENSHOT")
+                    .is_none_or(|v| v != "stream"),
                 moves_pointer: false,
                 cleans_up_after_crash: true,
             },
@@ -448,7 +459,7 @@ impl Output for FakeOutput {
 
     /// A display of the PC is closed once it is unplugged.
     fn health(&self) -> OutputHealth {
-        if !self.owned && !plugged(&self.name) {
+        if (!self.owned && !plugged(&self.name)) || self.screen.is_closed() {
             OutputHealth::Closed
         } else if let Some((w, h)) = self.screen.resized() {
             OutputHealth::Resized { w, h }
@@ -559,7 +570,29 @@ fn command(line: &str) -> Result<()> {
             info!("fake desktop: the sound system's events stopped");
             return Ok(());
         }
+        ["sound-gone"] => {
+            super::audio::gone();
+            info!("fake desktop: the sound system lost Prostir's devices");
+            return Ok(());
+        }
         _ => {}
+    }
+    if let ["close", name] = words[..] {
+        Screen::find(name)
+            .with_context(|| format!("no output {name}"))?
+            .close();
+        info!("fake desktop: closed {name}");
+        return Ok(());
+    }
+    if let ["break-encoder", name, n] = words[..] {
+        super::break_encoders(name, n.parse()?, false);
+        info!("fake desktop: the next {n} fake hardware encoders of {name} break");
+        return Ok(());
+    }
+    if let ["break-encoder", name, n, "any"] = words[..] {
+        super::break_encoders(name, n.parse()?, true);
+        info!("fake desktop: the next {n} encoders of {name} break");
+        return Ok(());
     }
     if let ["fail-source", name, n] = words[..] {
         screen::FAIL_STARTS

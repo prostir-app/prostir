@@ -17,11 +17,9 @@ impl Worker {
         let Some(mut output) = self.slots.get_mut(&id).and_then(|s| s.output.take()) else {
             return;
         };
-        let physical = matches!(w.what, What::Physical { .. });
         let asked = (wanted.encoding.backend, wanted.encoding.codec);
         let mut used = asked;
-        let mut result =
-            self.start_encoder(id, &w.name, physical, output.as_mut(), &wanted.encoding);
+        let mut result = self.start_encoder(id, &w.name, output.as_mut(), &wanted.encoding);
         // A source that fails fails the same with any encoder.
         if let (Err(e), Some(cfg)) = (&result, fallback)
             && e.downcast_ref::<SourceFailed>().is_none()
@@ -30,7 +28,7 @@ impl Worker {
                 "{}: cannot encode with {:?} {:?}: {e:#}; back to {:?} {:?}",
                 w.name, wanted.encoding.backend, wanted.encoding.codec, cfg.backend, cfg.codec
             );
-            result = self.start_encoder(id, &w.name, physical, output.as_mut(), cfg);
+            result = self.start_encoder(id, &w.name, output.as_mut(), cfg);
             used = (cfg.backend, cfg.codec);
         }
         let Some(slot) = self.slots.get_mut(&id) else {
@@ -145,7 +143,7 @@ impl Worker {
         }
     }
 
-    /// A new encoder for stream `id` (`name`, a display of the PC with `physical`),
+    /// A new encoder for stream `id` (`name`),
     /// fed by `output`: the best this PC has for where the output's frames are, in
     /// `cfg`'s codec (only x264 when `cfg` encodes on the CPU), else the next one, in
     /// H.264 if need be (see `encoder/choice.rs`). The stream's slot starts over with
@@ -154,7 +152,6 @@ impl Worker {
         &self,
         id: ScreenId,
         name: &str,
-        physical: bool,
         output: &mut dyn Output,
         cfg: &EncoderConfig,
     ) -> Result<Running> {
@@ -212,7 +209,7 @@ impl Worker {
                 .begin(format!("starting the encoder of {name} ({choice})"));
             self.shared
                 .router
-                .add_stream(id, choice.codec, name.to_owned(), physical);
+                .add_stream(id, choice.codec, name.to_owned());
             let router = self.shared.router.clone();
             let (input, gpu) = (source.input.clone(), self.gpu.clone());
             // Left behind after its time, a late encoder sends nothing; nor does one
@@ -293,7 +290,11 @@ impl Worker {
                 None => info!("{name}: encoding with {choice}"),
             }
             encoder.set_choice(&choice, note);
-            return Ok(Running { encoder, retired });
+            return Ok(Running {
+                encoder,
+                retired,
+                since: Instant::now(),
+            });
         };
         let mut why: Vec<String> = ranked
             .skipped
@@ -322,7 +323,7 @@ impl Worker {
 
     /// Sessions each encoder holds now, those of the screens `except` left out: every
     /// stream that opened, or is opening (it runs, and has not said it did not open).
-    fn running_encoders(&self, except: &[ScreenId]) -> BTreeMap<Kind, u32> {
+    pub(super) fn running_encoders(&self, except: &[ScreenId]) -> BTreeMap<Kind, u32> {
         // Those left behind may still hold their sessions.
         let mut running = self.behind.running();
         for (_, s) in self.slots.iter().filter(|(id, _)| !except.contains(id)) {
@@ -469,11 +470,55 @@ pub(super) fn stop_encoder(
     steps: &Steps,
     behind: &Arc<timed::Behind<Kind>>,
 ) {
-    let Some(Running { encoder, retired }) = encoder else {
+    let Some(running) = encoder else {
         return;
     };
-    retired.store(true, Ordering::Relaxed);
     steps.begin(format!("stopping the encoder of {name}"));
+    stop_now(running, name, behind);
+}
+
+/// Stops every encoder of `encoders` (each with its output's name) at once, as one
+/// step: each driver takes its time to let go, and the outputs go together after,
+/// not one after the other. Waits at most as long as for one.
+pub(super) fn stop_encoders(
+    encoders: Vec<(Running, String)>,
+    steps: &Steps,
+    behind: &Arc<timed::Behind<Kind>>,
+) {
+    if encoders.is_empty() {
+        return;
+    }
+    steps.begin(format!("stopping {} encoders", encoders.len()));
+    std::thread::scope(|scope| {
+        for (running, name) in encoders {
+            // The encoder goes in the call, so one without a thread of its own is
+            // stopped here instead.
+            let encoder = Arc::new(std::sync::Mutex::new(Some((running, name))));
+            let taken = encoder.clone();
+            let spawned = std::thread::Builder::new()
+                .name("encoder-stops".into())
+                .spawn_scoped(scope, move || {
+                    let mine = taken.lock().unwrap().take();
+                    if let Some((running, name)) = mine {
+                        stop_now(running, &name, behind);
+                    }
+                });
+            if spawned.is_err() {
+                let left = encoder.lock().unwrap().take();
+                if let Some((running, name)) = left {
+                    stop_now(running, &name, behind);
+                }
+            }
+        }
+    });
+}
+
+/// Stops `running`, waiting for it at most [`ENCODER_STOP`].
+fn stop_now(running: Running, name: &str, behind: &Arc<timed::Behind<Kind>>) {
+    let Running {
+        encoder, retired, ..
+    } = running;
+    retired.store(true, Ordering::Relaxed);
     let kind = encoder.kind();
     let _ = timed::call_counted(
         behind,
@@ -483,7 +528,7 @@ pub(super) fn stop_encoder(
         ENCODER_STOP,
         move || {
             #[cfg(feature = "fake-desktop")]
-            crate::platform::hang("encoder-stop");
+            crate::platform::encoder_stops();
             drop(encoder);
         },
     );

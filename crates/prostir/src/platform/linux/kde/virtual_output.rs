@@ -933,7 +933,7 @@ mod tests {
                     EncoderEvent::Frame { timing, .. } => {
                         kept.lock().unwrap().extend(timing);
                     }
-                    EncoderEvent::Failed(why) => {
+                    EncoderEvent::Failed(why) | EncoderEvent::SourceLost(why) => {
                         let _ = failed.send(why);
                     }
                     EncoderEvent::Unopened(not) => {

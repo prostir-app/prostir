@@ -87,7 +87,6 @@ impl Worker {
                 slot.output = Some(output);
                 slot.failed = None;
                 slot.rest_until = None;
-                slot.closed_told = false;
                 slot.size_guard = SizeGuard::default();
                 // Made anew: seen at its scale again before another is taken.
                 slot.scale_seen = None;
@@ -105,23 +104,47 @@ impl Worker {
         }
     }
 
-    /// Screen `id` could not be made or start at `attempt`: a monitor waits for the
-    /// next attempt, a display of the PC is tried again after a rest.
+    /// Screen `id` could not be made or start at `attempt` (or the desktop closed
+    /// it, or its source lost its stream): a display of the PC is tried again after a
+    /// rest; a monitor waits for the next attempt, which the control loop gives after
+    /// a pause. A monitor's output goes too when the fault is the desktop's or its
+    /// stream's (no output on the desktop that nobody sees, where windows would
+    /// vanish); for one of the encoder's it stays, so it is not made and removed
+    /// again with each try. A failure at an attempt already said failed is said once.
     pub(super) fn failed(&mut self, id: ScreenId, attempt: u32, e: &anyhow::Error) {
+        let mut told = false;
         if let Some(slot) = self.slots.get_mut(&id) {
+            if let Some(output) = slot.output.as_mut() {
+                output.detach();
+            }
+            stop_encoder(
+                slot.encoder.take(),
+                &slot.name,
+                &self.shared.steps,
+                &self.behind,
+            );
+            slot.started_for = None;
             if slot.is_physical() {
-                stop_encoder(
-                    slot.encoder.take(),
-                    &slot.name,
-                    &self.shared.steps,
-                    &self.behind,
-                );
                 slot.output = None;
                 slot.rest_until = Some(Instant::now() + PHYSICAL_REST);
             } else {
+                told = slot.failed == Some(attempt);
                 slot.failed = Some(attempt);
+                let had_output = output_at_fault(e) && slot.output.take().is_some();
+                self.shared.router.remove_stream(id);
+                if had_output {
+                    self.layout_due = true;
+                    self.done(Done::Lost { id });
+                }
             }
         }
+        if !told {
+            self.say_failed(id, attempt, e);
+        }
+    }
+
+    /// Says that screen `id` failed at `attempt`, and why.
+    fn say_failed(&self, id: ScreenId, attempt: u32, e: &anyhow::Error) {
         self.done(Done::Failed {
             id,
             attempt,
@@ -193,15 +216,47 @@ impl Worker {
             if self.primary_made.as_ref() == self.slots.get(&id).and_then(Slot::key) {
                 self.primary_made = None;
             }
+        } else {
+            // Not made again: no headset waits for the stream it had.
+            self.shared.router.remove_stream(id);
         }
     }
 
-    /// Monitors the desktop closed are said once (the control loop makes them anew for
-    /// the next session); displays of the PC whose stream stopped rest and are shown
-    /// again.
+    /// Each screen whose stream broke or whose output the desktop closed is put right
+    /// by itself, the others go on: a display of the PC rests and is shown again; a
+    /// monitor whose encoder broke keeps its output and its encoder starts again; one
+    /// the desktop closed, or whose source lost its stream, is made again; each after
+    /// its pause (see [`Worker::encoder_broke`] and [`Worker::failed`]); a window
+    /// panel closes, its window back where it was. One failure is one: a monitor
+    /// whose output closed, and whose stream broke with it, counts once, as closed.
     pub(super) fn check_closed(&mut self) {
-        let mut stopped = self.shared.router.take_broken();
-        for (id, slot) in &mut self.slots {
+        let mut stopped = Vec::new();
+        // `None`: closed, or its source lost its stream (made again); else its
+        // encoder broke, why.
+        let mut gone: Vec<(ScreenId, Option<String>)> = Vec::new();
+        let add =
+            |gone: &mut Vec<(ScreenId, Option<String>)>, id: ScreenId, broke: Option<String>| {
+                match gone.iter_mut().find(|(i, _)| *i == id) {
+                    Some((_, was)) => {
+                        if broke.is_none() {
+                            *was = None;
+                        }
+                    }
+                    None => gone.push((id, broke)),
+                }
+            };
+        for (id, broke) in self.shared.router.take_broken() {
+            match self.slots.get(&id) {
+                Some(slot) if slot.is_physical() => stopped.push(id),
+                Some(slot) if broke.by_source => {
+                    warn!("{}: its stream from the desktop is gone", slot.name);
+                    add(&mut gone, id, None);
+                }
+                Some(_) => add(&mut gone, id, Some(broke.why)),
+                None => {}
+            }
+        }
+        for (id, slot) in &self.slots {
             let closed = slot
                 .output
                 .as_ref()
@@ -211,12 +266,33 @@ impl Worker {
             }
             if slot.is_physical() {
                 stopped.push(*id);
-            } else if !std::mem::replace(&mut slot.closed_told, true) {
+            } else {
                 warn!("the desktop closed {}", slot.name);
-                self.shared.events.send(Event::Desk(
-                    self.shared.generation,
-                    Done::Closed { id: *id },
-                ));
+                add(&mut gone, *id, None);
+            }
+        }
+        for (id, broke) in gone {
+            let panel = self.slots.get(&id).is_some_and(Slot::is_panel);
+            if panel {
+                warn!("{id}: its stream or output is gone: the window panel closes");
+                self.remove(id, true);
+                self.done(Done::PanelGone { id });
+                continue;
+            }
+            let attempt = self.attempt_of(id);
+            match broke {
+                Some(why) => self.encoder_broke(id, attempt, &why),
+                None => {
+                    let e = anyhow!(
+                        "{}",
+                        t(
+                            "його вихід на стільниці зник",
+                            "its output on the desktop is gone"
+                        )
+                    )
+                    .context(UserError::Capture);
+                    self.failed(id, attempt, &e);
+                }
             }
         }
         stopped.sort_unstable();
@@ -243,6 +319,108 @@ impl Worker {
             self.done(Done::Lost { id });
         }
     }
+}
+
+impl Worker {
+    /// Whether screen `id` has an encoder to go on with other than `kind`: one that
+    /// breaks is passed over only then, never leaving a screen with none (x264
+    /// alone, say).
+    fn another_encoder_for(&self, id: ScreenId, kind: Kind) -> bool {
+        let (Some(output), Some(wanted)) = (
+            self.slots.get(&id).and_then(|s| s.output.as_ref()),
+            self.wanted.as_ref(),
+        ) else {
+            return false;
+        };
+        let asked = Asked {
+            codec: wanted.encoding.codec,
+            software: wanted.encoding.backend == Backend::X264,
+        };
+        let running = self.running_encoders(&[id]);
+        let held = |k: Kind| running.get(&k).copied().unwrap_or(0);
+        crate::encoder::catalog()
+            .rank(output.source().memory, asked, id, &held)
+            .choices
+            .iter()
+            .any(|c| (c.backend, c.adapter) != kind)
+    }
+
+    /// The attempt the wanted state has screen `id` at.
+    fn attempt_of(&self, id: ScreenId) -> u32 {
+        self.wanted
+            .as_ref()
+            .and_then(|w| w.screens.iter().find(|(i, _)| *i == id))
+            .map_or(0, |(_, w)| w.attempt)
+    }
+
+    /// The encoder of monitor `id` broke at `attempt` (`why`): it stops, the output
+    /// stays, and it starts again at the next attempt (after its pause, see
+    /// `screen::retry_pause`). One that broke soon after it started, again with the
+    /// same encoder, is not used for this monitor for a while: the next encoder is
+    /// (`Catalog::did_not_open`), so a failure that comes back each time does not
+    /// come back for ever.
+    pub(super) fn encoder_broke(&mut self, id: ScreenId, attempt: u32, why: &str) {
+        let another = self
+            .slots
+            .get(&id)
+            .and_then(|s| s.encoder.as_ref())
+            .is_some_and(|e| self.another_encoder_for(id, e.kind()));
+        let Some(slot) = self.slots.get_mut(&id) else {
+            return;
+        };
+        let Some(encoder) = slot.encoder.take() else {
+            return;
+        };
+        let (kind, codec, soon) = (
+            encoder.kind(),
+            encoder.codec(),
+            encoder.since.elapsed() < BROKE_SOON,
+        );
+        slot.started_for = None;
+        // As for a restart: the output lets go of the encoder first (a capture
+        // feeding it stops).
+        if let Some(output) = slot.output.as_mut() {
+            output.detach();
+        }
+        stop_encoder(Some(encoder), &slot.name, &self.shared.steps, &self.behind);
+        self.shared.router.remove_stream(id);
+        let breaks = match slot.breaks {
+            Some((k, n)) if k == (kind, codec) && soon => n + 1,
+            _ => 1,
+        };
+        // While encoders are left behind, the sessions held are not known; and an
+        // encoder is passed over only for another.
+        let teach = breaks >= BREAKS_OF_A_KIND && self.behind.total() == 0 && another;
+        slot.breaks = (!teach).then_some(((kind, codec), breaks));
+        slot.failed = Some(attempt);
+        warn!(
+            "{}: its encoder broke ({breaks} in a row): starting it again shortly",
+            slot.name
+        );
+        if teach {
+            let held = self
+                .running_encoders(&[id])
+                .get(&kind)
+                .copied()
+                .unwrap_or(0);
+            let failure = NotOpened {
+                short: false,
+                why: why.to_owned(),
+                resumed: false,
+            };
+            crate::encoder::catalog().did_not_open(kind, codec, id, &failure, held);
+        }
+        self.layout_due = true;
+        let e = anyhow!("{why}").context(UserError::Encoder);
+        self.say_failed(id, attempt, &e);
+    }
+}
+
+/// Whether failure `e` is the output's (its stream from the desktop is gone, the
+/// desktop closed it or could not make it), not the encoder's.
+fn output_at_fault(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<SourceFailed>().is_some()
+        || matches!(code_of(e), ErrorCode::DESKTOP | ErrorCode::CAPTURE)
 }
 
 /// The first time in a run that a screen sharing program resizes a monitor (output
