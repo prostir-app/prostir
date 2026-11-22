@@ -15,8 +15,8 @@ use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, PixmapMut, Rect, Str
 use crate::ids::DisplayKey;
 use crate::lang::{Language, Moment, Texts};
 use crate::note::{Kind, Note};
+use crate::platform::store::UpdateHint;
 use crate::settings::{Background, Curve, HandMode, Preset, Settings, Sky};
-use crate::store::UpdateHint;
 
 pub const WIDTH: u32 = 1280;
 pub const HEIGHT: u32 = 960;
@@ -152,7 +152,7 @@ pub struct UiState {
     pub ip_input: Option<String>,
     /// What the search screen says while no PC answers.
     pub hint: Option<crate::session::Hint>,
-    /// Quest monitors, sorted by id.
+    /// The PC's virtual monitors, sorted by id.
     pub monitors: Vec<MonitorEntry>,
     /// The monitor picked on the map (its actions show under it).
     pub selected: Option<DisplayKey>,
@@ -201,6 +201,13 @@ pub struct UiState {
     pub curve_available: bool,
     /// The headset can show a passthrough window onto the keyboard.
     pub keyboard_available: bool,
+    /// The headset tracks hands: the choice of what they do shows.
+    pub hands_available: bool,
+    /// The display rates to choose from, usual and saving the battery, in hertz (none:
+    /// the runtime chooses, the choice is hidden).
+    pub display_rates: Option<(u16, u16)>,
+    /// The display rate now, as the runtime says.
+    pub display_rate_now: Option<u16>,
     pub error: Option<String>,
     /// Monitor whose "×" was pressed once and now asks for confirmation.
     pub confirm_remove: Option<DisplayKey>,
@@ -2618,7 +2625,7 @@ pub fn menu_button_image(size: u32, hovered: bool) -> Vec<u8> {
     p.take()
 }
 
-/// Quest monitors with reorder / primary / remove, then the laptop screen.
+/// The virtual monitors with reorder / primary / remove, then the laptop screen.
 /// The monitors as seen from where the user sits, on a small map: press one to pick
 /// it, and its actions show underneath.
 fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32) -> f32 {
@@ -4206,33 +4213,36 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
     let l = &s.texts;
     let st = s.settings;
     let (lx, lw) = (x, w);
-    segmented(
-        items,
-        lx,
-        lw,
-        &mut y,
-        l.t("hands"),
-        vec![
-            (
-                l.t("hide"),
-                Action::Hands(HandMode::Hidden),
-                st.hands == HandMode::Hidden,
-                true,
-            ),
-            (
-                l.t("show"),
-                Action::Hands(HandMode::Visible),
-                st.hands == HandMode::Visible,
-                true,
-            ),
-            (
-                l.t("hands-use"),
-                Action::Hands(HandMode::Control),
-                st.hands == HandMode::Control,
-                true,
-            ),
-        ],
-    );
+    // Without tracked hands there is nothing to choose for them.
+    if s.hands_available {
+        segmented(
+            items,
+            lx,
+            lw,
+            &mut y,
+            l.t("hands"),
+            vec![
+                (
+                    l.t("hide"),
+                    Action::Hands(HandMode::Hidden),
+                    st.hands == HandMode::Hidden,
+                    true,
+                ),
+                (
+                    l.t("show"),
+                    Action::Hands(HandMode::Visible),
+                    st.hands == HandMode::Visible,
+                    true,
+                ),
+                (
+                    l.t("hands-use"),
+                    Action::Hands(HandMode::Control),
+                    st.hands == HandMode::Control,
+                    true,
+                ),
+            ],
+        );
+    }
     let on_off = |on: bool, act: fn(bool) -> Action, enabled: bool| {
         vec![
             (l.t("off"), act(false), !on, enabled),
@@ -4281,57 +4291,65 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
             ),
         ],
     );
-    segmented(
-        items,
-        lx,
-        lw,
-        &mut y,
-        l.t("palm-menu"),
-        vec![
-            (
-                l.t("palm-menu-left"),
-                Action::LeftHanded(false),
-                !st.left_handed,
-                true,
-            ),
-            (
-                l.t("palm-menu-right"),
-                Action::LeftHanded(true),
-                st.left_handed,
-                true,
-            ),
-        ],
-    );
-    segmented(
-        items,
-        lx,
-        lw,
-        &mut y,
-        l.t("display-rate"),
-        vec![
-            (
-                l.t("display-rate-normal"),
-                Action::BatterySaver(false),
-                !st.battery_saver,
-                true,
-            ),
-            (
-                l.t("display-rate-saver"),
-                Action::BatterySaver(true),
-                st.battery_saver,
-                true,
-            ),
-        ],
-    );
-    items.push(text(
-        lx,
-        y - 18.0,
-        18.0,
-        false,
-        MUTED,
-        l.t("display-rate-note"),
-    ));
-    y += 22.0;
+    // The palm menu needs tracked hands.
+    if s.hands_available {
+        segmented(
+            items,
+            lx,
+            lw,
+            &mut y,
+            l.t("palm-menu"),
+            vec![
+                (
+                    l.t("palm-menu-left"),
+                    Action::LeftHanded(false),
+                    !st.left_handed,
+                    true,
+                ),
+                (
+                    l.t("palm-menu-right"),
+                    Action::LeftHanded(true),
+                    st.left_handed,
+                    true,
+                ),
+            ],
+        );
+    }
+    // The rates the runtime offers, by the rule; none to choose from: hidden.
+    if let Some((usual, saver)) = s.display_rates {
+        let usual_text = l.f("display-rate-normal", &[("hz", usual.into())]);
+        let saver_text = l.f("display-rate-saver", &[("hz", saver.into())]);
+        segmented(
+            items,
+            lx,
+            lw,
+            &mut y,
+            l.t("display-rate"),
+            vec![
+                (
+                    usual_text.as_str(),
+                    Action::BatterySaver(false),
+                    !st.battery_saver,
+                    true,
+                ),
+                (
+                    saver_text.as_str(),
+                    Action::BatterySaver(true),
+                    st.battery_saver,
+                    true,
+                ),
+            ],
+        );
+        // What the display shows now, when that is not what was chosen (the system
+        // changed it); else why the slower rate loses nothing.
+        let chosen = if st.battery_saver { saver } else { usual };
+        let note = match s.display_rate_now {
+            Some(now) if now != chosen => l.f("display-rate-now", &[("hz", now.into())]),
+            _ => l.f("display-rate-note", &[("hz", saver.into())]),
+        };
+        items.push(text(lx, y - 18.0, 18.0, false, MUTED, &note));
+        y += 22.0;
+    }
     segmented(
         items,
         lx,
@@ -4835,7 +4853,7 @@ mod tests {
     fn k(n: u32) -> DisplayKey {
         DisplayKey::new(crate::ids::PcId([7; 8]), prostir_proto::state::DisplayId(n))
     }
-    use crate::store::{NoStore, Store as _};
+    use crate::platform::store::{NoStore, Store as _};
 
     /// What a PC with an H.265 decoder on the headset offers.
     pub fn sample_limits() -> Limits {
@@ -4982,6 +5000,9 @@ mod tests {
             custom_available: false,
             curve_available: true,
             keyboard_available: true,
+            hands_available: true,
+            display_rates: Some((90, 72)),
+            display_rate_now: Some(90),
             error: None,
             confirm_remove: None,
             confirm_save: None,

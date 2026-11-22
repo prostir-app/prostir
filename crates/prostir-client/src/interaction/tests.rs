@@ -350,8 +350,11 @@ fn cancelling_lets_go_and_forgets_the_pinch() {
     let mut sim = Sim::new();
     let k = Thing::Display(monitor(1));
     sim.scene.pick_for[1] = on(k);
+    assert!(!sim.hands.busy());
     sim.frame(MS, 0.0, 1.0, false);
+    assert!(sim.hands.busy());
     sim.hands.cancel_all(&mut sim.scene);
+    assert!(!sim.hands.busy());
     assert_eq!(sim.scene.take(), [Call::Cancel]);
     assert_eq!(sim.frame(11 * MS, 0.0, 1.0, false), []);
     // A pinch on a button, then the system menu, then the pinch opens elsewhere.
@@ -362,6 +365,43 @@ fn cancelling_lets_go_and_forgets_the_pinch() {
     sim.scene.take();
     sim.scene.pick_for[1] = None;
     assert_eq!(sim.frame(11 * MS, 0.0, 0.0, true), []);
+}
+
+/// The controller put down mid-drag and the hand taking over (its grip never seen let
+/// go): what it held is let go at once, as letting go would, not carried on by the
+/// hand. The other way round too: a pinch held on a monitor, then a controller.
+#[test]
+fn controllers_to_hands_mid_drag_let_go() {
+    let mut sim = Sim::new();
+    let k = Thing::Display(monitor(1));
+    sim.scene.pick_for[1] = on(k);
+    sim.frame(MS, 0.0, 1.0, false);
+    assert_eq!(sim.frame(11 * MS, 0.0, 1.0, false), [Call::Drag(k)]);
+    // The runtime's input for the hand starts afresh: no grip, no pinch.
+    sim.right = HandState::default();
+    assert_eq!(sim.frame(11 * MS, 0.0, 0.0, true), [Call::LetGo(k)]);
+    assert_eq!(sim.hands.held().count(), 0);
+    assert_eq!(sim.frame(11 * MS, 0.0, 0.0, true), []);
+
+    let mut sim = Sim::new();
+    sim.scene.pick_for[1] = on(k);
+    sim.frame(MS, 1.0, 0.0, true);
+    sim.frame(HOLD_TO_DRAG + MS, 1.0, 0.0, true);
+    assert_eq!(sim.hands.held().collect::<Vec<_>>(), [k]);
+    sim.right = HandState::default();
+    assert_eq!(sim.frame(11 * MS, 0.0, 0.0, false), [Call::LetGo(k)]);
+    assert_eq!(sim.hands.held().count(), 0);
+}
+
+/// A pinch on a menu button when the controller is picked up does not click when the
+/// controller's trigger is seen up.
+#[test]
+fn a_pinch_waiting_to_click_goes_with_the_hand() {
+    let mut sim = Sim::new();
+    sim.scene.pick_for[1] = on(Thing::Menu);
+    sim.frame(MS, 1.0, 0.0, true);
+    assert_eq!(sim.frame(11 * MS, 0.0, 0.0, false), []);
+    assert_eq!(sim.frame(11 * MS, 0.0, 0.0, false), []);
 }
 
 /// Both hands on one monitor resize it by how far apart they are; the second hand

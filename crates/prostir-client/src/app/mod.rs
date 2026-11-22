@@ -33,6 +33,7 @@ use prostir_proto::state::{
     self, Battery, DisplayId, HeadsetState, PcState, Prefs, Presence, ReqId, caps,
 };
 
+use crate::caps::{Caps, Offer};
 use crate::ids::{DisplayKey, PcId};
 use crate::interaction::{FrameInput, Head};
 use crate::lang::{Known, Lang, LangState, Moment, Texts};
@@ -41,11 +42,11 @@ use crate::net::NetEvent;
 use crate::note::{self, Note, Notes};
 use crate::pending;
 use crate::persist::{self, PersistEvent};
+use crate::platform::store::UpdateHint;
 use crate::presence;
 use crate::profiles::{self, Profile};
 use crate::session::{Attempt, NetCmd, Session};
 use crate::settings::Settings;
-use crate::store::UpdateHint;
 use crate::ui::{self, Action, Tab};
 use crate::world::World;
 
@@ -72,25 +73,6 @@ const REST_OFF: Duration = Duration::from_secs(5 * 60);
 /// app closes.
 const NOT_OWNED_FOR: Duration = Duration::from_secs(6);
 
-/// What the headset can show, as the shell found it at the start (step 7.8a makes this
-/// the headset's `Caps`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Can {
-    /// The cameras: the "Room" backgrounds.
-    pub room: bool,
-    /// A window onto the real keyboard.
-    pub keyboard_window: bool,
-    /// Panoramas (equirect layers).
-    pub panorama: bool,
-    /// Curved layers.
-    pub curve: bool,
-    /// The person put a picture of their own for the background on the headset (looked
-    /// for again each time the menu opens).
-    pub custom_panorama: bool,
-    /// Where this build is updated from (its store's).
-    pub update_from: UpdateHint,
-}
-
 /// What the model starts with: what the files held, what the system said, what the
 /// headset can.
 pub struct Start {
@@ -104,9 +86,14 @@ pub struct Start {
     /// The headset's own system language.
     pub system_lang: Option<Lang>,
     pub battery: Option<(u8, bool)>,
-    /// The headset's model as the system names it, for `HeadsetCaps`.
-    pub model: String,
-    pub can: Can,
+    /// What the headset can do (its model among it), as the shell found it.
+    pub caps: Caps,
+    /// The display rate now, as the runtime says (`None`: it does not).
+    pub refresh_hz: Option<f32>,
+    /// The person's own picture for the background is on the headset.
+    pub custom_panorama: bool,
+    /// Where this build is updated from (its store's).
+    pub update_from: UpdateHint,
     /// Whether the system lets the app record (see `prostir_proto::state::permission`).
     pub mic_permission: u8,
     /// The selftest's fake PC: the only address ever dialed.
@@ -161,6 +148,14 @@ pub enum PlatformEvent {
     Mic { permission: u8, denied: bool },
     /// The battery was read.
     Battery(Option<(u8, bool)>),
+    /// The system moved the room's origin to where the person is now (its "recenter"):
+    /// what stands in the room moves with it, as it always did.
+    SpaceMoved,
+    /// The display rate is now this, changed by the system or as asked.
+    RefreshRate(f32),
+    /// The cameras broke for good (the runtime said so): the "Room" backgrounds and the
+    /// window onto the keyboard go for this start.
+    CamerasLost,
     /// A language loaded, ready for the menu.
     Texts(Texts),
     /// The languages there are files for, listed again.
@@ -204,8 +199,9 @@ pub enum Effect {
 /// For OpenXR and the runtime's extensions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum XrCmd {
-    /// The display rate: to save the battery, or the usual one.
-    RefreshRate { saver: bool },
+    /// The display rate to ask for (one of `Caps::refresh_rates`, by the rule of
+    /// `Caps::rate`).
+    RefreshRate(f32),
     /// The cameras: on or off, and how opaque.
     Room { on: bool, opacity: f32 },
 }
@@ -300,9 +296,15 @@ pub struct Menu {
 pub struct Headset {
     /// Percent and whether it is charging, read once a minute.
     pub battery: Option<(u8, bool)>,
-    /// The model as the system names it.
-    pub model: String,
-    pub can: Can,
+    /// What it can do, as the shell found it at the start (the cameras may go later).
+    pub caps: Caps,
+    /// The display rate now, as the runtime says.
+    pub refresh_hz: Option<f32>,
+    /// The person put a picture of their own for the background on the headset (looked
+    /// for again each time the menu opens).
+    pub custom_panorama: bool,
+    /// Where this build is updated from (its store's).
+    pub update_from: UpdateHint,
     /// Whether the system lets the app record, as last found.
     pub mic_permission: u8,
     /// Access to the microphone was refused in the system.
@@ -457,12 +459,14 @@ impl Model {
             lang,
             system_lang,
             battery,
-            model,
-            can,
+            caps,
+            refresh_hz,
+            custom_panorama,
+            update_from,
             mic_permission,
             only,
         } = start;
-        let world = World::new(desk, keyboard, can.curve, &settings);
+        let world = World::new(desk, keyboard, caps.cylinder, &settings);
         let mut m = Self {
             now,
             rev: 0,
@@ -492,8 +496,10 @@ impl Model {
             },
             headset: Headset {
                 battery,
-                model,
-                can,
+                caps,
+                refresh_hz,
+                custom_panorama,
+                update_from,
                 mic_permission,
                 mic_denied: false,
                 mic_wanted: settings.mic,
@@ -826,7 +832,8 @@ impl Model {
         }
         // The window onto the keyboard: in front of the user at desk height the first
         // time, then wherever it was moved.
-        self.keyboard_window = (self.headset.can.keyboard_window && self.settings.keyboard_window)
+        let keyboard = self.headset.caps.offers(Offer::KeyboardWindow);
+        self.keyboard_window = (keyboard && self.settings.keyboard_window)
             .then(|| self.world.keyboard_here(self.head));
         // Far monitors first so nearer (and grabbed) ones draw on top.
         self.world.animate(&self.settings, input.dt);
@@ -999,6 +1006,17 @@ impl Model {
                 }
             }
             PlatformEvent::Battery(battery) => self.battery_read(battery),
+            PlatformEvent::SpaceMoved => {
+                // In the room's terms nothing moved: the arrangement went with the
+                // origin. The menu's map is drawn from the eyes again.
+                info!("the room's origin moved: the arrangement moves with it");
+                self.view_eye = None;
+            }
+            PlatformEvent::RefreshRate(hz) => {
+                info!("display at {hz} Hz");
+                self.headset.refresh_hz = Some(hz);
+            }
+            PlatformEvent::CamerasLost => self.cameras_lost(),
             PlatformEvent::Texts(texts) => {
                 if self.lang.loaded(texts) {
                     self.language_shown();
@@ -1016,8 +1034,26 @@ impl Model {
                 self.settings.keyboard_window = false;
                 self.keyboard_window = None;
             }
-            PlatformEvent::CustomPanorama(there) => self.headset.can.custom_panorama = there,
+            PlatformEvent::CustomPanorama(there) => self.headset.custom_panorama = there,
         }
+    }
+
+    /// The cameras broke for good: the "Room" backgrounds and the window onto the
+    /// keyboard are no longer offered (the background chosen is kept for the next
+    /// start; until then nothing shows behind the monitors), said once.
+    fn cameras_lost(&mut self) {
+        if self.headset.caps.room.take().is_none() {
+            return;
+        }
+        self.keyboard_window = None;
+        let text = self.texts().t("error-cameras-lost").to_owned();
+        self.show_error(text);
+    }
+
+    /// The display rate to ask for as the settings say, if the runtime lets the app
+    /// choose (see `Caps::rate`).
+    pub fn wanted_rate(&self) -> Option<f32> {
+        self.headset.caps.rate(self.settings.battery_saver)
     }
 
     /// The store says the app is not the person's: the menu says so in front of the
@@ -1362,7 +1398,7 @@ impl Model {
                 self.presence.worn(),
                 self.headset.battery,
                 self.headset.mic_permission,
-                &self.headset.model,
+                &self.headset.caps,
             )
         }
     }
@@ -1620,17 +1656,17 @@ fn prefs_of(s: &Settings) -> Prefs {
 
 /// What the headset says about itself when it opens a session: what it can do, its
 /// settings, whether it is worn, its battery, the microphone's switch and `permission`;
-/// `model` as the system names it.
+/// what it can do as `caps` says.
 pub fn headset_state(
     settings: &Settings,
     worn: bool,
     battery: Option<(u8, bool)>,
     permission: u8,
-    model: &str,
+    caps: &Caps,
 ) -> HeadsetState {
     let mic = mic_state(settings, permission);
     HeadsetState {
-        caps: Some(crate::device::headset_caps(model)),
+        caps: Some(caps.headset_caps()),
         prefs: Some(prefs_of(settings)),
         presence: Some(Presence { worn }),
         battery: battery.map(|(percent, charging)| Battery { percent, charging }),

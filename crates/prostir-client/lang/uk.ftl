@@ -245,9 +245,10 @@ palm-menu = Меню на долоні
 palm-menu-left = На лівій руці
 palm-menu-right = На правій руці
 display-rate = Частота екрана шолома
-display-rate-normal = 90 Hz
-display-rate-saver = 72 Hz, довше від заряду
-display-rate-note = Відео йде 60 кадрів на секунду, тож 72 Hz його не обрізає.
+display-rate-normal = { $hz } Гц
+display-rate-saver = { $hz } Гц, довше від заряду
+display-rate-note = Відео йде 60 кадрів на секунду, тож { $hz } Гц його не обрізає.
+display-rate-now = Зараз екран показує { $hz } Гц.
 menu-button = Кругла кнопка меню біля монітора
 
 ## Налаштування: звук
@@ -325,6 +326,7 @@ error-send = Не вдалося надіслати на ПК: { $error }
 error-not-connected = Немає з'єднання з ПК
 error-too-big = { $name }: { $size } ({ $codec }) завеликий, щоб цей шолом його показав
 error-cameras = Камери недоступні: { $error }
+error-cameras-lost = Камери перестали працювати: «Кімната» і «Притемнена» повернуться після наступного запуску застосунку.
 error-not-ip = «{ $typed }»: не IP-адреса
 error-save-settings = Не вдалося зберегти налаштування: { $error }
 error-save-desk = Не вдалося зберегти розстановку: { $error }

@@ -5,8 +5,9 @@
 //! monitor with the menu closed or open allocate nothing; the menu's state is made
 //! anew only when what it shows changed. Pointing about the menu's picture, once each
 //! button was pointed at, draws nothing and takes no memory.
-
-// On the PC only: on the headset the app has a counting allocator of its own.
+//!
+//! On the desktop only: the app built for Android has its own counting allocator, and
+//! a program has one.
 #![cfg(not(target_os = "android"))]
 #![expect(
     clippy::disallowed_methods,
@@ -19,15 +20,16 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use glam::Vec3;
-use prostir::app::{By, Can, Effect, Event, Model, Start};
+use prostir::app::{By, Effect, Event, Model, Start};
+use prostir::caps::{self, Caps};
 use prostir::ids::{DisplayKey, PcId};
 use prostir::interaction::{Button, FrameInput, HandState, Hands, Head, Menu, Menus};
 use prostir::lang::{self, LangState};
 use prostir::layout::{Desk, Ray};
 use prostir::net::NetEvent;
+use prostir::platform::store::Store as _;
 use prostir::session::NetCmd;
 use prostir::settings::Settings;
-use prostir::store::Store as _;
 use prostir::ui::Action;
 use prostir::view::View;
 use prostir_proto::HostMsg;
@@ -213,15 +215,21 @@ fn connected() -> Loop {
         ),
         system_lang: None,
         battery: Some((80, false)),
-        model: "Test headset".into(),
-        can: Can {
-            room: false,
-            keyboard_window: false,
-            panorama: true,
-            curve: true,
-            custom_panorama: false,
-            update_from: prostir::store::NoStore.update_hint(),
+        caps: Caps {
+            equirect: true,
+            cylinder: true,
+            color_scale: true,
+            refresh_rates: vec![72.0, 90.0],
+            ..Caps::without_extensions(
+                "Test headset".into(),
+                caps::DECODERS_UNSAID.to_vec(),
+                caps::STREAMS_UNSAID,
+                None,
+            )
         },
+        refresh_hz: Some(90.0),
+        custom_panorama: false,
+        update_from: prostir::platform::store::NoStore.update_hint(),
         mic_permission: permission::UNKNOWN,
         only: Some(addr()),
     });

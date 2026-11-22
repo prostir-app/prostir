@@ -265,9 +265,10 @@ palm-menu = Palm menu
 palm-menu-left = Left hand
 palm-menu-right = Right hand
 display-rate = Headset display rate
-display-rate-normal = 90 Hz
-display-rate-saver = 72 Hz, lasts longer
-display-rate-note = The video runs at 60 frames a second, so 72 Hz keeps all of it.
+display-rate-normal = { $hz } Hz
+display-rate-saver = { $hz } Hz, lasts longer
+display-rate-note = The video runs at 60 frames a second, so { $hz } Hz keeps all of it.
+display-rate-now = The display shows { $hz } Hz now.
 menu-button = Round menu button by the monitor
 
 ## Settings: sound
@@ -355,6 +356,7 @@ error-not-connected = Not connected to a PC
 error-too-big = { $name }: { $size } ({ $codec }) is too large for this headset to show
 # $error (String): what went wrong, as the system says it
 error-cameras = Cameras unavailable: { $error }
+error-cameras-lost = The cameras stopped working: "Room" and "Dimmed" come back once the app starts again.
 # $typed (String): what was typed
 error-not-ip = «{ $typed }»: is not an IP address
 # $error (String): what went wrong, as the system says it

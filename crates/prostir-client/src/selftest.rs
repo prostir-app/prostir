@@ -55,7 +55,39 @@ pub struct Options {
     /// `pc=usb`: against a real PC app over USB (`adb reverse` to `127.0.0.1:47830`,
     /// its keys put in place by the script) instead of the fake PC in the process.
     pub pc_usb: bool,
+    /// `caps=minimal`: the OpenXR instance with only the extensions the app cannot do
+    /// without, so the app runs as on a headset without the others.
+    pub caps_minimal: bool,
+    /// `perf=`: the performance level asked of the runtime (the app itself asks none).
+    pub perf: Perf,
 }
+
+/// A performance level for the selftest to ask for and measure (step 7 note, 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Perf {
+    /// Nothing asked: as the runtime decides.
+    #[default]
+    Default,
+    Low,
+    High,
+}
+
+impl Perf {
+    pub fn name(self) -> &'static str {
+        match self {
+            Perf::Default => "default",
+            Perf::Low => "low",
+            Perf::High => "high",
+        }
+    }
+}
+
+/// A frame's work without a menu redraw, as a share of the display period, at the
+/// 95th and the 99th percentile; and a menu's redraw (only recorded: more means drawing
+/// it on a thread of its own). Shares, so one limit holds at any display rate.
+pub const FRAME_SHARE_P95: f64 = 0.15;
+pub const FRAME_SHARE_P99: f64 = 0.3;
+pub const MENU_REDRAW_SHARE: f64 = 0.5;
 
 impl Default for Options {
     fn default() -> Self {
@@ -64,6 +96,8 @@ impl Default for Options {
             relaunch: false,
             decoder_rate_max: false,
             pc_usb: false,
+            caps_minimal: false,
+            perf: Perf::Default,
         }
     }
 }
@@ -95,9 +129,14 @@ impl Options {
                 ("decoder_rate", "default") => options.decoder_rate_max = false,
                 ("pc", "usb") => options.pc_usb = true,
                 ("pc", "fake") => options.pc_usb = false,
-                ("relaunch", "0") | ("caps", "full") | ("perf", "default") => {}
-                ("caps", v) => return Err(format!("caps={v} is not in this build yet")),
-                ("perf", v) => return Err(format!("perf={v} is not in this build yet")),
+                ("relaunch", "0") => {}
+                ("caps", "full") => options.caps_minimal = false,
+                ("caps", "minimal") => options.caps_minimal = true,
+                ("perf", "default") => options.perf = Perf::Default,
+                ("perf", "low") => options.perf = Perf::Low,
+                ("perf", "high") => options.perf = Perf::High,
+                ("caps", v) => return Err(format!("caps={v}: full or minimal")),
+                ("perf", v) => return Err(format!("perf={v}: default, low or high")),
                 ("pc", v) => return Err(format!("pc={v}: fake or usb")),
                 _ => return Err(format!("{key}={value}: unknown")),
             }
@@ -232,8 +271,9 @@ pub struct Measured {
 /// The limits (step 7 note, 10.3 and 7): first pictures, asking for a keyframe, the
 /// decoder's recovery and a picture after a lost ask for a keyframe within 1 s (the
 /// clips come round to their keyframe only every 2 s), reconnecting within 3 s (and
-/// by asking: a query answered), a frame's work p95 within 0.15 and p99 within 0.3 of
-/// the display period. The menu's redraw is only recorded. What failed, in words.
+/// by asking: a query answered), a frame's work p95 within [`FRAME_SHARE_P95`] and p99
+/// within [`FRAME_SHARE_P99`] of the display period. The menu's redraw is only
+/// recorded. What failed, in words.
 pub fn check(m: &Measured) -> Vec<String> {
     let mut fails = Vec::new();
     let mut within = |what: &str, value: Option<f64>, limit: f64| match value {
@@ -251,8 +291,8 @@ pub fn check(m: &Measured) -> Vec<String> {
     within("decoder_recovered_ms", m.decoder_recovered_ms, 1000.0);
     within("reconnect_ms", m.reconnect_ms, 3000.0);
     within("stream_unfreeze_ms", m.unfreeze_ms, 1000.0);
-    within("frame_cpu_share.p95", m.frame_share_p95, 0.15);
-    within("frame_cpu_share.p99", m.frame_share_p99, 0.3);
+    within("frame_cpu_share.p95", m.frame_share_p95, FRAME_SHARE_P95);
+    within("frame_cpu_share.p99", m.frame_share_p99, FRAME_SHARE_P99);
     if m.queries_answered == 0 {
         fails.push("queries_answered 0: the fake PC was not found by asking".to_owned());
     }
@@ -276,8 +316,8 @@ pub fn check_usb(m: &Measured) -> Vec<String> {
     for (i, first) in m.first_frames_ms.iter().enumerate() {
         within(&format!("stream.{}.first_frame_ms", i + 1), *first, 1000.0);
     }
-    within("frame_cpu_share.p95", m.frame_share_p95, 0.15);
-    within("frame_cpu_share.p99", m.frame_share_p99, 0.3);
+    within("frame_cpu_share.p95", m.frame_share_p95, FRAME_SHARE_P95);
+    within("frame_cpu_share.p99", m.frame_share_p99, FRAME_SHARE_P99);
     fails
 }
 
@@ -523,8 +563,15 @@ mod tests {
                 relaunch: true,
                 decoder_rate_max: false,
                 pc_usb: false,
+                caps_minimal: false,
+                perf: Perf::Default,
             }
         );
+        let o = Options::parse("caps=minimal,perf=low").unwrap();
+        assert!(o.caps_minimal);
+        assert_eq!(o.perf, Perf::Low);
+        assert_eq!(Options::parse("perf=high").unwrap().perf, Perf::High);
+        assert!(!Options::parse("caps=full").unwrap().caps_minimal);
         assert!(Options::parse("decoder_rate=max").unwrap().decoder_rate_max);
         assert!(
             !Options::parse("decoder_rate=default")
@@ -540,8 +587,8 @@ mod tests {
         assert!(Options::parse("pc=usb").unwrap().pc_usb);
         assert!(!Options::parse("pc=fake").unwrap().pc_usb);
         for refused in [
-            "caps=minimal",
-            "perf=low",
+            "caps=none",
+            "perf=boost",
             "pc=wifi",
             "seconds=0",
             "speed=2",
@@ -571,13 +618,13 @@ mod tests {
     fn the_report_keeps_its_order() {
         let mut r = Report::default();
         r.lay_out(&["selftest", "model", "connect_ms"]);
-        r.set("model", "Quest\n3");
+        r.set("model", "Model\n3");
         r.set_ms("connect_ms", Some(412.04));
         r.set("selftest", 1);
         r.set_share("share", Some(0.12345));
         assert_eq!(
             r.text(),
-            "selftest=1\nmodel=Quest 3\nconnect_ms=412.0\nshare=0.123\n"
+            "selftest=1\nmodel=Model 3\nconnect_ms=412.0\nshare=0.123\n"
         );
     }
 

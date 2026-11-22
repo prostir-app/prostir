@@ -22,8 +22,8 @@ use crate::connecting::Ended;
 use crate::ids::Thing;
 use crate::interaction::{HandState, Hands, Menu, Menus};
 use crate::layout::Desk;
+use crate::platform::store::Store as _;
 use crate::session::{Disconnect, StepId};
-use crate::store::Store as _;
 use crate::ui::UiState;
 
 const MS: Duration = Duration::from_millis(1);
@@ -38,6 +38,23 @@ fn addr() -> SocketAddr {
 
 fn k(n: u32) -> DisplayKey {
     DisplayKey::new(PC, DisplayId(n))
+}
+
+/// A headset as the tests had it: panoramas and curved layers, no cameras, two display
+/// rates.
+fn test_caps() -> Caps {
+    Caps {
+        equirect: true,
+        cylinder: true,
+        color_scale: true,
+        refresh_rates: vec![72.0, 90.0],
+        ..Caps::without_extensions(
+            "Test headset".into(),
+            crate::caps::DECODERS_UNSAID.to_vec(),
+            crate::caps::STREAMS_UNSAID,
+            None,
+        )
+    }
 }
 
 fn monitor(n: u32) -> Display {
@@ -101,6 +118,15 @@ impl Sim {
 
     /// The model, with `only` its fake PC or (`None`) searching the network.
     fn with(only: Option<SocketAddr>) -> Self {
+        Self::with_caps(only, test_caps())
+    }
+
+    /// The model of a selftest on a headset that can do what `caps` says.
+    fn of(caps: Caps) -> Self {
+        Self::with_caps(Some(addr()), caps)
+    }
+
+    fn with_caps(only: Option<SocketAddr>, caps: Caps) -> Self {
         let now = Instant::now();
         let m = Model::new(Start {
             now,
@@ -111,15 +137,10 @@ impl Sim {
             lang: LangState::new(crate::lang::builtin("en"), Vec::new()),
             system_lang: None,
             battery: Some((80, false)),
-            model: "Test headset".into(),
-            can: Can {
-                room: false,
-                keyboard_window: false,
-                panorama: true,
-                curve: true,
-                custom_panorama: false,
-                update_from: crate::store::NoStore.update_hint(),
-            },
+            caps,
+            refresh_hz: Some(90.0),
+            custom_panorama: false,
+            update_from: crate::platform::store::NoStore.update_hint(),
             mic_permission: permission::UNKNOWN,
             only,
         });
@@ -395,10 +416,18 @@ fn the_system_menu_ends_a_drag_with_one_save() {
     step(&mut sim, &mut hands, &mut right, Vec3::new(0.2, -0.3, 0.0));
     let moved = sim.m.world().placement(k(1)).copied();
     sim.saves();
+    // The shell lets go (on the system menu, the recenter, other controllers) while
+    // the hands are busy.
+    assert!(hands.busy());
     // The system menu.
     hands.cancel_all(&mut sim.m);
+    assert!(!hands.busy());
     assert!(!sim.m.world().holding());
     assert_eq!(sim.saves(), [persist::File::Desk]);
+    // Once more, with nothing held (the system's recenter, another profile of
+    // controllers): nothing to save.
+    hands.cancel_all(&mut sim.m);
+    assert_eq!(sim.saves(), []);
     step(&mut sim, &mut hands, &mut right, Vec3::new(0.5, -0.3, 0.0));
     assert_eq!(
         sim.m.world().placement(k(1)).copied(),
@@ -1117,4 +1146,149 @@ fn profiles_are_a_list_the_pc_hears_of() {
         sim.m.headset_state().profiles,
         Some(named(&["Work", ""], active))
     );
+}
+
+/// A headset with every optional extension: the cameras, their window onto the
+/// keyboard, hands, two display rates.
+fn full_caps() -> Caps {
+    Caps {
+        room: Some(crate::caps::RoomCaps {
+            keyboard_window: true,
+        }),
+        hands: true,
+        hand_aim: true,
+        menu_gesture: true,
+        perf_levels: true,
+        volume_steps: Some(15),
+        refresh_rates: vec![72.0, 80.0, 90.0, 120.0],
+        ..test_caps()
+    }
+}
+
+/// The menu offers only what the headset can do (the step 7 note, 4.4): everything
+/// with every extension, nothing optional with none (`caps=minimal`), and each item
+/// with its own field.
+#[test]
+fn the_menu_shows_what_the_headset_can() {
+    let view = crate::view::build(&Sim::of(full_caps()).m);
+    assert!(view.room_available && view.keyboard_available && view.hands_available);
+    assert!(view.panorama_available && view.curve_available);
+    assert_eq!(view.display_rates, Some((90, 72)));
+    assert_eq!(view.display_rate_now, Some(90));
+
+    let minimal = Caps::without_extensions(
+        "Test headset".into(),
+        crate::caps::DECODERS_UNSAID.to_vec(),
+        4,
+        Some(15),
+    );
+    let sim = Sim::of(minimal);
+    let view = crate::view::build(&sim.m);
+    assert!(!view.room_available && !view.keyboard_available && !view.hands_available);
+    assert!(!view.panorama_available && !view.curve_available);
+    assert_eq!(view.display_rates, None);
+    // What the PC hears comes from the same caps, the system's decoders among them.
+    let told = sim.m.headset_state().caps.expect("caps in the state");
+    assert_eq!(told.streams_max, 4);
+    assert_eq!(told.decoders.len(), 2);
+    assert_eq!(told.layers_max, crate::caps::LAYERS_AT_LEAST);
+
+    // One rate offered: nothing to choose.
+    let view = crate::view::build(
+        &Sim::of(Caps {
+            refresh_rates: vec![90.0],
+            ..full_caps()
+        })
+        .m,
+    );
+    assert_eq!(view.display_rates, None);
+    // Cameras without their keyboard window.
+    let view = crate::view::build(
+        &Sim::of(Caps {
+            room: Some(crate::caps::RoomCaps {
+                keyboard_window: false,
+            }),
+            ..full_caps()
+        })
+        .m,
+    );
+    assert!(view.room_available && !view.keyboard_available);
+}
+
+/// Saving the battery asks for the rate the rule picks from those offered, and the
+/// usual one back; without rates nothing is asked.
+#[test]
+fn the_display_rate_by_the_rule() {
+    let rates = |sim: &mut Sim| -> Vec<f32> {
+        sim.take()
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::Xr(XrCmd::RefreshRate(hz)) => Some(hz),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut sim = Sim::of(full_caps());
+    assert_eq!(sim.m.wanted_rate(), Some(90.0));
+    sim.menu(Action::BatterySaver(true));
+    assert_eq!(rates(&mut sim), [72.0]);
+    assert_eq!(sim.m.wanted_rate(), Some(72.0));
+    sim.menu(Action::BatterySaver(false));
+    assert_eq!(rates(&mut sim), [90.0]);
+    let mut sim = Sim::of(Caps {
+        refresh_rates: Vec::new(),
+        ..full_caps()
+    });
+    sim.menu(Action::BatterySaver(true));
+    assert!(rates(&mut sim).is_empty());
+    assert_eq!(sim.m.wanted_rate(), None);
+}
+
+/// The system changed the display rate: the menu says what it shows now.
+#[test]
+fn the_rate_the_system_chose_shows() {
+    let mut sim = Sim::of(full_caps());
+    sim.handle(Event::Platform(PlatformEvent::RefreshRate(120.0)));
+    let view = crate::view::build(&sim.m);
+    assert_eq!(view.display_rate_now, Some(120));
+    assert_eq!(sim.m.headset().refresh_hz, Some(120.0));
+}
+
+/// The cameras broke for good: the "Room" backgrounds and the window onto the keyboard
+/// go from the menu and the scene, said once; the setting chosen stays for the next
+/// start.
+#[test]
+fn cameras_lost_hide_the_room() {
+    let mut sim = Sim::of(full_caps());
+    sim.menu(Action::KeyboardWindow(true));
+    sim.frames(Duration::from_millis(50));
+    assert!(sim.m.keyboard_window().is_some());
+    sim.saves();
+    sim.handle(Event::Platform(PlatformEvent::CamerasLost));
+    let view = crate::view::build(&sim.m);
+    assert!(!view.room_available && !view.keyboard_available);
+    assert!(view.error.is_some());
+    assert!(sim.m.keyboard_window().is_none());
+    sim.frames(Duration::from_millis(50));
+    assert!(sim.m.keyboard_window().is_none());
+    // Kept as chosen, nothing saved.
+    assert!(sim.m.settings().keyboard_window);
+    assert_eq!(sim.saves(), []);
+    // Said once.
+    sim.after(ERROR_SHOWN_FOR + MS);
+    sim.handle(Event::Platform(PlatformEvent::CamerasLost));
+    assert!(crate::view::build(&sim.m).error.is_none());
+}
+
+/// The system moved the room's origin: nothing is saved or laid out anew, the monitors
+/// keep their places in the room's terms.
+#[test]
+fn the_origin_moved_keeps_the_arrangement() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    let before = sim.m.world().placement(k(1)).copied();
+    sim.handle(Event::Platform(PlatformEvent::SpaceMoved));
+    sim.frames(Duration::from_millis(100));
+    assert_eq!(sim.m.world().placement(k(1)).copied(), before);
+    assert_eq!(sim.saves(), []);
 }

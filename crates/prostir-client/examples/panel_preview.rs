@@ -5,8 +5,8 @@
 use prostir::ids::{DisplayKey, PcId};
 use prostir::lang::{BUILTIN, Known, Lang, Language, Loader, Texts};
 use prostir::note::Note;
+use prostir::platform::store::{NoStore, Store as _};
 use prostir::settings::Settings;
-use prostir::store::{NoStore, Store as _};
 use prostir::ui::{
     Action, MonitorEntry, OfferWhy, PairingView, Panel, PhysicalEntry, Place, Section, Tab, UiState,
 };
@@ -323,6 +323,9 @@ fn main() {
         custom_available: false,
         curve_available: true,
         keyboard_available: true,
+        hands_available: true,
+        display_rates: Some((90, 72)),
+        display_rate_now: Some(90),
         error: None,
         confirm_remove: std::env::var("CONFIRM").is_ok().then_some(k(2)),
         intro: std::env::var("INTRO").is_ok(),

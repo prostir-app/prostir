@@ -1855,9 +1855,13 @@ impl World {
     /// The hands are not the app's any more (the system menu over it): what they held
     /// is let go, and the arrangement is kept.
     pub fn cancel_holds(&mut self) {
+        // Saved only if something was held: nothing moved otherwise.
+        let held = self.held.iter().any(Option::is_some) || self.resizing.is_some();
         self.held = [None, None];
         self.resizing = None;
-        self.save_layout();
+        if held {
+            self.save_layout();
+        }
     }
 
     // ---- The person's things ----
