@@ -16,6 +16,7 @@ pub mod frames;
 pub mod ids;
 pub mod lang;
 pub mod layout;
+pub mod note;
 pub mod outbox;
 pub mod pending;
 pub mod persist;

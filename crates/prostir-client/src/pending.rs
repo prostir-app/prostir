@@ -16,11 +16,11 @@ use prostir_proto::state::ReqId;
 
 use crate::ids::DisplayKey;
 use crate::layout::Placement;
-use crate::ui::{AskState, AskView, Asked, Failure};
+use crate::ui::Asked;
 
 /// A request without an answer for this long counts as failed (a late answer is let go).
 pub const ANSWER_WITHIN: Duration = Duration::from_secs(30);
-/// How long a failure stays shown by its control.
+/// How long the menu shows a failure under its button (see `note`).
 pub const FAILURE_SHOWN_FOR: Duration = Duration::from_secs(8);
 /// A profile whose monitors do not all stream (or fail) this long after the PC made
 /// them is placed with what streams then, so the arrangement is never held for ever.
@@ -31,8 +31,6 @@ pub const PROFILE_STANDS_WITHIN: Duration = Duration::from_secs(8);
 pub struct Asks {
     /// Waiting for an answer: which control asked, and when.
     waiting: BTreeMap<ReqId, (Asked, Instant)>,
-    /// Failed lately: shown by their control for a while.
-    failed: Vec<(Asked, Failure, String, Instant)>,
     /// The number of the last request this session.
     last: u32,
     /// Commands of the PC answered with the answer to one of these requests (a
@@ -59,10 +57,8 @@ impl Asks {
         self.last = 0;
     }
 
-    /// Control `what` asks, at `now`: the number its request goes with. A failure
-    /// it showed is forgotten.
+    /// Control `what` asks, at `now`: the number its request goes with.
     pub fn ask(&mut self, what: Asked, now: Instant) -> ReqId {
-        self.failed.retain(|f| f.0 != what);
         self.last += 1;
         let req = ReqId(self.last);
         self.waiting.insert(req, (what, now));
@@ -77,12 +73,6 @@ impl Asks {
     /// Command `command` of the PC is answered with the answer to request `req`.
     pub fn answer_command_after(&mut self, req: ReqId, command: ReqId) {
         self.command_after.insert(req, command);
-    }
-
-    /// Control `what` failed for `why` (nothing sent, no answer, the PC's code).
-    pub fn failed(&mut self, what: Asked, why: Failure, detail: String, now: Instant) {
-        self.failed.retain(|f| f.0 != what);
-        self.failed.push((what, why, detail, now));
     }
 
     /// Request `req` was answered with `outcome`, at `now`.
@@ -101,9 +91,6 @@ impl Asks {
                 command,
             };
         };
-        if let Outcome::Failed { error, detail } = outcome {
-            self.failed(what, Failure::Pc(*error), detail.clone(), now);
-        }
         Answered {
             what: Some(what),
             took: Some(now.saturating_duration_since(at)),
@@ -111,8 +98,8 @@ impl Asks {
         }
     }
 
-    /// Requests without an answer for [`ANSWER_WITHIN`] fail as timed out (their
-    /// numbers and controls); failures shown long enough are let go.
+    /// Requests without an answer for [`ANSWER_WITHIN`] fail as timed out: their
+    /// numbers and controls.
     pub fn expire(&mut self, now: Instant) -> Vec<(ReqId, Asked)> {
         let late: Vec<ReqId> = self
             .waiting
@@ -120,51 +107,24 @@ impl Asks {
             .filter(|(_, (_, at))| now.saturating_duration_since(*at) >= ANSWER_WITHIN)
             .map(|(req, _)| *req)
             .collect();
-        let mut gone = Vec::new();
-        for req in late {
-            if let Some((what, _)) = self.waiting.remove(&req) {
-                self.failed(what, Failure::TimedOut, String::new(), now);
-                gone.push((req, what));
-            }
-        }
-        self.failed
-            .retain(|f| now.saturating_duration_since(f.3) < FAILURE_SHOWN_FOR);
-        gone
+        late.into_iter()
+            .filter_map(|req| Some((req, self.waiting.remove(&req)?.0)))
+            .collect()
     }
 
     /// The connection broke: nothing waiting gets an answer, nor do the PC's
-    /// commands. The controls that waited.
-    pub fn disconnected(&mut self, now: Instant) -> Vec<Asked> {
+    /// commands. The requests that waited, and their controls.
+    pub fn disconnected(&mut self) -> Vec<(ReqId, Asked)> {
         self.command_after.clear();
-        let waited: Vec<Asked> = std::mem::take(&mut self.waiting)
-            .into_values()
-            .map(|(what, _)| what)
-            .collect();
-        for what in &waited {
-            self.failed(*what, Failure::Disconnected, String::new(), now);
-        }
-        waited
+        std::mem::take(&mut self.waiting)
+            .into_iter()
+            .map(|(req, (what, _))| (req, what))
+            .collect()
     }
 
     /// Whether control `what` waits for an answer.
     pub fn waits(&self, what: Asked) -> bool {
         self.waiting.values().any(|(w, _)| *w == what)
-    }
-
-    /// How each control's request stands, for the menu: failed ones first.
-    pub fn views(&self) -> Vec<AskView> {
-        let failed = self.failed.iter().map(|(what, why, detail, _)| AskView {
-            what: *what,
-            state: AskState::Failed {
-                why: *why,
-                detail: detail.clone(),
-            },
-        });
-        let waiting = self.waiting.values().map(|(what, _)| AskView {
-            what: *what,
-            state: AskState::Waiting,
-        });
-        failed.chain(waiting).collect()
     }
 }
 
@@ -254,24 +214,15 @@ mod tests {
         // Twice, or a number never asked: nothing waits for it.
         assert_eq!(asks.answered(b, &Outcome::Done, later).what, None);
         assert_eq!(asks.answered(ReqId(77), &Outcome::Done, later).what, None);
-        // A failure shows by its control, and goes when it asks again.
+        // A failure is an answer too (the menu says it under the button).
         let failed = Outcome::failed(ErrorCode::LIMIT, "6");
         assert_eq!(
             asks.answered(a, &failed, later).what,
             Some(Asked::AddMonitor)
         );
-        assert!(matches!(
-            asks.views()[..],
-            [AskView {
-                what: Asked::AddMonitor,
-                state: AskState::Failed {
-                    why: Failure::Pc(ErrorCode::LIMIT),
-                    ..
-                }
-            }]
-        ));
+        assert!(!asks.waits(Asked::AddMonitor));
         assert_eq!(asks.ask(Asked::AddMonitor, later), ReqId(3));
-        assert_eq!(asks.views()[0].state, AskState::Waiting);
+        assert!(asks.waits(Asked::AddMonitor));
         asks.new_session();
         assert_eq!(asks.ask(Asked::Mirror, later), ReqId(1));
     }
@@ -310,25 +261,12 @@ mod tests {
             "too late"
         );
         assert!(asks.waits(Asked::Sound));
-        // The failure is shown for a while, then let go.
-        assert!(asks.views().iter().any(|v| v.what == Asked::Screenshot));
-        asks.expire(t + ANSWER_WITHIN + FAILURE_SHOWN_FOR);
-        assert!(!asks.views().iter().any(|v| v.what == Asked::Screenshot));
+        assert!(!asks.waits(Asked::Screenshot));
         asks.answer_command_after(quick, ReqId(5));
         let now = t + Duration::from_secs(21);
-        assert_eq!(asks.disconnected(now), [Asked::Sound]);
+        assert_eq!(asks.disconnected(), [(quick, Asked::Sound)]);
         assert!(!asks.waits(Asked::Sound));
         assert_eq!(asks.answered(quick, &Outcome::Done, now).command, None);
-        assert!(matches!(
-            asks.views()[..],
-            [AskView {
-                state: AskState::Failed {
-                    why: Failure::Disconnected,
-                    ..
-                },
-                ..
-            }]
-        ));
     }
 
     fn key(n: u32) -> DisplayKey {

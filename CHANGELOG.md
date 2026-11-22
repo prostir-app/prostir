@@ -88,10 +88,18 @@
 - A monitor you add shows at once where it will appear, as a frame saying it is being
   added, and its picture takes that place; a monitor you remove leaves the view at
   once, and comes back if the PC cannot remove it.
-- When something the headset asked for does not happen, the menu says why next to the
-  control that asked, in the headset's language (for example "The limit is reached" or
+- When something the headset asked for does not happen, the menu says why right under
+  the button that asked, in the headset's language (for example "The limit is reached" or
   "No active window on the PC"), with the PC's own detail under it. A request the PC
   does not answer within 30 s says so instead of waiting for ever.
+- Every button of the open menu answers right under itself, for a few seconds: a
+  profile saved, a monitor added or removed (or why not), a new layout, where the
+  microphone goes and whether the headset may use it, the menu's language, a PC paired
+  or forgotten, a screenshot saved. A wait for the PC shows on the menu's bottom line
+  instead. Pressing the note (or its ×) or another button takes it away, and so does
+  another page. A separate message in front of you is left for news that comes while
+  the menu is closed and for the palm menu and the PC's commands, which before also
+  showed behind an open menu.
 - A desktop that thinks or hangs (KScreen, KWin, a graphics driver starting or
   stopping an encoder) no longer holds anything else up: the headset's requests are
   answered at once, sound, the microphone, the menu and the tray go on, and the
