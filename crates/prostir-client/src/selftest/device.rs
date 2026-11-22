@@ -135,6 +135,7 @@ const KEYS: &[&str] = &[
     "reconnect_picture_ms",
     "pc",
     "clock_offset_ms",
+    "clock_offset_round_ms",
     "end_to_end_samples",
     "end_to_end_ms.p50",
     "end_to_end_ms.p95",
@@ -325,8 +326,9 @@ pub struct Selftest {
 
 /// The PC's clock less the headset's, in µs, from the script's clock on the PC
 /// (`pc=usb`): a few questions, the answer of the quickest one, as if the PC read its
-/// clock half way through it. `None` without the clock.
-fn clock_offset_us() -> Option<i64> {
+/// clock half way through it, and that quickest round trip (µs). `None` without the
+/// clock.
+fn clock_offset_us() -> Option<(i64, u64)> {
     let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), CLOCK_PORT);
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
@@ -350,7 +352,7 @@ fn clock_offset_us() -> Option<i64> {
     }
     let (round, offset) = best?;
     info!("selftest: the PC's clock is {offset} us off, to within {round} us");
-    Some(offset)
+    Some((offset, round))
 }
 
 /// Runs `f` with the running activity (the Activity object of the NativeActivity,
@@ -719,11 +721,15 @@ impl Selftest {
         }
         if self.options.pc_usb {
             // The real PC over USB, and nothing else.
-            self.clock_offset_us = clock_offset_us();
-            match self.clock_offset_us {
-                Some(us) => self
-                    .report
-                    .set("clock_offset_ms", format!("{:.1}", us as f64 / 1000.0)),
+            let clock = clock_offset_us();
+            self.clock_offset_us = clock.map(|(offset, _)| offset);
+            match clock {
+                Some((offset, round)) => {
+                    let ms = |us: f64| format!("{:.2}", us / 1000.0);
+                    self.report.set("clock_offset_ms", ms(offset as f64));
+                    // How far off the offset can be: half of this either way.
+                    self.report.set("clock_offset_round_ms", ms(round as f64));
+                }
                 None => warn!("selftest: no clock of the PC on port {CLOCK_PORT}"),
             }
             super::set_time_codes(self.clock_offset_us.is_some());

@@ -279,8 +279,10 @@ pub fn check_usb(m: &Measured) -> Vec<String> {
 /// ms, for each picture whose time code was read (see `prostir_proto::timecode`):
 /// `codes` holds the PC's time of each (its `CLOCK_MONOTONIC` in ms, low 32 bits) and
 /// the headset's when it was decoded (its `CLOCK_MONOTONIC` in µs); `offset_us` is the
-/// PC's clock less the headset's. A picture whose time does not make sense (before
-/// its capture, or a minute after) is left out.
+/// PC's clock less the headset's. The PC's time is its ms cut down, so a capture was
+/// half a millisecond later than its code says on the average: that is taken off. A
+/// picture whose time does not make sense (before its capture, or a minute after) is
+/// left out.
 pub fn end_to_end_ms(codes: &[(u32, u64)], offset_us: i64) -> Samples {
     let mut out = Samples::with_capacity(codes.len());
     for &(pc_ms, at_us) in codes {
@@ -293,7 +295,7 @@ pub fn end_to_end_ms(codes: &[(u32, u64)], offset_us: i64) -> Samples {
         let ms = now_ms.wrapping_sub(pc_ms) as i32;
         let fraction = (on_pc_us % 1000) as f64 / 1000.0;
         if (0..60_000).contains(&ms) {
-            out.add(f64::from(ms) + fraction);
+            out.add(f64::from(ms) + fraction - 0.5);
         }
     }
     out
@@ -629,8 +631,8 @@ mod tests {
         ];
         let e2e = end_to_end_ms(&codes, offset);
         assert_eq!(e2e.len(), 2);
-        assert_eq!(e2e.percentile(0.5), Some(30.0));
-        assert_eq!(e2e.max(), Some(42.5));
+        assert_eq!(e2e.percentile(0.5), Some(29.5));
+        assert_eq!(e2e.max(), Some(42.0));
     }
 
     /// The decoders' pictures are kept for the selftest only while it runs, and only
