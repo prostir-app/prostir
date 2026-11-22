@@ -592,9 +592,19 @@ impl Session {
         self.cmds.push(NetCmd::SubmitCode(code));
     }
 
-    /// Pairing: which side shows the code is swapped, and pairing starts over.
-    pub fn switch_pairing_side(&mut self) {
+    /// Pairing: which side shows the code is swapped, and pairing starts over; asked
+    /// again after the PC refused, it is the user's "Pair" too.
+    pub fn switch_pairing_side(&mut self, now: Instant) {
         self.search.pc_shows_code = !self.search.pc_shows_code;
+        if matches!(
+            self.search.attempt,
+            Some(Attempt::PairOffer {
+                why: OfferWhy::PcRefused { .. },
+                ..
+            })
+        ) {
+            return self.answer_offer(true, now);
+        }
         if matches!(self.search.attempt, Some(Attempt::Pairing { .. })) {
             self.search.attempt = None;
         }

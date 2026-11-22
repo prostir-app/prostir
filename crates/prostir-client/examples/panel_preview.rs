@@ -247,6 +247,7 @@ fn main() {
             let why = match v.as_str() {
                 "failed" => OfferWhy::WrongCodes,
                 "forgotten" => OfferWhy::Forgotten,
+                "refused" => OfferWhy::PcRefused { pc_shows: false },
                 _ => OfferWhy::New,
             };
             ("workstation 192.168.1.10".into(), why)

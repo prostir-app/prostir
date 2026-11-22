@@ -137,7 +137,7 @@ impl Model {
                 }
             }
             Action::PairAnswer(pair) => self.session.answer_offer(pair, self.now),
-            Action::PairOtherWay => self.session.switch_pairing_side(),
+            Action::PairOtherWay => self.session.switch_pairing_side(self.now),
             Action::Key(c) => {
                 if let Some(t) = &mut self.menu.ip_input
                     && t.len() < 21

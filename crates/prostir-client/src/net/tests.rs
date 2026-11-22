@@ -407,6 +407,118 @@ fn forgetting_leaves_and_drops_the_pc() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A PC that takes the connection and the versions, then refuses each request to pair
+/// with `text` (as the PC app does when it has no dialog for the code, or another
+/// headset is pairing): its address and key, and what the headset asked of it, by the
+/// messages' names, once the headset is gone.
+fn refusing_pc(dir: &Path, text: &'static str) -> (SocketAddr, [u8; 32], JoinHandle<Vec<String>>) {
+    use prostir_proto::handshake;
+    use prostir_proto::link::tcp::{NoiseTcp, Plain};
+    use prostir_proto::packet::{self, lane};
+    let identity = Identity::load_or_create(&dir.join("pc-identity")).unwrap();
+    let key = identity.public;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let pc = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut link = NoiseTcp::accept(stream, &identity, Arc::new(Plain)).unwrap();
+        handshake::read_first(&mut *link.receiver).unwrap();
+        handshake::send_from_pc(
+            &mut *link.sender,
+            &HostMsg::Welcome {
+                version: prostir_proto::PROTOCOL_VERSION,
+                language: "en".into(),
+            },
+        )
+        .unwrap();
+        let mut packets = ClientMsg::assembler();
+        let mut asked = Vec::new();
+        while let Ok(msg) = ClientMsg::recv(&mut *link.receiver, &mut packets) {
+            let name = format!("{msg:?}");
+            asked.push(name.split([' ', '{', '(']).next().unwrap_or("").to_owned());
+            if matches!(msg, ClientMsg::PairBegin { .. }) {
+                for reply in [
+                    HostMsg::Error { text: text.into() },
+                    HostMsg::PairResult { tag: None },
+                ] {
+                    let sent = reply.encode().and_then(|m| {
+                        packet::send_whole(&mut *link.sender, lane::CONTROL, m, 1200)
+                    });
+                    if sent.is_err() {
+                        return asked;
+                    }
+                }
+            }
+        }
+        asked
+    });
+    (addr, key, pc)
+}
+
+/// The PC refuses to pair (no dialog for the code, or another headset pairing): the
+/// headset says the PC's words and asks the user again at once, with no new request
+/// and no count of wrong codes; the search pauses as after a refusal. Whichever side
+/// was to show the code: also while the user waits for the PC's code to type.
+#[test]
+fn a_pc_that_refuses_to_pair_is_not_asked_again() {
+    for pc_shows_code in [false, true] {
+        let dir = temp_dir(&format!("refused-{pc_shows_code}"));
+        let headset_dir = dir.join("headset");
+        std::fs::create_dir_all(&headset_dir).unwrap();
+        let (addr, key, pc) = refusing_pc(&dir, "No dialog");
+        let (tx, rx) = mpsc::channel();
+        let mut net = Net::start(
+            Config {
+                discovery_port: None,
+                broadcast: false,
+                ..Config::in_dir(&headset_dir, None, "Test headset")
+            },
+            tx,
+            Arc::new(FakeSource(Arc::default())),
+            HeadsetState::default(),
+        )
+        .unwrap();
+        net.send(NetCmd::Dial {
+            step: StepId(1),
+            to: Dest::Addr(addr),
+            pair: Some(key),
+            pc_shows_code,
+        });
+        let seen = until_ended(&rx, 1);
+        let said = seen
+            .iter()
+            .any(|e| matches!(e, NetEvent::HostError(t) if t == "No dialog"));
+        assert!(said, "the PC's words: {pc_shows_code}");
+        let offers: Vec<OfferWhy> = seen
+            .iter()
+            .filter_map(|e| match e {
+                NetEvent::PairOffer { why, .. } => Some(*why),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(offers.len(), 1, "asked again: {pc_shows_code}");
+        assert_eq!(
+            offers[0],
+            OfferWhy::PcRefused {
+                pc_shows: pc_shows_code
+            },
+            "not wrong codes"
+        );
+        let refused = seen
+            .iter()
+            .any(|e| matches!(e, NetEvent::Ended { ended, .. } if ended.refused.is_some()));
+        assert!(refused, "the search pauses: {pc_shows_code}");
+        assert!(net.stop(Duration::from_secs(2)));
+        let asked = pc.join().unwrap();
+        let begins = asked.iter().filter(|m| *m == "PairBegin").count();
+        assert_eq!(begins, 1, "{asked:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// A PC the headset does not trust is offered (before anything is sent); one that no
 /// longer trusts the headset too, when it says so, as a PC that forgot it.
 #[test]

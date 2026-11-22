@@ -135,6 +135,10 @@ pub enum OfferWhy {
     WrongCodes,
     /// The PC forgot this headset and ended the session.
     Forgotten,
+    /// The PC did not take part in pairing (it has no dialog for the code, the code
+    /// was not typed there, another headset is pairing): its own words are in the
+    /// error line. `pc_shows`: the PC was to show the code.
+    PcRefused { pc_shows: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3481,6 +3485,7 @@ fn build_pair_offer(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32, host: &str
         OfferWhy::New => l.t("offer-new"),
         OfferWhy::WrongCodes => l.t("offer-wrong-codes"),
         OfferWhy::Forgotten => l.t("offer-forgotten"),
+        OfferWhy::PcRefused { .. } => l.t("offer-pc-refused"),
     };
     items.push(text(x, y, 34.0, true, TEXT, title));
     y += 60.0;
@@ -3492,10 +3497,25 @@ fn build_pair_offer(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32, host: &str
         y += 32.0;
     }
     y += 20.0;
+    // Refused by the PC: the other side may show the code.
+    if let OfferWhy::PcRefused { pc_shows } = why {
+        let other = if pc_shows {
+            l.t("pairing-other-way-type-on-pc")
+        } else {
+            l.t("pairing-other-way-type-here")
+        };
+        items.push(button(
+            rect(x, y, w, 56.0),
+            other,
+            Style::Normal,
+            Some(Action::PairOtherWay),
+        ));
+        y += 68.0;
+    }
     let half = (w - 12.0) / 2.0;
     let pair = match why {
         OfferWhy::New => l.t("offer-pair"),
-        OfferWhy::WrongCodes => l.t("offer-try-again"),
+        OfferWhy::WrongCodes | OfferWhy::PcRefused { .. } => l.t("offer-try-again"),
         OfferWhy::Forgotten => l.t("offer-pair-again"),
     };
     items.push(button(
@@ -5656,7 +5676,13 @@ mod tests {
                     .collect();
                 states.push(st);
             }
-            for why in [OfferWhy::New, OfferWhy::WrongCodes, OfferWhy::Forgotten] {
+            for why in [
+                OfferWhy::New,
+                OfferWhy::WrongCodes,
+                OfferWhy::Forgotten,
+                OfferWhy::PcRefused { pc_shows: false },
+                OfferWhy::PcRefused { pc_shows: true },
+            ] {
                 let mut offer = sample_state();
                 offer.texts = lang.clone();
                 offer.host = None;

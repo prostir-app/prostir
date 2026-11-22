@@ -90,6 +90,7 @@ pairing-other-way-type-on-pc = The other way: code in the headset, type it on th
 offer-new = A new PC
 offer-wrong-codes = The code did not match several times
 offer-forgotten = The PC no longer knows this headset
+offer-pc-refused = Pairing did not start on the PC
 offer-own-pc = Pair the headset only with your own PC.
 offer-code = You will type a code from one device into the other.
 offer-pair = Pair

@@ -77,6 +77,7 @@ pairing-other-way-type-on-pc = Навпаки: код у шоломі, ввес�
 offer-new = Новий ПК
 offer-wrong-codes = Код не підійшов кілька разів
 offer-forgotten = ПК більше не знає цей шолом
+offer-pc-refused = Сполучення на ПК не почалося
 offer-own-pc = Сполучайте шолом лише зі своїм ПК.
 offer-code = Потрібно ввести код з одного пристрою на іншому.
 offer-pair = Сполучити

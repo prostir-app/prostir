@@ -339,21 +339,66 @@ fn alive(wire: &mut Wire) -> bool {
     alive
 }
 
-/// Waits for the code the user types, looking at the connection meanwhile; `None` if
-/// it was dropped, the PC left, or nobody typed in time.
-fn wait_code(conn: &Conn, wire: &mut Wire) -> Option<String> {
+/// How the wait for the code the user types ended.
+enum Typed {
+    Code(String),
+    /// The PC gave up this attempt meanwhile (it said why): no code to type.
+    PcGaveUp,
+    /// Dropped, the PC left, or nobody typed in time.
+    Gone,
+}
+
+/// Waits for the code the user types, looking at the connection meanwhile.
+fn wait_code(conn: &Conn, wire: &mut Wire) -> Typed {
     conn.current.forget_code();
     let deadline = Instant::now() + CODE_WITHIN;
     loop {
         match conn.current.code_within(Duration::from_millis(10)) {
-            Ok(Some(code)) => return Some(code),
+            Ok(Some(code)) => return Typed::Code(code),
             Ok(None) => {}
-            Err(()) => return None,
+            Err(()) => return Typed::Gone,
         }
         if !alive(wire) || Instant::now() >= deadline {
-            return None;
+            return Typed::Gone;
+        }
+        // The PC refused (another headset is pairing, too many wrong codes): its
+        // answer came while the user waits for a code it never showed.
+        let gave_up = wire
+            .pending
+            .iter()
+            .any(|m| matches!(m, HostMsg::PairResult { .. } | HostMsg::Error { .. }));
+        if gave_up {
+            return Typed::PcGaveUp;
         }
     }
+}
+
+/// A line of the PC's before trust, as the menu shows it: short plain text.
+fn short_text(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).take(160).collect()
+}
+
+/// The PC gave up the attempt (no dialog for the code, the code not typed there,
+/// another headset pairing): what it said is shown, the search pauses as after a
+/// refusal, and the user is asked again (not a wrong code, and no new request on
+/// its own, which the PC would only refuse again).
+fn pc_refused(conn: &mut Conn, wire: &mut Wire, pc_shows: bool) -> io::Result<bool> {
+    // What it said, up to its answer.
+    loop {
+        match read(wire)? {
+            HostMsg::PairResult { .. } => break,
+            HostMsg::Error { text } => conn.d.shared.tell(NetEvent::HostError(short_text(&text))),
+            other => return Err(io::Error::other(format!("unexpected {other:?}"))),
+        }
+    }
+    info!("pairing with {}: the PC did not take part", conn.addr);
+    conn.ended.refused = Some(Instant::now());
+    conn.d.shared.tell(NetEvent::PairOffer {
+        key: wire.peer.key,
+        addr: conn.addr,
+        why: OfferWhy::PcRefused { pc_shows },
+    });
+    Ok(false)
 }
 
 /// What the PC is kept as when paired with, until its session says its own name: its
@@ -383,7 +428,11 @@ fn pair(conn: &mut Conn, wire: &mut Wire) -> io::Result<bool> {
                 addr,
                 code: None,
             });
-            wait_code(conn, wire).ok_or_else(|| io::Error::other("pairing interrupted"))?
+            match wait_code(conn, wire) {
+                Typed::Code(code) => code,
+                Typed::PcGaveUp => return pc_refused(conn, wire, pc_shows),
+                Typed::Gone => return Err(io::Error::other("pairing interrupted")),
+            }
         } else {
             let code = (shared.pairing_code)();
             shared.tell(NetEvent::Pairing {
@@ -396,22 +445,15 @@ fn pair(conn: &mut Conn, wire: &mut Wire) -> io::Result<bool> {
         };
         let (pairing, msg) = Pairing::start(&code);
         wire.feedback.send(ClientMsg::PairMsg { msg })?;
-        let theirs = loop {
-            match read(wire)? {
-                HostMsg::PairMsg { msg } => break Some(msg),
-                // The PC gave up this attempt (e.g. its dialog was cancelled).
-                HostMsg::PairResult { .. } => break None,
-                // Not trusted yet: only a short line of plain text gets shown.
-                HostMsg::Error { text } => {
-                    let text: String = text.chars().filter(|c| !c.is_control()).take(160).collect();
-                    shared.tell(NetEvent::HostError(text));
-                }
-                other => return Err(io::Error::other(format!("unexpected {other:?}"))),
+        let theirs = match read(wire)? {
+            HostMsg::PairMsg { msg } => msg,
+            // The PC gave up this attempt (its dialog was cancelled, it has none), and
+            // said why first.
+            msg @ (HostMsg::PairResult { .. } | HostMsg::Error { .. }) => {
+                wire.pending.push_front(msg);
+                return pc_refused(conn, wire, pc_shows);
             }
-        };
-        let Some(theirs) = theirs else {
-            shared.tell(NetEvent::PairingFailed);
-            continue;
+            other => return Err(io::Error::other(format!("unexpected {other:?}"))),
         };
         let secret = pairing.finish(&theirs)?;
         let own = &shared.identity.public;
