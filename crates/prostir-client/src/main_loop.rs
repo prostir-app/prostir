@@ -465,7 +465,8 @@ impl Shell<'_> {
     /// failed again and again, or it panicked) is made again with its job, the PC asked
     /// for a keyframe, up to [`DECODER_RESTARTS`] times; then (or after a panic) the
     /// stream counts as failed and its monitor goes. Looked at once a pass: a look at
-    /// each monitor, nothing made.
+    /// each monitor, nothing made; one stream failed a pass (another one is found on
+    /// the next).
     fn decoders_now(&mut self, now: Instant) {
         let mut failed = None;
         for (id, m) in &mut self.monitors {
@@ -513,6 +514,7 @@ impl Shell<'_> {
             };
             if gave_up {
                 failed = Some(*id);
+                break;
             }
         }
         if let Some(id) = failed {

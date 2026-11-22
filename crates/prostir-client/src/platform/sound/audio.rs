@@ -24,6 +24,9 @@ const REPORT_EVERY: Duration = Duration::from_secs(10);
 /// each time up to [`OPEN_AGAIN_MAX`].
 const OPEN_AGAIN_FIRST: Duration = Duration::from_millis(300);
 const OPEN_AGAIN_MAX: Duration = Duration::from_secs(5);
+/// A sound output that broke after playing this long worked: the next one opens after
+/// the first pause again.
+const PLAYED_A_WHILE: Duration = Duration::from_secs(1);
 
 /// Most audio kept waiting before older slices are dropped (10 ms each), so sound
 /// never drifts behind the picture after a Wi-Fi hiccup.
@@ -121,13 +124,21 @@ impl Player {
                 let mut backoff = Backoff::new(OPEN_AGAIN_FIRST, OPEN_AGAIN_MAX);
                 loop {
                     let pause = match Stream::open() {
-                        Ok(stream) => match play(&stream, &rx, &back, &counted, &gains) {
-                            Ended::Closed => return,
-                            Ended::Failed => {
-                                backoff.worked();
-                                OPEN_AGAIN_FIRST
+                        Ok(stream) => {
+                            let opened = Instant::now();
+                            match play(&stream, &rx, &back, &counted, &gains) {
+                                Ended::Closed => return,
+                                // Broke right after it opened: as one that did not open,
+                                // so the pauses grow.
+                                Ended::Failed if opened.elapsed() < PLAYED_A_WHILE => {
+                                    backoff.failed()
+                                }
+                                Ended::Failed => {
+                                    backoff.worked();
+                                    OPEN_AGAIN_FIRST
+                                }
                             }
-                        },
+                        }
                         Err(e) => {
                             let pause = backoff.failed();
                             warn!(
