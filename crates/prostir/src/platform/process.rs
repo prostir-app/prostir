@@ -4,6 +4,7 @@
 
 use std::io::{ErrorKind, Read};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -84,9 +85,13 @@ fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> Receiver<Vec<
     rx
 }
 
-/// Spawns a helper that dies with Prostir, even if Prostir crashes (with the thread
-/// that spawns it, in fact: a helper for a thread's job is started on that thread).
-pub fn spawn_tied(cmd: &mut Command) -> std::io::Result<Child> {
+/// Spawns a helper that dies with Prostir, even if Prostir crashes. The kernel sends
+/// that signal (`PR_SET_PDEATHSIG`) when the thread that spawned the helper ends, not
+/// the process: so every helper is spawned on one thread that lives as long as Prostir
+/// does. Spawned on the thread of a call with a time limit (see `worker/timed.rs`),
+/// which ends right after, the microphone's `pw-loopback` and each recording's `pacat`
+/// were stopped as soon as they were made.
+pub fn spawn_tied(mut cmd: Command) -> std::io::Result<Child> {
     use std::os::unix::process::CommandExt;
     // SAFETY: prctl only.
     unsafe {
@@ -95,7 +100,42 @@ pub fn spawn_tied(cmd: &mut Command) -> std::io::Result<Child> {
             Ok(())
         });
     }
-    cmd.spawn()
+    let Some(spawner) = spawner() else {
+        return cmd.spawn();
+    };
+    let (reply, answer) = mpsc::sync_channel(1);
+    if let Err(mpsc::SendError((mut cmd, _))) = spawner.send((cmd, reply)) {
+        return cmd.spawn();
+    }
+    answer.recv().unwrap_or_else(|_| {
+        Err(std::io::Error::other(
+            "the thread that starts helpers ended",
+        ))
+    })
+}
+
+/// A helper to start, and where its process goes.
+type SpawnJob = (Command, mpsc::SyncSender<std::io::Result<Child>>);
+
+/// The thread that starts the helpers, made with the first one and never ended. None
+/// when no thread could be made: each helper is then started on its caller's thread.
+fn spawner() -> Option<&'static mpsc::Sender<SpawnJob>> {
+    static SPAWNER: OnceLock<Option<mpsc::Sender<SpawnJob>>> = OnceLock::new();
+    SPAWNER
+        .get_or_init(|| {
+            let (jobs, taken) = mpsc::channel::<SpawnJob>();
+            std::thread::Builder::new()
+                .name("helpers".into())
+                .spawn(move || {
+                    for (mut cmd, reply) in taken {
+                        let _ = reply.send(cmd.spawn());
+                    }
+                })
+                .inspect_err(|e| warn!("no thread to start helpers on: {e}"))
+                .ok()
+                .map(|_| jobs)
+        })
+        .as_ref()
 }
 
 /// Writes `script` to `path` as a program for a test to run. It is copied there by
@@ -121,6 +161,28 @@ pub fn write_program(path: &std::path::Path, script: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A helper started on a thread that ends right after (as the sound thread's calls
+    /// with a time limit do) goes on running: only Prostir's end ends it.
+    #[test]
+    fn a_helper_outlives_the_thread_that_started_it() {
+        let mut helper = std::thread::spawn(|| {
+            let mut sleep = Command::new("sleep");
+            sleep.arg("30");
+            spawn_tied(sleep)
+        })
+        .join()
+        .unwrap()
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let ended = helper.try_wait().unwrap();
+        let _ = helper.kill();
+        let _ = helper.wait();
+        assert_eq!(
+            ended, None,
+            "the helper ended with the thread that started it"
+        );
+    }
 
     #[test]
     fn run_returns_the_output() {
