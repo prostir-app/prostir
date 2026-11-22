@@ -362,7 +362,7 @@ fn typed_methods_from_busctl() {
     let busctl = |args: &[&str]| {
         Command::new("busctl")
             .arg(format!("--address={}", bus.address))
-            // `--`: a negative number is an argument, not an option.
+            // `--`: what follows is an argument, not an option.
             .args(["call", "--", BUS_NAME, OBJECT_PATH, INTERFACE])
             .args(args)
             .stdin(Stdio::null())
@@ -377,18 +377,15 @@ fn typed_methods_from_busctl() {
         }
     };
     assert!(recenter.status.success(), "{recenter:?}");
-    let distance = busctl(&["Distance", "n", "-2"]).unwrap();
-    assert!(distance.status.success(), "{distance:?}");
     let profile = busctl(&["Profile", "s", "Робота"]).unwrap();
     assert!(profile.status.success(), "{profile:?}");
     headset
-        .wait(SOON, "the commands", |v| v.commands.len() == 3)
+        .wait(SOON, "the commands", |v| v.commands.len() == 2)
         .unwrap();
     assert_eq!(
         headset.view().commands,
         [
             Asked::Known(HeadsetCommand::Recenter),
-            Asked::Known(HeadsetCommand::Distance { steps: -2 }),
             Asked::Known(HeadsetCommand::Profile {
                 name: "Робота".into()
             }),

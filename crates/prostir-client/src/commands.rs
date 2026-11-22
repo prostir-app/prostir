@@ -21,8 +21,6 @@ pub enum Does {
     Profile(usize),
     /// Profile `index` named so (none: by its number again).
     Rename(usize, Option<String>),
-    /// Closer (below 0) or further.
-    Closer(i8),
     /// Answered with this failure, and nothing changes.
     Fail(ErrorCode, String),
 }
@@ -56,7 +54,6 @@ pub fn what_to_do(
         }
         Command::Cinema { on } => Does::Act(Action::Cinema(*on)),
         Command::FocusMode { on } => Does::Act(Action::Focus(*on)),
-        Command::Distance { steps } => Does::Closer(*steps),
         Command::Preset { preset } => match preset {
             0 => Does::Act(Action::Preset(Preset::Arc)),
             1 => Does::Act(Action::Preset(Preset::Wall)),

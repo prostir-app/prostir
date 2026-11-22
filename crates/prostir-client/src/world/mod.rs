@@ -257,7 +257,7 @@ pub struct World {
     /// A display in a hand moved, or the one resized changed size, since it was taken.
     dragged: bool,
     /// The arrangement was changed by hand since the app last asked: a display moved
-    /// or resized, "Line up", closer or further, two swapped, a layout chosen (see
+    /// or resized, "Line up", two swapped, a layout chosen (see
     /// [`World::take_rearranged`]).
     rearranged: bool,
 
@@ -1649,28 +1649,6 @@ impl World {
             *p = layout::carried(p, (old_pos, ahead), (head, yaw));
         }
         self.center = (head, yaw);
-        self.save_layout();
-        self.send_layout(now);
-    }
-
-    /// Brings the monitors closer (`steps` below 0) or further, a step at a time, as
-    /// they stand around the user: the arrangement as a whole, made as much smaller or
-    /// larger, so each monitor keeps its size to the eye and the arrangement its shape.
-    /// Glued monitors stay glued and none goes into another: a monitor brought nearer
-    /// at its own width would be seen larger, and reach into its neighbours.
-    pub fn closer(&mut self, steps: i8, now: Instant) {
-        const STEP: f32 = 1.15;
-        let (center, _) = self.center;
-        let wanted = self.radius * STEP.powi(i32::from(steps));
-        let k = wanted.clamp(0.5, 6.0) / self.radius.max(1e-3);
-        for (id, p) in &mut self.placements {
-            if !window(&self.listed, *id) {
-                p.position = center + (p.position - center) * k;
-                p.width *= k;
-            }
-        }
-        self.radius *= k;
-        self.rearranged |= k != 1.0;
         self.save_layout();
         self.send_layout(now);
     }

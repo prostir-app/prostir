@@ -40,7 +40,6 @@ fn command_of(request: &Request) -> Option<Command> {
         Request::Focus { on } => Command::FocusMode { on: *on },
         Request::Follow { on } => Command::Follow { on: *on },
         Request::NoLimits { on } => Command::NoLimits { on: *on },
-        Request::Distance { steps } => Command::Distance { steps: *steps },
         Request::Preset { preset } => Command::Preset { preset: *preset },
         _ => return None,
     })
@@ -575,7 +574,6 @@ impl Brain {
             | Request::Focus { .. }
             | Request::Follow { .. }
             | Request::NoLimits { .. }
-            | Request::Distance { .. }
             | Request::Preset { .. } => unsupported(""),
         }
     }
@@ -1399,6 +1397,5 @@ mod tests {
         let long = fits_the_wire(&profile(33)).unwrap_err();
         assert_eq!(long.error, ApiError::BadArgument);
         assert!(fits_the_wire(&Command::Recenter).is_ok());
-        assert!(fits_the_wire(&Command::Distance { steps: -128 }).is_ok());
     }
 }

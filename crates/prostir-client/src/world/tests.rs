@@ -1025,25 +1025,13 @@ fn following_the_head() {
     );
 }
 
-/// Closer and further a step at a time, each keeping its size to the eye and the
-/// arrangement its shape; in front: the arrangement turned and carried to the head as it stood.
+/// Turned and moved: the arrangement is carried in front of the head, its shape as it
+/// stood.
 #[test]
-fn closer_further_and_in_front() {
+fn recenter_keeps_the_arrangement_shape() {
     let mut sim = Sim::at_desk();
     let before = sim.places();
-    sim.world.closer(-1, sim.now);
-    for (k, p) in &before {
-        let q = sim.place(*k);
-        assert!((q.position.length() - p.position.length() / 1.15).abs() < 1e-4);
-        assert!(
-            (q.width - p.width / 1.15).abs() < 1e-4,
-            "its size to the eye kept"
-        );
-    }
-    sim.world.closer(1, sim.now);
-    assert!(same_places(&sim.places(), &before), "and back");
 
-    // Turned and moved: in front again, the shape as it was.
     sim.head = (
         Vec3::new(0.3, 0.1, -0.2),
         Quat::from_rotation_y(1.2) * -Vec3::Z,
@@ -1560,31 +1548,6 @@ fn a_restart_keeps_the_rows() {
     );
     let told = again.arranged.last().map(|r| row_ids(r));
     assert_eq!(told, Some(rows), "the same rows");
-}
-
-/// Closer or further, the arrangement keeps its shape as seen: monitors glued edge to
-/// edge stay glued, none over another, and each stays the same size to the eye.
-#[test]
-fn closer_keeps_glued_monitors_apart() {
-    for steps in [-2, -1, 1, 2] {
-        let mut sim = Sim::at_desk();
-        let before = sim.places();
-        sim.world.closer(steps, sim.now);
-        none_covers(&sim, &[(1, QHD), (2, QHD), (3, QHD)]);
-        none_cut(&sim, &[(1, QHD), (2, QHD), (3, QHD)]);
-        let k_ = 1.15f32.powi(i32::from(steps));
-        for n in 1..=3 {
-            let (a, b) = (before[&k(n)], sim.place(k(n)));
-            assert!(
-                (b.width / a.width - k_).abs() < 1e-4,
-                "{steps}: its size to the eye"
-            );
-            assert!(
-                (b.position.length() / a.position.length() - k_).abs() < 1e-4,
-                "{steps}: as far as asked"
-            );
-        }
-    }
 }
 
 /// Monitors of different widths moved left or right ("Move" in the menu): the two
