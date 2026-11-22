@@ -96,6 +96,7 @@ pub fn write_program(path: &std::path::Path, script: &str) {
     std::fs::write(&draft, script).unwrap();
     let copied = Command::new("cp").arg(&draft).arg(path).status().unwrap();
     assert!(copied.success(), "cp {}", path.display());
+    std::fs::remove_file(&draft).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
