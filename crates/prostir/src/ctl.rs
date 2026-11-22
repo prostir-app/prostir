@@ -167,19 +167,6 @@ pub fn parse(args: &[String]) -> Result<(Ctl, bool), String> {
                 _ => Request::NoLimits { on },
             })
         }
-        "closer" | "farther" => {
-            takes = rest.len().min(1);
-            let n = match rest.first() {
-                Some(n) => n
-                    .parse::<i8>()
-                    .ok()
-                    .filter(|n| *n > 0)
-                    .ok_or_else(|| format!("steps: 1 to 127, not {n:?}"))?,
-                None => 1,
-            };
-            let steps = if first == "closer" { -n } else { n };
-            ask(Request::Distance { steps })
-        }
         "preset" => {
             takes = 1;
             let n = number(rest.first(), "a preset")?;
@@ -341,7 +328,6 @@ prostir ctl COMMAND [--json]
   profile rename N NEW NAME      gives profile N (its number, or a one-word name) the
                                  name NEW NAME; with none, its number again
   cinema | focus | follow | mic | nolimits  on|off
-  closer [N] | farther [N]
   preset N
   monitor list | add WxH[@1.25|@125%] | remove ID | retry ID | primary ID
   screen show ID | screen hide ID

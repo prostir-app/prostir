@@ -1352,12 +1352,6 @@ impl Model {
         self.world_done();
     }
 
-    /// Brings the monitors closer or further (see `World::closer`).
-    fn closer(&mut self, steps: i8) {
-        self.world.closer(steps, self.now);
-        self.world_done();
-    }
-
     /// The A button (see `World::tidy_up`).
     fn tidy_up(&mut self) {
         self.world.tidy_up(&self.settings, self.now);

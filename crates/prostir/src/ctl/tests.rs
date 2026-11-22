@@ -44,9 +44,6 @@ fn commands_read_as_requests() {
     assert_eq!(asks("follow on"), Request::Follow { on: true });
     assert_eq!(asks("mic off"), Request::SetMic { on: false });
     assert_eq!(asks("nolimits on"), Request::NoLimits { on: true });
-    assert_eq!(asks("closer"), Request::Distance { steps: -1 });
-    assert_eq!(asks("closer 3"), Request::Distance { steps: -3 });
-    assert_eq!(asks("farther 2"), Request::Distance { steps: 2 });
     assert_eq!(asks("preset 4"), Request::Preset { preset: 4 });
     let monitor = |w, h, scale| Request::AddMonitor { w, h, scale };
     assert_eq!(asks("monitor add 2560x1440"), monitor(2560, 1440, 100));
@@ -142,9 +139,6 @@ fn wrong_arguments() {
         "cinema",
         "cinema maybe",
         "recenter now",
-        "closer 0",
-        "closer -1",
-        "farther 200",
         "preset 300",
         "monitor add big",
         "monitor add 2560x1440@x",

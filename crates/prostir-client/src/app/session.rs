@@ -334,10 +334,6 @@ impl Model {
                 }
                 Outcome::failed(ErrorCode::OTHER, "no connection")
             }
-            Does::Closer(steps) => {
-                self.closer(steps);
-                Outcome::Done
-            }
             Does::Fail(code, detail) => Outcome::failed(code, &detail),
         };
         self.send_to(pc, ClientMsg::Reply { req, outcome });

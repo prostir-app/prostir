@@ -87,8 +87,6 @@ wire_enum! {
         3 => Cinema { on: bool },
         /// "Focus" (changes `Prefs`).
         4 => FocusMode { on: bool },
-        /// Closer (below 0) or further.
-        5 => Distance { steps: i8 },
         /// A preset arrangement (a number the headset knows, else `BAD_ARGUMENT`).
         6 => Preset { preset: u8 },
         /// "Line up".
@@ -282,7 +280,6 @@ mod tests {
             Command::Profile {
                 name: "Робота".into(),
             },
-            Command::Distance { steps: -2 },
             Command::NoLimits { on: true },
             Command::RenameProfile {
                 profile: "2".into(),

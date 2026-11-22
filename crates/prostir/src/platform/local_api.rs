@@ -557,13 +557,6 @@ impl Object {
         self.done(Request::NoLimits { on }).await
     }
 
-    /// Closer (below 0) or further.
-    async fn distance(&self, steps: i16) -> Result<(), BusError> {
-        let steps = i8::try_from(steps)
-            .map_err(|_| Failure::new(ApiError::BadArgument, "steps: -128 to 127"))?;
-        self.done(Request::Distance { steps }).await
-    }
-
     async fn preset(&self, preset: u8) -> Result<(), BusError> {
         self.done(Request::Preset { preset }).await
     }

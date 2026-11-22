@@ -305,12 +305,6 @@ fn reply_of(fx: &[Effect], req: u32) -> Option<&Outcome> {
 fn the_pcs_commands_are_answered() {
     let mut sim = Sim::new();
     sim.connect(&[1, 2]);
-    let before = sim.m.world().placement(k(1)).copied();
-    sim.command(7, Command::Distance { steps: -2 });
-    let fx = sim.take();
-    assert_eq!(reply_of(&fx, 7), Some(&Outcome::Done));
-    assert_ne!(sim.m.world().placement(k(1)).copied(), before, "it moved");
-
     sim.command(8, Command::Recenter);
     let fx = sim.take();
     assert_eq!(reply_of(&fx, 8), Some(&Outcome::Done));
@@ -1386,8 +1380,8 @@ fn a_failed_older_profile_switch_leaves_the_newer_one() {
     );
 }
 
-/// A profile in use, then the arrangement changed by hand (a monitor moved, "Line up",
-/// closer): no profile is in use any more, and its button can bring its places back.
+/// A profile in use, then the arrangement changed by hand (a monitor moved, "Line up"):
+/// no profile is in use any more, and its button can bring its places back.
 /// A press that changes nothing (a monitor taken and let go where it was, "In front")
 /// leaves it in use.
 #[test]
@@ -1415,9 +1409,6 @@ fn changed_by_hand_the_profile_is_left() {
     sim.menu(Action::NewProfile);
     sim.menu(Action::Tidy);
     assert_eq!(sim.m.menu().active_profile, None, "lined up");
-    sim.menu(Action::NewProfile);
-    sim.command(30, Command::Distance { steps: -1 });
-    assert_eq!(sim.m.menu().active_profile, None, "closer");
 }
 
 /// What only asks, or asks nothing, leaves the profile in use: the first press of ×

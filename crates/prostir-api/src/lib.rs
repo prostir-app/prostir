@@ -101,10 +101,6 @@ pub enum Request {
     NoLimits {
         on: bool,
     },
-    /// Closer (below 0) or further, in the headset's steps.
-    Distance {
-        steps: i8,
-    },
     Preset {
         preset: u8,
     },
@@ -232,7 +228,6 @@ pub const REQUESTS: &[&str] = &[
     "focus",
     "follow",
     "no_limits",
-    "distance",
     "preset",
     "add_monitor",
     "remove_monitor",
@@ -304,7 +299,6 @@ impl Request {
                 | Self::Focus { .. }
                 | Self::Follow { .. }
                 | Self::NoLimits { .. }
-                | Self::Distance { .. }
                 | Self::Preset { .. }
         )
     }
@@ -1047,7 +1041,6 @@ mod tests {
             Request::Focus { on: false },
             Request::Follow { on: true },
             Request::NoLimits { on: true },
-            Request::Distance { steps: -2 },
             Request::Preset { preset: 3 },
             Request::AddMonitor {
                 w: 2560,
@@ -1149,7 +1142,7 @@ mod tests {
         assert_eq!(error(r#"{"request":"fly"}"#), ApiError::Unsupported);
         assert_eq!(error(r#"{"request":"cinema"}"#), ApiError::BadArgument);
         assert_eq!(
-            error(r#"{"request":"distance","steps":300}"#),
+            error(r#"{"request":"preset","preset":300}"#),
             ApiError::BadArgument
         );
         assert_eq!(error("recenter"), ApiError::BadArgument);

@@ -535,7 +535,7 @@ prostir mcp
 
 `prostir ctl` звертається до Prostir, що працює, з термінала, скрипту чи гарячої
 клавіші (комбінації клавіш KDE, `bind` у Hyprland): `prostir ctl recenter`, `prostir
-ctl profile 1`, `prostir ctl closer 2`, `prostir ctl monitor add 2560x1440@125%`,
+ctl profile 1`, `prostir ctl monitor add 2560x1440@125%`,
 `prostir ctl quality 50`, `prostir ctl status`, `prostir ctl watch` (рядок на кожну
 зміну, до Ctrl+C). `prostir ctl help` показує всі команди. З `--json` кожна пише JSON.
 Код виходу каже, що вийшло: 0 зроблено, 1 не вдалося, 2 Prostir не працює чи немає

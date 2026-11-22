@@ -535,7 +535,6 @@ impl Inner {
             | Request::Cinema { .. }
             | Request::Focus { .. }
             | Request::Follow { .. }
-            | Request::Distance { .. }
             | Request::Preset { .. } => {
                 if !connected {
                     return Err(refused(ApiError::NotConnected, "Шолом не підключено."));

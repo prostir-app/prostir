@@ -3,8 +3,8 @@
 //! the room, and the PC's own displays glued on its desktop stand two of its pixels
 //! apart. Each desk is laid out as its monitors' pictures come, one by one, then goes
 //! through random steps: a monitor dropped next to another with the magnet on, one or
-//! two monitors added (the second asked before the first one's picture comes), closer
-//! or further, two swapped, a stream coming back at another resolution, "Line up", and
+//! two monitors added (the second asked before the first one's picture comes), two
+//! swapped, a stream coming back at another resolution, "Line up", and
 //! the PC's own displays shown as one group.
 
 use super::*;
@@ -264,13 +264,6 @@ impl Trial {
         Some(format!("add {sizes:?}"))
     }
 
-    fn closer(&mut self, rng: &mut Lcg) -> Option<String> {
-        let steps = [-2, -1, 1, 2][rng.below(4)];
-        let sim = &mut self.sim;
-        sim.world.closer(steps, sim.now);
-        Some(format!("closer {steps}"))
-    }
-
     fn swap(&mut self, rng: &mut Lcg) -> Option<String> {
         let line: Vec<DisplayKey> = self.sim.world.monitors().iter().map(|m| m.0).collect();
         if line.len() < 2 {
@@ -333,7 +326,6 @@ enum Step {
     Drop,
     Add,
     AddTwice,
-    Closer,
     Swap,
     Refit,
     LineUp,
@@ -360,7 +352,6 @@ fn holds_through(steps: &[Step], cases: usize) {
                 Step::Drop => desk.drop_near(&mut rng),
                 Step::Add => desk.add(&mut rng, false),
                 Step::AddTwice => desk.add(&mut rng, true),
-                Step::Closer => desk.closer(&mut rng),
                 Step::Swap => desk.swap(&mut rng),
                 Step::Refit => desk.refit(&mut rng),
                 Step::LineUp => desk.line_up(),
@@ -407,7 +398,6 @@ fn each_arrangement_step_cuts_into_nothing() {
     for step in [
         Step::Add,
         Step::AddTwice,
-        Step::Closer,
         Step::Swap,
         Step::Refit,
         Step::LineUp,
@@ -437,7 +427,6 @@ fn no_arrangement_step_cuts_one_display_into_another() {
             Step::Drop,
             Step::Add,
             Step::AddTwice,
-            Step::Closer,
             Step::Swap,
             Step::Refit,
             Step::LineUp,

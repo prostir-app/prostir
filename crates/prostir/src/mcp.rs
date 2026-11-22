@@ -1115,11 +1115,6 @@ static TOOLS: &[Tool] = &[
     ),
     asks("no_limits", "Headset command: no limits on or off.", &[ON]),
     asks(
-        "distance",
-        "Headset command: the monitors closer (steps below 0) or further.",
-        &[Arg::of("steps", "integer", "steps, below 0 closer").within(-128, 127)],
-    ),
-    asks(
         "preset",
         "Headset command: the headset's preset of this number.",
         &[Arg::of("preset", "integer", "the preset's number").within(0, 255)],
