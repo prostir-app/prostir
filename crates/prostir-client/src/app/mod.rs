@@ -179,8 +179,12 @@ pub enum PlatformEvent {
 /// What the model asks the shell to do, in order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    /// To the outbox of PC `pc`'s session (it only queues).
+    /// To the outbox of PC `pc`'s session (it only queues); the menu says when it
+    /// cannot be sent.
     Send(PcId, ClientMsg),
+    /// The same, about the headset itself (presence, battery, the microphone, the
+    /// settings the PC acts on): quiet, a message that cannot be sent is let go.
+    Tell(PcId, ClientMsg),
     /// To the network thread.
     Net(NetCmd),
     /// The text of this file changed in the pass (see [`Model::write_file`]): once a
@@ -1242,7 +1246,7 @@ impl Model {
     /// quietly.
     fn tell_all(&mut self, msg: &ClientMsg) {
         for pc in &self.sessions {
-            self.effects.push(Effect::Send(*pc, msg.clone()));
+            self.effects.push(Effect::Tell(*pc, msg.clone()));
         }
     }
 

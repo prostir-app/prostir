@@ -252,7 +252,7 @@ impl Sim {
 fn sent(fx: &[Effect]) -> Vec<&ClientMsg> {
     fx.iter()
         .filter_map(|e| match e {
-            Effect::Send(pc, msg) if *pc == PC => Some(msg),
+            Effect::Send(pc, msg) | Effect::Tell(pc, msg) if *pc == PC => Some(msg),
             _ => None,
         })
         .collect()
@@ -564,4 +564,38 @@ fn quiet_frames_change_nothing_the_menu_shows() {
     let rev = sim.m.rev();
     sim.frames(Duration::from_secs(1));
     assert_eq!(sim.m.rev(), rev);
+}
+
+/// What the headset says of itself (its settings for the PC, the microphone, the
+/// battery) is quiet: a message of it that cannot be sent is let go, and the menu says
+/// nothing. Only the menu's requests are said when they are not sent.
+#[test]
+fn the_headsets_own_news_is_quiet() {
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    sim.menu(Action::Focus(true));
+    sim.menu(Action::SetMic(true));
+    sim.handle(Event::Platform(PlatformEvent::Battery(Some((50, true)))));
+    let fx = sim.take();
+    let quiet = |m: &ClientMsg| {
+        matches!(
+            m,
+            ClientMsg::Prefs { .. } | ClientMsg::UpState { .. } | ClientMsg::Battery { .. }
+        )
+    };
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Tell(_, m) if quiet(m)))
+    );
+    assert!(
+        !fx.iter()
+            .any(|e| matches!(e, Effect::Send(_, m) if quiet(m))),
+        "{fx:?}"
+    );
+    sim.menu(Action::FindMouse);
+    let fx = sim.take();
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Send(_, ClientMsg::Request { .. })))
+    );
 }

@@ -334,6 +334,11 @@ impl Shell<'_> {
                 }),
                 None => self.later.push(Event::SendFailed { pc, why: None }),
             },
+            Effect::Tell(pc, msg) => {
+                if let Some(f) = self.outboxes.get(&pc) {
+                    let _ = f.send(msg);
+                }
+            }
             Effect::Net(cmd) => self.network.send(cmd),
             Effect::Save(file) => {
                 let model = &self.model;
