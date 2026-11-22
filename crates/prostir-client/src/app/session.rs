@@ -90,7 +90,10 @@ impl Model {
             NetEvent::Notice(_, text) => self.show_toast(text),
             NetEvent::Reply { pc, req, outcome } => {
                 match (self.answered(pc, req, &outcome), outcome) {
-                    (Some(ui::Asked::Profile(_)), Outcome::Failed { .. }) => {
+                    // Only the switch it asked for: another one asked since goes on.
+                    (Some(ui::Asked::Profile(_)), Outcome::Failed { .. })
+                        if self.world.switching_with(pc, req) =>
+                    {
                         self.world.switch_to(None);
                     }
                     // Said by `answered`.

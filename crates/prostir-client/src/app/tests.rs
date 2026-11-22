@@ -1292,3 +1292,28 @@ fn the_origin_moved_keeps_the_arrangement() {
     assert_eq!(sim.m.world().placement(k(1)).copied(), before);
     assert_eq!(sim.saves(), []);
 }
+
+/// Switched to one profile, then to another before the PC answered: the first one's
+/// failure does not end the switch to the second.
+#[test]
+fn a_failed_older_profile_switch_leaves_the_newer_one() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::NewProfile);
+    sim.menu(Action::NewProfile);
+    sim.take();
+    sim.menu(Action::ApplyProfile(0));
+    let first = requests(&sim.take()).first().expect("asked").0;
+    sim.menu(Action::ApplyProfile(1));
+    let second = requests(&sim.take()).first().expect("asked").0;
+    assert!(sim.m.world().switching_with(PC, second));
+    sim.net(NetEvent::Reply {
+        pc: PC,
+        req: first,
+        outcome: Outcome::failed(ErrorCode::DESKTOP, "stuck"),
+    });
+    assert!(
+        sim.m.world().switching_with(PC, second),
+        "the newer switch goes on"
+    );
+}
