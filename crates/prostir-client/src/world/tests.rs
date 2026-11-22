@@ -1308,6 +1308,20 @@ fn none_covers(sim: &Sim, sizes: &[(u32, (u32, u32))]) {
     }
 }
 
+/// No two of `sizes` (number, pixels) cut into each other in the room.
+fn none_cut(sim: &Sim, sizes: &[(u32, (u32, u32))]) {
+    let height = |p: &Placement, (w, h): (u32, u32)| p.width * h as f32 / w as f32;
+    for (i, &(a, ap)) in sizes.iter().enumerate() {
+        for &(b, bp) in &sizes[i + 1..] {
+            let (pa, pb) = (sim.place(k(a)), sim.place(k(b)));
+            assert!(
+                !layout::cuts(&pa, height(&pa, ap), &pb, height(&pb, bp)),
+                "{a} and {b} cut into each other: {pa:?} {pb:?}"
+            );
+        }
+    }
+}
+
 /// The PC's displays glued to each other on its desktop stand a little apart in the
 /// headset, never over each other; "Line up" takes them along with the first of them
 /// and leaves no monitor covering any.
@@ -1517,4 +1531,26 @@ fn a_restart_keeps_the_rows() {
     );
     let told = again.arranged.last().map(|r| row_ids(r));
     assert_eq!(told, Some(rows), "the same rows");
+}
+
+/// Closer or further, the arrangement keeps its shape as seen: monitors glued edge to
+/// edge stay glued, none over another, and each stays the same size to the eye.
+#[test]
+fn closer_keeps_glued_monitors_apart() {
+    for steps in [-2, -1, 1, 2] {
+        let mut sim = Sim::at_desk();
+        let before = sim.places();
+        sim.world.closer(steps, sim.now);
+        none_covers(&sim, &[(1, QHD), (2, QHD), (3, QHD)]);
+        none_cut(&sim, &[(1, QHD), (2, QHD), (3, QHD)]);
+        let k_ = 1.15f32.powi(i32::from(steps));
+        for n in 1..=3 {
+            let (a, b) = (before[&k(n)], sim.place(k(n)));
+            assert!((b.width - a.width).abs() < 1e-6, "{steps}: its size kept");
+            assert!(
+                (b.position.length() / a.position.length() - k_).abs() < 1e-4,
+                "{steps}: as far as asked"
+            );
+        }
+    }
 }

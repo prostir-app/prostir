@@ -1571,7 +1571,9 @@ impl World {
     }
 
     /// Brings the monitors closer (`steps` below 0) or further, a step at a time, as
-    /// they stand around the user: each keeps its size, the arrangement its shape.
+    /// they stand around the user: each keeps its size, the arrangement its shape. Each
+    /// row is lined up at its new distance (see `layout::line_up`): nearer the eye a
+    /// monitor of the same size is seen larger, and would reach into its neighbours.
     pub fn closer(&mut self, steps: i8, now: Instant) {
         const STEP: f32 = 1.15;
         let (center, _) = self.center;
@@ -1581,6 +1583,9 @@ impl World {
             if !window(&self.listed, *id) {
                 p.position = center + (p.position - center) * k;
             }
+        }
+        if !self.cinema {
+            self.line_up_rows();
         }
         self.radius *= k;
         self.save_layout();
@@ -1596,6 +1601,15 @@ impl World {
             self.arrange_all(s, now);
             return;
         }
+        self.line_up_rows();
+        self.held = [None, None];
+        self.save_layout();
+        self.send_layout(now);
+    }
+
+    /// Every row of the desk arrangement lined up (see `layout::line_up`), the PC's own
+    /// displays with the first of them.
+    fn line_up_rows(&mut self) {
         // The first display of the PC itself that shows is lined up as a laptop's
         // screen; the others go with it, standing to it as they stood (they are not
         // lined up, and so cover no monitor the first one does not).
@@ -1636,9 +1650,6 @@ impl World {
                 }
             }
         }
-        self.held = [None, None];
-        self.save_layout();
-        self.send_layout(now);
     }
 
     /// Swaps the places of monitor `id` and its neighbour `delta` along in the order;
