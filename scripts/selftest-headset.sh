@@ -210,10 +210,13 @@ while True:
         echo ">> the headset's 127.0.0.1:47830 pointed at a prostir here; it points at the test one" \
             "for now and back afterwards (a prostir without --no-adb may take it back meanwhile)"
     fi
-    adb reverse tcp:47830 "tcp:$PC_PORT" >/dev/null || exit 2
+    # Marked just before each change: a reverse that half went through (or the
+    # script stopped right after it) is put back too; putting back is harmless when
+    # nothing changed, as the state before is known.
     REVERSED_USB=1
-    adb reverse "tcp:$CLOCK_PORT" "tcp:$CLOCK_PORT" >/dev/null || exit 2
+    adb reverse tcp:47830 "tcp:$PC_PORT" >/dev/null || exit 2
     REVERSED_CLOCK=1
+    adb reverse "tcp:$CLOCK_PORT" "tcp:$CLOCK_PORT" >/dev/null || exit 2
     : >"$OUT/pc.log"
     pc_start || exit 2
 }
