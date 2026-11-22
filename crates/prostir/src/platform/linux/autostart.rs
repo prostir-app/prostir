@@ -12,7 +12,9 @@
 //! over the port; it takes effect at the next login when Prostir already runs
 //! otherwise now (it holds the port, so the socket is not started now). Turning it off
 //! disables the socket and removes the entry; Prostir running now runs on until it
-//! quits.
+//! quits. Where the socket is enabled for every user (a link in `/etc/systemd/user`,
+//! which a package may have made), off masks it for this user, which `disable` alone
+//! would leave on, and on unmasks it first.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -53,6 +55,8 @@ struct Places {
     config: Option<PathBuf>,
     /// Where the user's systemd looks for units, the user's own first.
     unit_dirs: Vec<PathBuf>,
+    /// Where units are enabled for every user (`/etc/systemd/user`).
+    global: PathBuf,
     /// The user's systemd runs.
     systemd: bool,
     hyprland: bool,
@@ -67,6 +71,7 @@ impl Places {
         Self {
             config: config_home(),
             unit_dirs: unit_dirs(),
+            global: "/etc/systemd/user".into(),
             systemd: std::env::var_os("XDG_RUNTIME_DIR")
                 .is_some_and(|d| Path::new(&d).join("systemd/private").exists()),
             hyprland: super::hyprland::running(),
@@ -96,15 +101,28 @@ impl Places {
     }
 
     /// Whether the socket is enabled: a link in a `sockets.target.wants` of the user's
-    /// systemd (the user's own, or one for every user).
+    /// systemd (the user's own, or one for every user), and not masked for this user.
     fn socket_enabled(&self) -> bool {
-        [
-            self.config.as_ref().map(|c| c.join("systemd/user")),
-            Some("/etc/systemd/user".into()),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|d| d.join("sockets.target.wants").join(SOCKET).exists())
+        let wanted = |d: &Path| d.join("sockets.target.wants").join(SOCKET).exists();
+        let own = self.config.as_ref().map(|c| c.join("systemd/user"));
+        !self.socket_masked() && (own.as_deref().is_some_and(wanted) || wanted(&self.global))
+    }
+
+    /// Enabled for every user (a link in `/etc/systemd/user`), which only a mask turns
+    /// off for this user.
+    fn socket_enabled_globally(&self) -> bool {
+        self.global
+            .join("sockets.target.wants")
+            .join(SOCKET)
+            .exists()
+    }
+
+    /// Masked for this user: the user's unit is a link to `/dev/null`.
+    fn socket_masked(&self) -> bool {
+        self.config.as_ref().is_some_and(|c| {
+            std::fs::read_link(c.join("systemd/user").join(SOCKET))
+                .is_ok_and(|to| to == Path::new("/dev/null"))
+        })
     }
 
     fn available(&self) -> bool {
@@ -125,7 +143,17 @@ impl Places {
             Way::Socket => {
                 // The entry of 0.1 would start a watcher that takes the port first.
                 self.remove_entry();
-                let _ = self.systemctl(&[if on { "enable" } else { "disable" }, SOCKET]);
+                if on {
+                    if self.socket_masked() {
+                        let _ = self.systemctl(&["unmask", SOCKET]);
+                    }
+                    let _ = self.systemctl(&["enable", SOCKET]);
+                } else {
+                    let _ = self.systemctl(&["disable", SOCKET]);
+                    if self.socket_enabled_globally() {
+                        let _ = self.systemctl(&["mask", SOCKET]);
+                    }
+                }
             }
             Way::Entry if on => self.write_entry(),
             Way::Entry => self.remove_entry(),
@@ -432,6 +460,7 @@ mod tests {
         let p = Places {
             config: Some(dir.join("config")),
             unit_dirs: vec![unit_dir],
+            global: dir.join("etc"),
             systemd,
             hyprland: false,
             systemctl,
@@ -457,6 +486,36 @@ mod tests {
         let asked = std::fs::read_to_string(dir.join("asked")).unwrap();
         assert!(
             asked.ends_with("--user disable prostir.socket\n"),
+            "{asked}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A package that enabled the socket for every user (a link in
+    /// `/etc/systemd/user`, which `disable` leaves): off masks it for this user, so it
+    /// stays off; on unmasks it first.
+    #[test]
+    fn off_holds_over_a_socket_enabled_for_every_user() {
+        let (p, dir) = places("global", true, true);
+        let wants = dir.join("etc/sockets.target.wants");
+        std::fs::create_dir_all(&wants).unwrap();
+        std::fs::write(wants.join(SOCKET), "[Socket]\n").unwrap();
+        assert!(p.enabled());
+        p.set(false);
+        let asked = std::fs::read_to_string(dir.join("asked")).unwrap();
+        assert_eq!(
+            asked,
+            "--user disable prostir.socket\n--user mask prostir.socket\n"
+        );
+        // As systemctl masks it.
+        let units = dir.join("config/systemd/user");
+        std::fs::create_dir_all(&units).unwrap();
+        std::os::unix::fs::symlink("/dev/null", units.join(SOCKET)).unwrap();
+        assert!(!p.enabled(), "masked: off");
+        p.set(true);
+        let asked = std::fs::read_to_string(dir.join("asked")).unwrap();
+        assert!(
+            asked.ends_with("--user unmask prostir.socket\n--user enable prostir.socket\n"),
             "{asked}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
