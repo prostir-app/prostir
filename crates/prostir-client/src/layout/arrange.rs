@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
 use prostir_layout::circle::{self, Limits};
-use prostir_layout::space::{Frame, Monitor, covers, cuts};
+use prostir_layout::space::{Frame, Monitor, Seen, azimuth, covers, cuts, see};
 use prostir_layout::view::Room;
 use prostir_layout::{place, rows, tidy};
 
@@ -329,6 +329,109 @@ pub fn refit(p: Placement, was: PixelSize, now: PixelSize) -> Placement {
     Placement {
         width: p.width * now.0 as f32 / was.0 as f32,
         ..p
+    }
+}
+
+/// `p` moved along the row it stands in: turned about the eye by `angle` (radians,
+/// positive to the right as seen), or on a wall (`wall`) carried along its plane by
+/// `metres`.
+fn along_row(p: Placement, frame: &Frame, wall: bool, angle: f32, metres: f32) -> Placement {
+    if wall {
+        return Placement {
+            position: p.position + frame.turn * Vec3::X * metres,
+            ..p
+        };
+    }
+    let turn = frame.turn * Quat::from_rotation_y(-angle) * frame.turn.inverse();
+    Placement {
+        position: frame.eye + turn * (p.position - frame.eye),
+        rotation: (turn * p.rotation).normalize(),
+        width: p.width,
+    }
+}
+
+/// Where the middle of `p`'s left (`side` -1) or right (1) edge is seen, around the eye
+/// of `frame` (radians, positive to the right), and along a wall in its plane.
+fn edge(p: &Placement, frame: &Frame, side: f32) -> (f32, f32) {
+    let at = frame.to_local(p.position + p.rotation * Vec3::X * (side * p.width / 2.0));
+    (azimuth(at.as_dvec3()) as f32, at.x)
+}
+
+/// `p` moved along its row so its `side` edge (-1 left, 1 right) is where `slot`'s
+/// is: a monitor taking another's place at its own width keeps that place's edge.
+pub fn edge_to(p: Placement, slot: &Placement, side: f32, frame: &Frame, wall: bool) -> Placement {
+    let (to, to_x) = edge(slot, frame, side);
+    let (from, from_x) = edge(&p, frame, side);
+    along_row(p, frame, wall, to - from, to_x - from_x)
+}
+
+/// Whether `a` is seen left of `b` from `frame`'s eye.
+pub fn left_of(a: &Placement, b: &Placement, frame: &Frame) -> bool {
+    let az = |p: &Placement| azimuth(frame.to_local(p.position).as_dvec3());
+    az(a) < az(b)
+}
+
+/// How far apart two monitors side by side may be seen to overlap before one is
+/// pushed clear of the other (radians: a hundredth of a millimetre a metre away), what
+/// the last bits of a float leave of a seam.
+const SEAM: f64 = 1e-5;
+
+/// Monitor `id` of `monitors` is larger, or stands elsewhere, than before (another
+/// resolution, a place swapped): the monitors beside it in its row (seen at its height
+/// for at least half of the lower one) that it now covers as seen are pushed clear
+/// along the row, each side as one piece with all beyond it, just as far as it
+/// reaches into them: they meet it edge to edge. Around the eye; on a wall (`wall`)
+/// along its plane. The rest stays.
+pub fn make_room<K: Key>(
+    placements: &mut HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    (center, tilt): ((Vec3, f32), f32),
+    wall: bool,
+    id: K,
+) {
+    let frame = frame(center, tilt);
+    let all = placed(placements, monitors);
+    let seen = see(&frame, &all);
+    let (Some(me), Some(mine)) = (
+        seen.iter().find(|s| s.id == id).copied(),
+        placements.get(&id).copied(),
+    ) else {
+        return;
+    };
+    for side in [1.0f32, -1.0] {
+        let beyond: Vec<&Seen<K>> = seen
+            .iter()
+            .filter(|s| s.id != id && s.vertical_overlap(&me) >= 0.5)
+            .filter(|s| (s.center_x() > me.center_x()) == (side > 0.0))
+            .collect();
+        let reach = |s: &Seen<K>| {
+            if side > 0.0 {
+                me.right - s.left
+            } else {
+                s.right - me.left
+            }
+        };
+        let Some(into) = beyond
+            .iter()
+            .filter(|s| s.horizontal_overlap(&me) > 0.0)
+            .copied()
+            .max_by(|a, b| reach(a).total_cmp(&reach(b)))
+            .filter(|s| reach(s) > SEAM)
+        else {
+            continue;
+        };
+        let Some(other) = placements.get(&into.id).copied() else {
+            continue;
+        };
+        // How far its near edge goes to meet this one's.
+        let (to, to_x) = edge(&mine, &frame, side);
+        let (from, from_x) = edge(&other, &frame, -side);
+        let (angle, metres) = (to - from, to_x - from_x);
+        for s in beyond {
+            if let Some(p) = placements.get_mut(&s.id) {
+                *p = along_row(*p, &frame, wall, angle, metres);
+            }
+        }
     }
 }
 

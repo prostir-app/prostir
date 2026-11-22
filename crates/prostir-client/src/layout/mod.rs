@@ -22,8 +22,8 @@ mod stick;
 mod tests;
 
 pub use arrange::{
-    Physical, ahead, arrange, carried, covers_any, facing_yaw, frame, kept_to, line_up, place_new,
-    preset_radius, refit, spread, tilt,
+    Physical, ahead, arrange, carried, covers_any, edge_to, facing_yaw, frame, kept_to, left_of,
+    line_up, make_room, place_new, preset_radius, refit, spread, tilt,
 };
 pub use cinema::{cinema, cinema_choice};
 pub use desktop::{Desktop, DesktopMemo};

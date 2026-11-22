@@ -582,7 +582,7 @@ fn a_ray_hits_a_monitor_where_it_is_drawn() {
     // drawn on its way.
     let (one, other) = (sim.world.monitors()[0].0, sim.world.monitors()[1].0);
     let (a, b) = (sim.place(one), sim.place(other));
-    sim.world.swap(one, 1);
+    sim.world.swap(&sim.s, one, 1);
     assert!(near(&sim.place(one), &b) && near(&sim.place(other), &a));
     sim.after(11);
     let drawn = sim.drawn(one);
@@ -930,7 +930,7 @@ fn a_drag_is_drawn_in_the_same_pass() {
 
     // Swapped, and taken on the way.
     sim.settled();
-    sim.world.swap(k(1), 1);
+    sim.world.swap(&sim.s, k(1), 1);
     sim.after(30);
     let drawn = sim.drawn(k(1));
     assert!(!near(&drawn, &sim.place(k(1))), "still on its way");
@@ -948,7 +948,7 @@ fn moving_all_from_the_way_nothing_jumps() {
     let mut sim = Sim::at_desk();
     sim.s.move_all = true;
     let (one, other) = (sim.world.monitors()[0].0, sim.world.monitors()[1].0);
-    sim.world.swap(one, 1);
+    sim.world.swap(&sim.s, one, 1);
     sim.after(30);
     let drawn: HashMap<DisplayKey, Placement> = sim
         .world
@@ -1308,6 +1308,32 @@ fn none_covers(sim: &Sim, sizes: &[(u32, (u32, u32))]) {
     }
 }
 
+/// No two of `sizes` (number, pixels) seen over each other from the eye, by more than
+/// a hundredth of the smaller one across and up.
+fn none_seen_over(sim: &Sim, sizes: &[(u32, (u32, u32))]) {
+    use prostir_layout::space::{Monitor, PixelSize, overlaps, see};
+    let frame = layout::frame(sim.world.center, sim.world.tilt);
+    let all: Vec<Monitor<u32>> = sizes
+        .iter()
+        .map(|&(n, (w, h))| Monitor {
+            id: n,
+            px: PixelSize::new(w, h),
+            placement: sim.place(k(n)),
+        })
+        .collect();
+    let seen = see(&frame, &all);
+    for (i, a) in seen.iter().enumerate() {
+        for b in &seen[i + 1..] {
+            assert!(
+                !overlaps(a, b, 0.01),
+                "{} and {} seen over each other: {a:?} {b:?}",
+                a.id,
+                b.id
+            );
+        }
+    }
+}
+
 /// No two of `sizes` (number, pixels) cut into each other in the room.
 fn none_cut(sim: &Sim, sizes: &[(u32, (u32, u32))]) {
     let height = |p: &Placement, (w, h): (u32, u32)| p.width * h as f32 / w as f32;
@@ -1552,5 +1578,26 @@ fn closer_keeps_glued_monitors_apart() {
                 "{steps}: as far as asked"
             );
         }
+    }
+}
+
+/// Monitors of different widths moved left or right ("Move" in the menu): the two
+/// swapped stand edge to edge where the pair stood, neither over the other or over a
+/// neighbour.
+#[test]
+fn swapping_monitors_of_different_widths_keeps_them_apart() {
+    let sizes = [(1, (3440, 1440)), (2, (1920, 1080)), (3, QHD)];
+    for (first, delta) in [(0, 1), (1, 1), (2, -1), (1, -1)] {
+        let mut sim = Sim::new(None);
+        sim.connect(PC);
+        sim.list(sizes.iter().map(|&(n, s)| monitor(n, s)).collect());
+        for &(n, s) in &sizes {
+            sim.stream(n, s);
+        }
+        sim.settled();
+        let order: Vec<DisplayKey> = sim.world.monitors().iter().map(|m| m.0).collect();
+        sim.world.swap(&sim.s, order[first], delta);
+        none_seen_over(&sim, &sizes);
+        none_cut(&sim, &sizes);
     }
 }

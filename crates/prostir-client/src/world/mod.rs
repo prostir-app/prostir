@@ -1652,9 +1652,12 @@ impl World {
         }
     }
 
-    /// Swaps the places of monitor `id` and its neighbour `delta` along in the order;
-    /// the others stay. Each takes the other's place at the size of its own pixels.
-    pub fn swap(&mut self, id: DisplayKey, delta: i32) {
+    /// Swaps the places of monitor `id` and its neighbour `delta` along in the order.
+    /// Each takes the other's place at the size of its own pixels, the two edge to edge
+    /// where the pair stood (the one going left from the left edge of the pair, the
+    /// other from its right edge); neighbours either reaches into are pushed clear along
+    /// the row (see `layout::make_room`), the others stay.
+    pub fn swap(&mut self, s: &Settings, id: DisplayKey, delta: i32) {
         let Some(i) = self.lineup.iter().position(|m| m.0 == id) else {
             return;
         };
@@ -1668,8 +1671,28 @@ impl World {
             self.placements.get(&other).copied(),
         ) {
             let (sa, sb) = ((aw, ah), (bw, bh));
-            self.placements.insert(id, layout::refit(b, sb, sa));
-            self.placements.insert(other, layout::refit(a, sa, sb));
+            let frame = layout::frame(self.center, self.tilt);
+            let wall = s.preset == Preset::Wall;
+            // Into `b`'s place goes `id`, into `a`'s the other, each from the pair's
+            // outer edge on its side.
+            let side = if layout::left_of(&a, &b, &frame) {
+                1.0
+            } else {
+                -1.0
+            };
+            let to_b = layout::edge_to(layout::refit(b, sb, sa), &b, side, &frame, wall);
+            let to_a = layout::edge_to(layout::refit(a, sa, sb), &a, -side, &frame, wall);
+            self.placements.insert(id, to_b);
+            self.placements.insert(other, to_a);
+            for moved in [other, id] {
+                layout::make_room(
+                    &mut self.placements,
+                    &self.sizes,
+                    (self.center, self.tilt),
+                    wall,
+                    moved,
+                );
+            }
             self.save_layout();
         }
     }

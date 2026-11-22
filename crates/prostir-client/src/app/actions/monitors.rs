@@ -108,7 +108,7 @@ impl Model {
             }
             // Swaps the places of a monitor and its neighbour in the order; the others
             // stay.
-            Action::Move { id, delta } => self.world.swap(id, delta),
+            Action::Move { id, delta } => self.world.swap(&self.settings, id, delta),
             // The others are not this part's (see `Model::act`).
             _ => {}
         }
