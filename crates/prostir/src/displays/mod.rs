@@ -190,6 +190,9 @@ pub struct Displays {
     /// The streams go in H.264 because a headset did not decode the codec chosen:
     /// they go back to it once every headset with a session does.
     fitted_down: bool,
+    /// When a screen last streamed (or the session began): nothing streaming for
+    /// `encoding::NOTHING_STREAMS` ends the sessions (see [`Displays::healthy`]).
+    streamed_at: Instant,
     pub router: Arc<Router>,
     cfg: EncoderConfig,
     primary: Option<ScreenId>,
@@ -252,6 +255,7 @@ impl Displays {
             choices: Vec::new(),
             streaming: true,
             fitted_down: false,
+            streamed_at: Instant::now(),
             router,
             cfg: EncoderConfig {
                 codec: settings.codec,
@@ -640,6 +644,9 @@ impl Displays {
             self.sync_audio();
         }
         self.stop_too_big();
+        if self.some_stream() {
+            self.streamed_at = Instant::now();
+        }
         if self.retry_due(Instant::now()) {
             self.push();
         }
@@ -707,6 +714,10 @@ impl Displays {
     /// session too (the other headsets get a keyframe of it). The encoders run from
     /// here; [`Displays::worn`] pauses them again if no headset is worn.
     pub fn headset_connected(&mut self) {
+        // A new session tries every encoder again for each monitor.
+        let monitors = self.monitors().map(|s| s.id).collect();
+        self.desk.ask(Job::Forgive(monitors));
+        self.streamed_at = Instant::now();
         self.retry_too_big();
         self.retry_failed();
         // Paused ones (kept from before) start over as the worker resumes them;

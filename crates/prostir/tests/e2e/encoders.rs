@@ -380,13 +380,15 @@ fn one_monitor_whose_encoder_breaks_starts_again_alone() {
         software: false,
         encoder: Some("works"),
         fps: 10,
+        // The monitors go with the headset, and are made anew for the next session.
+        linger: 0,
         ..Options::default()
     };
-    let (_dir, mut pc, _keys, mut headset) = crate::session("encoder-breaks", &options);
+    let (_dir, mut pc, mut keys, mut headset) = crate::session("encoder-breaks", &options);
     let first = pc.source_starts()["Fake-1"];
     let made = pc.count_log("Prostir-2: encoding with");
-    pc.desktop("break-encoder Fake-2 5");
-    pc.wait_log(SOON, "the next 5 fake hardware encoders of Fake-2 break");
+    pc.desktop("break-encoder Fake-2 2");
+    pc.wait_log(SOON, "the next 2 fake hardware encoders of Fake-2 break");
     pc.wait_log(SOON, "Prostir-2: its encoder broke (1 in a row)");
     pc.wait_log(SOON, "Prostir-2: its encoder broke (2 in a row)");
     let next = pc.wait_log_after(SOON, "Prostir-2: encoding with", made + 1);
@@ -402,22 +404,74 @@ fn one_monitor_whose_encoder_breaks_starts_again_alone() {
         !view.closed && view.goodbye.is_none(),
         "the session goes on"
     );
+    // A new session tries every encoder again for it: its monitor, made anew, gets
+    // the fake hardware encoder again.
+    headset.disconnect();
+    pc.wait_log(SOON, "headset disconnected");
+    let hardware = pc.count_log("Prostir-2: encoding with fake hardware");
+    let mut again = connect(&pc, &mut keys);
+    again
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    pc.wait_log_after(SOON, "Prostir-2: encoding with fake hardware", hardware);
 }
 
-/// The desktop closes one monitor's output (KWin may): only that one is made again,
-/// after a pause, and streams; the other goes on and the session stays.
+/// An encoder that keeps breaking on a monitor, where it is the only one there is
+/// (x264): it is never passed over, which would leave the monitor with none; the
+/// monitor streams again once it breaks no more.
+#[test]
+fn the_only_encoder_is_never_passed_over() {
+    let options = Options {
+        fps: 10,
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = crate::session("encoder-only-one", &options);
+    pc.desktop("break-encoder Fake-2 3 any");
+    pc.wait_log(SOON, "the next 3 encoders of Fake-2 break");
+    pc.wait_log(SOON, "Prostir-2: its encoder broke (3 in a row)");
+    headset
+        .wait(SOON, "every monitor showing again", View::all_monitors_show)
+        .unwrap();
+    assert_eq!(pc.count_log("not used for this output"), 0);
+    let view = headset.view();
+    assert!(
+        !view.closed && view.goodbye.is_none(),
+        "the session goes on"
+    );
+}
+
+/// The desktop closes one monitor's output (KWin may), and its stream ends with it:
+/// only that one is made again, after one pause (one failure, not two), with the
+/// encoder it had (the stream's end is no fault of the encoder's), and streams; the
+/// other goes on and the session stays.
 #[test]
 fn a_monitor_the_desktop_closed_is_made_again_alone() {
-    let (_dir, mut pc, _keys, mut headset) = crate::session("output-closed", &Options::default());
+    let options = Options {
+        software: false,
+        encoder: Some("works"),
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = crate::session("output-closed", &options);
     let first = pc.source_starts()["Fake-1"];
     pc.desktop("close Fake-2");
     pc.wait_log(SOON, "fake desktop: closed Fake-2");
-    pc.wait_log(SOON, "the desktop closed Prostir-2");
     pc.wait_log(SOON, "fake desktop: removed Fake-2");
     pc.wait_log_after(SOON, "fake desktop: created Fake-2 ", 1);
     headset
         .wait(SOON, "every monitor showing again", View::all_monitors_show)
         .unwrap();
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        pc.count_log("Prostir-2: trying it again (failure 1 in a row)"),
+        1
+    );
+    assert_eq!(pc.count_log("(failure 2 in a row)"), 0, "counted twice");
+    assert_eq!(pc.count_log("its encoder broke"), 0);
+    assert_eq!(
+        pc.count_log("Prostir-2: encoding with fake hardware"),
+        2,
+        "the same encoder again"
+    );
     assert_eq!(pc.count_log("fake desktop: created Fake-1 "), 1);
     assert_eq!(pc.source_starts()["Fake-1"], first, "the other one went on");
     let view = headset.view();
@@ -461,4 +515,32 @@ fn a_monitor_that_cannot_be_made_is_tried_again_after_longer_pauses() {
         !view.closed && view.goodbye.is_none(),
         "the session goes on"
     );
+}
+
+/// No monitor can be made at all: the session goes on while each is tried again (the
+/// desktop may come back from a restart), and ends, saying why, only once nothing
+/// streamed for 30 s.
+#[test]
+fn a_session_where_nothing_streams_ends_after_a_while() {
+    let options = Options {
+        broken_monitors: "1,2".into(),
+        ..Options::default()
+    };
+    let dir = TestDir::new("nothing-streams");
+    dir.save_monitors(crate::TWO_MONITORS);
+    let mut keys = dir.pair();
+    let pc = Pc::start(&dir, &options);
+    let started = Instant::now();
+    let mut headset = connect(&pc, &mut keys);
+    headset.wait_closed(Duration::from_secs(60)).unwrap();
+    let ended = started.elapsed();
+    assert!(
+        ended >= Duration::from_secs(28) && ended < Duration::from_secs(45),
+        "ended after {ended:?}"
+    );
+    assert_eq!(
+        headset.view().goodbye,
+        Some(prostir_proto::PcGoodbye::Failed.code())
+    );
+    assert!(pc.count_log("fake monitor 1 is broken") >= 4, "tried again");
 }

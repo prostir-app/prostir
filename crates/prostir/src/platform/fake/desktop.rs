@@ -20,10 +20,12 @@
 //!   dies;
 //! - `sound-gone`: the sound system loses Prostir's devices (the sound device and
 //!   the microphone), as when PipeWire restarts;
-//! - `close Fake-2`: the desktop closes that output, as KWin may;
+//! - `close Fake-2`: the desktop closes that output, as KWin may, and its stream
+//!   ends (as KWin's PipeWire node goes);
 //! - `break-encoder Fake-2 3`: the next three fake hardware encoders of that output
 //!   (the one running now among them) break once they have sent a frame, as a
-//!   driver that fails in the middle of a stream;
+//!   driver that fails in the middle of a stream; `break-encoder Fake-2 3 any`: the
+//!   next three of any encoder;
 //! - `fail-source Fake-3 2`: the next two starts of that output's picture source fail
 //!   (it may not be made yet), as when KWin's PipeWire node of an output is gone;
 //! - `hang make 20`, `hang place 20`, `hang encoder-stop 20`, `hang sound-start 20`:
@@ -583,11 +585,13 @@ fn command(line: &str) -> Result<()> {
         return Ok(());
     }
     if let ["break-encoder", name, n] = words[..] {
-        super::BREAK_ENCODERS
-            .lock()
-            .unwrap()
-            .insert(name.to_owned(), n.parse()?);
+        super::break_encoders(name, n.parse()?, false);
         info!("fake desktop: the next {n} fake hardware encoders of {name} break");
+        return Ok(());
+    }
+    if let ["break-encoder", name, n, "any"] = words[..] {
+        super::break_encoders(name, n.parse()?, true);
+        info!("fake desktop: the next {n} encoders of {name} break");
         return Ok(());
     }
     if let ["fail-source", name, n] = words[..] {

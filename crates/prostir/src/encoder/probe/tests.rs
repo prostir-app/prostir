@@ -259,6 +259,27 @@ fn other_failures_are_the_outputs() {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
+/// What failed on an output is forgotten when asked (a new session, a retry by
+/// hand): only for that output.
+#[test]
+fn an_outputs_failures_are_forgotten_when_asked() {
+    let mut catalog = sample();
+    let wanted = Wanted {
+        codec: Codec::H264,
+        software: false,
+    };
+    for n in [1, 2] {
+        catalog.did_not_open(VA, Codec::H264, output(n), &failure(false, false), 0);
+    }
+    let none = |_: Kind| 0;
+    let first =
+        |c: &Catalog, n| c.rank(Memory::DmaBuf, wanted, output(n), &none).choices[0].backend;
+    assert_ne!(first(&catalog, 1), Backend::Va);
+    catalog.forget_output(output(1));
+    assert_eq!(first(&catalog, 1), Backend::Va, "tried again");
+    assert_ne!(first(&catalog, 2), Backend::Va, "the other output's stays");
+}
+
 /// The headset's menu: each codec on the graphics card and on the CPU, as found.
 #[test]
 fn codecs_offered_are_those_found() {

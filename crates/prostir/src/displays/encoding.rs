@@ -3,9 +3,10 @@
 
 use super::*;
 
-/// A monitor that failed this many times in a row no longer counts as on its way
-/// (see [`Displays::healthy`]); it is still tried again.
-const GIVE_UP_AFTER: u32 = 3;
+/// Nothing streamed for this long (every screen failed, and none came back while
+/// each was tried again): the sessions end (see [`Displays::healthy`]). Long enough
+/// for the desktop to come back from a restart of its own or of the graphics card.
+pub(super) const NOTHING_STREAMS: Duration = Duration::from_secs(30);
 
 impl Displays {
     /// Monitor `id` is tried again (after a failure): `Starting` until the worker
@@ -279,18 +280,26 @@ impl Displays {
         })
     }
 
-    /// Some monitor streams or is on its way: one that broke or did not start is
-    /// tried again by itself (see [`Displays::retry_due`]), and only when none can
-    /// stream at all (every one failed [`GIVE_UP_AFTER`] times in a row) do the
-    /// sessions end, the screens made anew for the next one.
+    /// Whether some screen streams now: a monitor, a window panel, or a display of
+    /// the PC shown.
+    pub(super) fn some_stream(&self) -> bool {
+        self.screens
+            .values()
+            .any(|s| s.running() && (!s.is_physical() || s.streaming))
+    }
+
+    /// Some screen streams or is on its way for the first time: one that broke or
+    /// did not start is tried again by itself (see [`Displays::retry_due`]), and only
+    /// when nothing streamed for [`NOTHING_STREAMS`] do the sessions end, the screens
+    /// made anew for the next one.
     pub fn healthy(&self) -> bool {
-        // Monitors too big for this headset are not broken: they wait for another.
-        self.monitors().any(|s| {
-            s.running()
-                || matches!(s.state, ScreenState::Starting)
-                || self.too_big.contains_key(&s.id)
-                || (s.retry_at.is_some() && s.failures < GIVE_UP_AFTER)
-        })
+        self.some_stream()
+            // Monitors too big for this headset are not broken: they wait for another.
+            || self.monitors().any(|s| {
+                self.too_big.contains_key(&s.id)
+                    || (matches!(s.state, ScreenState::Starting) && s.failures == 0)
+            })
+            || self.streamed_at.elapsed() < NOTHING_STREAMS
     }
 }
 

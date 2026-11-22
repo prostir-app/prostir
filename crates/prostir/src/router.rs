@@ -400,6 +400,14 @@ impl RouterInner {
     }
 }
 
+/// How a stream broke: why, and whether its source lost its stream (the desktop's)
+/// rather than its encoder failing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Broke {
+    pub why: String,
+    pub by_source: bool,
+}
+
 /// A stream larger than every headset decodes: its display, size and codec.
 pub type TooBig = (ScreenId, (u32, u32), Codec);
 
@@ -419,7 +427,7 @@ pub struct Router {
     inner: Mutex<RouterInner>,
     /// Streams whose encoder broke, with why: each is started again by itself (see
     /// `Worker::check_closed`), the others go on.
-    broken: Mutex<Vec<(ScreenId, String)>>,
+    broken: Mutex<Vec<(ScreenId, Broke)>>,
     /// Streams whose encoder did not open, with why: each goes on with the next
     /// encoder for it (see `Displays::tick`).
     unopened: Mutex<Vec<(ScreenId, crate::encoder::NotOpened)>>,
@@ -1012,7 +1020,7 @@ impl Router {
     }
 
     /// Streams whose encoder broke since the last call, with why.
-    pub fn take_broken(&self) -> Vec<(ScreenId, String)> {
+    pub fn take_broken(&self) -> Vec<(ScreenId, Broke)> {
         std::mem::take(&mut *self.broken.lock().unwrap())
     }
 
@@ -1146,12 +1154,25 @@ impl Router {
                 }
                 !too_big
             }
-            EncoderEvent::Failed(reason) => {
-                error!("{}: {reason}", slot.name);
-                // Not the end of anything either: the desktop's worker starts this
-                // stream again by itself, after a pause (see `Worker::check_closed`),
-                // and the others go on.
-                self.broken.lock().unwrap().push((id, reason));
+            // Not the end of anything either: the desktop's worker starts this stream
+            // again by itself, after a pause (see `Worker::check_closed`), and the
+            // others go on.
+            EncoderEvent::Failed(why) => {
+                error!("{}: {why}", slot.name);
+                let broke = Broke {
+                    why,
+                    by_source: false,
+                };
+                self.broken.lock().unwrap().push((id, broke));
+                false
+            }
+            EncoderEvent::SourceLost(why) => {
+                warn!("{}: its source is gone: {why}", slot.name);
+                let broke = Broke {
+                    why,
+                    by_source: true,
+                };
+                self.broken.lock().unwrap().push((id, broke));
                 false
             }
             // Not the end of anything: `Displays` starts the next encoder for it.

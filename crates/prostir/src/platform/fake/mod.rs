@@ -118,22 +118,34 @@ pub fn hang(point: &str) {
     }
 }
 
-/// How many of the fake hardware encoders of each output still break once they sent a
-/// frame (`break-encoder Fake-2 3`, see `desktop.rs`), by output name.
+/// How many of the encoders of each output still break once they sent a frame, and
+/// whether any encoder does or only the fake hardware one (`break-encoder Fake-2 3`,
+/// `break-encoder Fake-2 3 any`, see `desktop.rs`), by output name.
 static BREAK_ENCODERS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, u32>>,
+    std::sync::Mutex<std::collections::HashMap<String, (u32, bool)>>,
 > = std::sync::LazyLock::new(Default::default);
 
-/// Whether a fake hardware encoder of output `name` that sent a frame breaks now (one
-/// of those a test asked for).
-pub fn encoder_breaks(name: &str) -> bool {
+/// The next `n` encoders of output `name` break (any encoder with `any`, else only
+/// the fake hardware one).
+fn break_encoders(name: &str, n: u32, any: bool) {
+    BREAK_ENCODERS
+        .lock()
+        .unwrap()
+        .insert(name.to_owned(), (n, any));
+}
+
+/// Whether an encoder of output `name` (the fake hardware one with `fake`) that sent
+/// a frame breaks now (one of those a test asked for).
+pub fn encoder_breaks(name: &str, fake: bool) -> bool {
     BREAK_ENCODERS
         .lock()
         .unwrap()
         .get_mut(name)
-        .is_some_and(|left| {
-            let breaks = *left > 0;
-            *left = left.saturating_sub(1);
+        .is_some_and(|(left, any)| {
+            let breaks = *left > 0 && (fake || *any);
+            if breaks {
+                *left -= 1;
+            }
             breaks
         })
 }

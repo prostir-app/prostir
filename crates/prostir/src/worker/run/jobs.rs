@@ -33,6 +33,15 @@ impl Worker {
                     }
                 }
             }
+            Job::Forgive(ids) => {
+                let mut catalog = crate::encoder::catalog();
+                for id in ids {
+                    catalog.forget_output(id);
+                    if let Some(slot) = self.slots.get_mut(&id) {
+                        slot.breaks = None;
+                    }
+                }
+            }
             Job::Screenshot { until, .. }
             | Job::FindMouse { until, .. }
             | Job::WindowHere { until, .. }

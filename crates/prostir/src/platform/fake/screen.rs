@@ -139,6 +139,9 @@ impl Screen {
     pub fn close(&self) {
         self.closed
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        // Its source, waiting for a picture, hears it now.
+        let _changes = self.changes.lock().unwrap();
+        self.changed.notify_all();
     }
 
     /// Whether the desktop closed it.
@@ -414,6 +417,15 @@ mod imp {
                 .ok_or(gst::FlowError::Flushing)?;
             let mut changes = screen.changes.lock().unwrap();
             loop {
+                // Closed by the desktop: its stream is gone, as KWin's PipeWire node.
+                if screen.is_closed() {
+                    gst::element_imp_error!(
+                        self,
+                        gst::ResourceError::NotFound,
+                        ["the output {} is closed", screen.name]
+                    );
+                    return Err(gst::FlowError::Error);
+                }
                 {
                     let mut state = self.state.lock().unwrap();
                     if state.flushing {
