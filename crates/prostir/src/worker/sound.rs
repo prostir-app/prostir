@@ -27,6 +27,9 @@ const STOP_WITHIN: Duration = Duration::from_secs(5);
 /// system that went away (restarted, or Prostir's device removed) says nothing, and
 /// the capture of a device that went takes the PC's speakers instead.
 const CHECK_EVERY: Duration = Duration::from_secs(2);
+/// A device that breaks within this of being made is made again only after the
+/// pause of a failure.
+const BROKE_SOON: Duration = Duration::from_secs(30);
 
 /// What the control loop wants of the sound.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -157,6 +160,8 @@ impl Sound {
             mic_retry: Backoff::default(),
             recorded: None,
             checked: Instant::now(),
+            audio_made: Instant::now(),
+            mic_made: Instant::now(),
         };
         let mark_gone = move || {
             let (lock, ring) = &*gone;
@@ -205,6 +210,9 @@ struct Thread {
     recorded: Option<(bool, u32)>,
     /// When the sound and the microphone were last looked at.
     checked: Instant,
+    /// When the sound and the microphone were last made.
+    audio_made: Instant,
+    mic_made: Instant,
 }
 
 impl Thread {
@@ -247,13 +255,17 @@ impl Thread {
 
     /// Lets go of the sound or the microphone that broke (the sound system went away,
     /// or removed Prostir's device), and says so, so the status tells the truth; what
-    /// is still wanted is made again right after, as one that failed to start is (the
-    /// pauses come from those starts). Left as it is, the PC's sound would play on its
-    /// speakers, and the headset microphone would reach no program.
+    /// is still wanted is made again right after, or after the pause of a failure when
+    /// it broke within [`BROKE_SOON`] of being made (a device that breaks again and
+    /// again is not made every few seconds). Left as it is, the PC's sound would play
+    /// on its speakers, and the headset microphone would reach no program.
     fn check(&mut self) {
         self.checked = Instant::now();
         if let Some(audio) = self.audio.take_if(|a| !a.alive()) {
             warn!("the PC's sound no longer reaches the headset's device: making it again");
+            if self.audio_made.elapsed() < BROKE_SOON {
+                self.audio_retry.failed();
+            }
             let _ = timed::call(
                 "sound-stop",
                 "letting go of the PC's sound that broke",
@@ -264,6 +276,9 @@ impl Thread {
         }
         if let Some(mic) = self.mic.take_if(|m| !m.alive()) {
             warn!("the headset microphone is gone from the PC: making it again");
+            if self.mic_made.elapsed() < BROKE_SOON {
+                self.mic_retry.failed();
+            }
             // Closed here, for every share: the control loop's, let go when it hears
             // of it, has nothing left to run.
             let _ = timed::call(
@@ -295,6 +310,7 @@ impl Thread {
                     self.audio_retry.succeeded();
                     self.say(SoundDone::Audio(audio.route(), audio.device()));
                     self.audio = Some(audio);
+                    self.audio_made = Instant::now();
                 }
                 Err(e) => {
                     warn!("no sound in the headset: {e:#}");
@@ -328,6 +344,7 @@ impl Thread {
                     let mic = Arc::new(mic);
                     self.say(SoundDone::Mic(mic.clone()));
                     self.mic = Some(mic);
+                    self.mic_made = Instant::now();
                     self.recorded = None;
                 }
                 Err(e) => {

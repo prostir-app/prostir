@@ -455,7 +455,15 @@ fn sound_and_microphone_come_back_after_the_sound_system_went() {
     );
     let gone = Instant::now();
     pc.wait_log_after(SOON, OFF, offs);
+    let noticed = Instant::now();
     pc.wait_log_after(SOON, DEVICE, devices);
+    // Made a moment before (the session just began), it waits the pause of a
+    // failure, so one that breaks again and again is not made every few seconds.
+    let remade = noticed.elapsed();
+    assert!(
+        remade >= Duration::from_secs(3),
+        "made again {remade:?} after"
+    );
     pc.wait_log_after(SOON, MIC, mics);
     let back = pc.wait_log_after(SOON, ON, ons);
     eprintln!(
