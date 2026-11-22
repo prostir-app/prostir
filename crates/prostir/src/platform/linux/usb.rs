@@ -630,9 +630,7 @@ exit 1
 "#,
             dir = dir.display()
         );
-        std::fs::write(&adb, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&adb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::platform::process::write_program(&adb, &script);
         adb
     }
 

@@ -80,6 +80,25 @@ pub fn spawn_tied(cmd: &mut Command) -> std::io::Result<Child> {
     cmd.spawn()
 }
 
+/// Writes `script` to `path` as a program for a test to run. It is copied there by
+/// `cp`, so this process never has the program open for writing: a program another
+/// test starts at that moment would hold that open until its own exec, and running
+/// the script then fails ("Text file busy").
+#[cfg(all(
+    test,
+    target_os = "linux",
+    feature = "desktop",
+    not(feature = "fake-desktop")
+))]
+pub fn write_program(path: &std::path::Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let draft = path.with_extension("draft");
+    std::fs::write(&draft, script).unwrap();
+    let copied = Command::new("cp").arg(&draft).arg(path).status().unwrap();
+    assert!(copied.success(), "cp {}", path.display());
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
