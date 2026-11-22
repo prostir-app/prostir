@@ -1647,63 +1647,20 @@ impl World {
     }
 
     /// Brings the monitors closer (`steps` below 0) or further, a step at a time, as
-    /// they stand around the user: each keeps its size in metres, so nearer it is seen
-    /// larger and further smaller. The rows are laid out again from the primary monitor
-    /// (else the one most ahead) outwards: monitors glued edge to edge before meet again
-    /// (further, no gap opens between them), and none goes into another (nearer, they
-    /// would reach into their neighbours); the PC's own displays go as one group.
-    pub fn closer(&mut self, s: &Settings, steps: i8, now: Instant) {
+    /// they stand around the user: the arrangement as a whole, made as much smaller or
+    /// larger, so each monitor keeps its size to the eye and the arrangement its shape.
+    /// Glued monitors stay glued and none goes into another: a monitor brought nearer
+    /// at its own width would be seen larger, and reach into its neighbours.
+    pub fn closer(&mut self, steps: i8, now: Instant) {
         const STEP: f32 = 1.15;
         let (center, _) = self.center;
         let wanted = self.radius * STEP.powi(i32::from(steps));
         let k = wanted.clamp(0.5, 6.0) / self.radius.max(1e-3);
-        let frame = layout::frame(self.center, self.tilt);
-        let group = self.placed_group();
-        let seams = layout::seams(&self.placements, &self.sizes, &frame, &group);
-        // The PC's own displays as one piece: carried as their middle is, so they
-        // stay glued as they are.
-        let middle = group
-            .iter()
-            .filter_map(|id| self.placements.get(id))
-            .map(|p| p.position)
-            .sum::<Vec3>()
-            / group.len().max(1) as f32;
-        let carry = (middle - center) * (k - 1.0);
         for (id, p) in &mut self.placements {
-            if group.contains(id) {
-                p.position += carry;
-            } else if !window(&self.listed, *id) {
+            if !window(&self.listed, *id) {
                 p.position = center + (p.position - center) * k;
+                p.width *= k;
             }
-        }
-        let anchor = self
-            .primary()
-            .filter(|id| self.placements.contains_key(id))
-            .or_else(|| {
-                self.sizes
-                    .iter()
-                    .filter_map(|m| Some((m.0, *self.placements.get(&m.0)?)))
-                    .min_by(|a, b| {
-                        let off = |p: &Placement| {
-                            let at = frame.to_local(p.position);
-                            at.x.atan2(-at.z).abs()
-                        };
-                        off(&a.1).total_cmp(&off(&b.1))
-                    })
-                    .map(|m| m.0)
-            });
-        if let Some(anchor) = anchor
-            && !self.cinema
-        {
-            layout::reglue(
-                &mut self.placements,
-                &self.sizes,
-                (self.center, self.tilt),
-                s.preset == Preset::Wall,
-                &group,
-                &seams,
-                anchor,
-            );
         }
         self.radius *= k;
         self.rearranged |= k != 1.0;
