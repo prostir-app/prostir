@@ -225,7 +225,7 @@ fn a_round_tries_each_way_in_turn() {
 
 /// A trusted PC's answer leads to its connection at once, while the query still waits
 /// for more; the one PC that answers everyone is dialed at the end of the round, and
-/// refusing the connection, it is most likely behind a firewall.
+/// refusing the connection in two rounds in a row, it is most likely behind a firewall.
 #[test]
 fn answers_lead_to_the_pc() {
     let mut sim = Sim::new(MAX_PCS);
@@ -268,10 +268,30 @@ fn answers_lead_to_the_pc() {
     assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
     sim.missed(s);
     assert_eq!(
+        sim.s.search().unreachable,
+        None,
+        "once may be a connection slower than a dial waits"
+    );
+    // The next round the same.
+    sim.after(ASK_FAST);
+    let (s, _) = sim.step();
+    sim.missed(s);
+    let (s, _) = sim.asked(None);
+    sim.answer(None, addr(7));
+    sim.missed(s);
+    let (s, _) = sim.step();
+    sim.missed(s);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
+    sim.missed(s);
+    assert_eq!(
         sim.s.search().unreachable.as_deref(),
         Some("Desk"),
-        "it answers but refuses: a firewall"
+        "it answers but refuses again: a firewall"
     );
+    // Any connection that opens takes it back.
+    sim.s.dialed(StepId(999), addr(7));
+    assert_eq!(sim.s.search().unreachable, None);
     // Two of them: none is picked for the user.
     sim.after(ASK_FAST);
     let (s, _) = sim.step();

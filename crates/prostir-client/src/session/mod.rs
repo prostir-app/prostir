@@ -72,6 +72,9 @@ pub const NEW_HINT_AFTER: Duration = Duration::from_secs(5);
 pub const SILENT_HINT_AFTER: Duration = Duration::from_secs(30);
 /// The most PCs listed from answers (the rest of a flood of forged ones is dropped).
 pub const FOUND_MAX: usize = 8;
+/// A PC that answers but is not reached this many times in a row is most likely
+/// behind a firewall (once may be a connection slower than a dial waits).
+pub const UNREACHABLE_AFTER: u8 = 2;
 
 /// A PC this headset trusts, as the network thread's file of them says.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,8 +213,12 @@ pub enum Attempt {
 pub struct Search {
     /// PCs that answered lately (within [`HEARD_WITHIN`]), the latest last.
     pub found: Vec<FoundHost>,
-    /// A PC that answers but does not accept the connection (a firewall).
+    /// A PC that answers but does not accept the connection (a firewall): after
+    /// [`UNREACHABLE_AFTER`] dials in a row, until a connection opens.
     pub unreachable: Option<String>,
+    /// The address of a PC that answered and was not reached, and how many times in a
+    /// row.
+    missed_at: Option<(SocketAddr, u8)>,
     /// What the search screen says while nothing answers.
     pub hint: Option<Hint>,
     pub attempt: Option<Attempt>,
@@ -680,8 +687,16 @@ impl Session {
         if let Some(addr) = self.addr_of(at)
             && let Some(h) = self.search.found.iter().find(|h| h.addr == addr)
         {
-            // It answers but refuses the connection: most likely a firewall.
-            self.search.unreachable = Some(h.name.clone());
+            // It answers but refuses the connection again and again: most likely a
+            // firewall.
+            let times = match self.search.missed_at {
+                Some((a, n)) if a == addr => n.saturating_add(1),
+                _ => 1,
+            };
+            self.search.missed_at = Some((addr, times));
+            if times >= UNREACHABLE_AFTER {
+                self.search.unreachable = Some(h.name.clone());
+            }
         }
         if matches!(
             self.search.attempt,
@@ -695,6 +710,9 @@ impl Session {
     /// The connection of step `step` is open (TCP): an attempt until the PC's key
     /// says whose it is.
     pub fn dialed(&mut self, step: StepId, addr: SocketAddr) {
+        // A connection opened: no firewall in the way.
+        self.search.unreachable = None;
+        self.search.missed_at = None;
         if !matches!(self.search.round, Round::Waiting { step: s, .. } if s == step) {
             return;
         }
