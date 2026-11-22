@@ -213,6 +213,19 @@ pub fn readable(fds: &[RawFd], timeout: Option<Duration>) -> io::Result<Vec<bool
     Ok(polled.iter().map(|p| p.revents != 0).collect())
 }
 
+/// Whether the peer of `socket` closed its end, or the connection broke: looked at
+/// without waiting and without reading what it sent.
+pub fn hung_up(socket: &impl AsRawFd) -> bool {
+    let mut polled = libc::pollfd {
+        fd: socket.as_raw_fd(),
+        events: libc::POLLRDHUP,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd, and no wait.
+    let n = unsafe { libc::poll(&raw mut polled, 1, 0) };
+    n > 0 && polled.revents & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR) != 0
+}
+
 /// Starts the program `exe` with `args`, passing it `sockets` in systemd's way (the
 /// TCP socket as descriptor 3, the UDP one as 4, `LISTEN_FDS`, `LISTEN_PID`): what the
 /// sockets' watcher does to start the full program. The environment is this

@@ -1122,6 +1122,39 @@ mod tests {
         }
     }
 
+    /// Each kind of display says what it is, and only that.
+    #[test]
+    fn a_display_says_what_kind_it_is() {
+        let kinds = [
+            (DisplayKind::Virtual, [true, false, false]),
+            (
+                DisplayKind::Window {
+                    title: "Notes".into(),
+                },
+                [false, true, false],
+            ),
+            (
+                DisplayKind::Physical {
+                    builtin: true,
+                    connector: "eDP-1".into(),
+                    shown: false,
+                },
+                [false, false, true],
+            ),
+        ];
+        for (kind, expected) in kinds {
+            let d = Display {
+                kind: kind.clone(),
+                ..display(1)
+            };
+            assert_eq!(
+                [d.is_virtual(), d.is_window(), d.is_physical()],
+                expected,
+                "{kind:?}"
+            );
+        }
+    }
+
     #[test]
     fn texts_are_cut_on_a_character_boundary() {
         assert_eq!(clip("abc", 5), "abc");

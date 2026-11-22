@@ -16,6 +16,7 @@ limit-physical = Щонайбільше { $n } { $n ->
     [few] екрани ПК
    *[many] екранів ПК
 }
+quality-custom = Власна: { $n } Мбіт/с
 limit-streams = Щонайбільше { $n } { $n ->
     [one] екран
     [few] екрани

@@ -296,6 +296,66 @@ fn pc_code(pc: &Pc) -> String {
     }
 }
 
+/// The headset shows its code and the PC's dialog for it is up (the person at the PC
+/// has not typed it yet); the person picks "the other way round" on the headset, which
+/// hangs up and dials again for the PC's code. The PC lets go of the first attempt as
+/// its connection ends, closing its dialog, and shows its code to the new one.
+#[test]
+fn the_other_way_round_while_the_pc_dialog_is_up() {
+    let dir = TestDir::new("headset-net-other-way");
+    dir.save_monitors(TWO_MONITORS);
+    let (mut net, rx, _) = headset(&dir.path().join("headset"));
+    let mut pc = Pc::start(
+        &dir,
+        &Options {
+            typed_code: Some(CODE.into()),
+            typed_code_delay: Duration::from_secs(60),
+            ..Options::default()
+        },
+    );
+    dial(&net, 1, &pc);
+    let key = wait(&rx, START, |e| match e {
+        NetEvent::PairOffer { key, .. } => Some(key),
+        _ => None,
+    });
+    let ended = |n| {
+        move |e| {
+            matches!(
+                e,
+                NetEvent::Ended {
+                    step: StepId(s),
+                    ..
+                } if s == n
+            )
+            .then_some(())
+        }
+    };
+    wait(&rx, START, ended(1));
+    dial_to_pair(&net, 2, &pc, key, false);
+    wait(&rx, START, |e| match e {
+        NetEvent::Pairing { code: Some(_), .. } => Some(()),
+        _ => None,
+    });
+    pc.wait_log(SOON, "the person at the PC types the code");
+    net.send(NetCmd::Hangup);
+    wait(&rx, START, ended(2));
+    pc.wait_log(SOON, "the headset hung up while its code was asked for");
+    dial_to_pair(&net, 3, &pc, key, true);
+    if pc.bus.is_some() {
+        let code = pc_code(&pc).replace(' ', "");
+        assert_eq!(code.len(), 6, "{code}");
+    } else {
+        pc.wait_log(SOON, "pairing code shown in the tray");
+    }
+    let busy = pc.lines("another headset is pairing");
+    assert!(
+        busy.is_empty(),
+        "the new connection was turned away: {busy:?}"
+    );
+    let _ = net.stop(Duration::from_secs(2));
+    pc.quit();
+}
+
 /// A new PC: offered, then paired as the user agreed, the headset showing the code
 /// (the person at the PC types it); both sides trust each other, and the session opens.
 #[test]

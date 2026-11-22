@@ -34,6 +34,12 @@ pub fn is_held(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.is::<Held>())
 }
 
+/// The process id of whoever holds the lock, where `e` says Prostir runs already.
+pub fn held_by(e: &anyhow::Error) -> Option<u32> {
+    let held = e.chain().find_map(|c| c.downcast_ref::<Held>())?;
+    held.0.split_once(' ')?.1.parse().ok()
+}
+
 /// The lock taken: held until it is dropped.
 #[derive(Debug)]
 pub struct Lock(std::fs::File);
@@ -84,7 +90,23 @@ pub fn holder(path: &Path, role: &str) -> Option<u32> {
     }
     let text = std::fs::read_to_string(path).ok()?;
     let (who, pid) = text.trim().split_once(' ')?;
-    (who == role).then(|| pid.parse().ok()).flatten()
+    (who == role)
+        .then(|| pid.parse().ok())
+        .flatten()
+        .filter(|pid| is_prostir(*pid))
+}
+
+/// Whether process `pid` is a Prostir (this program, or another build of it), so a
+/// signal never goes to another program the lock's file names.
+fn is_prostir(pid: u32) -> bool {
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe"));
+    if let (Ok(exe), Ok(this)) = (exe, std::env::current_exe())
+        && exe == this
+    {
+        return true;
+    }
+    // Another build, or this one replaced by an update (its file then "(deleted)").
+    std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.contains("prostir"))
 }
 
 #[cfg(test)]
@@ -103,13 +125,36 @@ mod tests {
         assert_eq!(holder(&path, "serve"), None, "another role");
         let again = take(&path, "serve").unwrap_err();
         assert!(format!("{again:#}").contains("watcher"), "{again:#}");
-        assert!(is_held(&again.context("Prostir is already running")));
+        let again = again.context("Prostir is already running");
+        assert!(is_held(&again));
+        assert_eq!(held_by(&again), Some(std::process::id()));
+        assert_eq!(held_by(&anyhow::anyhow!("another error")), None);
         drop(held);
         // Free at once, also while a program another test starts shares the file.
         assert_eq!(holder(&path, "watcher"), None, "let go");
         let serve = take(&path, "serve").unwrap();
         assert_eq!(holder(&path, "serve"), Some(std::process::id()));
         drop(serve);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A lock whose file names another program (a process id that came back to
+    /// another one, say) has no holder to signal.
+    #[test]
+    fn a_holder_is_a_prostir() {
+        let dir = std::env::temp_dir().join(format!("prostir-lock-other-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("prostir.lock");
+        let _held = take(&path, "watcher").unwrap();
+        let mut other = std::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        std::fs::write(&path, format!("watcher {}", other.id())).unwrap();
+        let found = holder(&path, "watcher");
+        let _ = other.kill();
+        let _ = other.wait();
+        assert_eq!(found, None, "sleep is no Prostir");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

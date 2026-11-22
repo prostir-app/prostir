@@ -12,6 +12,16 @@ use log::warn;
 /// Runs a program to the end like `Command::output` (no input, its output and errors
 /// captured), but stops it after `timeout`: a tool that hangs must not hang Prostir.
 pub fn run(cmd: &mut Command, timeout: Duration) -> std::io::Result<Output> {
+    run_until(cmd, timeout, &|| false)
+}
+
+/// As [`run`], and stopped too once `stop` says so (looked at each time the program
+/// is): an error of kind `Interrupted` then.
+pub fn run_until(
+    cmd: &mut Command,
+    timeout: Duration,
+    stop: &dyn Fn() -> bool,
+) -> std::io::Result<Output> {
     let deadline = Instant::now() + timeout;
     let mut child = cmd
         .stdin(Stdio::null())
@@ -34,6 +44,14 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> std::io::Result<Output> {
             return Err(std::io::Error::new(
                 ErrorKind::TimedOut,
                 format!("{program} did not finish within {timeout:?}"),
+            ));
+        }
+        if stop() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                ErrorKind::Interrupted,
+                format!("{} stopped", cmd.get_program().to_string_lossy()),
             ));
         }
         std::thread::sleep(pause);

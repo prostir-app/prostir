@@ -446,7 +446,7 @@ impl Brain {
                 }
             }
             Request::SetQuality { mbit } => {
-                if !(5..=100).contains(&mbit) {
+                if !crate::store::BITRATES.contains(&mbit) {
                     return CtlReply::failed(
                         ApiError::BadArgument,
                         t("Якість: від 5 до 100 Мбіт/с", "Quality: 5 to 100 Mbit/s"),
@@ -1232,6 +1232,30 @@ pub fn wake_for_window() -> std::io::Result<crate::ctl::Woken> {
     wake(|| start_detached(std::process::Stdio::inherit()).map(crate::ctl::Woken::Started))
 }
 
+/// Wakes the Prostir that holds the lock of this user (`pid`, where known) for the
+/// settings window: `prostir` or `prostir serve` while it runs, or sleeps. Never starts
+/// another: one that runs but is not on this session bus (started from another
+/// session, say) only says so, since a new one would find it running too, and start
+/// one more.
+pub fn wake_running(pid: Option<u32>) -> std::io::Result<crate::ctl::Woken> {
+    wake(|| Err(std::io::Error::other(not_on_this_bus(pid))))
+}
+
+/// What says that Prostir (`pid`, where known) runs, but not on this session bus.
+pub fn not_on_this_bus(pid: Option<u32>) -> String {
+    let who = pid.map_or_else(String::new, |pid| {
+        format!(" ({} {pid})", t("процес", "process"))
+    });
+    format!(
+        "{}{who}{}",
+        t("Prostir уже працює", "Prostir is already running"),
+        t(
+            ", але не на цій сеансовій шині: його вікно відкривається з сеансу, де його запущено",
+            ", but not on this session bus: its window opens from the session it was started in",
+        ),
+    )
+}
+
 /// Wakes Prostir for an agent (the tool `start` of `prostir mcp`), as for the window,
 /// but nothing it starts writes to the agent's pipes: a new Prostir starts in the
 /// user's systemd manager (`systemd-run --user`, its log in the journal) where there
@@ -1264,7 +1288,8 @@ fn wake(
 ) -> std::io::Result<crate::ctl::Woken> {
     use crate::ctl::Woken;
     if let Some(pid) = platform::watcher() {
-        // SAFETY: a signal to a process of this user, which takes it.
+        // SAFETY: a signal to a Prostir of this user (see `platform::watcher`), which
+        // takes it.
         if unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) } == 0 {
             return Ok(Woken::Asleep { opens_window: true });
         }
@@ -1277,13 +1302,26 @@ fn wake(
     start()
 }
 
+/// Set on a Prostir started by [`start_detached`] until it takes the lock of the one
+/// Prostir of the user: one that finds the lock taken never starts another.
+pub const STARTED_TO_OPEN: &str = "PROSTIR_STARTED_TO_OPEN";
+
 /// Starts `prostir serve --open-settings` on its own, apart from this terminal, its
-/// stderr to `errors` (nothing goes to stdin and stdout).
+/// stderr to `errors` (nothing goes to stdin and stdout). Never from a Prostir started
+/// so that did not become the one Prostir of the user ([`STARTED_TO_OPEN`]): a chain of
+/// programs each starting the next would never end.
 fn start_detached(errors: std::process::Stdio) -> std::io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
+    if std::env::var_os(STARTED_TO_OPEN).is_some() {
+        return Err(std::io::Error::other(t(
+            "цей Prostir запустив інший, який не знайшов запущеного: цей не запускає ще один",
+            "this Prostir was started by another one, which found none running: it starts no other",
+        )));
+    }
     let mut command = std::process::Command::new(this_program()?);
     command
         .args(["serve", "--open-settings"])
+        .env(STARTED_TO_OPEN, "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(errors);

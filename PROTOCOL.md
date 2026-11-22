@@ -53,7 +53,8 @@ Contents:
 | Connection | TCP, client connects to host |
 | Host TCP port | `47830` (`TCP_PORT`; the host's `--port` option changes it) |
 | Discovery | UDP port `47831` (`DISCOVERY_PORT`): the headset asks, the PC answers |
-| Sessions | One at a time |
+| Connections | Set up in parallel, up to 16 at once (implementation-defined) |
+| Sessions | Several headsets may have one at once; the current host serves one |
 
 The connection is plain TCP carrying encrypted records (see [Security](#2-security)
 and [Framing](#3-framing)). There are two ways to reach the host:
@@ -230,11 +231,23 @@ all of them (a cable or another network helps); an access point that drops only
 broadcasts is covered by an address typed once, kept as that PC's last address after
 its first session.
 
-### One session at a time
+### Connections and sessions
 
-The host accepts connections one by one in its main loop. While a connection is being
-set up, paired or served, further connections wait in the TCP listen queue and are
-accepted only after it ends.
+The host sets up each connection on a thread of its own (implementation-defined): the
+Noise handshake, the version handshake, pairing and `Open`. A connection that waits for
+the person at the PC, or sends its bytes slowly, holds only itself. At most 16
+connections are set up at once; one more is closed at once. One pairing runs at a
+time: a `PairBegin` while another connection pairs is answered with `Error` ("Another
+headset is pairing with this PC right now") and `PairResult` without a tag, and the
+connection stays open for another `PairBegin`. A pairing whose connection ends (the
+headset hung up while the PC asks for its code) ends with it: its dialog closes, and a
+headset that dials again (for the other way round, say) pairs at once.
+
+A connection set up and trusted opens a session. The protocol lets several headsets
+have a session at once, each with every display and its own state (see
+[Rights](#rights)); the current host takes one: a session of another headset is turned
+away with `Error` ("Another headset is already connected to this PC"), and the same
+headset connecting again takes over its own earlier session.
 
 ## 2. Security
 
@@ -372,9 +385,10 @@ Host (implementation-defined values from `crates/prostir/src/pairing.rs`):
 | Failed attempts in a row (all connections) | The first 3 are free. After the 4th, the next attempt has to wait 30 s, then 60 s, 120 s, 240 s, 480 s, and at most 900 s. A success resets the count |
 | During a wait | `PairBegin` is answered with `Error` ("Too many wrong codes. Try again in N min.") and `PairResult` without a tag, and the connection is closed |
 
-Every attempt that does not succeed counts as a failed one: a wrong code, a host that
-has no code to offer (cancelled dialog, no dialog program) and an exchange that breaks
-off. When the headset shows the code and the host has none, the host reads and drops the
+Every attempt that does not succeed counts as a failed one, once: a wrong code, a
+cancelled dialog, a headset that hangs up while the host asks for the code, and an
+exchange that breaks off. An attempt that showed nothing (the host has no dialog
+program) does not count. When the headset shows the code and the host has none, the host reads and drops the
 headset's `PairMsg` (sent right after `PairBegin`), so the next `PairBegin` can follow on
 the same connection.
 
