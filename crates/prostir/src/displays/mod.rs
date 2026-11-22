@@ -51,6 +51,9 @@ pub const MONITORS_MAX: usize = 6;
 /// Virtual monitors with "No limits", for a headset that decodes more: the most the PC
 /// ever makes (the limit of the headset asking is checked before, see `requests`).
 pub const MONITORS_NO_LIMITS: usize = 10;
+/// How far from the origin of the desktop a monitor is placed at most (logical
+/// pixels, either way): a place asked for beyond it holds at it.
+pub const PLACE_LIMIT: i32 = 65_536;
 /// Window panels at once: the headset has only so many video decoders.
 pub const WINDOWS_MAX: usize = 3;
 /// Displays of the PC kept while not connected: beyond these, the least recently seen

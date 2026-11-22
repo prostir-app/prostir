@@ -725,6 +725,56 @@ fn a_message_over_its_limits_is_not_sent() {
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 }
 
+/// A desktop notification of up to 8 KiB goes through whole; a longer one is not
+/// sent, and not read.
+#[test]
+fn a_long_notice_goes_through() {
+    assert_eq!(MAX_TEXT, 8 * 1024);
+    for len in [4 * 1024, MAX_TEXT] {
+        let notice = HostMsg::Notice {
+            text: "n".repeat(len),
+        };
+        assert_eq!(
+            read_host(&host_bytes(&notice)).unwrap(),
+            notice,
+            "{len} bytes"
+        );
+    }
+    let too_long_notice = HostMsg::Notice {
+        text: "n".repeat(MAX_TEXT + 1),
+    };
+    let err = too_long_notice.write(&mut Vec::new()).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    let mut payload = Vec::new();
+    wire::Limited::put(&"n".repeat(MAX_TEXT + 1), &mut payload, usize::MAX).unwrap();
+    assert_wire(
+        read_host(&framed(20, &payload)),
+        too_long(MAX_TEXT + 1, MAX_TEXT),
+    );
+}
+
+/// What the PC sets aside for a headset: one message of 64 KiB before the session,
+/// one on each of 32 lanes in it, and never more than all of those at once.
+#[test]
+fn what_a_pc_accepts_from_a_headset() {
+    assert_eq!(
+        ClientMsg::limits(false),
+        Limits {
+            message: 64 * 1024,
+            lanes: 1,
+            in_flight: 64 * 1024,
+        }
+    );
+    assert_eq!(
+        ClientMsg::limits(true),
+        Limits {
+            message: 64 * 1024,
+            lanes: 32,
+            in_flight: 32 * 64 * 1024,
+        }
+    );
+}
+
 /// Before the session is open the PC is not trusted yet: its messages are kept small.
 #[test]
 fn a_pc_message_before_the_session_cannot_be_huge() {

@@ -5,8 +5,9 @@
 //! very first start opens it; `--version` says the version, on every command.
 
 use std::process::Command;
+use std::time::{Duration, Instant};
 
-use crate::pc::{Options, Pc, TestDir};
+use crate::pc::{Bus, Options, Pc, TestDir};
 use crate::{SOON, TWO_MONITORS};
 
 /// What the fake desktop logs where a real one opens the settings window.
@@ -92,7 +93,7 @@ fn the_first_start_opens_the_settings_window() {
     pc.wait_log(SOON, WINDOW);
     pc.quit();
     let pc = Pc::start(&dir, &Options::default());
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(500));
     assert_eq!(pc.count_log(WINDOW), 0);
 }
 
@@ -158,4 +159,85 @@ fn a_bare_prostir_at_login_is_serve() {
     );
     assert_eq!(again.code, 0, "{again:?}");
     assert!(!again.err.contains("started with the session"), "{again:?}");
+}
+
+/// The processes whose environment has `mark` (`NAME=value`), by process id.
+fn marked(mark: &str) -> Vec<u32> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let environ = std::fs::read(entry.path().join("environ")).unwrap_or_default();
+        if environ.split(|b| *b == 0).any(|v| v == mark.as_bytes()) {
+            found.push(pid);
+        }
+    }
+    found
+}
+
+/// Prostir runs, but on another session bus than the one `prostir` (or `prostir
+/// serve`) is started on, from another session say: the one started says so, once,
+/// and ends, starting no other program (never a chain of them).
+#[test]
+fn a_prostir_on_another_bus_is_not_started_again_and_again() {
+    let dir = TestDir::new("start-other-bus");
+    dir.save_monitors(TWO_MONITORS);
+    let pc = Pc::start(&dir, &Options::default());
+    if pc.bus.is_none() {
+        return;
+    }
+    let other = Bus::start(&dir.path().join("home")).expect("a second session bus");
+    for (n, args) in [&[][..], &["serve"]].into_iter().enumerate() {
+        let value = format!("{}-{n}", std::process::id());
+        let mark = format!("PROSTIR_E2E_MARK={value}");
+        let mut child = pc
+            .again_command(
+                args,
+                &[
+                    ("DBUS_SESSION_BUS_ADDRESS", other.address.as_str()),
+                    ("PROSTIR_E2E_MARK", &value),
+                ],
+            )
+            .spawn()
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        let mut most = 0;
+        let ended = loop {
+            most = most.max(marked(&mark).len());
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= until || most > 20 {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        for pid in marked(&mark) {
+            // SAFETY: a signal to a process this test started (it carries its mark).
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+        let out = child.wait_with_output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            most <= 2,
+            "prostir {args:?}: {most} processes at once; {err}"
+        );
+        let ended = ended.unwrap_or_else(|| panic!("prostir {args:?} did not end: {err}"));
+        assert_eq!(ended.code(), Some(2), "prostir {args:?}: {err}");
+        let said = err
+            .lines()
+            .filter(|l| l.starts_with("prostir: ") && l.contains("not on this session bus"))
+            .count();
+        assert_eq!(said, 1, "prostir {args:?}: said once: {err}");
+        // From the menu (a bare `prostir`), a notification says it too.
+        let noticed = err.contains("notification: Prostir: Prostir is already running");
+        assert_eq!(noticed, args.is_empty(), "prostir {args:?}: {err}");
+        assert!(
+            !err.contains("ended before it started"),
+            "prostir {args:?}: {err}"
+        );
+        assert_eq!(most, 1, "prostir {args:?}: nothing started: {err}");
+    }
+    pc.quit();
 }

@@ -133,7 +133,7 @@ pub mod sockets;
 #[cfg(unix)]
 mod lock;
 #[cfg(unix)]
-pub use lock::{Lock, is_held as runs_already};
+pub use lock::{Lock, held_by, is_held as runs_already};
 
 /// Ends the process at once, without the exit handlers of the libraries it loaded:
 /// for a thread left inside one of them (a probe of an encoder that hangs in its
@@ -309,6 +309,8 @@ pub enum NoCode {
     Cancelled,
     /// The PC has no program to ask with.
     NoDialog,
+    /// The headset hung up meanwhile: its dialog closed.
+    Gone,
 }
 
 #[cfg(test)]

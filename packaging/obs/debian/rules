@@ -47,6 +47,13 @@ override_dh_auto_install:
 	install -Dm644 LICENSE-EXCEPTION.md debian/prostir/usr/share/doc/prostir/LICENSE-EXCEPTION.md
 	install -Dm644 THIRD-PARTY-LICENSES.txt debian/prostir/usr/share/doc/prostir/THIRD-PARTY-LICENSES.txt
 
+# dh_installsystemduser (in the dh sequence since compat 12) would enable the user
+# units for every user (links in /etc/systemd/user), which a user's "Start with the
+# system" off cannot undo with `systemctl --user disable`: the first start of Prostir
+# enables the socket for its user instead. Still disabled on purge.
+override_dh_installsystemduser:
+	dh_installsystemduser --no-enable
+
 # dwz cannot always read the DWARF Rust writes (it fails the build on some versions),
 # and the dbgsym package needs no compression of it: left out.
 override_dh_dwz:

@@ -177,7 +177,10 @@ pub(super) fn parse_settings(text: &str) -> (Settings, Kept) {
         };
         let known = match (key, flag) {
             ("version", _) => value.parse().map(|v| kept.version = v).is_ok(),
-            ("bitrate", _) => value.parse().map(|v| s.bitrate = v).is_ok(),
+            ("bitrate", _) => value
+                .parse()
+                .map(|v| s.bitrate = bitrate_in_range(v))
+                .is_ok(),
             ("codec", _) => match value {
                 "h264" => Some(Codec::H264),
                 "h265" => Some(Codec::H265),

@@ -359,6 +359,37 @@ fn numbers_never_come_back() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A quality out of the range the PC offers, written into `settings.txt` by hand or
+/// given as `--bitrate`, holds at the nearest end of it: as kbit/s it would not fit.
+#[test]
+fn the_quality_stays_in_its_range() {
+    for (line, mbps) in [
+        ("bitrate 4294967\n", 100),
+        ("bitrate 101\n", 100),
+        ("bitrate 0\n", 5),
+        ("bitrate 4\n", 5),
+        ("bitrate 50\n", 50),
+    ] {
+        assert_eq!(parse_settings(line).0.bitrate, mbps, "{line}");
+    }
+    let store = Store::open(
+        None,
+        Run {
+            bitrate: Some(u32::MAX),
+            ..Run::default()
+        },
+    );
+    assert_eq!(store.wanted().bitrate, 100);
+    let store = Store::open(
+        None,
+        Run {
+            bitrate: Some(1),
+            ..Run::default()
+        },
+    );
+    assert_eq!(store.wanted().bitrate, 5);
+}
+
 /// Bad lines are skipped and kept; a monitor listed twice counts once.
 #[test]
 fn bad_lines_are_skipped() {

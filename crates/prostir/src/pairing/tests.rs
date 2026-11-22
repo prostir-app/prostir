@@ -436,7 +436,7 @@ fn wrong_codes_slow_pairing_down() {
     };
     for _ in 0..FREE_FAILURES {
         l.begin();
-        l.failed();
+        let _ = l.failed();
         assert!(l.wait().is_none());
     }
     // Counted from its start: the pause holds while it runs.
@@ -444,7 +444,7 @@ fn wrong_codes_slow_pairing_down() {
     let first = l.wait().expect("a pause after the free ones");
     assert!(first > Duration::from_secs(25) && first <= Duration::from_secs(30));
     // Its end does not count it again.
-    l.failed();
+    let _ = l.failed();
     assert!(l.wait().unwrap() <= Duration::from_secs(30));
     l.begin();
     assert!(l.wait().unwrap() > first);
@@ -520,6 +520,108 @@ fn nothing_before_open() {
         Err(io::ErrorKind::UnexpectedEof),
         "closed, no snapshot"
     );
+}
+
+/// The settings window waits for the code a headset shows, and the headset hangs up
+/// meanwhile: the attempt ends at once, the window waits no more, and the pairing is
+/// free for the next headset.
+#[test]
+fn a_headset_that_hangs_up_ends_the_wait_for_its_code() {
+    let _tray = TRAY_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pc = TestPc::new("hangup");
+    window_types_codes(true);
+    let started = Instant::now();
+    let (accepted, ()) = connect(&pc, |h| {
+        assert!(matches!(h.hello(PROTOCOL_VERSION), Answer::Welcome { .. }));
+        h.send(ClientMsg::Open { parts: Vec::new() });
+        assert_eq!(h.recv().unwrap(), HostMsg::PairingRequired);
+        h.send(ClientMsg::PairBegin {
+            headset_shows: true,
+            name: "test headset".into(),
+        });
+        let (_, msg) = Pairing::start("123456");
+        h.send(ClientMsg::PairMsg { msg });
+        let until = Instant::now() + Duration::from_secs(5);
+        while code_for().is_none() {
+            assert!(
+                Instant::now() < until,
+                "the window shows no headset waiting"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        h.link.closer.close();
+    });
+    window_types_codes(false);
+    let err = format!("{:#}", accepted.unwrap_err());
+    assert!(err.contains("hung up"), "{err}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(code_for(), None);
+    assert!(PAIRING.try_lock().is_ok(), "the pairing is free");
+}
+
+/// Headsets that wait for the pairing while another attempt runs do not slip past the
+/// pause the attempts set: after it, the first of them gets its turn (counted), and
+/// the next is told to wait.
+#[test]
+fn headsets_queued_for_the_pairing_wait_out_the_pause() {
+    let _tray = TRAY_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fresh = |failures| Limiter {
+        failures,
+        not_before: None,
+        warned: true, // no notification from tests
+    };
+    *LIMITER.lock().unwrap() = fresh(FREE_FAILURES - 1);
+    let first = take_turn().ok().expect("the first headset's turn");
+    LIMITER.lock().unwrap().begin();
+    let queued: Vec<_> = (0..2)
+        .map(|_| {
+            std::thread::spawn(|| match take_turn() {
+                Ok(turn) => {
+                    LIMITER.lock().unwrap().begin();
+                    std::thread::sleep(Duration::from_millis(100));
+                    let _ = LIMITER.lock().unwrap().failed();
+                    drop(turn);
+                    "paired"
+                }
+                Err(NoTurn::Busy) => "busy",
+                Err(NoTurn::Paused(_)) => "paused",
+            })
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = LIMITER.lock().unwrap().failed();
+    drop(first);
+    let mut got: Vec<&str> = queued.into_iter().map(|t| t.join().unwrap()).collect();
+    got.sort_unstable();
+    *LIMITER.lock().unwrap() = fresh(0);
+    assert_eq!(got, ["paired", "paused"]);
+}
+
+/// An attempt that showed nothing (no dialog on the PC) after the free ones warns
+/// nobody; the first attempt that fails after them does, once.
+#[test]
+fn only_a_failed_attempt_warns_of_the_pause() {
+    let mut l = Limiter {
+        failures: FREE_FAILURES,
+        not_before: None,
+        warned: false,
+    };
+    l.begin();
+    l.not_attempted();
+    assert!(!l.warned, "nothing was shown");
+    assert!(l.wait().is_none());
+    l.begin();
+    assert!(l.failed(), "the first pause is told");
+    l.begin();
+    assert!(!l.failed(), "once");
 }
 
 /// "Code on the PC": the headset asks first, the PC makes and shows its code, the

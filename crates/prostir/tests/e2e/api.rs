@@ -750,6 +750,19 @@ fn monitors_scaled_and_placed_from_the_pc() {
     )
     .unwrap_err();
     assert_eq!(error_name(&bad), "BadSize");
+    // A place far off the desktop, at the ends of what the numbers hold: placed at
+    // the edge, and the PC goes on.
+    for (x, y) in [(i32::MAX, i32::MAX), (i32::MIN, i32::MIN)] {
+        let request = format!(r#"{{"request":"place","id":{},"x":{x},"y":{y}}}"#, b.id);
+        let reply: String = call(&bus, "Call", &(request.as_str(),))
+            .unwrap()
+            .body()
+            .deserialize()
+            .unwrap();
+        assert!(reply.contains("revision"), "{reply}");
+    }
+    let (_, state) = get_state(&bus);
+    assert_eq!(state.displays.len(), 2, "{state:?}");
 }
 
 /// How long a monitor just added waits for the headset to place it (`PLACE_WAIT` in

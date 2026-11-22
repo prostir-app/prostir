@@ -81,6 +81,12 @@ pub fn single_instance(role: &str) -> Result<crate::platform::Lock> {
     Ok(file)
 }
 
+/// The fake full program with these settings, while it holds the lock itself: its
+/// process id.
+pub fn serving() -> Option<u32> {
+    super::lock::holder(&config_home()?.join("prostir-fake.lock"), "serve")
+}
+
 /// The fake sockets' watcher with these settings, if one runs: its process id.
 pub fn watcher() -> Option<u32> {
     super::lock::holder(&config_home()?.join("prostir-fake.lock"), "watcher")
@@ -910,15 +916,23 @@ pub mod dialogs {
     use crate::platform::NoCode;
 
     /// The code the test's person at the PC types (`PROSTIR_FAKE_TYPED_CODE`), after
-    /// thinking for `PROSTIR_FAKE_TYPED_CODE_DELAY_MS`.
-    pub fn ask_code() -> Result<String, NoCode> {
+    /// thinking for `PROSTIR_FAKE_TYPED_CODE_DELAY_MS`; the dialog closes once `gone`
+    /// says the headset is gone, as a real one does.
+    pub fn ask_code(gone: &dyn Fn() -> bool) -> Result<String, NoCode> {
         let code = std::env::var("PROSTIR_FAKE_TYPED_CODE").map_err(|_| NoCode::NoDialog)?;
         let delay: u64 = std::env::var("PROSTIR_FAKE_TYPED_CODE_DELAY_MS")
             .ok()
             .and_then(|ms| ms.parse().ok())
             .unwrap_or(0);
         log::info!("fake desktop: the person at the PC types the code in {delay} ms");
-        std::thread::sleep(std::time::Duration::from_millis(delay));
+        let typed = std::time::Instant::now() + std::time::Duration::from_millis(delay);
+        while let Some(left) = typed.checked_duration_since(std::time::Instant::now()) {
+            if gone() {
+                log::info!("fake desktop: the dialog for the code closes");
+                return Err(NoCode::Gone);
+            }
+            std::thread::sleep(left.min(std::time::Duration::from_millis(20)));
+        }
         Ok(code)
     }
 

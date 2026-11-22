@@ -389,6 +389,69 @@ mod tests {
         }
     }
 
+    /// The PC numbers its requests 1, 2, ...: an answer to an older one, while a
+    /// newer one is on its way, is not written to the device.
+    #[test]
+    fn requests_are_numbered_and_an_old_answer_waits() {
+        let start = Instant::now();
+        let mut pc = PcVolume::default();
+        let ask = |act: Option<Act>| match act {
+            Some(Act::Ask(ask)) => ask,
+            other => panic!("not a request: {other:?}"),
+        };
+        let first = ask(pc.device(30, false, start));
+        assert_eq!(first.ask, 1);
+        let later = start + ASK_EVERY;
+        let second = ask(pc.device(60, false, later));
+        assert_eq!(second.ask, 2);
+        let answer = |level, ask| Volume {
+            level,
+            muted: false,
+            seq: 0,
+            ask,
+        };
+        let rested = later + 2 * ASK_EVERY;
+        assert_eq!(pc.from_headset(&answer(27, 1), rested), None, "old");
+        assert_eq!(pc.tick(rested), None);
+        assert_eq!(
+            pc.from_headset(&answer(60, 2), rested),
+            Some(Act::Write {
+                level: 60,
+                muted: false
+            })
+        );
+    }
+
+    /// `due` says when `tick` has something to do: a request that waits for
+    /// [`ASK_EVERY`] since the last one, the headset's level once the device rested
+    /// that long, and nothing when all is done.
+    #[test]
+    fn due_is_when_the_next_tick_acts() {
+        let start = Instant::now();
+        let mut pc = PcVolume::default();
+        assert_eq!(pc.due(), None, "nothing to do");
+        assert!(matches!(pc.device(30, false, start), Some(Act::Ask(_))));
+        assert_eq!(pc.due(), None, "asked, nothing waits");
+        let moved = start + Duration::from_millis(10);
+        assert_eq!(pc.device(40, false, moved), None, "too soon to ask again");
+        assert_eq!(pc.due(), Some(start + ASK_EVERY), "a request waits");
+        assert!(matches!(pc.tick(start + ASK_EVERY), Some(Act::Ask(_))));
+        let answer = Volume {
+            level: 40,
+            muted: false,
+            seq: 0,
+            ask: 2,
+        };
+        let answered = start + ASK_EVERY + Duration::from_millis(5);
+        assert_eq!(pc.from_headset(&answer, answered), None, "still moving");
+        assert_eq!(pc.due(), Some(moved + ASK_EVERY), "the level waits");
+        assert!(matches!(
+            pc.tick(moved + ASK_EVERY),
+            Some(Act::Write { .. })
+        ));
+        assert_eq!(pc.due(), None, "all done");
+    }
+
     /// The slider and the buttons at the same moment: the headset's level wins.
     #[test]
     fn at_the_same_time_the_headset_wins() {

@@ -540,6 +540,120 @@ mod tests {
         );
     }
 
+    /// Read in place, an answer is from the PC whose secret made it, and not from
+    /// another PC, nor an answer to another query.
+    #[test]
+    fn an_answer_is_from_the_pc_whose_secret_made_it() {
+        let q = Query::new([&PC], "");
+        let mut bytes = Vec::new();
+        Answer::write_to(&q.nonce, &PC, 47830, 0, "desk", &mut bytes);
+        let a = AnswerRef::read(&bytes).unwrap();
+        assert!(a.from_pc(&PC));
+        assert!(!a.from_pc(&OTHER));
+        // The same tag with another nonce: not an answer to this PC's tag any more.
+        let tag = a.tag;
+        bytes[5] ^= 1;
+        let elsewhere = AnswerRef::read(&bytes).unwrap();
+        assert_eq!(elsewhere.tag, tag);
+        assert!(!elsewhere.from_pc(&PC));
+    }
+
+    /// An answer with a short name reads; one of version 0 or with a name longer than
+    /// a PC's does not; a newer version's is read by the fields of this one.
+    #[test]
+    fn an_answer_is_read_by_its_version_and_length() {
+        let q = Query::new([&PC], "");
+        let bytes = Answer::to(&q, &PC, 47830, flags::ANSWERS_ALL, "desk").encode();
+        let a = AnswerRef::read(&bytes).unwrap();
+        assert_eq!(
+            (a.port, a.flags, a.name),
+            (47830, flags::ANSWERS_ALL, "desk")
+        );
+        let mut old = bytes.clone();
+        old[4] = 0;
+        assert!(AnswerRef::read(&old).is_none(), "version 0");
+        let mut newer = bytes.clone();
+        newer[4] = 2;
+        newer.extend_from_slice(b"more");
+        assert_eq!(AnswerRef::read(&newer).unwrap().name, "desk", "version 2");
+        let mut long = bytes;
+        long[32] = MAX_PC_NAME as u8 + 1;
+        long.resize(33 + MAX_PC_NAME + 1, b'x');
+        assert!(AnswerRef::read(&long).is_none(), "a name too long");
+        long[32] = MAX_PC_NAME as u8;
+        assert_eq!(AnswerRef::read(&long).unwrap().name.len(), MAX_PC_NAME);
+    }
+
+    /// A name is cut at the edge of a character, never inside one, also when the
+    /// limit falls in the middle of a two, three or four byte character.
+    #[test]
+    fn a_name_is_cut_at_a_character() {
+        // Run where a cut that never ends cannot hold up the other tests: the result
+        // comes back at once, or the test fails.
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut cuts = Vec::new();
+            for prefix in ["", "Q", "QQ", "QQQ"] {
+                for letter in ["Й", "€", "𝄞"] {
+                    let text = format!("{prefix}{}", letter.repeat(40));
+                    cuts.push((text.clone(), cut(&text, MAX_HEADSET_NAME).to_owned()));
+                }
+            }
+            let name = format!("Q{}", "Й".repeat(40));
+            let query = Query::new([&PC], &name);
+            let _ = send.send((cuts, query, name));
+        });
+        let (cuts, query, name) = receive
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the cut ends");
+        for (text, cut) in cuts {
+            assert!(cut.len() <= MAX_HEADSET_NAME, "{text}: {} bytes", cut.len());
+            assert!(
+                cut.len() > MAX_HEADSET_NAME - 4,
+                "{text}: {} bytes",
+                cut.len()
+            );
+            assert!(text.starts_with(&cut));
+        }
+        assert_eq!(query.name, format!("Q{}", "Й".repeat(15)));
+        assert_eq!(query.name.len(), MAX_HEADSET_NAME - 1);
+        let back = Query::decode(&query.encode()).unwrap();
+        assert_eq!(back.name, query.name);
+        assert!(name.starts_with(&back.name));
+    }
+
+    /// The real tag lands in every place about as often: where it is tells nothing.
+    #[test]
+    fn the_real_tag_is_anywhere() {
+        const RUNS: usize = 2000;
+        let mut at = [0usize; MIN_TAGS];
+        let mut q = Query::new([&PC], "");
+        for _ in 0..RUNS {
+            q.renew([&PC], "");
+            let ours = find_tag(&PC, &q.nonce);
+            let place = q.tags.iter().position(|t| *t == ours).unwrap();
+            at[place] += 1;
+        }
+        // 250 each on average; 150 to 350 is more than six standard deviations either
+        // way, so a fair shuffle stays inside by far, and one that never leaves a tag
+        // where it was (the real one starts first) does not.
+        for (place, &count) in at.iter().enumerate() {
+            assert!(
+                (150..=350).contains(&count),
+                "place {place}: {count} of {RUNS} ({at:?})"
+            );
+        }
+    }
+
+    /// Find secrets are random: two are never the same, nor all zeros.
+    #[test]
+    fn find_secrets_are_random() {
+        let (a, b) = (new_secret(), new_secret());
+        assert_ne!(a, b);
+        assert_ne!(a, [0; 32]);
+        assert_ne!(b, [0; 32]);
+    }
+
     #[test]
     fn an_answer_reads_back_and_is_always_smaller_than_a_query() {
         let q = Query::new([&PC], "");
