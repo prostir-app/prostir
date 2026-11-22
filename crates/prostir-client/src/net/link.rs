@@ -42,9 +42,13 @@ const LOOK_EVERY: Duration = Duration::from_millis(500);
 const CODE_WITHIN: Duration = Duration::from_secs(300);
 /// How often the session logs what it received.
 const REPORT_EVERY: Duration = Duration::from_secs(10);
-/// Nothing at all from the PC for this long (it pings every second, so three pings
-/// missed): the session is over, and the search starts at once.
-pub const SILENCE: Duration = Duration::from_secs(3);
+/// Nothing at all from the PC for this long (it pings every second): the session is
+/// over, and the search starts at once. Not shorter: after a radio stall of a second or
+/// two, TCP's resends back off, and what was held up can take a few seconds more to
+/// arrive on a link that is fine. A dead Wi-Fi could be found sooner by dialing the PC
+/// anew alongside the silent session after a shorter quiet, keeping whichever answers
+/// (later, measured with `silence_detect_ms`).
+pub const SILENCE: Duration = Duration::from_secs(5);
 /// Wrong codes in a row before the headset stops and asks again.
 const PAIR_ATTEMPTS: u32 = 3;
 
