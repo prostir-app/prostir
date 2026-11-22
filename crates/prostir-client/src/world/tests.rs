@@ -1452,3 +1452,69 @@ fn two_monitors_added_at_once_each_get_a_place() {
     sim.settled();
     none_covers(&sim, &[(1, QHD), (2, QHD), (3, QHD), (4, QHD)]);
 }
+
+/// Two monitors side by side, the right one raised by hand, a step at a time, until it
+/// shares only a third of its height with the other: still one row, as the PC has it
+/// (a monitor leaves its row only once clearly moved out of it). The rows the PC was
+/// told, top to bottom.
+fn raised_beside() -> (Sim, Vec<Vec<u32>>) {
+    let mut sim = Sim::new(None);
+    sim.s.magnet = false;
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    sim.stream(1, QHD);
+    sim.stream(2, QHD);
+    sim.settled();
+    let h = sim.world.height_of(k(2));
+    for _ in 0..13 {
+        let mut p = sim.place(k(2));
+        p.position.y += h * 0.05;
+        sim.world.hold(Thing::Display(k(2)), &sim.s);
+        sim.world.drag(&sim.s, Thing::Display(k(2)), p, sim.head.0);
+        sim.world.let_go(Thing::Display(k(2)), &sim.s, sim.now);
+        sim.settled();
+    }
+    let rows = row_ids(sim.arranged.last().expect("told"));
+    assert_eq!(rows.len(), 1, "one row: {rows:?}");
+    (sim, rows)
+}
+
+/// The link drops and comes back with nothing moved: the PC is told its desktop again,
+/// the same rows (they are kept, as those it had, through the reconnect).
+#[test]
+fn a_reconnect_keeps_the_rows() {
+    let (mut sim, rows) = raised_beside();
+    let places = sim.places();
+    sim.world.disconnected(PC);
+    sim.world.stream_ended(k(1));
+    sim.world.stream_ended(k(2));
+    sim.arranged.clear();
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    sim.stream(1, QHD);
+    sim.stream(2, QHD);
+    sim.settled();
+    assert!(same_places(&sim.places(), &places), "nothing moved");
+    let told = sim.arranged.last().map(|r| row_ids(r));
+    assert_eq!(told, Some(rows), "told again, the same rows");
+}
+
+/// The app starts again with what `layout.txt` keeps: the PC is told the rows it had.
+#[test]
+fn a_restart_keeps_the_rows() {
+    let (sim, rows) = raised_beside();
+    let mut text = String::new();
+    sim.world.desk().write_text(&mut text);
+    let mut again = Sim::new(Some(&text));
+    again.connect(PC);
+    again.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    again.stream(1, QHD);
+    again.stream(2, QHD);
+    again.settled();
+    assert!(
+        same_places(&again.places(), &sim.places()),
+        "where they were"
+    );
+    let told = again.arranged.last().map(|r| row_ids(r));
+    assert_eq!(told, Some(rows), "the same rows");
+}

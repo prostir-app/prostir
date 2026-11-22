@@ -448,11 +448,19 @@ impl World {
         }
     }
 
-    /// A session with PC `pc` began: its desktop is told afresh.
+    /// A session with PC `pc` began: its desktop is told afresh, by the rows it had (the
+    /// last session's, or after a start those `layout.txt` keeps): nothing moved, the
+    /// same rows, so its desktop is not rearranged.
     pub fn connected(&mut self, pc: PcId) {
+        let kept = self.desk.rows(pc);
         let view = self.pcs.entry(pc).or_default();
         view.connected = true;
-        view.sent_layout = None;
+        let rows = view
+            .sent_layout
+            .take()
+            .map_or_else(|| kept.to_vec(), |d| d.rows);
+        view.sent_layout = Desktop::history(rows);
+        view.pending_layout = None;
         self.last = Some(pc);
     }
 
@@ -779,6 +787,8 @@ impl World {
             center,
             tilt,
             listed,
+            desk,
+            saves,
             ..
         } = self;
         let Some(view) = pcs.get_mut(&pc) else {
@@ -849,6 +859,10 @@ impl World {
                 .map(|id| DisplayKey::new(pc, id))
                 .filter(|id| listed.get(id).is_some_and(|l| l.kind == Kind::Monitor)),
         );
+        // Kept for the next start too.
+        if desk.keep_rows(pc, &desktop.rows) {
+            saves.mark(File::Desk);
+        }
         view.sent_layout = Some(desktop);
         view.arrange = Some(rows);
         true
@@ -1266,6 +1280,7 @@ impl World {
             .keys()
             .copied()
             .chain(self.desk.cinema())
+            .chain(self.desk.rows(pc).iter().flatten().copied())
             .filter(of_pc)
             .collect();
         if self.desk.forget(&gone) {

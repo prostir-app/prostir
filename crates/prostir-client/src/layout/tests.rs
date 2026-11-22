@@ -1414,6 +1414,10 @@ fn desk_format_2() {
         "0123456789abcdef:4 0 0 -1 0 0 0 1 0\n".to_owned(),
         "0123456789abcdef:4 0 0 -1 0 0 0 0 1\n".to_owned(),
         format!("0123456789abcdef:4 {place} 2560x1440 more\n"),
+        "rows 12\n".to_owned(),
+        "rows 0123456789abcdef:1 0123456789abcdef:1\n".to_owned(),
+        "rows 0123456789abcdef:1 /\n".to_owned(),
+        "rows 0123456789abcdef:1 fedcba9876543210:2\n".to_owned(),
     ] {
         let text = format!("format 2\ncenter 0 1.6 0 0.25\n{first}{bad}");
         let (desk, skipped) = Desk::parse(&text).unwrap();
@@ -2321,4 +2325,23 @@ fn a_long_follow_leaves_a_glued_seam_glued() {
     let lined = line_up(&p, &owner, center, tilt(Preset::Arc), Some(1), &rows, None);
     let moved = farthest_corner(&p, &lined, &owner);
     assert!(moved < 1e-4, "Line up after following moves {moved} m");
+}
+
+/// The rows each PC's desktop was laid out by are kept in `layout.txt`, one line a PC,
+/// and read back as they were; a display forgotten leaves its row, and an empty row
+/// goes.
+#[test]
+fn the_desk_keeps_each_pcs_rows() {
+    let other = |n: u32| DisplayKey::new(PcId([6; 8]), DisplayId(n));
+    let mut desk = Desk::default();
+    assert!(desk.keep_rows(PcId([5; 8]), &[vec![k(2), k(1)], vec![k(3)]]));
+    assert!(!desk.keep_rows(PcId([5; 8]), &[vec![k(2), k(1)], vec![k(3)]]));
+    assert!(desk.keep_rows(PcId([6; 8]), &[vec![other(7)]]));
+    let back = reread(&desk);
+    assert_eq!(back.rows(PcId([5; 8])), [vec![k(2), k(1)], vec![k(3)]]);
+    assert_eq!(back.rows(PcId([6; 8])), [vec![other(7)]]);
+    assert!(desk.forget(&[k(3)]));
+    assert_eq!(desk.rows(PcId([5; 8])), [vec![k(2), k(1)]]);
+    assert!(desk.forget(&[other(7)]));
+    assert!(desk.rows(PcId([6; 8])).is_empty());
 }
