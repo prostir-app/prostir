@@ -208,6 +208,13 @@ impl Outbox {
         self.ready.notify_all();
     }
 
+    /// Waits until the session is over (the reader saw the PC close the connection),
+    /// at most `within`.
+    pub fn wait_closed(&self, within: Duration) {
+        let s = self.state.lock().unwrap();
+        let _ = self.ready.wait_timeout_while(s, within, |s| !s.closed);
+    }
+
     /// The writer sent the goodbye.
     pub fn said_goodbye(&self) -> bool {
         self.state.lock().unwrap().leaving

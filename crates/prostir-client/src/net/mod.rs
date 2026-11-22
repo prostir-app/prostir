@@ -47,8 +47,10 @@ use crate::ui::OfferWhy;
 /// After a goodbye, how long the PC has to read it and close the connection before
 /// this side does.
 const GOODBYE_WAIT: Duration = Duration::from_secs(1);
-/// The app closing: how long the connections' threads get to say goodbye and end.
-const QUIT_WITHIN: Duration = Duration::from_millis(900);
+/// The app closing: how long the connections' threads get to say goodbye and end, and
+/// then, closed, to end at all.
+const QUIT_WITHIN: Duration = Duration::from_millis(700);
+const CLOSE_WITHIN: Duration = Duration::from_millis(200);
 
 /// Messages to the PC (see [`crate::outbox`]). Sending only queues them.
 #[derive(Clone)]
@@ -60,15 +62,16 @@ impl Feedback {
     /// Starts the writer thread for one session. It ends (and closes the connection,
     /// which ends the session) when a write fails or times out, or once the outbox is
     /// closed.
+    /// The thread is the network thread's to wait for when the app closes.
     fn start(
         mut sender: Box<dyn RecordSender>,
         closer: Closer,
-        media: &Arc<dyn MediaSource>,
+        shared: &Shared,
     ) -> io::Result<Self> {
         let outbox = Arc::new(Outbox::default());
         let queued = outbox.clone();
-        let media = media.clone();
-        std::thread::Builder::new()
+        let media = shared.media.clone();
+        let writer = std::thread::Builder::new()
             .name("net-writer".into())
             .spawn(move || {
                 media.raise_priority();
@@ -95,12 +98,14 @@ impl Feedback {
                 }
                 // After the goodbye nothing more goes out; the PC closes the connection
                 // once it read it, and what it sends meanwhile is still read, so a reset
-                // cannot throw the goodbye away. If it does not close, this side does.
+                // cannot throw the goodbye away: until the reader sees the end. If the PC
+                // does not close, this side does.
                 if queued.said_goodbye() {
                     let _ = sender.finish();
-                    std::thread::sleep(GOODBYE_WAIT);
+                    queued.wait_closed(GOODBYE_WAIT);
                 }
             })?;
+        shared.note(Inbox::Thread(writer));
         Ok(Self { outbox })
     }
 
@@ -321,6 +326,8 @@ impl Net {
             media,
             inbox: Mutex::new(tx.clone()),
             events,
+            linked: Mutex::default(),
+            quitting: std::sync::atomic::AtomicBool::new(false),
         });
         let thread = std::thread::Builder::new()
             .name("net".into())
@@ -415,6 +422,11 @@ pub(crate) struct Shared {
     media: Arc<dyn MediaSource>,
     inbox: Mutex<Sender<Inbox>>,
     events: Sender<NetEvent>,
+    /// The PCs a connection has, by key: never a second one to the same PC (the PC
+    /// would take it for the headset coming back, and drop the first).
+    linked: Mutex<std::collections::BTreeSet<PcId>>,
+    /// The app is closing: no connection starts a session any more.
+    quitting: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -433,6 +445,19 @@ impl Shared {
     /// Whether PC `pc`'s session has the sound and the microphone.
     fn has_media(&self, pc: PcId) -> bool {
         *lock(&self.media_to) == Some(pc)
+    }
+
+    /// Takes PC `pc` for a connection: `false` when another one has it.
+    fn claim(&self, pc: PcId) -> bool {
+        lock(&self.linked).insert(pc)
+    }
+
+    fn release(&self, pc: PcId) {
+        lock(&self.linked).remove(&pc);
+    }
+
+    fn quitting(&self) -> bool {
+        self.quitting.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -574,19 +599,42 @@ fn run(config: &Config, shared: &Arc<Shared>, inbox: &Receiver<Inbox>) {
         }
     }
     // Closing: every connection is left (sessions with a goodbye), and their threads
-    // get a moment to end.
+    // get a moment to end; what is still open then is closed.
+    shared
+        .quitting
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     beacon.quit();
     for c in &conns {
         c.current.leave(HeadsetGoodbye::Quit);
     }
     let until = Instant::now() + QUIT_WITHIN;
-    while threads.iter().any(|t| !t.is_finished()) && Instant::now() < until {
+    let mut closed = false;
+    while threads.iter().any(|t| !t.is_finished()) && Instant::now() < until + CLOSE_WITHIN {
         // News of the connections ending (and their threads) still comes.
         while let Ok(news) = inbox.try_recv() {
             match news {
                 Inbox::Thread(t) => threads.push(t),
-                Inbox::Opened { current, .. } => current.leave(HeadsetGoodbye::Quit),
+                Inbox::Opened {
+                    step,
+                    addr,
+                    current,
+                } => {
+                    current.leave(HeadsetGoodbye::Quit);
+                    conns.push(Conn {
+                        step,
+                        addr,
+                        pc: None,
+                        current,
+                    });
+                }
+                Inbox::Gone { step } => conns.retain(|c| c.step != step),
                 _ => {}
+            }
+        }
+        if !closed && Instant::now() >= until {
+            closed = true;
+            for c in &conns {
+                c.current.closer.close();
             }
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -682,6 +730,15 @@ fn command(
             }
         }
         NetCmd::Forget(pc) => {
+            // Its address as the last PC's: not tried again on the next start.
+            let last = discovery::read_addr(&config.last_host_file);
+            if conns
+                .iter()
+                .any(|c| c.pc == Some(pc) && Some(c.addr) == last)
+                && let Err(e) = discovery::forget_last(&config.last_host_file)
+            {
+                warn!("cannot forget the last PC's address: {e}");
+            }
             let keys: Vec<[u8; 32]> = trusted
                 .entries()
                 .iter()

@@ -163,6 +163,14 @@ pub fn keep_last(path: &Path, addr: SocketAddr) -> io::Result<()> {
     std::fs::write(path, addr.to_string())
 }
 
+/// Forgets the last PC's address (that PC was forgotten).
+pub fn forget_last(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// The headset's own IPv4 address on the network the default route uses.
 fn local_ipv4() -> Option<Ipv4Addr> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;

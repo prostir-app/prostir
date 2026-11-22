@@ -105,11 +105,29 @@ struct Conn {
     began: Instant,
     ended: Ended,
     pc: Option<PcId>,
+    /// The PC this connection took (see `Shared::claim`), let go when it ends.
+    claimed: Option<PcId>,
+    /// Its end was told.
+    told: bool,
+}
+
+impl Drop for Conn {
+    /// However its thread ends (a panic too), the core hears the connection ended, so
+    /// the search never waits for it.
+    fn drop(&mut self) {
+        if !self.told {
+            self.finish(&Err(io::Error::other("the connection's thread ended")));
+        }
+    }
 }
 
 impl Conn {
     /// The connection is over: the core and the network thread hear how.
-    fn finish(self, outcome: &io::Result<()>) {
+    fn finish(&mut self, outcome: &io::Result<()>) {
+        self.told = true;
+        if let Some(pc) = self.claimed.take() {
+            self.d.shared.release(pc);
+        }
         let addr = self.addr;
         let why = match (outcome, self.ended.goodbye) {
             (_, Some(reason)) => Disconnect::Goodbye(reason),
@@ -139,7 +157,7 @@ impl Conn {
             step: self.d.step,
             pc: self.pc,
             why,
-            ended: self.ended,
+            ended: std::mem::take(&mut self.ended),
             lasted: self.began.elapsed(),
         });
     }
@@ -188,6 +206,8 @@ fn connection(d: Dial, stream: TcpStream) {
         began: Instant::now(),
         ended: Ended::default(),
         pc: None,
+        claimed: None,
+        told: false,
     };
     match before_trust(&mut conn, stream) {
         Ok(Some((wire, language))) => {
@@ -212,6 +232,8 @@ fn connection(d: Dial, stream: TcpStream) {
                 drop(wire);
                 conn.finish(&outcome);
             });
+            // Not started: the connection was moved into the closure and dropped
+            // with it, which told its end.
             match started {
                 Ok(t) => shared.note(Inbox::Thread(t)),
                 Err(e) => warn!("cannot start the session's thread: {e}"),
@@ -234,6 +256,22 @@ fn before_trust(conn: &mut Conn, stream: TcpStream) -> io::Result<Option<(Wire, 
         closer: noise_closer,
         peer,
     } = NoiseTcp::connect(stream, &shared.identity, Arc::new(Plain))?;
+    // One connection to a PC at a time, and none once the app closes: closed now,
+    // before anything is asked of the PC.
+    let pc = PcId::of(&peer.key);
+    if shared.quitting() {
+        noise_closer.close();
+        return Ok(None);
+    }
+    if !shared.claim(pc) {
+        info!(
+            "PC {pc} at {} has a connection already: this one closes",
+            conn.addr
+        );
+        noise_closer.close();
+        return Ok(None);
+    }
+    conn.claimed = Some(pc);
     // Versions first, before pairing: this exchange is the same in every version, so
     // a PC of any version says which side to update.
     let app = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
@@ -251,7 +289,7 @@ fn before_trust(conn: &mut Conn, stream: TcpStream) -> io::Result<Option<(Wire, 
         }
     };
     // From here on, packets.
-    let feedback = Feedback::start(sender, noise_closer, &shared.media)?;
+    let feedback = Feedback::start(sender, noise_closer, &shared)?;
     let mut wire = Wire {
         receiver,
         packets: HostMsg::assembler(),
