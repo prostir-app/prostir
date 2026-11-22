@@ -50,6 +50,7 @@ welcome-finds-wifi = У тій самій мережі Wi‑Fi.
 welcome-finds-wifi-usb = У тій самій мережі Wi‑Fi або через кабель USB.
 connect-searching = Шукаю ПК у мережі…
 connect-found = Знайдено
+found-cable = кабель
 connect-blocked = видно в мережі, але з'єднання блокується.
 connect-allow-port = Дозвольте в брандмауері ПК порт TCP 47830.
 connect-type-ip = Ввести IP вручну

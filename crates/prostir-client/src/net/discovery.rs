@@ -469,6 +469,7 @@ fn ask_once(
             at_last,
             label: String::new(),
             ip: String::new(),
+            usb: false,
         }));
     }
 }

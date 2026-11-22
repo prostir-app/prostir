@@ -631,12 +631,45 @@ wire_struct! {
 
 wire_struct! {
     /// A video decoder of the headset: the codec (as [`Codec`]'s number, so one a PC
-    /// does not know simply does not match) and the largest picture.
+    /// does not know simply does not match) and the widest and the tallest picture it
+    /// takes. Not every picture within both decodes in time: see [`PixelBudget`].
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Decoder {
         pub codec: u8,
         pub max_w: u32,
         pub max_h: u32,
+    }
+}
+
+wire_struct! {
+    /// How many pixels a picture may have for the headset's decoder of `codec` to
+    /// decode 60 of them a second (a decoder's limit is pixels per frame and per
+    /// second, not a box).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct PixelBudget {
+        pub codec: u8,
+        pub max_pixels: u32,
+    }
+}
+
+wire_struct! {
+    /// The pixel budget of the headset's decoders (a part, in `Open` only, from 0.2.0
+    /// B6; an older PC skips it and goes by the sides alone). It travels apart from
+    /// [`HeadsetCaps`] so that part keeps its bytes; the PC reads it into
+    /// [`HeadsetCaps::pixels`].
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct DecoderPixels {
+        #[wire(max = MAX_CODECS)]
+        pub budgets: Vec<PixelBudget>,
+    }
+}
+
+impl DecoderPixels {
+    pub fn check(&self) -> Result<(), WireError> {
+        if self.budgets.iter().any(|b| b.max_pixels == 0) {
+            return Err(WireError::Invalid("a pixel budget of 0"));
+        }
+        Ok(())
     }
 }
 
@@ -654,6 +687,11 @@ wire_struct! {
         pub layers_max: u8,
         #[wire(max = MAX_SHORT)]
         pub model: String,
+        /// The pixel budget of each decoder: not in this part's bytes but in
+        /// [`DecoderPixels`], which [`HeadsetState`] reads into here. None for a codec:
+        /// its decoder goes by its sides alone.
+        #[wire(skip)]
+        pub pixels: Vec<PixelBudget>,
     }
 }
 
@@ -673,14 +711,37 @@ impl HeadsetCaps {
         self.decoders.iter().find(|d| d.codec == n)
     }
 
-    /// Whether it decodes a picture of `w`x`h` in `codec`: within its decoder for
-    /// that codec, and H.264, which every headset decodes, at any size when it names
-    /// no decoder for it. The PC never starts a stream that does not fit.
+    /// The pixel budget of its decoder for `codec`, if it said one.
+    pub fn max_pixels(&self, codec: Codec) -> Option<u32> {
+        let n = crate::wire::encode(&codec).ok()?[0];
+        self.pixels
+            .iter()
+            .find(|b| b.codec == n)
+            .map(|b| b.max_pixels)
+    }
+
+    /// Whether it decodes a picture of `w`x`h` in `codec`: within the sides of its
+    /// decoder for that codec and within that decoder's pixel budget (when it said
+    /// one), and H.264, which every headset decodes, at any size when it names no
+    /// decoder for it. The PC never starts a stream that does not fit.
     pub fn fits(&self, codec: Codec, w: u32, h: u32) -> bool {
         match self.decoder(codec) {
-            Some(d) => w <= d.max_w && h <= d.max_h,
+            Some(d) => {
+                w <= d.max_w
+                    && h <= d.max_h
+                    && self
+                        .max_pixels(codec)
+                        .is_none_or(|p| u64::from(w) * u64::from(h) <= u64::from(p))
+            }
             None => codec == Codec::H264,
         }
+    }
+
+    /// The pixel budget as its own part, when there is one.
+    pub fn pixels_part(&self) -> Option<DecoderPixels> {
+        (!self.pixels.is_empty()).then(|| DecoderPixels {
+            budgets: self.pixels.clone(),
+        })
     }
 
     pub fn check(&self) -> Result<(), WireError> {
@@ -1025,7 +1086,7 @@ pub struct HeadsetState {
 }
 
 /// Tags of the headset's parts, in the order they go.
-const HEADSET_PARTS: &[u8] = &[138, 134, 115, 119, 135, 136, 143];
+const HEADSET_PARTS: &[u8] = &[138, 144, 134, 115, 119, 135, 136, 143];
 
 impl HeadsetState {
     /// Whether messages with `tag` are parts of the headset's state.
@@ -1038,6 +1099,12 @@ impl HeadsetState {
         use crate::ClientMsg as M;
         let mut out = Vec::new();
         out.extend(self.caps.clone().map(|part| M::HeadsetCaps { part }));
+        out.extend(
+            self.caps
+                .as_ref()
+                .and_then(HeadsetCaps::pixels_part)
+                .map(|part| M::DecoderPixels { part }),
+        );
         out.extend(self.prefs.map(|part| M::Prefs { part }));
         out.extend(self.presence.map(|part| M::Presence { part }));
         out.extend(self.battery.map(|part| M::Battery { part }));
@@ -1061,7 +1128,16 @@ impl HeadsetState {
     pub fn apply(&mut self, msg: crate::ClientMsg) -> Option<crate::ClientMsg> {
         use crate::ClientMsg as M;
         match msg {
-            M::HeadsetCaps { part } => self.caps = Some(part),
+            // The budget may come before or after the caps it belongs to.
+            M::HeadsetCaps { mut part } => {
+                if part.pixels.is_empty() {
+                    part.pixels = self.caps.take().map(|c| c.pixels).unwrap_or_default();
+                }
+                self.caps = Some(part);
+            }
+            M::DecoderPixels { part } => {
+                self.caps.get_or_insert_with(HeadsetCaps::default).pixels = part.budgets;
+            }
             M::Prefs { part } => self.prefs = Some(part),
             M::Presence { part } => self.presence = Some(part),
             M::Battery { part } => self.battery = Some(part),
@@ -1092,7 +1168,7 @@ impl HeadsetState {
             seen.push((part.tag, kind));
             state.apply(msg);
         }
-        if state.caps.is_none() {
+        if !seen.iter().any(|(tag, _)| *tag == 138) {
             return Err(WireError::Invalid(
                 "Open without the headset's capabilities",
             ));

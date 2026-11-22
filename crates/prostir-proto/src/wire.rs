@@ -316,6 +316,10 @@ macro_rules! put_field {
     ($out:expr, $value:expr, $ty:ty; rest) => {
         <$ty as $crate::wire::Rest>::put($value, $out)
     };
+    ($out:expr, $value:expr, $ty:ty; skip) => {{
+        let _ = $value;
+        Ok::<(), $crate::wire::WireError>(())
+    }};
 }
 
 /// Reads one field, as [`put_field!`] writes it.
@@ -329,10 +333,15 @@ macro_rules! get_field {
     ($r:expr, $ty:ty; rest) => {
         <$ty as $crate::wire::Rest>::get($r)?
     };
+    ($r:expr, $ty:ty; skip) => {
+        <$ty as Default>::default()
+    };
 }
 
 /// A struct whose bytes are its fields in declaration order. A string or list field
-/// takes `#[wire(max = N)]` after its doc comment.
+/// takes `#[wire(max = N)]` after its doc comment; a field marked `#[wire(skip)]` is
+/// not in the bytes at all (it is read as its default), for what travels in a message
+/// of its own.
 ///
 /// ```ignore
 /// wire_struct! {

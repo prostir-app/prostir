@@ -188,6 +188,8 @@ pub(crate) fn headset_state() -> HeadsetState {
             streams_max: 12,
             layers_max: 16,
             model: "Quest 3".into(),
+            // In a part of its own (see `the_pixel_budget_is_a_part_of_its_own`).
+            pixels: Vec::new(),
         }),
         prefs: Some(Prefs {
             notifications: true,
@@ -422,6 +424,14 @@ pub(crate) fn client_samples() -> Vec<ClientMsg> {
         ClientMsg::Pong { seq: 3 },
         ClientMsg::Goodbye { reason: 1 },
         ClientMsg::Asleep,
+        ClientMsg::DecoderPixels {
+            part: DecoderPixels {
+                budgets: vec![state::PixelBudget {
+                    codec: 0,
+                    max_pixels: 3840 * 2160,
+                }],
+            },
+        },
     ];
     samples.extend(headset_state().parts());
     samples
@@ -1193,6 +1203,10 @@ fn a_stream_fits_the_decoder_of_its_codec() {
     assert!(!caps.fits(Codec::H265, 8193, 1440));
     assert!(caps.fits(Codec::H264, 5120, 1440), "nothing said of H.264");
     assert!(!caps.fits(Codec::Av1, 640, 360));
+    assert!(
+        caps.fits(Codec::H265, 8192, 4320),
+        "no budget: the sides alone"
+    );
     let h264 = HeadsetCaps {
         decoders: vec![Decoder {
             codec: 0,
@@ -1201,6 +1215,96 @@ fn a_stream_fits_the_decoder_of_its_codec() {
         }],
         ..HeadsetCaps::default()
     };
+    // Quest 3: 8192 by 4320, but at 60 frames a second only 8192x1600 worth of
+    // pixels for H.265, 8192x2880 for H.264.
+    let quest = HeadsetCaps {
+        decoders: vec![
+            Decoder {
+                codec: 0,
+                max_w: 8192,
+                max_h: 4320,
+            },
+            Decoder {
+                codec: 1,
+                max_w: 8192,
+                max_h: 4320,
+            },
+        ],
+        pixels: vec![
+            state::PixelBudget {
+                codec: 0,
+                max_pixels: 8192 * 2880,
+            },
+            state::PixelBudget {
+                codec: 1,
+                max_pixels: 8192 * 1600,
+            },
+        ],
+        ..HeadsetCaps::default()
+    };
+    for codec in [Codec::H264, Codec::H265] {
+        for (w, h) in [
+            (3840, 2160),
+            (1440, 2560),
+            (2560, 1440),
+            (5120, 1440),
+            (8192, 1600),
+        ] {
+            assert!(quest.fits(codec, w, h), "{codec:?} {w}x{h}");
+        }
+        assert!(!quest.fits(codec, 7680, 4320), "{codec:?} 8K");
+    }
+    // A decoder that cannot do 4K at 60.
+    let weak = HeadsetCaps {
+        pixels: vec![state::PixelBudget {
+            codec: 0,
+            max_pixels: 2560 * 1600,
+        }],
+        ..h264.clone()
+    };
+    assert!(!weak.fits(Codec::H264, 3840, 2160));
+    assert!(weak.fits(Codec::H264, 2560, 1440));
     assert!(!h264.fits(Codec::H264, 5120, 1440));
     assert!(h264.fits(Codec::H264, 4096, 2160));
+}
+
+/// The pixel budget travels in a part of its own: `HeadsetCaps` keeps its bytes (an
+/// older PC reads it as before and skips the new part), and the budget comes back
+/// into the caps whichever of the two comes first.
+#[test]
+fn the_pixel_budget_is_a_part_of_its_own() {
+    let mut state = headset_state();
+    if let Some(caps) = &mut state.caps {
+        caps.pixels = vec![state::PixelBudget {
+            codec: 1,
+            max_pixels: 8192 * 1600,
+        }];
+    }
+    let caps = state.caps.clone().unwrap();
+    let bare = HeadsetCaps {
+        pixels: Vec::new(),
+        ..caps.clone()
+    };
+    let bytes = |c: &HeadsetCaps| client_bytes(&ClientMsg::HeadsetCaps { part: c.clone() });
+    assert_eq!(bytes(&caps), bytes(&bare), "the caps' bytes as before");
+    let ClientMsg::Open { mut parts } = state.open().unwrap() else {
+        panic!("not Open")
+    };
+    assert_eq!(parts[1].tag, 144);
+    parts.swap(0, 1);
+    assert_eq!(HeadsetState::from_open(&parts).unwrap(), state);
+    // Without it: the caps as an older headset says them.
+    parts.remove(0);
+    let older = HeadsetState::from_open(&parts).unwrap();
+    assert_eq!(older.caps, Some(bare));
+    // A budget of nothing is the headset's bug.
+    let zero = ClientMsg::DecoderPixels {
+        part: DecoderPixels {
+            budgets: vec![state::PixelBudget {
+                codec: 1,
+                max_pixels: 0,
+            }],
+        },
+    };
+    assert!(read_client(&client_bytes(&zero)).is_err());
 }

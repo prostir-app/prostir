@@ -13,13 +13,18 @@
 use prostir_proto::Codec;
 use prostir_proto::state::{self, HeadsetCaps, caps};
 
-/// A codec the headset decodes, and the largest picture it takes (each side's upper
-/// bound as the system says it).
+/// A codec the headset decodes: the widest and the tallest picture it takes (each
+/// side's upper bound as the system says it), and how many pixels a picture may have
+/// to decode at [`DECODE_RATE`]. A decoder's limit is pixels per frame and per second,
+/// so a box cannot describe it: 8192 wide fits only short pictures at 60 frames a
+/// second, while 3840x2160 and a portrait 1440x2560 both decode fine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decoder {
     pub codec: Codec,
     pub max_w: u32,
     pub max_h: u32,
+    /// `None`: not known (the sides alone then).
+    pub max_pixels: Option<u32>,
 }
 
 /// The cameras.
@@ -55,12 +60,9 @@ pub struct Caps {
     pub menu_gesture: bool,
     /// The layers the compositor takes in a frame (`maxLayerCount`).
     pub layers_max: u8,
-    /// The codecs the headset decodes and the largest picture each decodes at
-    /// [`DECODE_RATE`] (see [`largest_size`]): what the PC is told.
+    /// The codecs the headset decodes, their sides and their pixel budget at
+    /// [`DECODE_RATE`] (see [`pixel_budget`]): what the PC is told.
     pub decoders: Vec<Decoder>,
-    /// What the system's ranges said of the same decoders, before that check: only
-    /// logged and written in the selftest's report.
-    pub decoders_said: Vec<Decoder>,
     /// Streams decoded at once at most: the least of the decoders', and no more than
     /// the layers left for them (see [`streams_max`]).
     pub streams_max: u8,
@@ -136,9 +138,29 @@ pub const RESERVED_LAYERS: u8 = 4;
 
 /// The frame rate a decoder must keep at the size the PC is told: the PC sends 60.
 pub const DECODE_RATE: f64 = 60.0;
-/// The heights a decoder's largest size steps down through when it does not decode at
-/// [`DECODE_RATE`] (8K, 5K, 4K, 1600p, 1440p, 1200p, 1080p, 720p).
+/// The heights a decoder is asked at, as wide as it takes them, for its pixel budget
+/// (8K, 5K, 4K, 1600p, 1440p, 1200p, 1080p, 720p).
 pub const STEP_HEIGHTS: [u32; 8] = [4320, 2880, 2160, 1600, 1440, 1200, 1080, 720];
+/// The sizes a decoder is asked about for its pixel budget, each also turned to
+/// portrait: the monitors people use.
+pub const PROBE_SIZES: [(u32, u32); 16] = [
+    (1280, 720),
+    (1920, 1080),
+    (1920, 1200),
+    (2560, 1080),
+    (2560, 1440),
+    (2560, 1600),
+    (3440, 1440),
+    (3840, 1600),
+    (3840, 2160),
+    (4096, 2160),
+    (5120, 1440),
+    (5120, 2160),
+    (5120, 2880),
+    (6144, 3456),
+    (7680, 4320),
+    (8192, 4320),
+];
 
 /// What the headset decodes when the system could not be asked: what the app took
 /// for granted before it asked (H.264 up to 4096 on a side, H.265 up to 8192×4320).
@@ -147,11 +169,13 @@ pub const DECODERS_UNSAID: [Decoder; 2] = [
         codec: Codec::H264,
         max_w: 4096,
         max_h: 4096,
+        max_pixels: None,
     },
     Decoder {
         codec: Codec::H265,
         max_w: 8192,
         max_h: 4320,
+        max_pixels: None,
     },
 ];
 /// Streams at once when the system could not be asked (as before it was asked).
@@ -177,7 +201,6 @@ impl Caps {
             hand_aim: false,
             menu_gesture: false,
             layers_max: LAYERS_AT_LEAST,
-            decoders_said: decoders.clone(),
             decoders,
             streams_max,
             volume_steps,
@@ -236,9 +259,11 @@ impl Caps {
         self.decoders.iter().find(|d| d.codec == codec)
     }
 
-    /// What the PC is told this headset can do: the displays it shows, its decoders,
-    /// streams and layers at once, and its model.
+    /// What the PC is told this headset can do: the displays it shows, its decoders
+    /// and their pixel budgets, streams and layers at once, and its model.
     pub fn headset_caps(&self) -> HeadsetCaps {
+        let told = || self.decoders.iter().filter(|d| d.max_w > 0 && d.max_h > 0);
+        let codec = |d: &Decoder| prostir_proto::wire::encode(&d.codec).map_or(0, |b| b[0]);
         HeadsetCaps {
             features: vec![
                 caps::headset::PHYSICAL,
@@ -246,12 +271,9 @@ impl Caps {
                 caps::headset::COMMANDS,
                 caps::headset::MIC,
             ],
-            decoders: self
-                .decoders
-                .iter()
-                .filter(|d| d.max_w > 0 && d.max_h > 0)
+            decoders: told()
                 .map(|d| state::Decoder {
-                    codec: prostir_proto::wire::encode(&d.codec).map_or(0, |b| b[0]),
+                    codec: codec(d),
                     max_w: d.max_w,
                     max_h: d.max_h,
                 })
@@ -259,6 +281,15 @@ impl Caps {
             streams_max: self.streams_max,
             layers_max: self.layers_max,
             model: self.model.clone(),
+            pixels: told()
+                .filter_map(|d| {
+                    let max_pixels = d.max_pixels.filter(|p| *p > 0)?;
+                    Some(state::PixelBudget {
+                        codec: codec(d),
+                        max_pixels,
+                    })
+                })
+                .collect(),
         }
     }
 
@@ -319,33 +350,38 @@ pub trait Sizes {
     fn keeps_up(&mut self, w: u32, h: u32) -> bool;
 }
 
-/// The largest picture to tell the PC of a decoder whose widest is `max_w`, `max_h`
-/// tall at that width: that one if it decodes at [`DECODE_RATE`], else the first of
-/// [`STEP_HEIGHTS`] below it that does, as wide as the decoder takes at that height (up
-/// to `max_w`). 0×0 when none does: then the codec falls back to what was taken for
-/// granted ([`decoder_or_unsaid`]), never "any size".
-pub fn largest_size(max_w: u32, max_h: u32, sizes: &mut impl Sizes) -> (u32, u32) {
+/// The pixel budget of a decoder whose sides go up to `max_w` and `max_h`: the most
+/// pixels of a picture that decodes at [`DECODE_RATE`], and that picture. Asked of
+/// [`PROBE_SIZES`] both ways round, of the largest box, and of each of [`STEP_HEIGHTS`]
+/// as wide as the decoder takes it, the largest first; `None` when none decodes in
+/// time (then the codec falls back to what was taken for granted,
+/// [`decoder_or_unsaid`], never "any size").
+pub fn pixel_budget(max_w: u32, max_h: u32, sizes: &mut impl Sizes) -> Option<(u32, (u32, u32))> {
     if max_w == 0 || max_h == 0 {
-        return (0, 0);
+        return None;
     }
-    if sizes.keeps_up(max_w, max_h) {
-        return (max_w, max_h);
-    }
-    for h in STEP_HEIGHTS.into_iter().filter(|h| *h < max_h) {
-        let Some(w) = sizes.widest_at(h).map(|w| w.min(max_w)) else {
-            continue;
-        };
-        if w > 0 && sizes.keeps_up(w, h) {
-            return (w, h);
+    let mut asked: Vec<(u32, u32)> = PROBE_SIZES
+        .into_iter()
+        .flat_map(|(w, h)| [(w, h), (h, w)])
+        .chain([(max_w, max_h)])
+        .collect();
+    for h in STEP_HEIGHTS.into_iter().filter(|h| *h <= max_h) {
+        if let Some(w) = sizes.widest_at(h) {
+            asked.push((w.min(max_w), h));
         }
     }
-    (0, 0)
+    asked.retain(|&(w, h)| w > 0 && h > 0 && w <= max_w && h <= max_h);
+    let area = |(w, h): (u32, u32)| u64::from(w) * u64::from(h);
+    asked.sort_by_key(|s| std::cmp::Reverse(area(*s)));
+    asked.dedup();
+    let (w, h) = asked.into_iter().find(|&(w, h)| sizes.keeps_up(w, h))?;
+    Some((u32::try_from(area((w, h))).unwrap_or(u32::MAX), (w, h)))
 }
 
-/// `d` as told: itself, or for a decoder of no size what was taken for granted for its
-/// codec (`None` for a codec without that either).
+/// `d` as told: itself, or for a decoder of no size or no budget what was taken for
+/// granted for its codec (`None` for a codec without that either).
 pub fn decoder_or_unsaid(d: Decoder) -> Option<Decoder> {
-    if d.max_w > 0 && d.max_h > 0 {
+    if d.max_w > 0 && d.max_h > 0 && d.max_pixels.is_some() {
         return Some(d);
     }
     DECODERS_UNSAID.into_iter().find(|u| u.codec == d.codec)
@@ -371,7 +407,6 @@ mod tests {
             menu_gesture: true,
             layers_max: 16,
             decoders: DECODERS_UNSAID.to_vec(),
-            decoders_said: DECODERS_UNSAID.to_vec(),
             streams_max: 12,
             volume_steps: Some(15),
             model: "Test headset".into(),
@@ -489,12 +524,14 @@ mod tests {
                 codec: Codec::H264,
                 max_w: 1920,
                 max_h: 1088,
+                max_pixels: None,
             },
             // A decoder of no size is not told (the PC would refuse the caps).
             Decoder {
                 codec: Codec::H265,
                 max_w: 0,
                 max_h: 0,
+                max_pixels: Some(1000),
             },
         ];
         c.streams_max = 3;
@@ -502,6 +539,7 @@ mod tests {
         let told = c.headset_caps();
         assert!(told.check().is_ok());
         assert_eq!(told.decoders.len(), 1);
+        assert!(told.pixels.is_empty(), "no budget said, none told");
         assert!(told.fits(Codec::H264, 1920, 1080));
         assert!(!told.fits(Codec::H264, 2560, 1440));
         assert!(!told.fits(Codec::H265, 1920, 1080));
@@ -541,55 +579,108 @@ mod tests {
         }
         fn keeps_up(&mut self, w: u32, h: u32) -> bool {
             self.asked.push((w, h));
-            w * h <= self.area
+            w <= self.wide && w * h <= self.area
         }
     }
 
-    /// The largest size told is one that decodes at 60 frames a second: the system's
-    /// largest if it does, else the first standard height below that does; none found
-    /// is 0x0, and then the codec falls back to what was taken for granted.
+    /// The decoder as told for a system answering like `s`, sides `max_w` by `max_h`.
+    fn told(codec: Codec, max_w: u32, max_h: u32, s: &mut System) -> Decoder {
+        let budget = pixel_budget(max_w, max_h, s);
+        decoder_or_unsaid(Decoder {
+            codec,
+            max_w,
+            max_h,
+            max_pixels: budget.map(|b| b.0),
+        })
+        .unwrap()
+    }
+
+    /// A headset as one tried says it: H.265 takes 8192x4320, but at 60 frames a
+    /// second only as many pixels as 8192x1600, H.264 as 8192x2880. The PC hears the
+    /// sides and the budget, so 4K, portrait 1440p and 32:9 all fit in both codecs; 8K
+    /// does not.
     #[test]
-    fn the_largest_size_that_keeps_up() {
-        let mut s = System {
-            area: 8192 * 4320,
+    fn short_of_8k_still_takes_4k_and_portrait() {
+        let mut hevc = System {
+            area: 8192 * 1600,
             wide: 8192,
             asked: Vec::new(),
         };
-        assert_eq!(largest_size(8192, 4320, &mut s), (8192, 4320));
-        // 8192 by 8192 said, 8K at 60 only to 4320 rows.
-        assert_eq!(largest_size(8192, 8192, &mut s), (8192, 4320));
-        // 4K at 60 frames is too much: 1440 rows wide as allowed.
+        let mut avc = System {
+            area: 8192 * 2880,
+            wide: 8192,
+            asked: Vec::new(),
+        };
+        let mut c = full();
+        c.decoders = vec![
+            told(Codec::H265, 8192, 4320, &mut hevc),
+            told(Codec::H264, 8192, 4320, &mut avc),
+        ];
+        assert_eq!(c.decoders[0].max_pixels, Some(8192 * 1600));
+        assert_eq!(c.decoders[1].max_pixels, Some(8192 * 2880));
+        let pc = c.headset_caps();
+        assert!(pc.check().is_ok());
+        assert_eq!(pc.pixels.len(), 2);
+        for codec in [Codec::H265, Codec::H264] {
+            for (w, h) in [
+                (3840, 2160),
+                (1440, 2560),
+                (2560, 1440),
+                (5120, 1440),
+                (2160, 3840),
+                (1920, 1080),
+            ] {
+                assert!(pc.fits(codec, w, h), "{codec:?} {w}x{h}");
+            }
+            assert!(!pc.fits(codec, 7680, 4320), "{codec:?} 8K");
+            assert!(!pc.fits(codec, 8193, 1000), "{codec:?} wider than it takes");
+        }
+        // The largest first: one question when the largest box keeps up.
+        let mut big = System {
+            area: u32::MAX,
+            wide: 8192,
+            asked: Vec::new(),
+        };
+        assert_eq!(
+            pixel_budget(8192, 4320, &mut big),
+            Some((8192 * 4320, (8192, 4320)))
+        );
+        assert_eq!(big.asked, [(8192, 4320)]);
+    }
+
+    /// A decoder that cannot do 4K at 60 frames a second: 4K is not told as fitting,
+    /// 1440p still is; one that keeps up at nothing, or says no sizes, falls back to
+    /// what was taken for granted.
+    #[test]
+    fn a_weaker_decoder_leaves_4k_out() {
         let mut s = System {
-            area: 4096 * 1440,
+            area: 2560 * 1600,
             wide: 4096,
             asked: Vec::new(),
         };
-        assert_eq!(largest_size(4096, 4096, &mut s), (4096, 1440));
-        assert_eq!(s.asked.first(), Some(&(4096, 4096)));
-        // Nothing keeps up, or the system said nothing.
-        let mut s = System {
+        let d = told(Codec::H264, 4096, 4096, &mut s);
+        assert_eq!(d.max_pixels, Some(2560 * 1600));
+        let mut c = full();
+        c.decoders = vec![d];
+        let pc = c.headset_caps();
+        assert!(!pc.fits(Codec::H264, 3840, 2160));
+        assert!(pc.fits(Codec::H264, 2560, 1440));
+        assert!(pc.fits(Codec::H264, 1440, 2560));
+        assert!(pc.fits(Codec::H264, 2560, 1600));
+        let mut none = System {
             area: 100,
             wide: 4096,
             asked: Vec::new(),
         };
-        assert_eq!(largest_size(4096, 4096, &mut s), (0, 0));
-        assert_eq!(largest_size(0, 0, &mut s), (0, 0));
-        let none = Decoder {
-            codec: Codec::H265,
-            max_w: 0,
-            max_h: 0,
-        };
-        assert_eq!(decoder_or_unsaid(none), Some(DECODERS_UNSAID[1]));
+        assert_eq!(pixel_budget(4096, 4096, &mut none), None);
+        assert_eq!(pixel_budget(0, 0, &mut none), None);
+        assert_eq!(told(Codec::H265, 4096, 4096, &mut none), DECODERS_UNSAID[1]);
         let av1 = Decoder {
             codec: Codec::Av1,
-            ..none
+            max_w: 0,
+            max_h: 0,
+            max_pixels: None,
         };
         assert_eq!(decoder_or_unsaid(av1), None);
-        let some = Decoder {
-            codec: Codec::H264,
-            max_w: 1920,
-            max_h: 1088,
-        };
-        assert_eq!(decoder_or_unsaid(some), Some(some));
     }
 }

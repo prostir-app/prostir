@@ -328,7 +328,7 @@ fn main() {
         display_rates: Some((90, 72)),
         display_rate_now: Some(90),
         error: None,
-        confirm_remove: std::env::var("CONFIRM").is_ok().then_some(k(2)),
+        confirm_remove: std::env::var("CONFIRM").is_ok().then_some(k(1)),
         intro: std::env::var("INTRO").is_ok(),
         update: std::env::var("UPDATE")
             .ok()
