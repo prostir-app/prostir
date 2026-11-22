@@ -261,10 +261,16 @@ impl Model {
         use crate::commands::Does;
         use prostir_proto::state::ErrorCode;
         info!("the PC asks: {asked:?}");
-        let outcome = match crate::commands::what_to_do(asked, &self.profiles) {
+        let texts = self.texts().clone();
+        let menu_name = |n: usize| texts.f("profile-n", &[("n", n.into())]);
+        let outcome = match crate::commands::what_to_do(asked, &self.profiles, &menu_name) {
             Does::Act(action) => {
                 self.act(action, By::Elsewhere);
                 Outcome::Done
+            }
+            // The names are the person's: only the PC the menu acts on names them.
+            Does::Rename(..) if self.session.main() != Some(pc) => {
+                Outcome::failed(ErrorCode::NOT_ALLOWED, "")
             }
             Does::Rename(i, name) => {
                 if let Some(p) = self.profiles.get_mut(i) {

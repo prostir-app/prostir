@@ -82,6 +82,9 @@ impl Model {
                     self.tell_press(Note::failed(Some(action), &text), true);
                     return;
                 }
+                // What asked to be pressed again was about the list before.
+                self.menu.confirm_save = None;
+                self.menu.confirm_delete = None;
                 let profile = self.current_profile();
                 self.profiles.push(profile);
                 let i = self.profiles.len() - 1;
@@ -101,6 +104,12 @@ impl Model {
                     return;
                 }
                 self.menu.confirm_delete = None;
+                self.menu.confirm_save = None;
+                // A switch waited for to this one or one after it: the profile it was
+                // for is not where it was.
+                if (i..=self.profiles.len()).any(|j| self.session.waits(ui::Asked::Profile(j))) {
+                    self.world.switch_to(None);
+                }
                 let name = self.profile_name(i);
                 self.profiles.remove(i);
                 // The one in use, if another one, keeps being it.

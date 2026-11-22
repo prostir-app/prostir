@@ -173,8 +173,8 @@ pc-display-shown = Shown
 pc-display-hidden = Hidden
 pc-displays = PC displays
 pc-display-limit = the PC's limit reached
-# $count (Number): how many more displays of the PC there are
-pc-displays-more = And { $count } more
+# $page (Number): the page shown; $pages (Number): how many pages there are
+page-of = Page { $page } of { $pages }
 scale = Scale
 monitors-line-up = Line up: close the seams (A button)
 add-monitor = Add a monitor
@@ -203,10 +203,8 @@ profile-replace = Replace?
 
 profile-new = New profile
 profile-save-here = Save here
-profile-delete-confirm = Delete? Again
+profile-delete-confirm = Press again to delete
 profiles-none = Arrange the monitors and press "New profile": the arrangement is kept, one press away.
-# $page (Number): the page of profiles shown; $pages (Number): how many pages there are
-profiles-more = More profiles ({ $page } of { $pages })
 # $count (Number): how many profiles there can be
 profiles-at-most =
     { $count ->
@@ -385,7 +383,7 @@ note-display-shown = The PC display is shown
 note-display-hidden = The PC display is hidden
 note-scale = Scale changed
 note-no-limits-on = More monitors and displays allowed
-note-no-limits-off = The limits Prostir advises
+note-no-limits-off = Recommended limits back on
 note-sound-headset = PC sound plays in the headset
 note-sound-pc = PC sound plays on the PC
 note-encoding = Video settings applied

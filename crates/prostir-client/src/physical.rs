@@ -52,16 +52,16 @@ fn connector_under(d: &Display, name: &str) -> Option<String> {
     }
 }
 
-/// The displays of PC `pc` itself, in its list's order, as the menu shows their
-/// switches: each shown as `asked` says while the PC has not answered (the switch
-/// moves at once), else as the PC says.
+/// The displays of PC `pc` itself as the menu shows their switches, those connected
+/// first, each part in its list's order: each shown as `asked` says while the PC has
+/// not answered (the switch moves at once), else as the PC says.
 pub fn entries(
     pc: PcId,
     displays: &Displays,
     asked: &[(DisplayKey, bool)],
     texts: &Texts,
 ) -> Vec<PhysicalEntry> {
-    displays
+    let mut all: Vec<PhysicalEntry> = displays
         .displays
         .iter()
         .filter(|d| d.is_physical())
@@ -80,7 +80,9 @@ pub fn entries(
                 connected: connected(d),
             }
         })
-        .collect()
+        .collect();
+    all.sort_by_key(|e| !e.connected);
+    all
 }
 
 #[cfg(test)]
@@ -120,9 +122,9 @@ mod tests {
         }
     }
 
-    /// Every display of the PC itself, in its order, with its switch as the PC says
-    /// or, asked and not answered yet, as asked; a closed laptop's panel is there,
-    /// not connected; monitors made for the headset are not.
+    /// Every display of the PC itself, those connected first, with its switch as the
+    /// PC says or, asked and not answered yet, as asked; a closed laptop's panel is
+    /// there, not connected, last; monitors made for the headset are not.
     #[test]
     fn every_display_of_the_pc_with_its_switch() {
         let uk = crate::lang::builtin("uk");
@@ -153,14 +155,15 @@ mod tests {
         assert_eq!(
             seen,
             [
-                (100, "Екран ноутбука", Some("eDP-1"), true, false),
                 (117, "DELL U2720Q", Some("HDMI-A-1"), false, true),
                 (118, "Екран DP-2", None, true, true),
-            ]
+                (100, "Екран ноутбука", Some("eDP-1"), true, false),
+            ],
+            "those connected first"
         );
         let k = DisplayKey::new(PC, DisplayId(117));
         let asked = entries(PC, &list, &[(k, false), (k, true)], &uk);
-        assert!(asked[1].shown, "as asked last");
+        assert!(asked[0].shown, "as asked last");
         assert_eq!(label(&monitor(1), &uk), "Екран Prostir-1");
         assert_eq!(
             label(

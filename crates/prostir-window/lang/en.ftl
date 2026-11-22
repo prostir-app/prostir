@@ -191,6 +191,7 @@ hs-profile-rename = Rename
 hs-profile-rename-named = Rename { $name }
 hs-profile-name = New name for { $name }
 hs-profile-save = Save
+hs-profile-number = A name cannot be a number only: a number is the profile's place.
 hs-profiles-note = The name shows in the headset's menu. An empty name brings back the number.
 
 ## Pairing

@@ -6,6 +6,8 @@
 //! anew only when what it shows changed. Pointing about the menu's picture, once each
 //! button was pointed at, draws nothing and takes no memory.
 
+// On the PC only: on the headset the app has a counting allocator of its own.
+#![cfg(not(target_os = "android"))]
 #![expect(
     clippy::disallowed_methods,
     reason = "the test's own starting time; the code under test takes the time as a parameter"

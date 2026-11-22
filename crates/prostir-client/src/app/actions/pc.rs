@@ -55,6 +55,7 @@ impl Model {
                     self.menu.physical_asked.retain(|(a, _)| *a != k);
                 }
             }
+            Action::PhysicalPage(page) => self.menu.physical_page = page,
             Action::NoLimits(on) => {
                 self.settings.no_limits = on;
                 self.saves.mark(persist::File::Settings);

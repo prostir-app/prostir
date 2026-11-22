@@ -917,6 +917,13 @@ impl World {
     /// (see `layout::arrange`), leaving the rest alone: all of them, as they stand to
     /// each other on the PC's desktop (one more of them shown changes the group).
     fn place_physical(&mut self, s: &Settings) {
+        let laid = self.physical_laid(s);
+        self.placements.extend(laid);
+    }
+
+    /// The PC's own displays that show, laid out as one group under the primary
+    /// monitor (see `layout::arrange`).
+    fn physical_laid(&self, s: &Settings) -> Vec<(DisplayKey, Placement)> {
         let physical = self.physical_sizes();
         let laid = self.around_user(layout::arrange(
             s.preset,
@@ -925,10 +932,27 @@ impl World {
             &physical,
             self.curve_factor(s),
         ));
-        for (id, ..) in physical {
-            if let Some(p) = laid.get(&id) {
-                self.placements.insert(id, *p);
+        physical
+            .iter()
+            .filter_map(|(id, ..)| Some((*id, *laid.get(id)?)))
+            .collect()
+    }
+
+    /// The PC's own displays that show and have no place yet get one in the group: all
+    /// of them where none has one; else each where the group puts it next to one placed
+    /// already, wherever the person moved that one (see `layout::kept_to`). Those
+    /// placed stay where they are.
+    fn place_new_physical(&mut self, s: &Settings) {
+        let laid = self.physical_laid(s);
+        let anchor = laid
+            .iter()
+            .find_map(|(id, at)| Some((*at, *self.placements.get(id)?)));
+        for (id, at) in laid {
+            if self.placements.contains_key(&id) {
+                continue;
             }
+            let p = anchor.map_or(at, |(from, to)| layout::kept_to(at, from, to));
+            self.placements.insert(id, p);
         }
     }
 
@@ -1025,7 +1049,7 @@ impl World {
             .iter()
             .any(|(id, _)| self.streams.contains_key(id) && !self.placements.contains_key(id))
         {
-            self.place_physical(s);
+            self.place_new_physical(s);
             placed = true;
         }
         if placed {
@@ -1527,7 +1551,8 @@ impl World {
             return;
         }
         // The first display of the PC itself that shows is lined up as a laptop's
-        // screen; any other one stays where it is.
+        // screen; the others go with it, standing to it as they stood (they are not
+        // lined up, and so cover no monitor the first one does not).
         let lid = self
             .physical()
             .iter()
@@ -1539,6 +1564,7 @@ impl World {
             .map(|p| p.0)
             .filter(|id| Some(*id) != lid)
             .collect();
+        let lid_was = lid.and_then(|id| self.placements.get(&id).copied());
         let sizes: Vec<(DisplayKey, u32, u32)> = self
             .sizes
             .iter()
@@ -1556,6 +1582,14 @@ impl World {
         );
         // Window panels (and anything not laid out) stay as they are.
         self.placements.extend(lined);
+        if let (Some(from), Some(to)) = (lid_was, lid.and_then(|id| self.placements.get(&id))) {
+            let to = *to;
+            for id in &others {
+                if let Some(p) = self.placements.get_mut(id) {
+                    *p = layout::kept_to(*p, from, to);
+                }
+            }
+        }
         self.held = [None, None];
         self.save_layout();
         self.send_layout(now);

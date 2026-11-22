@@ -157,10 +157,12 @@ pub struct UiState {
     /// The monitor picked on the map (its actions show under it).
     pub selected: Option<DisplayKey>,
     /// The PC's own displays shown, on the map: centre and half size as seen, in
-    /// radians.
-    pub physical_seen: Vec<[f32; 4]>,
-    /// The PC's own displays, each with its switch.
+    /// radians, and what they are called.
+    pub physical_seen: Vec<([f32; 4], String)>,
+    /// The PC's own displays, each with its switch, those connected first.
     pub physical: Vec<PhysicalEntry>,
+    /// Which of them the Monitors tab shows, when there are more than fit.
+    pub physical_page: u8,
     pub primary: Option<DisplayKey>,
     /// The screen picked for cinema (see `layout::cinema_choice`).
     pub cinema_screen: Option<DisplayKey>,
@@ -373,6 +375,9 @@ pub enum Action {
     DeleteProfile(usize),
     /// Show these profiles on the Profiles tab (see `UiState::profile_page`).
     ProfilePage(u8),
+    /// Show these displays of the PC on the Monitors tab (see
+    /// `UiState::physical_page`).
+    PhysicalPage(u8),
     Tab(Tab),
     /// Lay everything out again in front of the user, where they look now.
     Recenter,
@@ -1626,9 +1631,6 @@ impl Panel {
             // The list of parts, and the part shown.
             Page::Tab(Tab::Settings(_)) if b.right() <= 300.0 => (44.0, 274.0),
             Page::Tab(Tab::Settings(_)) => (324.0, pw - 44.0),
-            // Two columns of profiles.
-            Page::Tab(Tab::Profiles) if b.right() <= 640.0 => (44.0, 624.0),
-            Page::Tab(Tab::Profiles) => (656.0, pw - 44.0),
             _ => (44.0, pw - 44.0),
         }
     }
@@ -2628,7 +2630,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         .monitors
         .iter()
         .filter_map(|m| m.seen)
-        .chain(s.physical_seen.iter().copied())
+        .chain(s.physical_seen.iter().map(|(seen, _)| *seen))
         .collect();
     let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
     for [cx, cy, hw, hh] in &all {
@@ -2653,8 +2655,29 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             (2.0 * hh * scale - 2.0 * gap).max(8.0),
         )
     };
-    for m in &s.physical_seen {
-        items.push(Item::Box(to_rect(*m), [255, 255, 255, 14]));
+    // The PC's own displays: fainter, each with its name inside, smaller or shortened
+    // where it does not fit (they are switched under the map, not picked on it).
+    for (seen, name) in &s.physical_seen {
+        let r = to_rect(*seen);
+        items.push(Item::Box(r, [255, 255, 255, 14]));
+        let size = (r.height() * 0.32).clamp(SMALLEST, 18.0);
+        if r.width() > 24.0 && r.height() > size + 4.0 {
+            let mut label = text_in(
+                r.width() - 12.0,
+                text(
+                    r.left() + 6.0,
+                    r.top() + r.height() / 2.0 + size * 0.36,
+                    size,
+                    false,
+                    MUTED,
+                    name,
+                ),
+            );
+            if let Item::Text { shorten, .. } = &mut label {
+                *shorten = true;
+            }
+            items.push(label);
+        }
     }
     let selected = s.selected.or(s.primary);
     for m in &s.monitors {
@@ -2857,28 +2880,41 @@ fn scales_of(s: &UiState) -> &[u16] {
     }
 }
 
-/// The PC's own displays from `y`, each on a row: its name, its connector smaller
-/// under it, and its switch (shown or hidden, said by the highlighted option). One not
-/// connected says so and keeps its switch; with as many shown as the PC allows, the
-/// others' "Shown" waits, saying why. As many rows as fit above "Line up"; the rest
-/// counted. Where the next thing goes.
+/// The PC's own displays from `y` (those connected first), each on a row: its name,
+/// its connector smaller under it, and its switch (shown or hidden, said by the
+/// highlighted option). One not connected says so and keeps its switch; with as many
+/// shown as the PC allows, the others' "Shown" waits, saying why. As many rows as fit
+/// above "Line up", a page at a time, the pages turned beside the title. Where the
+/// next thing goes.
 fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f32 {
     let l = &s.texts;
     if s.physical.is_empty() {
         return y - 18.0;
     }
+    // Room above "Line up" and the bottom line.
+    let rows = ((HEIGHT as f32 - 166.0 - y) / 60.0).floor().max(1.0) as usize;
+    let pages = s.physical.len().div_ceil(rows);
+    let page = usize::from(s.physical_page) % pages;
+    let title_room = if pages > 1 { w - PAGER_W - 10.0 } else { w };
     items.push(text_in(
-        w,
+        title_room,
         text(x, y, 21.0, true, SECTION, l.t("pc-displays")),
     ));
+    if pages > 1 {
+        pager(
+            items,
+            l,
+            (x + w, y - 8.0),
+            (page, pages),
+            Action::PhysicalPage,
+        );
+    }
     y += 16.0;
     let max = s.limits.as_ref().map(|l| usize::from(l.physical_max));
     let shown = s.physical.iter().filter(|d| d.shown && d.connected).count();
     let full = max.is_some_and(|max| shown >= max);
-    // Room above "Line up" and the bottom line.
-    let rows = ((HEIGHT as f32 - 150.0 - y) / 60.0).floor().max(1.0) as usize;
     let bw = 128.0;
-    for d in s.physical.iter().take(rows) {
+    for d in s.physical.iter().skip(page * rows).take(rows) {
         items.push(Item::Box(rect(x, y, w, 54.0), [255, 255, 255, 8]));
         let room = w - 2.0 * bw - 10.0 - 32.0;
         let mut name = text_in(room, text(x + 16.0, y + 24.0, 19.0, true, TEXT, &d.name));
@@ -2936,19 +2972,50 @@ fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -
         }
         y += 60.0;
     }
-    if s.physical.len() > rows {
-        let more = s.physical.len() - rows;
-        items.push(text(
-            x,
-            y + 10.0,
+    y + 4.0
+}
+
+/// How wide [`pager`] is.
+const PAGER_W: f32 = 250.0;
+
+/// "‹ Page 2 of 3 ›", its right edge at `right` and its middle at `mid` (x, y): the
+/// buttons turn to the page before and after (`turn` to it), round.
+fn pager(
+    items: &mut Vec<Item>,
+    l: &Texts,
+    (right, mid): (f32, f32),
+    (page, pages): (usize, usize),
+    turn: fn(u8) -> Action,
+) {
+    let to = |p: usize| turn(u8::try_from(p % pages).unwrap_or(0));
+    let (bw, bh) = (44.0, 36.0);
+    items.push(button(
+        rect(right - PAGER_W, mid - bh / 2.0, bw, bh),
+        "‹",
+        Style::Normal,
+        Some(to(page + pages - 1)),
+    ));
+    items.push(button(
+        rect(right - bw, mid - bh / 2.0, bw, bh),
+        "›",
+        Style::Normal,
+        Some(to(page + 1)),
+    ));
+    let label = l.f(
+        "page-of",
+        &[("page", (page + 1).into()), ("pages", pages.into())],
+    );
+    items.push(text_in(
+        PAGER_W - 2.0 * bw - 16.0,
+        text(
+            right - PAGER_W + bw + 8.0,
+            mid + 6.0,
             16.0,
             false,
             MUTED,
-            &l.f("pc-displays-more", &[("count", more.into())]),
-        ));
-        y += 26.0;
-    }
-    y + 4.0
+            &label,
+        ),
+    ));
 }
 
 /// A row with a title, a muted note and one button on the right.
@@ -3752,10 +3819,11 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     }
 }
 
-/// Every profile, ten to a page in two columns, each on a row: its name to switch to
-/// it (the one in use highlighted), "Save here" to save the setup over it and "×" to
-/// delete it (each asks again first); "New profile" saves the setup as one more, and
-/// with more than ten, "More profiles" shows the next ones.
+/// Every profile, ten to a page, two to a row across the page, each with its name to
+/// switch to it (the one in use highlighted), "Save here" to save the setup over it and
+/// "×" to delete it (each asks again first); "New profile" saves the setup as one
+/// more; with more than ten, the pages turn beside it. Under the list, how many there
+/// may be and where they are named.
 fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>) {
     let l = &s.texts;
     let (x, w) = (44.0, WIDTH as f32 - 88.0);
@@ -3764,10 +3832,22 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>
     // Something to save: the PC's monitors.
     let can_save = connected && !s.monitors.is_empty();
     let full = s.profiles.len() >= crate::profiles::MAX_PROFILES;
+    let pages = s.profiles.len().div_ceil(PROFILES_PER_PAGE).max(1);
+    let page = usize::from(s.profile_page) % pages;
+    let pager_room = if pages > 1 { PAGER_W + 20.0 } else { 0.0 };
     items.push(text_in(
-        w - 330.0,
+        w - 330.0 - pager_room,
         text(x, y + 30.0, 21.0, true, SECTION, l.t("profiles")),
     ));
+    if pages > 1 {
+        pager(
+            items,
+            l,
+            (x + w - 320.0, y + 24.0),
+            (page, pages),
+            Action::ProfilePage,
+        );
+    }
     let new = Action::NewProfile;
     let mut b = button(
         rect(x + w - 300.0, y, 300.0, 48.0),
@@ -3797,9 +3877,12 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>
             ));
         }
     }
-    let pages = s.profiles.len().div_ceil(PROFILES_PER_PAGE).max(1);
-    let page = usize::from(s.profile_page) % pages;
     let col_w = (w - 32.0) / 2.0;
+    let on_page = s
+        .profiles
+        .len()
+        .saturating_sub(page * PROFILES_PER_PAGE)
+        .min(PROFILES_PER_PAGE);
     for (k, (i, name)) in s
         .profiles
         .iter()
@@ -3808,8 +3891,8 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>
         .take(PROFILES_PER_PAGE)
         .enumerate()
     {
-        let cx = x + (k / 5) as f32 * (col_w + 32.0);
-        let ry = y + (k % 5) as f32 * 62.0;
+        let cx = x + (k % 2) as f32 * (col_w + 32.0);
+        let ry = y + (k / 2) as f32 * 62.0;
         let active = s.active_profile == Some(i);
         let (save_w, del_w) = (170.0, 52.0);
         let name_w = col_w - save_w - del_w - 20.0;
@@ -3867,19 +3950,9 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>
             Some(Action::DeleteProfile(i)),
         ));
     }
-    y += 5.0 * 62.0 + 10.0;
-    if pages > 1 {
-        let next = u8::try_from((page + 1) % pages).unwrap_or(0);
-        items.push(button(
-            rect(x, y, 300.0, 48.0),
-            &l.f(
-                "profiles-more",
-                &[("page", (page + 1).into()), ("pages", pages.into())],
-            ),
-            Style::Normal,
-            Some(Action::ProfilePage(next)),
-        ));
-        y += 70.0;
+    y += on_page.div_ceil(2) as f32 * 62.0;
+    if s.profiles.is_empty() {
+        y += 90.0;
     }
     if full {
         items.push(text(
@@ -4094,11 +4167,12 @@ fn settings_page(
                     (l.t("on"), Action::NoLimits(true), on, true),
                 ],
             );
-            for (k, line) in wrap(l.t("no-limits-note"), 18.0, w).iter().enumerate() {
+            // What it costs, under its own switch.
+            for (k, line) in wrap(l.t("no-limits-note"), 17.0, half).iter().enumerate() {
                 items.push(text(
-                    cx,
-                    y - 18.0 + k as f32 * 24.0,
-                    18.0,
+                    cx + half + 16.0,
+                    y2 - 18.0 + k as f32 * 23.0,
+                    17.0,
                     false,
                     MUTED,
                     line,
@@ -4880,7 +4954,8 @@ mod tests {
                 },
             ],
             selected: None,
-            physical_seen: vec![[0.0, -0.55, 0.35, 0.22]],
+            physical_seen: vec![([0.0, -0.55, 0.35, 0.22], "DELL U2720Q".into())],
+            physical_page: 0,
             physical: vec![
                 PhysicalEntry {
                     id: k(100),
@@ -5107,6 +5182,55 @@ mod tests {
         assert_eq!(rows[0].1, Some(Action::ShowPhysical(k(100), true)));
         s.physical.clear();
         assert!(!says(&s, crate::lang::builtin("uk").t("pc-displays")));
+    }
+
+    /// More displays of the PC than fit above "Line up": a page at a time, the pages
+    /// turned beside the title, round; every one of them can be switched on some page.
+    #[test]
+    fn every_pc_display_can_be_switched_page_by_page() {
+        let mut s = sample_state();
+        s.tab = Tab::Monitors;
+        s.selected = Some(k(102));
+        s.physical = (0..7)
+            .map(|n| PhysicalEntry {
+                id: k(200 + n),
+                name: format!("DP-{n}"),
+                connector: None,
+                shown: false,
+                connected: true,
+            })
+            .collect();
+        let mut switched = std::collections::BTreeSet::new();
+        let mut pages = 0;
+        for page in 0..4 {
+            s.physical_page = page;
+            let items = Panel::new().build(&s);
+            let turns: Vec<Action> = items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Button {
+                        action: Some(a @ Action::PhysicalPage(_)),
+                        ..
+                    } => Some(*a),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(turns.len(), 2, "back and on");
+            for i in &items {
+                if let Item::Button {
+                    key: Some(Action::ShowPhysical(id, true)),
+                    ..
+                } = i
+                {
+                    switched.insert(*id);
+                }
+            }
+            pages += 1;
+            let mut p = Panel::new();
+            p.set_state(&s);
+            assert!(p.overflows().is_empty(), "{:?}", p.overflows());
+        }
+        assert_eq!(switched.len(), 7, "after {pages} pages");
     }
 
     /// The scale: of a monitor picked, where the PC makes monitors at its scales,
@@ -5372,7 +5496,7 @@ mod tests {
         st.confirm_save = None;
         st.confirm_delete = Some(0);
         assert!(profile_buttons(&st).contains(&(
-            "Delete? Again".into(),
+            "Press again to delete".into(),
             Style::Armed,
             Some(Action::DeleteProfile(0))
         )));
@@ -5573,7 +5697,13 @@ mod tests {
                     items
                         .iter()
                         .filter_map(|i| match i {
-                            Item::Text { text, size, .. } => Some((text.clone(), *size)),
+                            // Names are the PC's too, shortened where long.
+                            Item::Text {
+                                text,
+                                size,
+                                shorten: false,
+                                ..
+                            } => Some((text.clone(), *size)),
                             // Names are the PC's, not the menu's texts.
                             Item::Button {
                                 label,
@@ -6090,7 +6220,11 @@ mod tests {
         let mut st = sample_state();
         st.tab = Tab::Monitors;
         st.primary = Some(k(primary));
-        st.physical_seen = spots.get(&MIRROR_ID).copied().into_iter().collect();
+        st.physical_seen = spots
+            .get(&MIRROR_ID)
+            .map(|seen| (*seen, "eDP-1".to_owned()))
+            .into_iter()
+            .collect();
         st.monitors = monitors
             .iter()
             .map(|&(id, width, height, ..)| MonitorEntry {

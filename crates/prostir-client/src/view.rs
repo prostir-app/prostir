@@ -106,8 +106,12 @@ pub fn build(m: &Model) -> UiState {
             .physical()
             .iter()
             .filter(|(id, _)| world.streams(*id))
-            .filter_map(|(id, _)| spot(*id))
+            .filter_map(|(id, _)| {
+                let name = physical::label(m.display(*id)?, m.texts());
+                Some((spot(*id)?, name))
+            })
             .collect(),
+        physical_page: menu.physical_page,
         physical: match (session.main(), m.pc().displays.as_ref()) {
             (Some(pc), Some(displays)) => {
                 // Asked and not answered yet: as asked.

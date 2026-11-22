@@ -306,7 +306,14 @@ fn main() {
         primary: Some(k(1)),
         cinema_screen: None,
         selected: std::env::var("SELECTED").is_ok().then_some(k(1)),
-        physical_seen: vec![[-0.35, -0.55, 0.2, 0.13], [0.15, -0.58, 0.3, 0.17]],
+        physical_seen: vec![
+            ([-0.35, -0.55, 0.2, 0.13], "DELL U2720Q".into()),
+            ([0.15, -0.58, 0.3, 0.17], texts.t("laptop-screen").into()),
+        ],
+        physical_page: std::env::var("PHYSICAL_PAGE")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0),
         physical: physical(&texts),
         audio_wanted: true,
         mic_wanted: true,

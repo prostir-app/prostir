@@ -279,6 +279,8 @@ pub struct Menu {
     pub confirm_forget: Option<(usize, Instant)>,
     /// Which profiles the Profiles tab shows, when there are many.
     pub profile_page: u8,
+    /// Which displays of the PC the Monitors tab shows, when there are more than fit.
+    pub physical_page: u8,
     /// The scale a monitor added gets, percent.
     pub add_scale: u16,
     /// Displays of the PC itself asked to be shown or hidden, the last ask of each
@@ -480,6 +482,7 @@ impl Model {
                 confirm_delete: None,
                 confirm_forget: None,
                 profile_page: 0,
+                physical_page: 0,
                 add_scale: 100,
                 physical_asked: Vec::new(),
                 notes: Notes::default(),

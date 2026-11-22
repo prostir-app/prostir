@@ -183,6 +183,7 @@ hs-profile-rename = Перейменувати
 hs-profile-rename-named = Перейменувати { $name }
 hs-profile-name = Нова назва для { $name }
 hs-profile-save = Зберегти
+hs-profile-number = Назва не може бути лише числом: число означає місце профілю.
 hs-profiles-note = Назва з’являється в меню шолома. Порожня назва повертає номер.
 
 ## Сполучення

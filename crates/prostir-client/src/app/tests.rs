@@ -938,10 +938,11 @@ fn the_pcs_displays_stand_as_on_its_desktop() {
     // As on the desktop: the monitor's top higher, sizes in proportion.
     assert!(right.position.y > laptop.position.y);
     assert!((right.width / laptop.width - 2560.0 / 1920.0).abs() < 0.01);
-    // Next to each other, without a gap: the panel's right edge at the monitor's left.
+    // Next to each other, a hair apart: the panel's right edge at the monitor's left.
     let edge =
         |p: &Placement, s: f32| p.position + p.rotation * Vec3::new(s * p.width / 2.0, 0.0, 0.0);
-    assert!((edge(&right, -1.0) - edge(&laptop, 1.0)).dot(side).abs() < 1e-3);
+    let gap = (edge(&right, -1.0) - edge(&laptop, 1.0)).dot(side);
+    assert!(gap > 0.0 && gap < 0.01, "a hair apart: {gap}");
 }
 
 /// A monitor added gets the scale chosen, where the PC makes monitors at its scales;
@@ -1087,7 +1088,7 @@ fn profiles_are_a_list_the_pc_hears_of() {
     sim.command(
         21,
         Command::Profile {
-            name: "work".into(),
+            name: "Work".into(),
         },
     );
     let asked = requests(&sim.take());

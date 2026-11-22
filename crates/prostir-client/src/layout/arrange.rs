@@ -75,20 +75,33 @@ pub fn arrange<K: Key>(
     out
 }
 
-/// Where each of `physical` is on one plane, in the desktop's pixels: as on the PC's
-/// desktop when each says where it is there, else side by side in their order, tops
-/// level (in their streams' pixels).
+/// Whether two desktop rectangles (x, y, width, height) cover some of the same pixels.
+fn cover_each_other(a: [i32; 4], b: [i32; 4]) -> bool {
+    let (a, b) = (a.map(i64::from), b.map(i64::from));
+    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+}
+
+/// Where each of `physical` is on one plane, in the desktop's pixels, in their order:
+/// as on the PC's desktop when each says where it is there and none covers another;
+/// else side by side, tops level (in their streams' pixels). Displays that show the
+/// same (one desktop cloned onto both) would stand on top of each other: side by
+/// side, each can be seen.
 fn desk_rects<K: Key>(physical: &[Physical<K>]) -> Vec<(K, [f32; 4])> {
-    if physical
+    let rects: Option<Vec<[i32; 4]>> = physical
         .iter()
-        .all(|p| p.3.is_some_and(|r| r[2] > 0 && r[3] > 0))
-    {
+        .map(|p| p.3.filter(|r| r[2] > 0 && r[3] > 0))
+        .collect();
+    let apart = |rects: &[[i32; 4]]| {
+        rects
+            .iter()
+            .enumerate()
+            .all(|(i, a)| rects[i + 1..].iter().all(|b| !cover_each_other(*a, *b)))
+    };
+    if let Some(rects) = rects.filter(|r| apart(r)) {
         return physical
             .iter()
-            .filter_map(|p| {
-                let [x, y, w, h] = p.3?;
-                Some((p.0, [x as f32, y as f32, w as f32, h as f32]))
-            })
+            .zip(rects)
+            .map(|(p, [x, y, w, h])| (p.0, [x as f32, y as f32, w as f32, h as f32]))
             .collect();
     }
     let mut x = 0.0;
@@ -129,9 +142,14 @@ fn group_size<K: Key>(physical: &[Physical<K>]) -> (u32, u32) {
     (size(r - l), size(b - t))
 }
 
+/// The gap between two displays of the PC glued to each other, in the desktop's
+/// pixels: neighbours on the desktop never overlap where they meet.
+const GLUE_GAP: f32 = 2.0;
+
 /// Each of `physical` placed within the group placed at `at` (its box, the size
 /// [`group_size`] says): side by side and above one another as on the PC's desktop,
-/// on the group's plane, each as wide as its share of the box.
+/// on the group's plane, a little apart ([`GLUE_GAP`]); each in the middle of its
+/// cell, as large as its stream's shape lets it be within the cell.
 pub fn spread<K: Key>(physical: &[Physical<K>], at: Placement) -> Vec<(K, Placement)> {
     let rects = desk_rects(physical);
     let [l, t, r, b] = bounds(&rects);
@@ -139,16 +157,33 @@ pub fn spread<K: Key>(physical: &[Physical<K>], at: Placement) -> Vec<(K, Placem
     let (mx, my) = ((l + r) / 2.0, (t + b) / 2.0);
     rects
         .iter()
-        .map(|&(id, [x, y, w, h])| {
+        .zip(physical)
+        .map(|(&(id, [x, y, w, h]), &(_, sw, sh, _))| {
             let offset = Vec3::new((x + w / 2.0 - mx) * per, -(y + h / 2.0 - my) * per, 0.0);
+            let (cw, ch) = ((w - GLUE_GAP).max(1.0), (h - GLUE_GAP).max(1.0));
+            let aspect = sw.max(1) as f32 / sh.max(1) as f32;
             let p = Placement {
                 position: at.position + at.rotation * offset,
                 rotation: at.rotation,
-                width: w * per,
+                width: cw.min(ch * aspect) * per,
             };
             (id, p)
         })
         .collect()
+}
+
+/// `p`, which stood so to `from`, standing the same way to `to`: turned, carried
+/// and made as much larger or smaller as `to` is than `from`. A display of the PC
+/// keeps its place in the group when another one moves it (see `World::place_missing`
+/// and `World::tidy_up`).
+pub fn kept_to(p: Placement, from: Placement, to: Placement) -> Placement {
+    let k = to.width / from.width.max(1e-6);
+    let turn = to.rotation * from.rotation.inverse();
+    Placement {
+        position: to.position + turn * (p.position - from.position) * k,
+        rotation: (turn * p.rotation).normalize(),
+        width: p.width * k,
+    }
 }
 
 /// Where the arrangement is seen from and how it is turned: from `center` (eye, yaw),

@@ -27,22 +27,33 @@ pub enum Does {
     Fail(ErrorCode, String),
 }
 
-/// What to do for `asked`, with `profiles` saved. A kind this app does not know is
-/// unsupported.
-pub fn what_to_do(asked: &Asked<Command>, profiles: &Slots) -> Does {
+/// What to do for `asked`, with `profiles` saved and `menu_name(n)` what the menu
+/// calls profile `n` ("Profile 2", for a command that names it so; see
+/// `profiles::find`). A kind this app does not know is unsupported.
+pub fn what_to_do(
+    asked: &Asked<Command>,
+    profiles: &Slots,
+    menu_name: &dyn Fn(usize) -> String,
+) -> Does {
     let Asked::Known(command) = asked else {
         return Does::Fail(ErrorCode::UNSUPPORTED, String::new());
     };
     match command {
         Command::Recenter => Does::Act(Action::Recenter),
-        Command::Profile { name } => match profiles::find(profiles, name) {
+        Command::Profile { name } => match profiles::find(profiles, name, menu_name) {
             Some(i) => Does::Profile(i),
             None => Does::Fail(ErrorCode::NO_SUCH_PROFILE, name.clone()),
         },
-        Command::RenameProfile { profile, name } => match profiles::find(profiles, profile) {
-            Some(i) => Does::Rename(i, profiles::clean_name(name)),
-            None => Does::Fail(ErrorCode::NO_SUCH_PROFILE, profile.clone()),
-        },
+        // A number names a profile by its place: never a name.
+        Command::RenameProfile { name, .. } if profiles::is_number(name) => {
+            Does::Fail(ErrorCode::BAD_ARGUMENT, name.clone())
+        }
+        Command::RenameProfile { profile, name } => {
+            match profiles::find(profiles, profile, menu_name) {
+                Some(i) => Does::Rename(i, profiles::clean_name(name)),
+                None => Does::Fail(ErrorCode::NO_SUCH_PROFILE, profile.clone()),
+            }
+        }
         Command::Cinema { on } => Does::Act(Action::Cinema(*on)),
         Command::FocusMode { on } => Does::Act(Action::Focus(*on)),
         Command::Distance { steps } => Does::Closer(*steps),
@@ -79,7 +90,7 @@ mod tests {
                 let Ok(asked) = decode::<Asked<Command>>(&bytes) else {
                     continue;
                 };
-                let does = what_to_do(&asked, &Vec::new());
+                let does = what_to_do(&asked, &Vec::new(), &menu_name);
                 assert!(
                     !matches!(does, Does::Act(Action::SetMic(_) | Action::AskMic)),
                     "kind {kind} {body:?} comes to {does:?}"
@@ -89,9 +100,14 @@ mod tests {
         let set_mic = decode::<Asked<Command>>(&[9, 1]).unwrap();
         assert_eq!(set_mic, Asked::Unknown { kind: 9 });
         assert_eq!(
-            what_to_do(&set_mic, &Vec::new()),
+            what_to_do(&set_mic, &Vec::new(), &menu_name),
             Does::Fail(ErrorCode::UNSUPPORTED, String::new())
         );
+    }
+
+    /// How a menu in a language of its own calls profile `n`.
+    fn menu_name(n: usize) -> String {
+        format!("Профайл {n}")
     }
 
     /// Three profiles, the second named "Робота".
@@ -110,20 +126,48 @@ mod tests {
         vec![p.clone(), work, p]
     }
 
-    /// A profile is named by its number from 1 (with the menu's word before it or
-    /// not) or by the name it was given; renamed so, or by its number again with an
-    /// empty name.
+    /// A profile is named by its number from 1 (alone, or with the word a menu calls
+    /// it by in any language) or by the name it was given, exactly; renamed so, or by
+    /// its number again with an empty name; a number is never a name.
     #[test]
     fn profiles_by_number_or_name() {
-        let profiles = three();
-        let does = |c: Command| what_to_do(&Asked::Known(c), &profiles);
-        for name in ["робота", " Робота ", "2", "Profile 2"] {
+        let mut profiles = three();
+        let does = |c: Command, p: &Slots| what_to_do(&Asked::Known(c), p, &menu_name);
+        for name in [" Робота ", "2", "Profile 2", "Профіль 2", "Профайл 2"] {
             assert_eq!(
-                does(Command::Profile { name: name.into() }),
+                does(Command::Profile { name: name.into() }, &profiles),
                 Does::Profile(1),
                 "{name}"
             );
         }
+        // A typo, another word before the number, another case: none of them.
+        for name in ["Робта", "робота", "Monitor 2", "Prfile 2"] {
+            assert!(
+                matches!(
+                    does(Command::Profile { name: name.into() }, &profiles),
+                    Does::Fail(ErrorCode::NO_SUCH_PROFILE, _)
+                ),
+                "{name}"
+            );
+        }
+        // Profile 3 named "1" (as an older build could keep it): "1" is profile 1.
+        profiles[2].name = Some("1".into());
+        assert_eq!(
+            does(Command::Profile { name: "1".into() }, &profiles),
+            Does::Profile(0)
+        );
+        assert!(matches!(
+            does(
+                Command::RenameProfile {
+                    profile: "3".into(),
+                    name: " 1 ".into(),
+                },
+                &profiles
+            ),
+            Does::Fail(ErrorCode::BAD_ARGUMENT, _)
+        ));
+        let profiles = three();
+        let does = |c: Command| what_to_do(&Asked::Known(c), &profiles, &menu_name);
         assert_eq!(
             does(Command::RenameProfile {
                 profile: "3".into(),
@@ -150,7 +194,7 @@ mod tests {
     #[test]
     fn commands_are_the_menus_actions() {
         let profiles = three();
-        let does = |c: Command| what_to_do(&Asked::Known(c), &profiles);
+        let does = |c: Command| what_to_do(&Asked::Known(c), &profiles, &menu_name);
         assert_eq!(does(Command::LineUp), Does::Act(Action::Tidy));
         for name in [" 2 ", "Profile 2", "Профіль 2"] {
             assert_eq!(
@@ -182,7 +226,7 @@ mod tests {
             Does::Act(Action::NoLimits(true))
         );
         assert_eq!(
-            what_to_do(&Asked::Unknown { kind: 200 }, &profiles),
+            what_to_do(&Asked::Unknown { kind: 200 }, &profiles, &menu_name),
             Does::Fail(ErrorCode::UNSUPPORTED, String::new())
         );
     }

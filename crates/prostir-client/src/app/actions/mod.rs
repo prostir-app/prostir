@@ -88,6 +88,7 @@ impl Model {
             | Action::SetEncoding(_)
             | Action::SetAudio(_)
             | Action::ShowPhysical(..)
+            | Action::PhysicalPage(_)
             | Action::NoLimits(_)
             | Action::SetMic(_)
             | Action::AskMic

@@ -138,9 +138,9 @@ pub struct UiState {
     /// The volume while its slider is held.
     pub volume_drag: Option<u8>,
     pub forget_ask: Option<String>,
-    /// A profile of a headset being named anew: the headset's key, the profile's place
-    /// in its list, and the name typed so far.
-    pub rename: Option<(String, usize, String)>,
+    /// A profile of a headset being named anew: the headset's key, what names the
+    /// profile to the headset (its name, else its number), and the name typed so far.
+    pub rename: Option<(String, String, String)>,
     pub code: String,
     /// The code sent, and the revision of the state with its result (none while the
     /// answer is awaited).
@@ -674,7 +674,13 @@ impl App {
                     egui::ScrollArea::vertical()
                         .auto_shrink(false)
                         .show(ui, |ui| {
-                            ui.set_max_width(ui.available_width().min(sh.content_max_width));
+                            // Room on the right for the scroll bar, which floats over the
+                            // content otherwise and covers the edge of its cards.
+                            let bar = ui.spacing().scroll.bar_width
+                                + ui.spacing().scroll.bar_outer_margin;
+                            ui.set_max_width(
+                                (ui.available_width() - bar).min(sh.content_max_width),
+                            );
                             if let Some(n) = &self.ui.notice {
                                 notice(ui, &tk, n, &mut actions);
                             }

@@ -179,7 +179,7 @@ only guests are connected, commands are refused with `NotAllowed`. Without a hea
 |---|---|
 | `recenter`, `line_up`, `show_mouse`, `reset_arrangement` | |
 | `profile` | `name` (string): the profile's name, or its number from 1 as the headset's menu lists them |
-| `rename_profile` | `profile` (string, its name or number), `name` (string, 64 bytes at most; empty: called by its number again): the new name shows in `headsets[].session.profiles` before the answer |
+| `rename_profile` | `profile` (string, its name or number), `name` (string, 64 bytes at most; empty: called by its number again; a number only is `BadArgument`): the new name shows in `headsets[].session.profiles` before the answer |
 | `cinema`, `focus`, `follow`, `no_limits` | `on` (bool) |
 | `distance` | `steps` (-128 to 127; below 0 is closer) |
 | `preset` | `preset` (0 to 255) |

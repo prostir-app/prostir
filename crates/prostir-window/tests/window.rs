@@ -48,18 +48,29 @@ fn pairing_by_name_and_keyboard() {
 }
 
 /// The headset's profiles: one is renamed by name and keyboard (its new name typed and
-/// sent with Enter), one is given back its number with an empty name, and the one in
-/// use says so.
+/// sent with Enter, the profile named by its number, as it has no name), one by its
+/// name is given back its number with an empty name; a number only is never sent as
+/// a name; the one in use says so, on one row even where two have its name.
 #[test]
 fn a_profile_is_renamed() {
     let mock = Mock::connected().edit(|s| {
         let session = s.headsets[0].session.as_mut().unwrap();
-        session.profiles = vec![String::new(), "Робота".into()];
+        session.profiles = vec![String::new(), "Робота".into(), "Кіно".into()];
         session.profile = Some("Робота".into());
     });
     let (mut h, handle) = window(mock, Setup::default());
     open(&mut h, Page::Headsets);
-    h.get_by_label("Увімкнено зараз");
+    assert_eq!(h.query_all_by_label("Увімкнено зараз").count(), 1);
+    press(&mut h, "Перейменувати Профіль 1");
+    h.get_by_label("Нова назва для Профіль 1").focus();
+    h.run_steps(1);
+    h.get_by_label("Нова назва для Профіль 1").type_text("12");
+    h.run_steps(2);
+    h.key_press(Key::Enter);
+    h.run_steps(4);
+    assert!(handle.calls().is_empty(), "a number only is not a name");
+    h.get_by_label("Назва не може бути лише числом: число означає місце профілю.");
+    press(&mut h, "Скасувати");
     press(&mut h, "Перейменувати Профіль 1");
     assert!(handle.calls().is_empty(), "not before it is saved");
     h.get_by_label("Нова назва для Профіль 1").focus();
@@ -77,7 +88,9 @@ fn a_profile_is_renamed() {
         }]
     );
     h.get_by_label("Перейменувати Ігри");
-    press(&mut h, "Перейменувати Робота");
+    let session = handle.state().headsets[0].session.clone().unwrap();
+    assert_eq!(session.profiles, ["Ігри", "Робота", "Кіно"]);
+    press_as(&mut h, Some(Role::Button), "Перейменувати Робота");
     h.get_by_label("Нова назва для Робота").focus();
     h.run_steps(1);
     for _ in 0.."Робота".chars().count() {
@@ -88,11 +101,27 @@ fn a_profile_is_renamed() {
     assert_eq!(
         handle.calls().last(),
         Some(&Request::RenameProfile {
-            profile: "2".into(),
+            profile: "Робота".into(),
             name: String::new()
         })
     );
     h.get_by_label("Перейменувати Профіль 2");
+
+    // Two of one name: one of them in use, one of them renamed.
+    let mock = Mock::connected().edit(|s| {
+        let session = s.headsets[0].session.as_mut().unwrap();
+        session.profiles = vec!["Робота".into(), "Робота".into()];
+        session.profile = Some("Робота".into());
+    });
+    let (mut h, _) = window(mock, Setup::default());
+    open(&mut h, Page::Headsets);
+    assert_eq!(h.query_all_by_label("Увімкнено зараз").count(), 1);
+    h.query_all_by_label("Перейменувати Робота")
+        .next()
+        .unwrap()
+        .click();
+    h.run_steps(2);
+    assert_eq!(h.query_all_by_label("Нова назва для Робота").count(), 1);
 }
 
 #[test]

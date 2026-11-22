@@ -375,11 +375,14 @@ fn a_monitor_gets_another_scale() {
 }
 
 /// Every display of the PC seen for the first time shows in the headset (the PC's
-/// displays wanted there), not only the one the desktop starts with: each streams.
+/// displays wanted there), not only the one the desktop starts with, each streaming,
+/// as many as the headset may show without "No limits": of five, four.
 #[test]
 fn every_display_of_the_pc_shows_at_first() {
     let options = Options {
-        physical: "HDMI-A-1=DEL 0x1 0@640x360;DP-2=LG 0x2 0@640x360".into(),
+        physical: "HDMI-A-1=DEL 0x1 0@640x360;DP-1=LG 0x2 0@640x360;DP-2=LG 0x3 0@640x360;\
+                   DP-3=LG 0x4 0@640x360;DP-4=LG 0x5 0@640x360"
+            .into(),
         ..Options::default()
     };
     let dir = TestDir::new("physical-all");
@@ -388,14 +391,16 @@ fn every_display_of_the_pc_shows_at_first() {
     let pc = Pc::start(&dir, &options);
     let mut headset = connect(&pc, &mut keys);
     headset
-        .wait(SOON, "both displays of the PC shown and streaming", |v| {
+        .wait(SOON, "four displays of the PC shown and streaming", |v| {
             let shown: Vec<_> = v
                 .displays()
                 .iter()
                 .filter(|d| d.is_shown_physical())
                 .map(|d| d.id)
                 .collect();
-            shown.len() == 2
+            let all = v.displays().iter().filter(|d| d.is_physical()).count();
+            all == 5
+                && shown.len() == 4
                 && shown.iter().all(|id| {
                     v.streams
                         .get(id)

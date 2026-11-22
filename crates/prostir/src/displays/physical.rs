@@ -140,8 +140,9 @@ impl Displays {
 
     /// A display of the PC seen for the first time: a new number (the laptop screen of
     /// earlier versions keeps 100 and its place), shown while the PC's displays are
-    /// wanted in the headset (`mirror`) and fewer than the headset may show without
-    /// "No limits" are shown and connected: every display of the PC shows at first, as
+    /// wanted in the headset (`mirror`), fewer than the headset may show without "No
+    /// limits" are shown and connected, and a headset connected now decodes one more
+    /// stream (`HeadsetCaps.streams_max`): every display of the PC shows at first, as
     /// it stands on the desktop, and the person hides those not needed. Known by its
     /// EDID where no other connected display says the same, else by its connector.
     fn found_physical(
@@ -175,7 +176,17 @@ impl Displays {
             .physical()
             .filter(|s| s.is_shown_physical() && !matches!(s.state, ScreenState::Absent))
             .count();
-        let shown = self.settings.mirror && shown_now < usize::from(crate::publish::PHYSICAL_MAX);
+        // Nor more streams than a headset connected now decodes at once.
+        let streams = self
+            .router
+            .headsets()
+            .iter()
+            .map(streams_max)
+            .min()
+            .unwrap_or(usize::MAX);
+        let shown = self.settings.mirror
+            && shown_now < usize::from(crate::publish::PHYSICAL_MAX)
+            && self.stream_count() < streams;
         self.physical_seen.insert(id, now_secs());
         info!(
             "{} is {id} ({}), {}",

@@ -155,7 +155,7 @@ pc-display-shown = Показано
 pc-display-hidden = Приховано
 pc-displays = Екрани ПК
 pc-display-limit = досягнуто межі ПК
-pc-displays-more = І ще { $count }
+page-of = Сторінка { $page } з { $pages }
 scale = Масштаб
 monitors-line-up = Вирівняти: прибрати шви (кнопка A)
 add-monitor = Додати монітор
@@ -186,7 +186,6 @@ profile-new = Новий профіль
 profile-save-here = Зберегти сюди
 profile-delete-confirm = Видалити? Ще раз
 profiles-none = Розставте монітори й натисніть «Новий профіль»: розстановка збережеться, і до неї можна повернутися одним натисканням.
-profiles-more = Ще профілі ({ $page } з { $pages })
 profiles-at-most =
     { $count ->
         [one] Щонайбільше { $count } профіль
@@ -348,7 +347,7 @@ note-display-shown = Екран ПК показано
 note-display-hidden = Екран ПК приховано
 note-scale = Масштаб змінено
 note-no-limits-on = Можна більше моніторів і екранів
-note-no-limits-off = Межі, які радить Prostir
+note-no-limits-off = Знову рекомендовані межі
 note-sound-headset = Звук ПК грає в шоломі
 note-sound-pc = Звук ПК грає на ПК
 note-encoding = Налаштування відео застосовано

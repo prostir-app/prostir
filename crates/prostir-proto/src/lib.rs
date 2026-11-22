@@ -187,8 +187,10 @@ const MAX_HOST_PAYLOAD: u32 = 64 * 1024 * 1024;
 /// Largest message from the PC before the session is open ([`HostMsg::read_setup`]):
 /// the PC is not trusted yet, and nothing it sends then is big.
 const MAX_SETUP_PAYLOAD: u32 = 64 * 1024;
-/// Largest message from the headset: the biggest real one is `Open` with the
-/// headset's state (a few hundred bytes) or a slice of microphone sound (under 1 KiB).
+/// Largest message from the headset: the biggest real ones are `Open` with the
+/// headset's state (a few hundred bytes; up to about 2.2 KiB with 32 profiles of the
+/// longest names, also as the `Profiles` part alone) and a slice of microphone sound
+/// (under 1 KiB).
 /// A peer is not trusted yet when its first messages arrive, so this keeps what it can
 /// make the PC allocate small.
 const MAX_CLIENT_PAYLOAD: u32 = 64 * 1024;
@@ -390,12 +392,12 @@ wire_enum! {
         /// Part, one for each kind: the headset's switch for its microphone (or camera),
         /// and whether the system lets it record.
         136 => UpState { part: UpState },
-        /// The headset starts an up stream `up` (the microphone) of `kind`, in `format`.
-        /// In the sound lane, so it never overtakes the stream's data.
-        139 => UpStart { up: u8, kind: UpKind, format: UpFormat },
         /// Part: the profiles saved in the headset, their names and the one in use (from
         /// 0.2.0 step 7.10; an older PC skips it).
         143 => Profiles { part: Profiles },
+        /// The headset starts an up stream `up` (the microphone) of `kind`, in `format`.
+        /// In the sound lane, so it never overtakes the stream's data.
+        139 => UpStart { up: u8, kind: UpKind, format: UpFormat },
         /// A piece of up stream `up` (10 ms of the microphone).
         140 => Up {
             up: u8,

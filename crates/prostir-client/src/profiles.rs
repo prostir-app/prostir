@@ -29,38 +29,64 @@ pub fn empty() -> Slots {
     Vec::new()
 }
 
-/// A name given to a profile, as it is kept: on one line, without spaces around it,
-/// at most as long as the protocol carries; none when nothing is left.
+/// Characters that turn the direction of text around (bidi overrides, embeddings and
+/// isolates): a name with them could show something other than what it says.
+fn turns_text(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Whether `name` is a number only: what names a profile by its place, never a name.
+pub fn is_number(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A name given to a profile, as it is kept: on one line, without characters that
+/// turn the text around and without spaces around it, at most as long as the protocol
+/// carries; none when nothing is left, or only a number (which names a profile by its
+/// place).
 pub fn clean_name(name: &str) -> Option<String> {
     let one_line: String = name
         .chars()
+        .filter(|c| !turns_text(*c))
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     let name = prostir_proto::state::clip(one_line.trim(), MAX_DISPLAY_NAME);
     let name = name.trim();
-    (!name.is_empty()).then(|| name.to_owned())
+    (!name.is_empty() && !is_number(name)).then(|| name.to_owned())
 }
 
-/// The profile a command names (`2`, `Profile 2`, `Профіль 2`, or the name it was
-/// given): its place in the list. A name given to a profile counts first.
-pub fn find(profiles: &Slots, named: &str) -> Option<usize> {
+/// How the built-in languages call profile number `n` (`Profile 2`, `Профіль 2`), from
+/// their files.
+fn builtin_names(n: usize) -> impl Iterator<Item = String> {
+    crate::lang::BUILTIN.iter().filter_map(move |(_, ftl)| {
+        let line = ftl.lines().find_map(|l| l.strip_prefix("profile-n = "))?;
+        Some(line.replace("{ $n }", &n.to_string()))
+    })
+}
+
+/// The profile a command names, its place in the list: a number only is its number
+/// from 1; else the name it was given, exactly; else the number as a menu calls it
+/// (`Profile 2`, `Профіль 2`, or `menu_name(2)`, the menu's own language).
+pub fn find(profiles: &Slots, named: &str, menu_name: &dyn Fn(usize) -> String) -> Option<usize> {
     let named = named.trim();
-    profiles
+    let number = |n: usize| (1..=profiles.len()).contains(&n).then(|| n - 1);
+    if is_number(named) {
+        return named.parse::<usize>().ok().and_then(number);
+    }
+    if let Some(i) = profiles
         .iter()
-        .position(|p| {
-            p.name
-                .as_deref()
-                .is_some_and(|n| n.to_lowercase() == named.to_lowercase())
-        })
-        .or_else(|| {
-            named
-                .split_whitespace()
-                .next_back()?
-                .parse::<usize>()
-                .ok()
-                .filter(|n| (1..=profiles.len()).contains(n))
-                .map(|n| n - 1)
-        })
+        .position(|p| p.name.as_deref() == Some(named))
+    {
+        return Some(i);
+    }
+    let n = named
+        .split_whitespace()
+        .next_back()?
+        .parse::<usize>()
+        .ok()?;
+    let called = menu_name(n) == named || builtin_names(n).any(|m| m == named);
+    called.then(|| number(n)).flatten()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -566,6 +592,10 @@ mod tests {
         assert_eq!(clean_name(" \n "), None);
         let long = clean_name(&"ї".repeat(100)).unwrap();
         assert_eq!(long.len(), MAX_DISPLAY_NAME);
+        // Turning the text around, or a number only: not kept.
+        assert_eq!(clean_name("\u{202E}krow\u{202C}"), Some("krow".into()));
+        assert_eq!(clean_name(" 12 "), None);
+        assert_eq!(clean_name("Room 12"), Some("Room 12".into()));
     }
 
     /// The files of the builds with three slots, numbers skipped, read in their order;

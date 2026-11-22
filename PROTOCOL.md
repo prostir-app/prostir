@@ -1051,16 +1051,18 @@ host that names capability 10 (monitors with a scale). Kind 8 is retired
 (`RETIRED_REQUEST_KINDS`) and never used.
 
 A display of the host seen for the first time is shown in the headset, while the
-person wants the host's displays there and fewer than the host's `physical_max`
-without "No limits" are shown: at first every display of the host shows, standing to
-the others as on its desktop (`Display.desk`), and the person hides those not needed.
+person wants the host's displays there, fewer than the host's `physical_max`
+without "No limits" are shown, and a headset connected then decodes one more stream:
+at first every display of the host shows, standing to the others as on its desktop
+(`Display.desk`; side by side where they cover each other, as a cloned desktop's do),
+and the person hides those not needed.
 
 ### Commands
 
 | `kind` | Command | Fields | What the headset does |
 |---:|---|---|---|
 | 1 | `Recenter` | | Brings everything in front of the user. |
-| 2 | `Profile` | `name:str(64)` | Switches to a profile: `name` is the name it was given, or its number from 1 as the headset's `Profiles` lists them (`NO_SUCH_PROFILE`); answers once it is in place. |
+| 2 | `Profile` | `name:str(64)` | Switches to a profile: `name` is a number only, its number from 1 as the headset's `Profiles` lists them; else the name it was given, exactly; else the number after the word the headset's menu calls a profile by ("Profile 2") in a language it has (`NO_SUCH_PROFILE`); answers once it is in place. |
 | 3 | `Cinema` | `on:bool` | Cinema mode. |
 | 4 | `FocusMode` | `on:bool` | "Focus" (changes `Prefs`). |
 | 5 | `Distance` | `steps:i8` | Closer (below 0) or further. |
@@ -1070,7 +1072,7 @@ the others as on its desktop (`Display.desk`), and the person hides those not ne
 | 10 | `Follow` | `on:bool` | Follow the head. |
 | 11 | `ResetArrangement` | | Reset the arrangement (`UNSUPPORTED` in the current client). |
 | 12 | `NoLimits` | `on:bool` | "No limits" (changes `Prefs`). |
-| 13 | `RenameProfile` | `profile:str(64), name:str(64)` | Gives profile `profile` (its name or number, as for `Profile`) the name `name`, on one line without spaces around it; an empty one gives it back its number (`NO_SUCH_PROFILE`). The headset's `Profiles` part shows it before the answer. From 0.2.0 step 7.10; an older headset answers `UNSUPPORTED`. |
+| 13 | `RenameProfile` | `profile:str(64), name:str(64)` | Gives profile `profile` (named as for `Profile`) the name `name`, on one line, without spaces around it or characters that turn text around; an empty one gives it back its number (`NO_SUCH_PROFILE`; `BAD_ARGUMENT` for a number only, which names a profile by its place; `NOT_ALLOWED` from a host the headset's menu does not act on). The headset's `Profiles` part shows it before the answer. From 0.2.0 step 7.10; an older headset answers `UNSUPPORTED`. |
 
 Kind 9 is retired (`RETIRED_COMMAND_KINDS`): it set the headset's microphone switch in
 development builds, and is never used again. The switch is the user's, changed only in
