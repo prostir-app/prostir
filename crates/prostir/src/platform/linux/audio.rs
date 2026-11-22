@@ -42,8 +42,17 @@ pub fn prepare() {
 /// nothing of it (`state.restore-props=false`): the headset owns the level of its
 /// sound device, which a remembered volume or mute would only fight, and a node of a
 /// test leaves nothing behind.
+///
+/// It is destroyed as the node it was made as (its number and serial), never by its
+/// name: one let go late (the sound system was slow) leaves alone the node made
+/// after it under the same name.
 struct VirtualNode {
     name: &'static str,
+    /// Its number, which PipeWire gives to another node once this one is gone.
+    id: u32,
+    /// Its serial, which PipeWire never gives again (none from a PipeWire too old to
+    /// have one).
+    serial: Option<u64>,
 }
 
 impl VirtualNode {
@@ -60,12 +69,24 @@ impl VirtualNode {
         }
         // The node shows up asynchronously.
         for _ in 0..20 {
-            if node_id(name).is_some() {
-                return Ok(Self { name });
+            if let Some(node) = node_info(name) {
+                return Ok(Self {
+                    name,
+                    id: node.id,
+                    serial: node.serial,
+                });
             }
             std::thread::sleep(Duration::from_millis(50));
         }
         bail!("PipeWire did not create {name}")
+    }
+
+    /// Whether the node with its number is still this one.
+    fn is_there(&self) -> bool {
+        node_info(&self.id.to_string()).is_some_and(|n| match self.serial {
+            Some(serial) => n.serial == Some(serial),
+            None => n.name.as_deref() == Some(self.name),
+        })
     }
 }
 
@@ -81,15 +102,50 @@ fn node_props(name: &str, description: &str, class: &str) -> String {
 
 impl Drop for VirtualNode {
     fn drop(&mut self) {
-        destroy_node(self.name);
+        if self.is_there() {
+            let _ = run(
+                Command::new("pw-cli").args(["destroy", &self.id.to_string()]),
+                TIMEOUT,
+            );
+        }
     }
 }
 
-fn node_id(name: &str) -> Option<u32> {
-    let out = run(Command::new("pw-cli").args(["info", name]), TIMEOUT).ok()?;
-    String::from_utf8_lossy(&out.stdout)
+/// A PipeWire object as `pw-cli info` tells it.
+#[derive(Debug, PartialEq, Eq)]
+struct NodeInfo {
+    id: u32,
+    serial: Option<u64>,
+    name: Option<String>,
+}
+
+/// The object `target` (a name or a number), if there is one.
+fn node_info(target: &str) -> Option<NodeInfo> {
+    let out = run(Command::new("pw-cli").args(["info", target]), TIMEOUT).ok()?;
+    parse_info(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// What `pw-cli info` printed: `id: 52`, then `object.serial = "57940"` and
+/// `node.name = "…"` among the properties (a `*` before those that changed).
+fn parse_info(text: &str) -> Option<NodeInfo> {
+    let id = text
         .lines()
-        .find_map(|l| l.trim().strip_prefix("id: ")?.trim().parse().ok())
+        .find_map(|l| l.trim().strip_prefix("id: ")?.trim().parse().ok())?;
+    let property = |key: &str| {
+        text.lines().find_map(|l| {
+            let (k, v) = l.trim().trim_start_matches('*').split_once(" = ")?;
+            (k.trim() == key).then(|| v.trim().trim_matches('"').to_owned())
+        })
+    };
+    Some(NodeInfo {
+        id,
+        serial: property("object.serial").and_then(|s| s.parse().ok()),
+        name: property("node.name"),
+    })
+}
+
+fn node_id(name: &str) -> Option<u32> {
+    node_info(name).map(|n| n.id)
 }
 
 fn destroy_node(name: &str) {
