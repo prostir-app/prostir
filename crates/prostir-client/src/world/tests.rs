@@ -18,6 +18,8 @@ use crate::pending::{PROFILE_STANDS_WITHIN, ProfileSwitch};
 use crate::persist::File;
 use crate::settings::{Preset, Settings};
 
+mod property;
+
 const PC: PcId = PcId([7; 8]);
 const OTHER_PC: PcId = PcId([8; 8]);
 

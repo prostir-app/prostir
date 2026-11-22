@@ -4,7 +4,7 @@
 //! Azimuth is measured in the frame, 0 straight ahead (-Z), positive to the right (+X).
 //! Elevation is 0 at eye level, positive up (+Y). Both in radians.
 
-use glam::{DVec3, Quat, Vec3};
+use glam::{DVec3, Quat, Vec2, Vec3};
 
 /// Monitor size in metres per stream pixel by default: every monitor gets the same
 /// pixel density, so neighbours line up like one big screen (2560 px is 1.25 m).
@@ -540,4 +540,150 @@ pub fn overlaps<K, L>(a: &Seen<K>, b: &Seen<L>, slack: f64) -> bool {
     let across = a.right.min(b.right) - a.left.max(b.left);
     let up = a.top.min(b.top) - a.bottom.max(b.bottom);
     across > slack * a.width().min(b.width()) && up > slack * a.height().min(b.height())
+}
+
+/// How far one monitor may reach into another before it counts as cutting it (half a
+/// millimetre): edges that meet, glued, and the last bits of a float do not.
+pub const CUT_SLACK: f32 = 0.0005;
+
+/// A flat face: where, how turned, half its width and height.
+#[derive(Debug, Clone, Copy)]
+struct Face {
+    p: Placement,
+    half: Vec2,
+}
+
+impl Face {
+    fn new(p: &Placement, height: f32) -> Self {
+        Self {
+            p: *p,
+            half: Vec2::new(p.width / 2.0, height / 2.0),
+        }
+    }
+
+    /// Half its size, made [`CUT_SLACK`] smaller on every side (none when nothing is
+    /// left of it).
+    fn inner(&self) -> Option<Vec2> {
+        let half = self.half - Vec2::splat(CUT_SLACK);
+        (half.x > 0.0 && half.y > 0.0).then_some(half)
+    }
+
+    fn corners(&self) -> [Vec3; 4] {
+        let (x, y) = (self.half.x, self.half.y);
+        [(-x, -y), (x, -y), (x, y), (-x, y)]
+            .map(|(a, b)| self.p.position + self.p.rotation * Vec3::new(a, b, 0.0))
+    }
+
+    /// A room point in the face's own coordinates (its plane is z = 0).
+    fn local(&self, at: Vec3) -> Vec3 {
+        self.p.rotation.inverse() * (at - self.p.position)
+    }
+
+    /// The part of the line `from + t * dir` (in the face's coordinates, in its plane)
+    /// within the face made [`CUT_SLACK`] smaller on every side, as `t` from and to
+    /// (Liang and Barsky); `t` itself within `range`.
+    fn clip(&self, from: Vec2, dir: Vec2, range: (f32, f32)) -> Option<(f32, f32)> {
+        let half = self.inner()?;
+        let (mut t0, mut t1) = range;
+        for (p, q) in [
+            (-dir.x, from.x + half.x),
+            (dir.x, half.x - from.x),
+            (-dir.y, from.y + half.y),
+            (dir.y, half.y - from.y),
+        ] {
+            if p.abs() < 1e-9 {
+                if q <= 0.0 {
+                    return None;
+                }
+                continue;
+            }
+            let t = q / p;
+            if p < 0.0 {
+                t0 = t0.max(t);
+            } else {
+                t1 = t1.min(t);
+            }
+        }
+        (t0 < t1).then_some((t0, t1))
+    }
+
+    /// Whether an edge of `other`, lying in this face's plane, goes inside this face.
+    fn entered_in_plane(&self, other: &Face) -> bool {
+        let c = other.corners().map(|c| self.local(c).truncate());
+        (0..4).any(|i| {
+            let (a, b) = (c[i], c[(i + 1) % 4]);
+            self.clip(a, b - a, (0.0, 1.0)).is_some()
+        })
+    }
+}
+
+/// Whether monitor `a` (`ah` high) and monitor `b` (`bh` high) cut into each other by
+/// more than [`CUT_SLACK`]: in two planes, the line where the planes meet runs through
+/// both of them; in one plane, they overlap. Edges that meet (glued, hinged) do not
+/// count.
+pub fn cuts(a: &Placement, ah: f32, b: &Placement, bh: f32) -> bool {
+    let (fa, fb) = (Face::new(a, ah), Face::new(b, bh));
+    let (na, nb) = (a.normal(), b.normal());
+    let across = na.cross(nb);
+    if across.length_squared() < 1e-8 {
+        // Facing the same way (or opposite): only in one plane can they meet.
+        if (b.position - a.position).dot(na).abs() >= CUT_SLACK {
+            return false;
+        }
+        return fa.entered_in_plane(&fb) || fb.entered_in_plane(&fa);
+    }
+    // The line both planes hold: a point of it, and its way.
+    let (ha, hb) = (na.dot(a.position), nb.dot(b.position));
+    let from = (nb.cross(across) * ha + across.cross(na) * hb) / across.length_squared();
+    let dir = across.normalize();
+    let along = |f: &Face| {
+        let o = f.local(from).truncate();
+        let d = (f.p.rotation.inverse() * dir).truncate();
+        f.clip(o, d, (f32::MIN, f32::MAX))
+    };
+    match (along(&fa), along(&fb)) {
+        (Some((a0, a1)), Some((b0, b1))) => a1.min(b1) - a0.max(b0) > CUT_SLACK,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn upright(x: f32, z: f32, yaw: f32, width: f32) -> Placement {
+        Placement {
+            position: Vec3::new(x, 0.0, z),
+            rotation: Quat::from_rotation_y(yaw),
+            width,
+        }
+    }
+
+    /// Edge to edge, a corner on an edge, or apart: no cut; one through another, or two
+    /// in one plane over each other: a cut.
+    #[test]
+    fn what_cuts_and_what_meets() {
+        let a = upright(0.0, -1.0, 0.0, 1.0);
+        // Beside it in its plane, edge to edge, and a hair apart.
+        assert!(!cuts(&a, 0.5, &upright(1.0, -1.0, 0.0, 1.0), 0.5));
+        assert!(!cuts(&a, 0.5, &upright(1.001, -1.0, 0.0, 1.0), 0.5));
+        // Over it by a centimetre, in its plane.
+        assert!(cuts(&a, 0.5, &upright(0.99, -1.0, 0.0, 1.0), 0.5));
+        // Hinged on its right edge, turned towards the eye: they share the edge.
+        let turn = 0.5f32;
+        let hinged = upright(0.5 + 0.5 * turn.cos(), -1.0 + 0.5 * turn.sin(), -turn, 1.0);
+        assert!(!cuts(&a, 0.5, &hinged, 0.5));
+        // The same, 5 cm to the left and 2 cm back: through it.
+        let into = Placement {
+            position: hinged.position - Vec3::new(0.05, 0.0, 0.02),
+            ..hinged
+        };
+        assert!(cuts(&a, 0.5, &into, 0.5));
+        // Square to it, through its middle; and in front of it, not touching.
+        let through = upright(0.0, -1.0, std::f32::consts::FRAC_PI_2, 0.4);
+        assert!(cuts(&a, 0.5, &through, 0.5));
+        assert!(!cuts(&a, 0.5, &upright(0.0, -0.8, 0.0, 0.4), 0.3));
+        // Smaller, inside it in its plane.
+        assert!(cuts(&a, 0.5, &upright(0.1, -1.0, 0.0, 0.3), 0.2));
+    }
 }

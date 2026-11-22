@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use glam::{Quat, Vec2, Vec3};
 
-use super::{Key, Placement};
+use super::{Key, Placement, cuts};
 
 /// Lines `value` (half size `half`) up with a neighbour at `other` (half size
 /// `other_half`) only when it is all but lined up already: centres, or first or last
@@ -135,6 +135,8 @@ type Part<K> = (K, Placement, f32, f32);
 #[derive(Debug)]
 pub struct StickScratch<K> {
     parts: Vec<Part<K>>,
+    /// The neighbours a monitor could join, nearest first.
+    near: Vec<(Part<K>, Beside)>,
     /// On a wall: (id, centre in the wall's frame, width, height).
     wall: Vec<(K, Vec3, f32, f32)>,
 }
@@ -143,6 +145,7 @@ impl<K> Default for StickScratch<K> {
     fn default() -> Self {
         Self {
             parts: Vec::new(),
+            near: Vec::new(),
             wall: Vec::new(),
         }
     }
@@ -161,20 +164,23 @@ fn parts<K: Key>(
     }));
 }
 
-/// The neighbour `m` would join among `others`, and how: the nearest as seen from
+/// The neighbours `m` could join among `others`, into `out`, nearest first as seen from
 /// `eye` (between two it touches equally, the one its centre is closer to).
-fn nearest<K: Key>(m: &Part<K>, others: &[Part<K>], eye: Vec3) -> Option<(Part<K>, Beside)> {
-    others
-        .iter()
-        .filter(|o| o.0 != m.0)
-        .filter_map(|o| Some((*o, beside(&o.1, o.2, &m.1, m.2, eye)?)))
-        .min_by(|(a, ba), (b, bb)| {
-            ba.gap.total_cmp(&bb.gap).then(
-                a.1.position
-                    .distance(m.1.position)
-                    .total_cmp(&b.1.position.distance(m.1.position)),
-            )
-        })
+fn nearest<K: Key>(m: &Part<K>, others: &[Part<K>], eye: Vec3, out: &mut Vec<(Part<K>, Beside)>) {
+    out.clear();
+    out.extend(
+        others
+            .iter()
+            .filter(|o| o.0 != m.0)
+            .filter_map(|o| Some((*o, beside(&o.1, o.2, &m.1, m.2, eye)?))),
+    );
+    out.sort_unstable_by(|(a, ba), (b, bb)| {
+        ba.gap.total_cmp(&bb.gap).then(
+            a.1.position
+                .distance(m.1.position)
+                .total_cmp(&b.1.position.distance(m.1.position)),
+        )
+    });
 }
 
 /// Where along `n`'s edge `m` goes: where the user put it (lined up only when it all
@@ -203,7 +209,10 @@ pub struct Stick<K> {
 /// The magnet for one monitor: let go almost against another (within 15 % of a
 /// monitor, as seen from `eye`) and at about the same distance, where it would stick
 /// to it, edge to edge, where along the edge it is (see [`hinge`]); `None` otherwise.
-/// Worked out in `scratch`.
+/// Joined to its nearest neighbour, a monitor that would go through another one (a
+/// hinge turns it towards the eye, into a third monitor beside or under it) is joined
+/// to the next nearest instead, and with none it stays where it was let go. Worked
+/// out in `scratch`.
 pub fn stick<K: Key>(
     placements: &HashMap<K, Placement>,
     monitors: &[(K, u32, u32)],
@@ -214,26 +223,40 @@ pub fn stick<K: Key>(
     parts(placements, monitors, &mut scratch.parts);
     let all = &scratch.parts;
     let m = *all.iter().find(|m| m.0 == id)?;
-    let (n, b) = nearest(&m, all, eye)?;
-    if b.gap >= 0.15 * m.1.width.min(n.1.width) {
-        return None;
+    nearest(&m, all, eye, &mut scratch.near);
+    let mut first = true;
+    for &(n, b) in &scratch.near {
+        if b.gap >= 0.15 * m.1.width.min(n.1.width) {
+            continue;
+        }
+        let b = Beside {
+            along: settle_along(&b, &n, m.1.width, m.2),
+            ..b
+        };
+        let placement = hinge(&n.1, n.2, m.1.width, m.2, &b, eye);
+        // Pulled much nearer or pushed away on purpose: it stays there.
+        let depth = m.1.position.distance(eye) / placement.position.distance(eye).max(0.1);
+        if !(0.7..=1.45).contains(&depth) {
+            if first {
+                return None;
+            }
+            continue;
+        }
+        first = false;
+        if all
+            .iter()
+            .any(|o| o.0 != id && cuts(&placement, m.2, &o.1, o.2))
+        {
+            continue;
+        }
+        return Some(Stick {
+            placement,
+            neighbour: n.0,
+            across: b.across,
+            side: b.side,
+        });
     }
-    let b = Beside {
-        along: settle_along(&b, &n, m.1.width, m.2),
-        ..b
-    };
-    let placement = hinge(&n.1, n.2, m.1.width, m.2, &b, eye);
-    // Pulled much nearer or pushed away on purpose: it stays there.
-    let depth = m.1.position.distance(eye) / placement.position.distance(eye).max(0.1);
-    if !(0.7..=1.45).contains(&depth) {
-        return None;
-    }
-    Some(Stick {
-        placement,
-        neighbour: n.0,
-        across: b.across,
-        side: b.side,
-    })
+    None
 }
 
 /// The magnet on a wall: like [`stick`], but in the wall's plane (monitors there are
