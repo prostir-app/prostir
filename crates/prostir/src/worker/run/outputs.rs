@@ -193,6 +193,9 @@ impl Worker {
             if self.primary_made.as_ref() == self.slots.get(&id).and_then(Slot::key) {
                 self.primary_made = None;
             }
+        } else {
+            // Not made again: no headset waits for the stream it had.
+            self.shared.router.remove_stream(id);
         }
     }
 
