@@ -142,6 +142,7 @@ impl Scene for Model {
         // The map shows the desktop anew.
         self.rev += 1;
         self.world.resize_end();
+        self.world_done();
     }
 
     fn cancel_holds(&mut self) {

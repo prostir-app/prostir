@@ -461,21 +461,6 @@ pub enum Action {
 }
 
 impl Action {
-    /// Changes the setup by hand: the monitors are no longer as the active profile has
-    /// them, so no profile is the active one after it.
-    pub fn leaves_profile(&self) -> bool {
-        matches!(
-            self,
-            Action::Add { .. }
-                | Action::Remove(_)
-                | Action::MakePrimary(_)
-                | Action::Move { .. }
-                | Action::ShowPhysical(..)
-                | Action::SetScale(..)
-                | Action::Preset(_)
-        )
-    }
-
     /// The same control as `other`: the same action, or a switch whose one button
     /// turns it on and off (a tile on the Quick page), which after a press stands for
     /// the other value.
@@ -3713,7 +3698,8 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             (true, true) => Style::Selected,
             (true, false) => Style::Normal,
         };
-        let action = (connected && !active).then_some(Action::ApplyProfile(i));
+        // The one in use too: pressed again, its monitors go back where it has them.
+        let action = connected.then_some(Action::ApplyProfile(i));
         let mut b = name_button(r, &s.profiles[i], 19.0, style, action);
         if let Item::Button { key, .. } = &mut b {
             *key = Some(Action::ApplyProfile(i));
@@ -3914,7 +3900,7 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>
             name,
             19.0,
             style,
-            (connected && !active).then_some(apply),
+            connected.then_some(apply),
         );
         if let Item::Button { key, .. } = &mut b {
             *key = Some(apply);
@@ -5466,7 +5452,11 @@ mod tests {
                     Style::Normal,
                     Some(Action::ApplyProfile(0))
                 ),
-                ("Work".into(), Style::Selected, None),
+                (
+                    "Work".into(),
+                    Style::Selected,
+                    Some(Action::ApplyProfile(1))
+                ),
             ]
         );
 
@@ -5501,7 +5491,11 @@ mod tests {
                 ),
                 save(0),
                 delete(0),
-                ("Work".into(), Style::Selected, None),
+                (
+                    "Work".into(),
+                    Style::Selected,
+                    Some(Action::ApplyProfile(1))
+                ),
                 save(1),
                 delete(1),
             ]
@@ -5547,43 +5541,14 @@ mod tests {
         assert!(second.iter().any(|(l, ..)| l == "Profile 11"));
         assert!(!second.iter().any(|(l, ..)| l == "Profile 10"));
 
-        // Switching to a profile or saving one keeps it; a layout chosen, a monitor
-        // moved, added or removed by hand leaves it, and then none is marked.
-        for keeps in [
-            Action::ApplyProfile(0),
-            Action::SaveProfile(1),
-            Action::NewProfile,
-            Action::Recenter,
-        ] {
-            assert!(!keeps.leaves_profile(), "{keeps:?}");
-        }
-        let by_hand = [
-            Action::Preset(Preset::Wall),
-            Action::Move {
-                id: k(102),
-                delta: 1,
-            },
-            Action::Add {
-                width: 1920,
-                height: 1080,
-            },
-            Action::Remove(k(102)),
-            Action::MakePrimary(k(103)),
-            Action::ShowPhysical(k(117), false),
-            Action::SetScale(k(102), 125),
-        ];
+        // None in use (the setup changed by hand, see `app`): none is marked.
         st.tab = Tab::Quick;
-        for action in by_hand {
-            let mut st = st.clone();
-            assert!(action.leaves_profile(), "{action:?}");
-            st.active_profile = None;
-            assert!(
-                profile_buttons(&st)
-                    .iter()
-                    .all(|(_, style, _)| *style == Style::Normal),
-                "after {action:?}"
-            );
-        }
+        st.active_profile = None;
+        assert!(
+            profile_buttons(&st)
+                .iter()
+                .all(|(_, style, _)| *style == Style::Normal)
+        );
     }
 
     #[test]

@@ -1317,3 +1317,67 @@ fn a_failed_older_profile_switch_leaves_the_newer_one() {
         "the newer switch goes on"
     );
 }
+
+/// A profile in use, then the arrangement changed by hand (a monitor moved, "Line up",
+/// closer): no profile is in use any more, and its button can bring its places back.
+/// A press that changes nothing (a monitor taken and let go where it was, "In front")
+/// leaves it in use.
+#[test]
+fn changed_by_hand_the_profile_is_left() {
+    use crate::interaction::Scene as _;
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::NewProfile);
+    assert_eq!(sim.m.menu().active_profile, Some(0));
+    // Taken and let go where it was.
+    let thing = Thing::Display(k(1));
+    let at = sim.m.hold(thing).expect("taken");
+    sim.m.let_go(sim.now, thing);
+    sim.menu(Action::Recenter);
+    assert_eq!(sim.m.menu().active_profile, Some(0), "nothing changed");
+    // Moved by hand.
+    let at = sim.m.hold(thing).unwrap_or(at);
+    let moved = Placement {
+        position: at.position + Vec3::new(-1.0, 0.3, 0.0),
+        ..at
+    };
+    sim.m.drag(thing, moved, Vec3::ZERO);
+    sim.m.let_go(sim.now, thing);
+    assert_eq!(sim.m.menu().active_profile, None, "moved by hand");
+    sim.menu(Action::NewProfile);
+    sim.menu(Action::Tidy);
+    assert_eq!(sim.m.menu().active_profile, None, "lined up");
+    sim.menu(Action::NewProfile);
+    sim.command(30, Command::Distance { steps: -1 });
+    assert_eq!(sim.m.menu().active_profile, None, "closer");
+}
+
+/// What only asks, or asks nothing, leaves the profile in use: the first press of ×
+/// (asking to confirm), Add or a display of the PC shown while there is no PC.
+#[test]
+fn what_changes_nothing_leaves_the_profile() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::NewProfile);
+    assert_eq!(sim.m.menu().active_profile, Some(0));
+    sim.menu(Action::Remove(k(1)));
+    assert_eq!(sim.m.menu().active_profile, Some(0), "nothing removed yet");
+    sim.menu(Action::Remove(k(1)));
+    assert_eq!(sim.m.menu().active_profile, None, "removed");
+
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::NewProfile);
+    let other_pc = DisplayKey::new(PcId([4; 8]), DisplayId(7));
+    sim.menu(Action::ShowPhysical(other_pc, true));
+    assert_eq!(
+        sim.m.menu().active_profile,
+        Some(0),
+        "not asked: no such PC"
+    );
+    sim.menu(Action::Add {
+        width: 1920,
+        height: 1080,
+    });
+    assert_eq!(sim.m.menu().active_profile, None, "asked");
+}

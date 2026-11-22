@@ -53,6 +53,8 @@ impl Model {
                 );
                 if sent.is_none() {
                     self.menu.physical_asked.retain(|(a, _)| *a != k);
+                } else {
+                    self.leave_profile();
                 }
             }
             Action::PhysicalPage(page) => self.menu.physical_page = page,

@@ -31,14 +31,20 @@ impl Model {
                 // its picture comes (not in cinema, where new monitors are not placed).
                 self.world
                     .adding_started(req, (width, height), self.head.1, self.now);
+                if req.is_some() {
+                    self.leave_profile();
+                }
             }
             Action::AddScale(scale) => self.menu.add_scale = scale,
             Action::SetScale(id, scale) => {
-                self.request_for(
+                let sent = self.request_for(
                     id,
                     |id| Request::SetScale { id, scale },
                     ui::Asked::Scale(id),
                 );
+                if sent.is_some() {
+                    self.leave_profile();
+                }
             }
             Action::Remove(id) => {
                 let confirmed = self.menu.confirm_remove.is_some_and(|(c, at)| {
@@ -46,11 +52,14 @@ impl Model {
                 });
                 if confirmed {
                     self.menu.confirm_remove = None;
-                    self.request_for(
+                    let sent = self.request_for(
                         id,
                         |id| Request::RemoveDisplay { id },
                         ui::Asked::Remove(id),
                     );
+                    if sent.is_some() {
+                        self.leave_profile();
+                    }
                 } else {
                     self.menu.confirm_remove = Some((id, self.now));
                 }
@@ -100,11 +109,14 @@ impl Model {
                 self.request(Request::FindMouse, ui::Asked::FindMouse);
             }
             Action::MakePrimary(id) => {
-                self.request_for(
+                let sent = self.request_for(
                     id,
                     |id| Request::SetPrimary { id },
                     ui::Asked::MakePrimary(id),
                 );
+                if sent.is_some() {
+                    self.leave_profile();
+                }
             }
             // Swaps the places of a monitor and its neighbour in the order; the others
             // stay.

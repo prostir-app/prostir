@@ -254,6 +254,12 @@ pub struct World {
     /// What the hands hold (two at most), and the monitor resized with both.
     held: [Option<Thing>; 2],
     resizing: Option<DisplayKey>,
+    /// A display in a hand moved, or the one resized changed size, since it was taken.
+    dragged: bool,
+    /// The arrangement was changed by hand since the app last asked: a display moved
+    /// or resized, "Line up", closer or further, two swapped, a layout chosen (see
+    /// [`World::take_rearranged`]).
+    rearranged: bool,
 
     /// The magnet's memory (see `stick_of`), asked every frame of a drag.
     stick: layout::StickScratch<DisplayKey>,
@@ -317,6 +323,8 @@ impl World {
             wrist: None,
             held: [None, None],
             resizing: None,
+            dragged: false,
+            rearranged: false,
             stick: layout::StickScratch::default(),
             gone: Vec::new(),
             waiting: Vec::new(),
@@ -705,6 +713,12 @@ impl World {
         self.resizing
     }
 
+    /// Whether the arrangement was changed by hand since this was last asked: the
+    /// profile it came from is not how it stands any more.
+    pub fn take_rearranged(&mut self) -> bool {
+        std::mem::take(&mut self.rearranged)
+    }
+
     /// The files changed since this was last asked, to be written after this pass.
     pub fn take_saves(&mut self) -> Dirty {
         std::mem::take(&mut self.saves)
@@ -1064,6 +1078,7 @@ impl World {
     /// Another preset was chosen (`s` says which): the arrangement's tilt is its, and
     /// everything is laid out by it.
     pub fn preset_chosen(&mut self, s: &Settings, now: Instant) {
+        self.rearranged = true;
         self.tilt = layout::tilt(s.preset);
         self.arrange_all(s, now);
     }
@@ -1636,6 +1651,7 @@ impl World {
             }
         }
         self.radius *= k;
+        self.rearranged |= k != 1.0;
         self.save_layout();
         self.send_layout(now);
     }
@@ -1650,6 +1666,7 @@ impl World {
             return;
         }
         self.line_up_rows();
+        self.rearranged = true;
         self.held = [None, None];
         self.save_layout();
         self.send_layout(now);
@@ -1732,6 +1749,7 @@ impl World {
             let to_a = layout::edge_to(layout::refit(a, sa, sb), &a, -side, &frame, wall);
             self.placements.insert(id, to_b);
             self.placements.insert(other, to_a);
+            self.rearranged = true;
             for moved in [other, id] {
                 layout::make_room(
                     &mut self.placements,
@@ -1906,6 +1924,7 @@ impl World {
         let before = *target;
         *target = p;
         if let Some(id) = thing.display() {
+            self.dragged |= before != p;
             self.carry_all(s, id, &before, &p);
         }
     }
@@ -1935,10 +1954,17 @@ impl World {
             }
             Thing::Menu if !self.cinema => self.save_layout(),
             Thing::Display(id) if !self.cinema => {
+                let mut moved = std::mem::take(&mut self.dragged);
                 if let Some(st) = self.stick_of(s, id) {
-                    self.placements.insert(id, st.placement);
+                    // Stuck where it stood already (taken and let go): no change.
+                    let was = self.placements.insert(id, st.placement);
+                    moved |= was.is_none_or(|w| {
+                        w.position.distance(st.placement.position) > 1e-4
+                            || w.rotation.angle_between(st.placement.rotation) > 1e-4
+                    });
                     stuck = true;
                 }
+                self.rearranged |= moved;
                 self.save_layout();
                 self.send_layout(now);
             }
@@ -1971,12 +1997,14 @@ impl World {
         let before = *p;
         p.width = width;
         let after = *p;
+        self.dragged |= before != after;
         self.carry_all(s, id, &before, &after);
     }
 
     /// The second hand let go: resizing ends, and the arrangement is kept.
     pub fn resize_end(&mut self) {
         self.resizing = None;
+        self.rearranged |= std::mem::take(&mut self.dragged);
         self.save_layout();
     }
 

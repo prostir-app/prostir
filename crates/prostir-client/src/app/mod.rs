@@ -910,6 +910,10 @@ impl Model {
     /// What the world asks for after it changed: the PC is told the rows of its
     /// desktop (see `World::settle`).
     fn world_done(&mut self) {
+        // Changed by hand: no longer as the profile it came from has it.
+        if self.world.take_rearranged() {
+            self.leave_profile();
+        }
         while let Some((pc, rows)) = self.world.take_arrange() {
             self.rev += 1;
             // Only to a PC in a session: the world sends nothing otherwise.
@@ -1290,6 +1294,14 @@ impl Model {
 
     /// The profiles or the one in use changed: the PCs hear of it once this pass ends
     /// (see [`Model::end_pass`]).
+    /// The setup changed where it is made (a monitor moved, added, removed...): no
+    /// profile is the one in use.
+    fn leave_profile(&mut self) {
+        if self.menu.active_profile.take().is_some() {
+            self.profiles_changed();
+        }
+    }
+
     fn profiles_changed(&mut self) {
         self.profiles_changed = true;
         self.rev += 1;
