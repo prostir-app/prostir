@@ -1,5 +1,5 @@
 //! One settings window per person: the window owns
-//! `io.github.OlexiyOdarchuk.Prostir.Settings` on the session bus, and a second start
+//! `io.github.prostir_app.Prostir.Settings` on the session bus, and a second start
 //! asks the first one to come forward (`Present`) and quits. The service also sees the
 //! window by this name (it keeps the service running while the window is open).
 
@@ -10,12 +10,12 @@ use eframe::egui;
 use zbus::blocking::Connection;
 use zbus::fdo::{RequestNameFlags, RequestNameReply};
 
-pub const NAME: &str = "io.github.OlexiyOdarchuk.Prostir.Settings";
+pub const NAME: &str = "io.github.prostir_app.Prostir.Settings";
 /// The window on the made-up service (`--mock`): its own name, so it neither takes
 /// the real window's place nor brings the real one forward.
-pub const MOCK_NAME: &str = "io.github.OlexiyOdarchuk.Prostir.Settings.Mock";
-pub const PATH: &str = "/io/github/OlexiyOdarchuk/Prostir/Settings";
-pub const INTERFACE: &str = "io.github.OlexiyOdarchuk.Prostir.Settings1";
+pub const MOCK_NAME: &str = "io.github.prostir_app.Prostir.Settings.Mock";
+pub const PATH: &str = "/io/github/prostir_app/Prostir/Settings";
+pub const INTERFACE: &str = "io.github.prostir_app.Prostir.Settings1";
 
 /// Set when someone asked the window to come forward; the window clears it.
 #[derive(Clone, Default)]
@@ -55,7 +55,7 @@ struct Window {
     presented: Presented,
 }
 
-#[zbus::interface(name = "io.github.OlexiyOdarchuk.Prostir.Settings1")]
+#[zbus::interface(name = "io.github.prostir_app.Prostir.Settings1")]
 impl Window {
     /// Brings the window forward. `activation_token`: the XDG activation token the
     /// caller was started with (empty if none), which lets a Wayland compositor give

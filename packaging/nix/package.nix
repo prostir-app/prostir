@@ -92,7 +92,7 @@ rustPlatform.buildRustPackage {
       # Every workspace member, the headset app and the fake headset for tests too:
       # cargo needs them present.
       (root + "/crates")
-      (root + "/packaging/io.github.OlexiyOdarchuk.Prostir.desktop")
+      (root + "/packaging/io.github.prostir_app.Prostir.desktop")
       (root + "/packaging/prostir.svg")
       (root + "/packaging/systemd")
       (root + "/packaging/udev")
@@ -121,8 +121,8 @@ rustPlatform.buildRustPackage {
   ];
 
   postInstall = ''
-    install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.desktop \
-      $out/share/applications/io.github.OlexiyOdarchuk.Prostir.desktop
+    install -Dm644 packaging/io.github.prostir_app.Prostir.desktop \
+      $out/share/applications/io.github.prostir_app.Prostir.desktop
     install -Dm644 packaging/prostir.svg $out/share/icons/hicolor/scalable/apps/prostir.svg
     # Not enabled here: Prostir's first start enables the socket for its user (on
     # NixOS, `systemd.packages = [ prostir ];` makes the units and the preset known);

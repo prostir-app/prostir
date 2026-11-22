@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci-pc.yml"><img src="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci-pc.yml/badge.svg" alt="CI PC"></a>
-  <a href="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci-headset.yml"><img src="https://github.com/OlexiyOdarchuk/prostir/actions/workflows/ci-headset.yml/badge.svg" alt="CI headset"></a>
-  <a href="https://github.com/OlexiyOdarchuk/prostir/releases"><img src="https://img.shields.io/github/v/release/OlexiyOdarchuk/prostir?include_prereleases&label=release" alt="Реліз"></a>
+  <a href="https://github.com/prostir-app/prostir/actions/workflows/ci-pc.yml"><img src="https://github.com/prostir-app/prostir/actions/workflows/ci-pc.yml/badge.svg" alt="CI PC"></a>
+  <a href="https://github.com/prostir-app/prostir/actions/workflows/ci-headset.yml"><img src="https://github.com/prostir-app/prostir/actions/workflows/ci-headset.yml/badge.svg" alt="CI headset"></a>
+  <a href="https://github.com/prostir-app/prostir/releases"><img src="https://img.shields.io/github/v/release/prostir-app/prostir?include_prereleases&label=release" alt="Реліз"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="Ліцензія GPL-3.0-or-later"></a>
   <img src="https://img.shields.io/badge/KDE%20Plasma%206%20%C2%B7%20Hyprland-Wayland-1d99f3" alt="KDE Plasma 6 і Hyprland, Wayland">
   <img src="https://img.shields.io/badge/Meta%20Quest-3%20%C2%B7%203S-1c1e20" alt="Meta Quest 3 і 3S">
@@ -292,11 +292,11 @@ Tumbleweed для ARM пишіть в адресі вище `openSUSE_Factory_AR
 Репозиторій є flake з частиною для ПК:
 
 ```sh
-nix run github:OlexiyOdarchuk/prostir          # спробувати
-nix profile install github:OlexiyOdarchuk/prostir
+nix run github:prostir-app/prostir          # спробувати
+nix profile install github:prostir-app/prostir
 ```
 
-У NixOS додайте `github:OlexiyOdarchuk/prostir` як вхід flake і покладіть
+У NixOS додайте `github:prostir-app/prostir` як вхід flake і покладіть
 `inputs.prostir.packages.${pkgs.system}.default` у `environment.systemPackages`.
 GStreamer з плагінами йде разом. Кодування відеокартою бере системний драйвер VA-API
 у NixOS (`hardware.graphics.enable`), а в інших дистрибутивах вбудовані драйвери Intel
@@ -542,13 +542,13 @@ ctl profile 1`, `prostir ctl closer 2`, `prostir ctl monitor add 2560x1440@125%`
 шолома, 3 немає відповіді вчасно, 64 неправильні аргументи.
 
 Інші програми дістають те саме на сеансовій шині D-Bus як
-`io.github.OlexiyOdarchuk.Prostir` (лише програми вашого ж користувача). Команда шолому
+`io.github.prostir_app.Prostir` (лише програми вашого ж користувача). Команда шолому
 може тривати до 30 с, довше, ніж `busctl` і `gdbus` чекають за замовчуванням, тож
 дайте їм `--timeout=35`:
 
 ```
-busctl --user --timeout=35 call io.github.OlexiyOdarchuk.Prostir \
-    /io/github/OlexiyOdarchuk/Prostir io.github.OlexiyOdarchuk.Prostir1 Recenter
+busctl --user --timeout=35 call io.github.prostir_app.Prostir \
+    /io/github/prostir_app/Prostir io.github.prostir_app.Prostir1 Recenter
 ```
 
 Методи, сигнали, помилки й JSON стану описано в [LOCAL-API.md](LOCAL-API.md).
@@ -600,7 +600,7 @@ busctl --user --timeout=35 call io.github.OlexiyOdarchuk.Prostir \
 ## Обмеження
 
 - KDE Plasma 6 і Hyprland на Wayland. GNOME поки не підтримується: якщо він вам
-  потрібен, поставте 👍 в [issue #1](https://github.com/OlexiyOdarchuk/prostir/issues/1). Сеанси X11 не підтримуються.
+  потрібен, поставте 👍 в [issue #1](https://github.com/prostir-app/prostir/issues/1). Сеанси X11 не підтримуються.
 - У Hyprland немає головного монітора, тож «Зробити головним» там лише вибирає, який
   монітор шолом ставить перед вами.
 - Апаратне кодування перевірено лише на графіці Intel (VA-API). AMD через VA-API і
@@ -691,7 +691,7 @@ Prostir?» з кнопками «Так» і «Ні», жодна не вибр�
 вже не дасть. Порти перелічено в розділі [Брандмауер](#брандмауер).
 
 Про проблему з безпекою можна повідомити приватно через
-[приватні звіти про вразливості на GitHub](https://github.com/OlexiyOdarchuk/prostir/security/advisories/new).
+[приватні звіти про вразливості на GitHub](https://github.com/prostir-app/prostir/security/advisories/new).
 
 ## Якщо щось не так і часті питання
 

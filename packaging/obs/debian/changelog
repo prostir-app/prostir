@@ -1,6 +1,6 @@
 prostir (@VERSION@-1) unstable; urgency=medium
 
   * Release @VERSION@. The changes are in CHANGELOG.md and on
-    https://github.com/OlexiyOdarchuk/prostir/releases/tag/v@VERSION@
+    https://github.com/prostir-app/prostir/releases/tag/v@VERSION@
 
  -- Prostir contributors <prostir-release@users.noreply.github.com>  @DATE@

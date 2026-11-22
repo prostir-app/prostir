@@ -35,7 +35,7 @@ BIN="$HOME/.local/bin"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 ICON="$DATA/icons/hicolor/scalable/apps/prostir.svg"
-APP_ID="io.github.OlexiyOdarchuk.Prostir"
+APP_ID="io.github.prostir_app.Prostir"
 DESKTOP="$DATA/applications/$APP_ID.desktop"
 # What earlier versions installed: the menu entry of 0.1, the settings window's own
 # program and entry.
