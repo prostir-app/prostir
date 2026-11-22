@@ -56,6 +56,7 @@ pub fn input(name: &str) -> Input {
             .to_owned(),
         label: name.to_owned(),
         frame_rate: None,
+        live: false,
     }
 }
 

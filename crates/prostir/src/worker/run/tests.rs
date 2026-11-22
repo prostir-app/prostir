@@ -64,6 +64,7 @@ impl Output for StubOutput {
                 source: String::new(),
                 label: self.key.to_string(),
                 frame_rate: None,
+                live: false,
             },
             origin: Origin::Monitor,
             memory: Memory::System,

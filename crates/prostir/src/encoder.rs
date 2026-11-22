@@ -25,7 +25,6 @@ use prostir_proto::Codec;
 
 mod choice;
 mod gpu;
-mod nudge;
 mod probe;
 
 pub use choice::{Backend, Choice, Kind, Wanted, codec_label, note};
@@ -286,9 +285,6 @@ pub struct Encoder {
     /// It takes frames straight from GPU buffers (dmabuf), so a capture hands it those.
     takes_dmabuf: bool,
     bus_thread: Option<JoinHandle<()>>,
-    /// Sends a new picture again shortly after, for an encoder that keeps a frame
-    /// until the next comes (see `encoder/nudge.rs`); stopped before the pipeline.
-    nudger: Option<nudge::Nudger>,
     /// Whether its source failed, and what it said while starting.
     gate: Arc<SourceGate>,
     kind: Kind,
@@ -322,6 +318,9 @@ pub struct Input {
     /// stream says `0/1`: a frame whenever the screen changes). Frames still come only
     /// when they come; see [`tell_frame_rate`].
     pub frame_rate: Option<gst::Fraction>,
+    /// The source is live, though it may not say so when the encoder first asks
+    /// (`pipewiresrc`); see [`tell_live`].
+    pub live: bool,
 }
 
 fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> Result<String> {
@@ -451,10 +450,35 @@ pub fn tell_frame_rate(pad: &gst::Pad, rate: gst::Fraction) {
             _ => None,
         };
         if let Some(caps) = told {
-            *event = gst::event::Caps::new(&caps);
+            *event = gst::event::Caps::builder(&caps)
+                .seqnum(event.seqnum())
+                .build();
         }
         gst::PadProbeReturn::Ok
     });
+}
+
+/// Answers the question whether the source is live with yes, as it passes `pad`
+/// (the latency query, answered upstream). VA-API asks once, when it first
+/// configures, and keeps up to four frames back for a source that is not live;
+/// `pipewiresrc` 1.6 says it is live only once its stream is up, about 30 ms after
+/// VA-API asked. So VA-API kept each picture of a still screen until the next frame
+/// came: PipeWire's keepalive, 2 s later (4 s, two kept). Told live, it gives each
+/// out at once (measured with a frame every 2 s from a PipeWire node: 75 to 100 ms
+/// from the converter to the parser, the card idle between frames, against 4 s).
+pub fn tell_live(pad: &gst::Pad) {
+    pad.add_probe(
+        gst::PadProbeType::QUERY_UPSTREAM | gst::PadProbeType::PULL,
+        |_, info| {
+            if let Some(query) = info.query_mut()
+                && let gst::QueryViewMut::Latency(q) = query.view_mut()
+            {
+                let (_, min, max) = q.result();
+                q.set(true, min, max);
+            }
+            gst::PadProbeReturn::Ok
+        },
+    );
 }
 
 /// `caps` with frame rate `rate` where they say none or 0; `None` when every
@@ -564,31 +588,19 @@ impl Encoder {
             .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
             .ok_or_else(|| anyhow!("appsink missing"))?;
         tune(&pipeline, cfg);
-        if let Some(rate) = input.frame_rate
-            && let Some(pad) = pipeline
-                .by_name(&queue_name(input))
-                .and_then(|q| q.static_pad("sink"))
-                .and_then(|p| p.peer())
-        {
-            tell_frame_rate(&pad, rate);
-        }
-        let nudger = match pipeline
+        // The source's last pad, before the queue.
+        if let Some(pad) = pipeline
             .by_name(&queue_name(input))
             .and_then(|q| q.static_pad("sink"))
+            .and_then(|p| p.peer())
         {
-            Some(pad) if cfg.backend.keeps_a_frame() => {
-                let encoder = pipeline
-                    .by_name("enc_in")
-                    .and_then(|e| e.static_pad("sink"));
-                Some(nudge::Nudger::start(
-                    &pad,
-                    encoder.as_ref(),
-                    &queue_name(input),
-                    nudge::AFTER,
-                )?)
+            if let Some(rate) = input.frame_rate {
+                tell_frame_rate(&pad, rate);
             }
-            _ => None,
-        };
+            if input.live {
+                tell_live(&pad);
+            }
+        }
         if let Some(pad) = pipeline
             .by_name("timecode")
             .and_then(|e| e.static_pad("src"))
@@ -636,15 +648,11 @@ impl Encoder {
             let on_event = on_event.clone();
             let node = node.clone();
             let encoded = encoded.clone();
-            let nudge = nudger.as_ref().map(nudge::Nudger::handle);
             sink.set_callbacks(
                 gst_app::AppSinkCallbacks::builder()
                     .new_sample(move |sink| {
                         let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                         encoded.store(true, Ordering::Relaxed);
-                        if let Some(n) = &nudge {
-                            n.left();
-                        }
                         if let Some(info) =
                             sample.caps().and_then(|c| c.structure(0)).and_then(|s| {
                                 Some((
@@ -768,7 +776,6 @@ impl Encoder {
             restart_on_resume,
             takes_dmabuf: cfg.backend.takes_dmabuf(),
             bus_thread: Some(bus_thread),
-            nudger,
             gate,
             kind: (cfg.backend, adapter),
             codec: cfg.codec,
@@ -920,9 +927,6 @@ impl Encoder {
             let _ = self.pipeline.set_state(gst::State::Null);
             // It opens again with the first frame.
             self.encoded.store(false, Ordering::Relaxed);
-            if let Some(n) = &self.nudger {
-                n.handle().forget();
-            }
         }
         let _ = self.pipeline.set_state(state);
         if !paused {
@@ -932,7 +936,7 @@ impl Encoder {
 
     /// Asks the encoder to emit an IDR frame (with parameter sets) as soon as possible.
     pub fn force_keyframe(&self) {
-        self.keyframer().ask();
+        request_keyframe(&self.sink);
     }
 
     /// A handle that asks it for a keyframe from any thread, while it runs.
@@ -940,7 +944,6 @@ impl Encoder {
         Keyframer {
             sink: self.sink.clone(),
             pause: self.paused.clone(),
-            nudge: self.nudger.as_ref().map(nudge::Nudger::handle),
         }
     }
 }
@@ -1004,16 +1007,11 @@ impl Pause {
 pub struct Keyframer {
     sink: gst_app::AppSink,
     pause: Arc<Pause>,
-    nudge: Option<nudge::Handle>,
 }
 
 impl Keyframer {
     pub fn ask(&self) {
         request_keyframe(&self.sink);
-        // The keyframe comes with the next frame, which the encoder would keep.
-        if let Some(n) = &self.nudge {
-            n.next_is_new();
-        }
     }
 
     /// The source is to send its picture again at once (a keyframe asked of a still
@@ -1035,8 +1033,6 @@ fn request_keyframe(sink: &gst_app::AppSink) {
 impl Drop for Encoder {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        // Before the pipeline stops, which its frames would wait on.
-        drop(self.nudger.take());
         // Wakes the bus thread, which then sees `stop`.
         if let Some(bus) = self.pipeline.bus() {
             let _ = bus.post(gst::message::Application::new(gst::Structure::new_empty(
@@ -1262,6 +1258,7 @@ mod tests {
                 .into(),
             label: "test".into(),
             frame_rate: None,
+            live: false,
         };
         let cfg = EncoderConfig {
             codec: prostir_proto::Codec::H264,
@@ -1285,6 +1282,33 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(*told.lock().unwrap(), 0, "not told as the encoder's");
+    }
+
+    /// Told live, the answer to the latency query that passes the pad says live,
+    /// whatever the source said, with its latencies; without, as the source says.
+    #[test]
+    fn a_source_told_live_is_live_to_the_encoder() {
+        gst::init().unwrap();
+        let asked = |live: bool| {
+            let pipeline =
+                gst::parse::launch("videotestsrc ! identity name=told ! queue name=q ! fakesink")
+                    .unwrap()
+                    .downcast::<gst::Pipeline>()
+                    .unwrap();
+            if live {
+                let pad = pipeline.by_name("told").unwrap().static_pad("src").unwrap();
+                super::tell_live(&pad);
+            }
+            pipeline.set_state(gst::State::Paused).unwrap();
+            let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+            let mut q = gst::query::Latency::new();
+            let sink = pipeline.by_name("q").unwrap().static_pad("sink").unwrap();
+            assert!(sink.peer_query(&mut q));
+            pipeline.set_state(gst::State::Null).unwrap();
+            q.result().0
+        };
+        assert!(!asked(false), "videotestsrc is not live");
+        assert!(asked(true));
     }
 
     /// Caps that say no frame rate, or 0, get the one told; a rate said stays.
@@ -1475,6 +1499,7 @@ mod live {
                             .into(),
                         label: format!("measure {i}"),
                         frame_rate: None,
+                        live: false,
                     };
                     let cfg = EncoderConfig {
                         codec: prostir_proto::Codec::H265,

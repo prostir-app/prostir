@@ -42,10 +42,10 @@ use wayland_protocols_plasma::screencast::v1::client::{
 const POINTER_EMBEDDED: u32 = 2;
 
 /// How often the last frame of a still screen is sent again, in ms. The session
-/// needs none of it (pings keep it); with the frame rate told (see [`input_for`])
-/// x264 holds no frame back waiting for the next, and VA-API's kept frame is pushed
-/// out 30 ms after a change (`encoder/nudge.rs`). Each costs an encoding on the PC
-/// and a decoding and a wake-up of the radio in the headset.
+/// needs none of it (pings keep it), and with the frame rate and liveness told (see
+/// [`input_for`]) no encoder holds a frame back waiting for the next; it is what
+/// still pushes out the one keyframe a still screen gets, and each costs an encoding
+/// on the PC and a decoding and a wake-up of the radio in the headset.
 const KEEPALIVE_MS: u32 = 2000;
 
 /// The refresh rate in mHz of an output whose rate KWin did not say.
@@ -75,6 +75,10 @@ fn frame_rate(mhz: u32) -> gstreamer::Fraction {
 /// formats the encoder takes (as `capssetter` does): `pipewiresrc` then offers
 /// PipeWire no format and is linked to nothing ("target not found").
 ///
+/// It is live, which `pipewiresrc` says only once its stream is up, after VA-API
+/// asked and chose to keep frames back (each picture of a still screen then waited
+/// for the keepalive 2 s later): the encoder is told so ([`crate::encoder::tell_live`]).
+///
 /// Only that node: when it is gone, WirePlumber would otherwise link the stream to
 /// the default video source, a webcam (seen here with a node that was not there:
 /// linked to one, it failed only on its format). With `node.dont-fallback` it says
@@ -89,6 +93,7 @@ fn input_for(node: u32, refresh: u32) -> Input {
         ),
         label: format!("node {node}"),
         frame_rate: Some(frame_rate(refresh)),
+        live: true,
     }
 }
 
@@ -954,7 +959,6 @@ mod tests {
     #[ignore = "by hand: makes a PipeWire video node of its own"]
     fn a_pipewire_node_is_encoded() {
         use gstreamer::prelude::*;
-        // KWin's stream says no frame rate, nor does this one.
         let (provider, node) =
             test_node("video/x-raw,format=BGRx,width=640,height=360,framerate=30/1");
         let (frames, why) = encode_node(
@@ -969,11 +973,11 @@ mod tests {
     }
 
     /// A still screen, a new picture every 2 s from a PipeWire node made here: VA-API
-    /// gives each out at once, not when the next comes in 2 s later (it keeps a frame;
-    /// the same is sent again 30 ms after, see `encoder/nudge.rs`). The time is from
-    /// the frame entering the converter to leaving the parser: on this PC (Intel, iHD,
-    /// the card idle between frames, the frames in memory) 80 to 130 ms; without the
-    /// frame sent again, 4 s (it kept two). Run by hand:
+    /// gives each out at once, not when the next comes in 2 s later, and no frame is
+    /// made twice. It keeps frames back for a source that is not live, and
+    /// `pipewiresrc` says it is only once its stream is up, after VA-API asked: told
+    /// it is (see [`crate::encoder::tell_live`]). The time is from the frame entering
+    /// the converter to leaving the parser; without it, 4 s (it kept two). Run by hand:
     /// `cargo test -p prostir -- --ignored a_still_screens_picture --nocapture`; needs
     /// PipeWire, WirePlumber, `pw-cli`, gst-plugin-pipewire and VA-API.
     #[test]
@@ -996,10 +1000,13 @@ mod tests {
             .map(|t| t.encode_us / 1000)
             .collect();
         let again = frames.iter().filter(|t| t.repeat).count();
-        eprintln!("new pictures through the encoder in ms: {new:?}; sent again: {again}");
+        eprintln!("new pictures through the encoder in ms: {new:?}; repeats: {again}");
         assert!(new.len() >= 4, "{new:?}");
         // The first opens the encoder.
-        assert!(new[1..].iter().all(|ms| *ms < 150), "{new:?}");
+        assert!(new[1..].iter().all(|ms| *ms < 100), "{new:?}");
+        // A repeat is only PipeWire's keepalive (2 s after a picture, as often as the
+        // pictures come), none made here.
+        assert!(again <= new.len(), "{again} repeats");
     }
 
     /// KWin's node gone: the encoder's start says its source failed at once (not after

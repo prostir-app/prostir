@@ -464,6 +464,7 @@ impl Output for FakeOutput {
                 source: format!("{} screen={}", screen::ELEMENT, self.name),
                 label: self.name.clone(),
                 frame_rate: None,
+                live: false,
             },
             origin: if self.owned {
                 Origin::Monitor

@@ -690,6 +690,7 @@ fn run_probe(backend: Backend, codec: Codec) -> Result<()> {
         ),
         label: format!("probe {}", backend.name()),
         frame_rate: None,
+        live: false,
     };
     let cfg = EncoderConfig {
         codec,
