@@ -403,9 +403,16 @@ mod tests {
             assert!(std::time::Instant::now() < until, "the write never ended");
             std::thread::sleep(Duration::from_millis(10));
         }
-        // Dropped with its device, the writer's thread ends too.
+        // Dropped with its device, the writer's thread ends too: it lets go of the
+        // device once it is through with the write it counted done.
         let weak = Arc::downgrade(&device);
         drop(device);
-        assert!(weak.upgrade().is_none());
+        while weak.upgrade().is_some() {
+            assert!(
+                std::time::Instant::now() < until,
+                "the writer kept the device"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

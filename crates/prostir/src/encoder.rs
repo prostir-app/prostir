@@ -31,7 +31,7 @@ pub use choice::{Backend, Choice, Kind, Wanted, codec_label, note};
 pub use gpu::GpuDevices;
 #[cfg(not(feature = "fake-desktop"))]
 pub use probe::file_identity;
-pub use probe::{Next, PROBE_TIMEOUT, catalog, settle, start_probing};
+pub use probe::{Next, catalog, probe_timeout, settle, start_probing};
 
 use crate::platform::AdapterId;
 
@@ -1212,31 +1212,40 @@ mod pause {
     use super::Pause;
 
     /// A capture sleeps on its encoder's pause until it is resumed, or woken to stop,
-    /// and not at all while it is not paused.
+    /// and not at all while it is not paused. What is seen is whether a sleeper ended,
+    /// never how long it took: a busy machine starts a thread late.
     #[test]
     fn a_pause_is_slept_on_until_resumed_or_woken() {
         let pause = Arc::new(Pause::default());
         let stop = Arc::new(AtomicBool::new(false));
         let sleeper = |pause: &Arc<Pause>, stop: &Arc<AtomicBool>| {
             let (pause, stop) = (pause.clone(), stop.clone());
-            std::thread::spawn(move || {
-                let started = Instant::now();
-                pause.wait(&stop);
-                started.elapsed()
-            })
+            std::thread::spawn(move || pause.wait(&stop))
         };
-        assert!(sleeper(&pause, &stop).join().unwrap() < Duration::from_millis(50));
+        let ends = |sleeper: std::thread::JoinHandle<()>| {
+            let until = Instant::now() + Duration::from_secs(10);
+            while !sleeper.is_finished() {
+                if Instant::now() > until {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            sleeper.join().is_ok()
+        };
+        assert!(ends(sleeper(&pause, &stop)), "not paused: no sleep");
         pause.set(true);
         let resumed = sleeper(&pause, &stop);
         std::thread::sleep(Duration::from_millis(100));
+        assert!(!resumed.is_finished(), "paused: it sleeps");
         pause.set(false);
-        assert!(resumed.join().unwrap() >= Duration::from_millis(90));
+        assert!(ends(resumed), "resumed: it wakes");
         pause.set(true);
         let stopped = sleeper(&pause, &stop);
         std::thread::sleep(Duration::from_millis(100));
+        assert!(!stopped.is_finished(), "paused: it sleeps");
         stop.store(true, Ordering::Relaxed);
         pause.wake();
-        assert!(stopped.join().unwrap() >= Duration::from_millis(90));
+        assert!(ends(stopped), "woken to stop");
         assert!(pause.is_on(), "still paused, only woken");
     }
 }

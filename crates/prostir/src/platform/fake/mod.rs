@@ -65,7 +65,7 @@ pub fn config_home() -> Option<PathBuf> {
 
 /// One fake PC per settings directory; refuses to start unless asked for and given
 /// one, so neither a test nor a fake build started by mistake touches the real settings.
-pub fn single_instance(role: &str) -> Result<std::fs::File> {
+pub fn single_instance(role: &str) -> Result<crate::platform::Lock> {
     anyhow::ensure!(
         asked_for(),
         "this build has a fake desktop for tests; it runs only with PROSTIR_FAKE_DESKTOP=1"

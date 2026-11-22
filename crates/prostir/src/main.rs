@@ -320,8 +320,8 @@ impl Brain {
                 }
             }
             Event::Notice(true) => {
-                info!("pairing a new headset: from the notice");
                 self.door.open_pairing(Instant::now(), door::pairing_time());
+                info!("pairing a new headset: from the notice");
             }
             Event::Notice(false) => self.door.notice_up(false, Instant::now()),
             Event::Window(on) => {
@@ -875,7 +875,7 @@ fn full_with(
     sockets: platform::sockets::Sockets,
     origin: Origin,
     why: Option<wake::Wake>,
-    _instance: Option<std::fs::File>,
+    _instance: Option<platform::Lock>,
 ) -> Result<i32> {
     let (events, received) = events::channel();
     // A signal from here on quits the usual way, putting everything back.
@@ -975,8 +975,8 @@ fn full_with(
     let now = Instant::now();
     let mut door = door::Door::new(pairing_open, origin != Origin::Own, now);
     if args.pair || why == Some(wake::Wake::Pair) {
-        info!("pairing a new headset: from the notice");
         door.open_pairing(now, door::pairing_time());
+        info!("pairing a new headset: from the notice");
     }
     let mut brain = Brain {
         linger: Duration::from_secs(args.linger),
@@ -1016,6 +1016,11 @@ fn full_with(
     // On the bus as early as the state can be: GStreamer's start (a scan of its
     // plugins, the first time) comes after.
     gstreamer::init().context("GStreamer init")?;
+    // GStreamer's streaming threads come from GLib's pool, which would keep up to eight
+    // of them after a pipeline stops, each waking to end 15 s later: an idle PC would
+    // wake once more long after the encoders' probe or a session. They end half a
+    // second after their last task instead; a pipeline starts new ones.
+    gstreamer::glib::ThreadPool::set_max_unused_threads(Some(0));
     // What the encoders can do, found on a thread of its own before a headset needs it.
     encoder::start_probing();
     if args.open_settings
@@ -1047,7 +1052,7 @@ fn full_with(
     // inside a driver whose library the exit tears down: the process crashed so on
     // the way out. Each probe ends within its time limit; one that hangs is left
     // behind, and then the process ends without the libraries' exit handlers.
-    if !encoder::settle(encoder::PROBE_TIMEOUT) {
+    if !encoder::settle(encoder::probe_timeout()) {
         warn!("a probe of the encoders did not end: quitting without waiting for it");
         platform::end_now(code);
     }

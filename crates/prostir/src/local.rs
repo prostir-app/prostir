@@ -492,11 +492,11 @@ impl Brain {
                 "The headset microphone is switched in the headset only",
             )),
             Request::PairNewHeadset => {
+                let seconds = self
+                    .door
+                    .open_pairing(Instant::now(), crate::door::pairing_time());
                 info!("pairing a new headset: from the local API");
-                CtlReply::Pairing(
-                    self.door
-                        .open_pairing(Instant::now(), crate::door::pairing_time()),
-                )
+                CtlReply::Pairing(seconds)
             }
             Request::StopPairing => {
                 self.door.stop_pairing();

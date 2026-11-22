@@ -47,7 +47,7 @@ pub fn config_home() -> Option<PathBuf> {
 /// Hyprland, its start-up clean-up would remove the first one's), and the port is one
 /// per PC anyway. The lock file is held for the life of the process and says who
 /// holds it (`role`: `watcher` or `serve`) and its process id.
-pub fn single_instance(role: &str) -> Result<std::fs::File> {
+pub fn single_instance(role: &str) -> Result<crate::platform::Lock> {
     crate::platform::lock::take(&runtime_dir().join("prostir.lock"), role)
         .context("Prostir is already running for this user")
 }

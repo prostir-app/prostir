@@ -428,9 +428,7 @@ mod tests {
         }
         let systemctl = dir.join("systemctl");
         let script = format!("#!/bin/sh\necho \"$@\" >> {}/asked\n", dir.display());
-        std::fs::write(&systemctl, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::platform::process::write_program(&systemctl, &script);
         let p = Places {
             config: Some(dir.join("config")),
             unit_dirs: vec![unit_dir],
