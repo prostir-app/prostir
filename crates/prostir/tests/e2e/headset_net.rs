@@ -299,7 +299,8 @@ fn pc_code(pc: &Pc) -> String {
 /// The headset shows its code and the PC's dialog for it is up (the person at the PC
 /// has not typed it yet); the person picks "the other way round" on the headset, which
 /// hangs up and dials again for the PC's code. The PC lets go of the first attempt as
-/// its connection ends, closing its dialog, and shows its code to the new one.
+/// its connection ends, closing its dialog, and shows its code to the new one; the
+/// headset asks for it (no refusal from the PC to show), and the code typed pairs.
 #[test]
 fn the_other_way_round_while_the_pc_dialog_is_up() {
     let dir = TestDir::new("headset-net-other-way");
@@ -341,9 +342,27 @@ fn the_other_way_round_while_the_pc_dialog_is_up() {
     wait(&rx, START, ended(2));
     pc.wait_log(SOON, "the headset hung up while its code was asked for");
     dial_to_pair(&net, 3, &pc, key, true);
+    // The headset waits for the code the PC shows; it would show the PC's words and
+    // ask again, had the PC turned the new connection away.
+    let asked = wait(&rx, START, |e| match e {
+        NetEvent::Pairing {
+            step: StepId(3),
+            code,
+            ..
+        } => Some(Ok(code)),
+        NetEvent::HostError(text) => Some(Err(text)),
+        NetEvent::PairOffer { why, .. } => Some(Err(format!("{why:?}"))),
+        _ => None,
+    });
+    assert_eq!(asked, Ok(None), "the headset asks for the PC's code");
     if pc.bus.is_some() {
         let code = pc_code(&pc).replace(' ', "");
         assert_eq!(code.len(), 6, "{code}");
+        net.send(NetCmd::SubmitCode(code));
+        let id = headset::ids::PcId::of(&dir.pc_key());
+        wait(&rx, START, |e| {
+            matches!(e, NetEvent::Connected { pc, .. } if pc == id).then_some(())
+        });
     } else {
         pc.wait_log(SOON, "pairing code shown in the tray");
     }
@@ -689,7 +708,10 @@ fn pairing_news(rx: &Receiver<NetEvent>, step: u32) -> (Vec<String>, bool) {
 
 /// The PC has no dialog for the code the headset shows: the headset says the PC's
 /// words and asks the user again at once (with the other way round), without a new
-/// request, nor a count of wrong codes; the other way round then pairs.
+/// request, nor a count of wrong codes, and the search pauses as after a refusal; so
+/// each "Try again" (the headset's side of
+/// `attempts_without_a_dialog_on_the_pc_are_no_wrong_codes`). The other way round then
+/// pairs.
 #[test]
 fn a_pc_without_a_dialog_is_not_asked_again() {
     let dir = TestDir::new("headset-net-no-dialog");
@@ -712,17 +734,23 @@ fn a_pc_without_a_dialog_is_not_asked_again() {
         )
         .then_some(())
     });
-    dial_to_pair(&net, 2, &pc, key, false);
-    let (seen, refused) = pairing_news(&rx, 2);
-    assert_eq!(seen.len(), 3, "{seen:?}");
-    assert_eq!(seen[0], "pairing Some(\"314 159\")");
-    assert!(seen[1].starts_with("error: "), "the PC's words: {seen:?}");
-    assert_eq!(seen[2], "offer PcRefused { pc_shows: false }");
-    assert!(refused, "the search pauses as after a refusal");
+    for step in 2..=5 {
+        dial_to_pair(&net, step, &pc, key, false);
+        let (seen, refused) = pairing_news(&rx, step);
+        assert_eq!(seen.len(), 3, "try {step}: {seen:?}");
+        assert_eq!(seen[0], "pairing Some(\"314 159\")");
+        assert!(
+            seen[1].starts_with("error: ") && seen[1].contains("no dialog"),
+            "try {step}: the PC's words: {seen:?}"
+        );
+        assert_eq!(seen[2], "offer PcRefused { pc_shows: false }", "try {step}");
+        assert!(refused, "try {step}: the search pauses as after a refusal");
+    }
+    let step = 6;
     if pc.bus.is_none() {
         eprintln!("no session bus: the PC's code cannot be read, the other way skipped");
     } else {
-        dial_to_pair(&net, 3, &pc, key, true);
+        dial_to_pair(&net, step, &pc, key, true);
         let code = wait(&rx, START, |e| match e {
             NetEvent::Pairing { code, .. } => Some(code),
             _ => None,
@@ -733,82 +761,6 @@ fn a_pc_without_a_dialog_is_not_asked_again() {
             matches!(e, NetEvent::Connected { pc, .. } if pc == id).then_some(())
         });
     }
-    assert!(net.stop(Duration::from_secs(2)));
-    pc.quit();
-}
-
-/// The headset shows its code and the PC's dialog for it is up; the user picks "the
-/// other way round" on the headset before anyone typed: the PC shows its code for the
-/// new connection (the old dialog ends with its connection), and pairing goes on.
-#[test]
-#[ignore = "needs the PC side of audit N-2 (the code wait ends with its connection)"]
-fn the_other_way_round_while_the_pc_dialog_is_up() {
-    let dir = TestDir::new("headset-net-other-way");
-    dir.save_monitors(TWO_MONITORS);
-    let id = headset::ids::PcId::of(&dir.pc_key());
-    let (mut net, rx, _) = headset(&dir.path().join("headset"));
-    let pc = Pc::start(
-        &dir,
-        &Options {
-            typed_code: Some(CODE.into()),
-            typed_code_delay: Duration::from_secs(60),
-            ..Options::default()
-        },
-    );
-    if pc.bus.is_none() {
-        eprintln!("no session bus: the PC's code cannot be read, skipped");
-        return;
-    }
-    dial(&net, 1, &pc);
-    let key = wait(&rx, START, |e| match e {
-        NetEvent::PairOffer { key, .. } => Some(key),
-        _ => None,
-    });
-    wait(&rx, START, |e| {
-        matches!(
-            e,
-            NetEvent::Ended {
-                step: StepId(1),
-                ..
-            }
-        )
-        .then_some(())
-    });
-    dial_to_pair(&net, 2, &pc, key, false);
-    wait(&rx, START, |e| match e {
-        NetEvent::Pairing { code: Some(_), .. } => Some(()),
-        _ => None,
-    });
-    // The PC's dialog is up now.
-    std::thread::sleep(Duration::from_millis(500));
-    net.send(NetCmd::Hangup);
-    wait(&rx, START, |e| {
-        matches!(
-            e,
-            NetEvent::Ended {
-                step: StepId(2),
-                ..
-            }
-        )
-        .then_some(())
-    });
-    dial_to_pair(&net, 3, &pc, key, true);
-    let first = wait(&rx, START, |e| match e {
-        NetEvent::Pairing {
-            step: StepId(3),
-            code: None,
-            ..
-        } => Some(Ok(())),
-        NetEvent::HostError(text) => Some(Err(text)),
-        NetEvent::PairOffer { why, .. } => Some(Err(format!("{why:?}"))),
-        _ => None,
-    });
-    assert_eq!(first, Ok(()), "the PC refused the new connection");
-    net.send(NetCmd::SubmitCode(pc_code(&pc)));
-    wait(&rx, START, |e| {
-        matches!(e, NetEvent::Connected { pc, .. } if pc == id).then_some(())
-    });
-    assert!(pc.lines("another headset is pairing").is_empty());
     assert!(net.stop(Duration::from_secs(2)));
     pc.quit();
 }
