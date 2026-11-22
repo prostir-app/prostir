@@ -77,7 +77,8 @@ pub trait CtlClient {
     }
     /// While Prostir is not running: quits what sleeps for it (its sockets' watcher,
     /// or systemd's socket until the next login), as `quit` does while it runs;
-    /// whether anything did.
+    /// whether anything did. A Prostir that runs on another session bus (another
+    /// session's) is not asleep: nothing of it quits from here.
     fn quit_asleep(&self) -> bool {
         false
     }

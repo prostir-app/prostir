@@ -1288,7 +1288,8 @@ fn wake(
 ) -> std::io::Result<crate::ctl::Woken> {
     use crate::ctl::Woken;
     if let Some(pid) = platform::watcher() {
-        // SAFETY: a signal to a process of this user, which takes it.
+        // SAFETY: a signal to a Prostir of this user (see `platform::watcher`), which
+        // takes it.
         if unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) } == 0 {
             return Ok(Woken::Asleep { opens_window: true });
         }

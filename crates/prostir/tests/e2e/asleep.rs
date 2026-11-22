@@ -13,7 +13,7 @@ use prostir_api::{BUS_NAME, INTERFACE, OBJECT_PATH, SETTINGS_NAME, State};
 use prostir_proto::discovery::{Answer, MIN_QUERY, Query, flags};
 use prostir_testkit::{FakeHeadset, Keys, View, find};
 
-use crate::pc::{Activate, Options, Pc, TestDir, wakeups_of};
+use crate::pc::{Activate, Bus, Options, Pc, TestDir, wakeups_of};
 use crate::{SOON, START, TWO_MONITORS, connect};
 
 /// An answer comes within this, if one comes.
@@ -616,4 +616,35 @@ fn quit_ends_a_sleeping_pc() {
     let status = pc.again(&["ctl", "status", "--json"]);
     assert_eq!(status.code, 2, "{status:?}");
     assert!(status.json().get("asleep").is_none(), "{status:?}");
+}
+
+/// `prostir ctl quit` from another session (another session bus) while the watcher's
+/// full program runs on its own bus: it is not running there, and nothing quits; on
+/// its own bus quit quits it.
+#[test]
+fn quit_from_another_session_leaves_a_running_pc() {
+    let dir = TestDir::new("quit-other-session");
+    dir.save_monitors(TWO_MONITORS);
+    let options = Options {
+        watcher: true,
+        ..Options::default()
+    };
+    let mut pc = Pc::start(&dir, &options);
+    if pc.bus.is_none() {
+        return;
+    }
+    // The settings window wakes the full program.
+    assert_eq!(pc.again(&[]).code, 0);
+    wait_program(&pc, true);
+    let other = Bus::start(&dir.path().join("home")).expect("a second session bus");
+    let quit = pc.again_with(
+        &["ctl", "quit"],
+        &[("DBUS_SESSION_BUS_ADDRESS", other.address.as_str())],
+    );
+    assert_eq!(quit.code, 2, "{quit:?}");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_ne!(pc.program(), Some(pc.pid()), "the full program runs on");
+    let quit = pc.again(&["ctl", "quit"]);
+    assert_eq!(quit.code, 0, "{quit:?}");
+    assert!(pc.wait_end(SOON).success());
 }
