@@ -876,6 +876,8 @@ const NOTE_DETAIL_SIZE: f32 = 15.0;
 const NOTE_PAD: f32 = 18.0;
 /// The gap between a button and its note, where the note's point is.
 const NOTE_GAP: f32 = 10.0;
+/// The least room a note keeps from what it does not cover.
+const NOTE_CLEAR: f32 = 6.0;
 /// Room on a note's right for its "×".
 const NOTE_CLOSE: f32 = 26.0;
 /// The highest a note reaches: under the tabs, which stay in view.
@@ -1005,6 +1007,8 @@ impl Panel {
         let items = std::mem::take(&mut self.items);
         let (width, height) = (self.pixmap.width() as f32, self.pixmap.height() as f32);
         let mut boxes: Vec<(Rect, String, bool)> = Vec::new(); // (bounds, text, is_button)
+        // Buttons that ask to confirm: they take the place of others, never cover any.
+        let mut armed: Vec<(Rect, String)> = Vec::new();
         let mut found = Vec::new();
         for item in &items {
             match item {
@@ -1033,8 +1037,12 @@ impl Panel {
                     rect: r,
                     label,
                     size,
+                    style,
                     ..
                 } => {
+                    if *style == Style::Armed {
+                        armed.push((*r, label.clone()));
+                    }
                     found.extend(self.missing_glyphs(label));
                     if r.bottom() > height - 36.0 {
                         found.push(format!("below the bottom: button {label:?}"));
@@ -1109,6 +1117,13 @@ impl Panel {
             }
         }
         found.extend(self.under_the_note(&items));
+        for (a, ta) in &armed {
+            for (b, tb, _) in &boxes {
+                if (b != a || tb != ta) && overlap(a, b) {
+                    found.push(format!("the confirmation {ta:?} covers {tb:?}"));
+                }
+            }
+        }
         for (i, (a, ta, a_button)) in boxes.iter().enumerate() {
             for (b, tb, b_button) in &boxes[i + 1..] {
                 if (*a_button && *b_button) || !overlap(a, b) {
@@ -1536,14 +1551,16 @@ impl Panel {
         find(&|key| key == on).or_else(|| find(&|key| key.same_control(on)))
     }
 
-    /// `note` as drawn: right under its button (above it where there is no room
-    /// below), over whatever lies there, as wide as its text and at least as the
-    /// button, within the panel under the tabs, and grown over whatever it would cut
-    /// through (see [`Panel::covering`]); inside the lower part of a tall button (a
-    /// tile, whose state line it covers) where it fits across it, so the row below
-    /// stays as it is; on the bottom line (above the error line, when there is one) for
-    /// a wait, which can last long and covers no row meanwhile, and where the page has
-    /// no button for it. Its texts are made to fit by [`Panel::fit`].
+    /// `note` as drawn, never over another control: right under its button (above it
+    /// where the space below is taken), with its point at the button; else in the
+    /// nearest free space of the button's column, then of another column (without a
+    /// point); inside the lower part of a tall button (a tile, whose state line it
+    /// covers) where it fits across it; on the bottom line (above the error line, when
+    /// there is one), else under the tabs, else the lowest free place, for a wait and
+    /// where the page has no button for it. As wide as its text and at least as the
+    /// button, within the panel under the tabs. Only on a page with no free space at
+    /// all does it go over what lies there, grown over whatever it would cut through
+    /// (see [`Panel::covering`]). Its texts are made to fit by [`Panel::fit`].
     fn note_item(&mut self, note: &Note, items: &[Item], error: bool) -> Item {
         let (pw, ph) = (WIDTH as f32, HEIGHT as f32);
         let text_w = self.text_width(&note.text, NOTE_SIZE, true);
@@ -1569,37 +1586,37 @@ impl Panel {
                 let r = rect(b.left() + 10.0, b.bottom() - 10.0 - h, w, h);
                 return Some((r, None, false, true));
             }
-            // Within the column of its button.
-            let (cl, cr) = self.column(b);
-            let w = wanted.max(b.width()).min(cr - cl);
-            let mid = b.left() + b.width() / 2.0;
-            let x = (mid - w / 2.0).clamp(cl, cr - w);
-            // Below, else above (where what it would cover below reaches too low).
-            [false, true].into_iter().find_map(|above| {
-                let y = if above {
-                    b.top() - NOTE_GAP - h
-                } else {
-                    b.bottom() + NOTE_GAP
-                };
-                let r = self.covering(rect(x, y, w, h), b, above, items, (cl, cr), lowest)?;
-                let tip = mid.clamp(r.left() + 18.0, r.right() - 18.0);
-                Some((r, Some(tip), above, false))
-            })
+            let taken = self.taken(items);
+            self.free_by(b, wanted, h, &taken, lowest)
+                .map(|(r, tip, above)| (r, tip, above, false))
         });
         let (rect_, tip, above, inside) = match placed {
             Some(placed) => placed,
-            // On the bottom line, grown over what it would cut through as anywhere;
-            // just under the tabs where the bottom of the page is too full for that.
+            // On the bottom line where it is free, else under the tabs; else over
+            // what lies on the bottom line, grown over what it would cut through, or
+            // under the tabs where the bottom of the page is too full for that.
             None => {
                 let w = wanted.min(widest);
                 let x = (pw - w) / 2.0;
-                let nothing = rect(0.0, ph, pw, 1.0);
-                let whole = (44.0, pw - 44.0);
                 let bottom = rect(x, lowest - h, w, h);
-                let r = [bottom, rect(x, NOTE_TOP, w, h)]
+                let top = rect(x, NOTE_TOP, w, h);
+                let taken = self.taken(items);
+                let free = |r: &Rect| !taken.iter().any(|t| overlap(r, t));
+                let r = match [bottom, top]
                     .into_iter()
-                    .find_map(|r| self.covering(r, nothing, false, items, whole, lowest))
-                    .unwrap_or(bottom);
+                    .find(free)
+                    .or_else(|| self.free_low(wanted, h, &taken, lowest))
+                {
+                    Some(r) => r,
+                    None => {
+                        let nothing = rect(0.0, ph, pw, 1.0);
+                        let whole = (44.0, pw - 44.0);
+                        [bottom, top]
+                            .into_iter()
+                            .find_map(|r| self.covering(r, nothing, false, items, whole, lowest))
+                            .unwrap_or(bottom)
+                    }
+                };
                 (r, None, false, false)
             }
         };
@@ -1613,6 +1630,129 @@ impl Panel {
             size: NOTE_SIZE,
             detail: note.detail.as_deref().map(str::to_owned),
             detail_size: NOTE_DETAIL_SIZE,
+        }
+    }
+
+    /// Where the page has something a note must not cover: its buttons, texts (as
+    /// wide as they measure) and boxes, under the tabs, each with [`NOTE_CLEAR`]
+    /// around it.
+    fn taken(&mut self, items: &[Item]) -> Vec<Rect> {
+        let mut taken = Vec::new();
+        for item in items {
+            let r = match item {
+                Item::Button { rect, .. } | Item::Box(rect, _) => *rect,
+                Item::Text {
+                    x,
+                    baseline,
+                    size,
+                    medium,
+                    text,
+                    ..
+                } => {
+                    let tw = self.text_width(text, *size, *medium);
+                    rect(*x, baseline - size * 0.8, tw.max(1.0), size * 1.05)
+                }
+                _ => continue,
+            };
+            if r.bottom() > NOTE_TOP {
+                let c = NOTE_CLEAR;
+                taken.push(rect(
+                    r.left() - c,
+                    r.top() - c,
+                    r.width() + 2.0 * c,
+                    r.height() + 2.0 * c,
+                ));
+            }
+        }
+        taken
+    }
+
+    /// A free place (one that overlaps nothing `taken`) for a note `wanted` wide and
+    /// `h` high about button `b`: right under it, else right above it (with its point
+    /// at the button, and whether above); else the nearest free place in the button's
+    /// column, then in another column wide enough (no point). Under the tabs and down
+    /// to `lowest`; none where the page has no free place.
+    fn free_by(
+        &self,
+        b: Rect,
+        wanted: f32,
+        h: f32,
+        taken: &[Rect],
+        lowest: f32,
+    ) -> Option<(Rect, Option<f32>, bool)> {
+        let free = |r: &Rect| !taken.iter().any(|t| overlap(r, t));
+        let (cl, cr) = self.column(b);
+        let w = wanted.max(b.width()).min(cr - cl);
+        let mid = b.left() + b.width() / 2.0;
+        let x = (mid - w / 2.0).clamp(cl, cr - w);
+        let fits = |y: f32| y >= NOTE_TOP && y + h <= lowest;
+        let (below, above) = (b.bottom() + NOTE_GAP, b.top() - NOTE_GAP - h);
+        for (y, up) in [(below, false), (above, true)] {
+            let r = rect(x, y, w, h);
+            if fits(y) && free(&r) {
+                let tip = mid.clamp(r.left() + 18.0, r.right() - 18.0);
+                return Some((r, Some(tip), up));
+            }
+        }
+        // The nearest free place, down or up from the button in 2-pixel steps: across
+        // its middle, else to one side of the column.
+        let nearest = |xs: [f32; 3], w: f32, from: f32| {
+            let steps = ((lowest - NOTE_TOP) / 2.0).ceil() as usize + 1;
+            (0..=steps).find_map(|i| {
+                let d = i as f32 * 2.0;
+                [from + d, from - d]
+                    .into_iter()
+                    .filter(|y| fits(*y))
+                    .flat_map(|y| xs.map(|x| rect(x, y, w, h)))
+                    .find(free)
+            })
+        };
+        if let Some(r) = nearest([x, cl, cr - w], w, below) {
+            return Some((r, None, false));
+        }
+        self.columns()
+            .into_iter()
+            .filter(|&(l, r)| (l, r) != (cl, cr) && r - l >= wanted.min(cr - cl))
+            .find_map(|(l, r)| {
+                let w = wanted.max(b.width()).min(r - l);
+                nearest([l + (r - l - w) / 2.0, l, r - w], w, b.top())
+            })
+            .map(|r| (r, None, false))
+    }
+
+    /// The lowest free place on the page for a note `wanted` wide (narrower to fit a
+    /// column) and `h` high, in any column: none where the page has none.
+    fn free_low(&self, wanted: f32, h: f32, taken: &[Rect], lowest: f32) -> Option<Rect> {
+        let free = |r: &Rect| !taken.iter().any(|t| overlap(r, t));
+        let columns: Vec<(f32, f32)> = self
+            .columns()
+            .into_iter()
+            .filter(|&(l, r)| r - l >= wanted.min(WIDTH as f32 - 88.0) * 0.5)
+            .collect();
+        let mut y = lowest - h;
+        while y >= NOTE_TOP {
+            for &(l, r) in &columns {
+                let w = wanted.min(r - l);
+                let found = [l + (r - l - w) / 2.0, l, r - w]
+                    .into_iter()
+                    .map(|x| rect(x, y, w, h))
+                    .find(free);
+                if found.is_some() {
+                    return found;
+                }
+            }
+            y -= 2.0;
+        }
+        None
+    }
+
+    /// The columns of the page: left and right edges.
+    fn columns(&self) -> Vec<(f32, f32)> {
+        let pw = WIDTH as f32;
+        match self.page {
+            Page::Tab(Tab::Monitors) | Page::Welcome => vec![(44.0, 624.0), (680.0, pw - 44.0)],
+            Page::Tab(Tab::Settings(_)) => vec![(44.0, 274.0), (324.0, pw - 44.0)],
+            _ => vec![(44.0, pw - 44.0)],
         }
     }
 
@@ -2796,12 +2936,13 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             y += 48.0;
         }
         if s.confirm_remove == Some(m.id) {
+            // In the row of the buttons it stands for, never over the scale's row.
             items.push(button(
                 rect(
                     primary.left(),
-                    y + 7.0,
+                    remove.top(),
                     remove.right() - primary.left(),
-                    48.0,
+                    remove.height(),
                 ),
                 l.t("monitor-remove-confirm"),
                 Style::Armed,
@@ -2885,8 +3026,9 @@ fn scales_of(s: &UiState) -> &[u16] {
 
 /// The PC's own displays from `y` (those connected first), each on a row: its name,
 /// its connector smaller under it, and its switch (shown or hidden, said by the
-/// highlighted option). One not connected says so and keeps its switch; with as many
-/// shown as the PC allows, the others' "Shown" waits, saying why. As many rows as fit
+/// highlighted option). One not connected says so, without a switch (there is
+/// nothing to show); with as many shown as the PC allows, the others' "Shown" waits,
+/// saying why. As many rows as fit
 /// above "Line up", a page at a time, the pages turned beside the title. Where the
 /// next thing goes.
 fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f32 {
@@ -2894,8 +3036,12 @@ fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -
     if s.physical.is_empty() {
         return y - 18.0;
     }
-    // Room above "Line up" and the bottom line.
-    let rows = ((HEIGHT as f32 - 166.0 - y) / 60.0).floor().max(1.0) as usize;
+    // Room above "Line up" and the bottom line, where a note has its free place
+    // (above the error line, when there is one).
+    let error = if s.error.is_some() { 42.0 } else { 0.0 };
+    let rows = ((HEIGHT as f32 - 166.0 - error - y) / 60.0)
+        .floor()
+        .max(1.0) as usize;
     let pages = s.physical.len().div_ceil(rows);
     let page = usize::from(s.physical_page) % pages;
     let title_room = if pages > 1 { w - PAGER_W - 10.0 } else { w };
@@ -2919,7 +3065,11 @@ fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -
     let bw = 128.0;
     for d in s.physical.iter().skip(page * rows).take(rows) {
         items.push(Item::Box(rect(x, y, w, 54.0), [255, 255, 255, 8]));
-        let room = w - 2.0 * bw - 10.0 - 32.0;
+        let room = if d.connected {
+            w - 2.0 * bw - 10.0 - 32.0
+        } else {
+            w - 32.0
+        };
         let mut name = text_in(room, text(x + 16.0, y + 24.0, 19.0, true, TEXT, &d.name));
         if let Item::Text { shorten, .. } = &mut name {
             *shorten = true;
@@ -2945,14 +3095,12 @@ fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -
             }
             items.push(t);
         }
-        let can_show = !full || d.shown || !d.connected;
-        for (i, (label, on, enabled)) in [
+        let can_show = !full || d.shown;
+        let switch = [
             (l.t("pc-display-shown"), true, can_show),
             (l.t("pc-display-hidden"), false, true),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        ];
+        for (i, (label, on, enabled)) in switch.into_iter().enumerate().filter(|_| d.connected) {
             let r = rect(
                 x + w - 2.0 * bw - 14.0 + i as f32 * (bw + 6.0),
                 y + 7.0,
@@ -5142,36 +5290,34 @@ mod tests {
     /// "Hidden".
     type Row = (String, Option<Action>, Style, Option<Action>, Style);
 
-    /// The switches of the PC's own displays, a row each.
+    /// The switches of the PC's own displays, a row each for those that have one.
     fn physical_rows(s: &UiState) -> Vec<Row> {
         let items = Panel::new().build(s);
         s.physical
             .iter()
-            .map(|d| {
+            .filter_map(|d| {
                 let of = |on: bool| {
-                    items
-                        .iter()
-                        .find_map(|i| match i {
-                            Item::Button {
-                                key: Some(Action::ShowPhysical(k, o)),
-                                action,
-                                style,
-                                ..
-                            } if *k == d.id && *o == on => Some((*action, *style)),
-                            _ => None,
-                        })
-                        .expect("a switch")
+                    items.iter().find_map(|i| match i {
+                        Item::Button {
+                            key: Some(Action::ShowPhysical(k, o)),
+                            action,
+                            style,
+                            ..
+                        } if *k == d.id && *o == on => Some((*action, *style)),
+                        _ => None,
+                    })
                 };
-                let (show, show_style) = of(true);
-                let (hide, hide_style) = of(false);
-                (d.name.clone(), show, show_style, hide, hide_style)
+                let (show, show_style) = of(true)?;
+                let (hide, hide_style) = of(false).expect("both halves of the switch");
+                Some((d.name.clone(), show, show_style, hide, hide_style))
             })
             .collect()
     }
 
-    /// Every display of the PC has its switch, named as the PC names it, its connector
-    /// under; one not connected says so and keeps its switch; with as many shown as
-    /// the PC allows, the others' "Shown" waits, saying why; none at all: no switches.
+    /// Every connected display of the PC has its switch, named as the PC names it, its
+    /// connector under; one not connected says so, without a switch; with as many
+    /// shown as the PC allows, the others' "Shown" waits, saying why; none at all: no
+    /// switches.
     #[test]
     fn every_pc_display_has_its_switch() {
         let says = |s: &UiState, what: &str| {
@@ -5185,22 +5331,13 @@ mod tests {
         let rows = physical_rows(&s);
         assert_eq!(
             rows,
-            [
-                (
-                    "Екран ноутбука".into(),
-                    Some(Action::ShowPhysical(k(100), true)),
-                    Style::Normal,
-                    None,
-                    Style::Selected
-                ),
-                (
-                    "DELL U2720Q".into(),
-                    None,
-                    Style::Selected,
-                    Some(Action::ShowPhysical(k(117), false)),
-                    Style::Normal
-                ),
-            ]
+            [(
+                "DELL U2720Q".into(),
+                None,
+                Style::Selected,
+                Some(Action::ShowPhysical(k(117), false)),
+                Style::Normal
+            ),]
         );
         assert!(says(&s, "Екран ноутбука"));
         assert!(says(&s, "eDP-1 · не підключено"));
@@ -5603,6 +5740,7 @@ mod tests {
                 st.tab = tab;
                 states.push(st.clone());
                 st.confirm_remove = Some(k(103));
+                st.selected = Some(k(103));
                 st.settings.cinema = true;
                 st.settings.focus = true;
                 st.mic_wanted = false;
@@ -5791,12 +5929,31 @@ mod tests {
         (r.left() + r.width() / 2.0, r.top() + r.height() / 2.0)
     }
 
+    /// The buttons a note at `r` covers, not being inside them.
+    fn covered_by(p: &Panel, r: Rect) -> Vec<String> {
+        p.items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Button { rect: b, label, .. }
+                    if overlap(b, &r)
+                        && !(b.left() <= r.left()
+                            && b.right() >= r.right()
+                            && b.top() <= r.top()
+                            && b.bottom() >= r.bottom()) =>
+                {
+                    Some(label.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// A note sits right under the button it is about, its point at the button's
-    /// middle, over the whole row below (which it keeps from being pressed: pressed,
-    /// the note goes); above a button too near the bottom, and above its title; inside
-    /// a tile that stands for the other value since, which still takes its own press;
-    /// where a button was pressed after the button has gone; on the bottom line for a
-    /// wait and where the page has no button for it, above the error line.
+    /// middle, where the space there is free; else in the nearest free space, never
+    /// over another control (the row below stays pressable); inside a tile that stands
+    /// for the other value since, which still takes its own press; where a button was
+    /// pressed after the button has gone; on the bottom line for a wait and where the
+    /// page has no button for it, above the error line.
     #[test]
     fn a_note_sits_under_its_button() {
         let texts = crate::lang::builtin("uk");
@@ -5809,52 +5966,43 @@ mod tests {
         let mut p = Panel::new();
         p.set_state(&st);
         let b = button_at(&p, add);
-        let (r, tip, above, text, size) = note_of(&p).expect("a note");
+        let (r, _, _, text, size) = note_of(&p).expect("a note");
         assert_eq!(text, "Монітор додано");
-        assert!(!above);
-        assert!(
-            (r.top() - (b.bottom() + NOTE_GAP)).abs() < 0.01,
-            "{r:?} under {b:?}"
-        );
         assert!(r.width() >= b.width());
-        assert_eq!(tip, Some(middle(b).0));
         assert!(
             (size - NOTE_SIZE).abs() < f32::EPSILON,
             "drawn at its own size"
         );
         assert!(p.overflows().is_empty(), "{:?}", p.overflows());
-        // Over the size below, whole (nothing of it peeks out): pressing there takes
-        // the note away, not the size below.
-        let below = button_at(
-            &p,
-            Action::Add {
-                width: 5120,
-                height: 1440,
-            },
+        // The sizes below are not covered: pressing one adds it.
+        assert_eq!(covered_by(&p, r), Vec::<String>::new());
+        let below = Action::Add {
+            width: 5120,
+            height: 1440,
+        };
+        p.hover(Some(middle(button_at(&p, below))));
+        assert_eq!(p.press(), Some(below));
+        // Free space right under its button: there, with its point at the button.
+        let tidy = Action::Tidy;
+        st.note = Some(Note::done(Some(tidy), "Готово"));
+        let mut p = Panel::new();
+        p.set_state(&st);
+        let b = button_at(&p, tidy);
+        let (r, tip, above, ..) = note_of(&p).expect("a note");
+        assert!(!above);
+        assert!(
+            (r.top() - (b.bottom() + NOTE_GAP)).abs() < 0.01,
+            "{r:?} under {b:?}"
         );
-        assert!(r.top() <= below.top() && r.bottom() >= below.bottom());
-        p.hover(Some(middle(below)));
-        assert_eq!(p.press(), Some(Action::HideNote));
-        // The whole row, not a part of its outer sizes.
-        let left = button_at(
-            &p,
-            Action::Add {
-                width: 3440,
-                height: 1440,
-            },
-        );
-        assert!(r.left() <= left.left());
+        assert_eq!(tip, Some(middle(b).0));
 
-        // The last row of the page: the note goes above.
+        // The last row of the page: not over the rows above either.
         let cinema = Action::CinemaScreen(k(103));
         st.note = Some(Note::done(Some(cinema), "Готово"));
         let mut p = Panel::new();
         p.set_state(&st);
-        let b = button_at(&p, cinema);
-        let (r, _, above, ..) = note_of(&p).expect("a note");
-        assert!(above);
-        // Above "Cinema screen" too, which stays over its buttons.
-        assert!(r.bottom() < b.top() - 30.0, "{r:?} over {b:?}");
+        let (r, ..) = note_of(&p).expect("a note");
+        assert_eq!(covered_by(&p, r), Vec::<String>::new());
         assert!(p.overflows().is_empty(), "{:?}", p.overflows());
 
         // A tile pressed: it turns the sound to the PC, and then stands for turning
@@ -5893,12 +6041,13 @@ mod tests {
         st.selected = None;
         st.note = Some(Note::done(Some(remove), texts.t("note-monitor-removed")));
         p.set_state(&st);
-        let (r, tip, ..) = note_of(&p).expect("a note");
+        // In the column where it was, over nothing that is there now.
+        let (r, ..) = note_of(&p).expect("a note");
         assert!(
-            (r.top() - (cross.bottom() + NOTE_GAP)).abs() < 0.01,
-            "{r:?} under {cross:?}"
+            r.top() > cross.top() && r.right() <= 624.5,
+            "{r:?} by {cross:?}"
         );
-        assert_eq!(tip, Some(middle(cross).0));
+        assert_eq!(covered_by(&p, r), Vec::<String>::new());
 
         // No button for it here: the bottom line, above the error line when there is
         // one.
@@ -5939,7 +6088,7 @@ mod tests {
     /// at their own size, in the longer pseudo-language made smaller: nothing peeks out
     /// from under them, and the tabs and the error line stay in view (see
     /// `Panel::under_the_note`). A wait and news without a button go on the bottom line
-    /// of every page.
+    /// of every page, else the lowest free place, over nothing.
     #[test]
     fn notes_fit_under_every_button() {
         let mut problems = Vec::new();
@@ -5981,7 +6130,8 @@ mod tests {
             let done = Note::done(None, lang.t("note-mic-ask"));
             let mut p = Panel::new();
             for page in pages {
-                // On the bottom line, above the error line when there is one.
+                // On the bottom line, above the error line when there is one (or where
+                // nothing is).
                 let lowest = HEIGHT as f32 - if page.error.is_some() { 66.0 } else { 24.0 };
                 for note in [Note::waiting(Some(Action::Tidy), &lang), done.clone()] {
                     let mut st = page.clone();
@@ -5991,7 +6141,8 @@ mod tests {
                     let (r, tip, ..) = note_of(&p).expect("a note");
                     let bottom = (r.bottom() - lowest).abs() < 0.01;
                     let top = (r.top() - NOTE_TOP).abs() < 0.01;
-                    if tip.is_some() || !(bottom || top) {
+                    let free = covered_by(&p, r).is_empty();
+                    if tip.is_some() || !(bottom || top || free) {
                         problems.push(format!("{:?}: not on the bottom line", page.tab));
                     }
                 }
@@ -6023,20 +6174,31 @@ mod tests {
                         for o in p.overflows() {
                             problems.push(format!("{:?}/{:?}/{on:?}: {o}", lang, page.tab));
                         }
-                        let Some((r, tip, ..)) = note_of(&p) else {
+                        let Some((r, ..)) = note_of(&p) else {
                             panic!("no note")
                         };
-                        // Under its button with a point, or inside a tile.
-                        let inside = p.items.iter().any(|i| {
-                            matches!(i, Item::Button { rect: b, .. }
-                                if b.left() <= r.left() && b.right() >= r.right()
-                                    && b.top() <= r.top() && b.bottom() >= r.bottom())
-                        });
-                        // The monitors on the map overlap one another: a note about
-                        // one (picking it says nothing) goes on the bottom line.
-                        let map = matches!(on, Action::SelectMonitor(_));
-                        if tip.is_none() && !inside && !map {
-                            problems.push(format!("{on:?}: not by its button"));
+                        // Over no other control: inside a tile it stands for, or where
+                        // nothing is. The densest parts of Settings have no free place
+                        // as wide as a long note: there it goes over the bottom line.
+                        let dense =
+                            matches!(page.tab, Tab::Settings(Section::Look | Section::Controls));
+                        let inside = |b: &Rect| {
+                            b.left() <= r.left()
+                                && b.right() >= r.right()
+                                && b.top() <= r.top()
+                                && b.bottom() >= r.bottom()
+                        };
+                        for i in &p.items {
+                            if let Item::Button { rect: b, label, .. } = i
+                                && overlap(b, &r)
+                                && !inside(b)
+                                && !dense
+                            {
+                                problems.push(format!(
+                                    "{:?}/{on:?}: the note covers {label:?}",
+                                    page.tab
+                                ));
+                            }
                         }
                         // The built-in languages are made smaller at most (in a narrow
                         // column), never cut short.
