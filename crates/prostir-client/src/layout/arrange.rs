@@ -35,30 +35,120 @@ pub fn preset_radius<K: Key>(preset: Preset, monitors: &[(K, u32, u32)]) -> f32 
     circle::radius_of(shape(preset), &pixel_sizes(monitors), &Limits::default())
 }
 
+/// A display of the PC itself shown: its stream's size in pixels, and where it is on
+/// the PC's desktop (`x`, `y`, width, height in the desktop's pixels), where known.
+pub type Physical<K> = (K, u32, u32, Option<[i32; 4]>);
+
 /// Places every monitor for a preset, around the origin facing -Z (see
-/// `prostir_layout::circle`). `monitors` and `mirror` hold `(id, width_px,
-/// height_px)`; the monitors go left to right in the given order (as on the desktop),
-/// in one row while it fits around the user, else in rows; the laptop mirror goes under
-/// the primary monitor. `curve`: the monitors are drawn curved, on a cylinder this many
-/// times the arrangement's radius (`None`: flat); the mirror then continues the
-/// cylinder of the monitor above it.
+/// `prostir_layout::circle`). `monitors` hold `(id, width_px, height_px)`; they go left
+/// to right in the given order (as on the desktop), in one row while it fits around the
+/// user, else in rows. The PC's own displays shown (`physical`) go under the primary
+/// monitor as one group, standing to each other as they stand on the PC's desktop (see
+/// [`spread`]). `curve`: the monitors are drawn curved, on a cylinder this many times
+/// the arrangement's radius (`None`: flat); the group then continues the cylinder of
+/// the monitor above it.
 pub fn arrange<K: Key>(
     preset: Preset,
     monitors: &[(K, u32, u32)],
     primary: Option<K>,
-    mirror: Option<(K, u32, u32)>,
+    physical: &[Physical<K>],
     curve: Option<f32>,
 ) -> HashMap<K, Placement> {
-    circle::arrange(
+    let group = physical
+        .first()
+        .map(|first| (first.0, group_size(physical)));
+    let mut out: HashMap<K, Placement> = circle::arrange(
         shape(preset),
         &pixel_sizes(monitors),
         primary,
-        mirror.map(|m| pixel_sizes(&[m])[0]),
+        group.map(|(id, (w, h))| (id, prostir_layout::space::PixelSize::new(w, h))),
         curve,
         &Limits::default(),
     )
     .into_iter()
-    .collect()
+    .collect();
+    if let Some((id, _)) = group
+        && let Some(at) = out.remove(&id)
+    {
+        out.extend(spread(physical, at));
+    }
+    out
+}
+
+/// Where each of `physical` is on one plane, in the desktop's pixels: as on the PC's
+/// desktop when each says where it is there, else side by side in their order, tops
+/// level (in their streams' pixels).
+fn desk_rects<K: Key>(physical: &[Physical<K>]) -> Vec<(K, [f32; 4])> {
+    if physical
+        .iter()
+        .all(|p| p.3.is_some_and(|r| r[2] > 0 && r[3] > 0))
+    {
+        return physical
+            .iter()
+            .filter_map(|p| {
+                let [x, y, w, h] = p.3?;
+                Some((p.0, [x as f32, y as f32, w as f32, h as f32]))
+            })
+            .collect();
+    }
+    let mut x = 0.0;
+    physical
+        .iter()
+        .map(|&(id, w, h, _)| {
+            let r = [x, 0.0, w.max(1) as f32, h.max(1) as f32];
+            x += w.max(1) as f32;
+            (id, r)
+        })
+        .collect()
+}
+
+/// The box around `rects`: left, top, right, bottom.
+fn bounds<K>(rects: &[(K, [f32; 4])]) -> [f32; 4] {
+    rects.iter().fold(
+        [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+        |[l, t, r, b], (_, [x, y, w, h])| [l.min(*x), t.min(*y), r.max(x + w), b.max(y + h)],
+    )
+}
+
+/// How many of a stream's pixels a pixel of the desktop is, for the group: as for the
+/// largest display in it (which then looks as large as it would alone).
+fn stream_per_desk<K: Key>(physical: &[Physical<K>], rects: &[(K, [f32; 4])]) -> f32 {
+    physical
+        .iter()
+        .zip(rects)
+        .max_by_key(|(p, _)| u64::from(p.1) * u64::from(p.2))
+        .map_or(1.0, |(p, (_, r))| p.1.max(1) as f32 / r[2].max(1.0))
+}
+
+/// The group of `physical` as one display: its size in a stream's pixels.
+fn group_size<K: Key>(physical: &[Physical<K>]) -> (u32, u32) {
+    let rects = desk_rects(physical);
+    let [l, t, r, b] = bounds(&rects);
+    let k = stream_per_desk(physical, &rects);
+    let size = |v: f32| (v * k).round().clamp(1.0, 1e6) as u32;
+    (size(r - l), size(b - t))
+}
+
+/// Each of `physical` placed within the group placed at `at` (its box, the size
+/// [`group_size`] says): side by side and above one another as on the PC's desktop,
+/// on the group's plane, each as wide as its share of the box.
+pub fn spread<K: Key>(physical: &[Physical<K>], at: Placement) -> Vec<(K, Placement)> {
+    let rects = desk_rects(physical);
+    let [l, t, r, b] = bounds(&rects);
+    let per = at.width / (r - l).max(1.0);
+    let (mx, my) = ((l + r) / 2.0, (t + b) / 2.0);
+    rects
+        .iter()
+        .map(|&(id, [x, y, w, h])| {
+            let offset = Vec3::new((x + w / 2.0 - mx) * per, -(y + h / 2.0 - my) * per, 0.0);
+            let p = Placement {
+                position: at.position + at.rotation * offset,
+                rotation: at.rotation,
+                width: w * per,
+            };
+            (id, p)
+        })
+        .collect()
 }
 
 /// Where the arrangement is seen from and how it is turned: from `center` (eye, yaw),

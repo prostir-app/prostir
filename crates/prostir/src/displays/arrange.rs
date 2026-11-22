@@ -402,6 +402,16 @@ impl Displays {
         self.on_desk.get(name).copied()
     }
 
+    /// The size of monitor `id` in pixels, where it is a monitor made for the headset.
+    pub fn monitor_size(&self, id: ScreenId) -> Option<(u32, u32)> {
+        let spec = self
+            .screens
+            .get(&id)
+            .filter(|s| s.is_virtual())
+            .and_then(|s| s.kind.spec())?;
+        Some((spec.width, spec.height))
+    }
+
     /// Gives monitor `id` the scale `percent` (one the desktop gives its size): its
     /// output is made anew under the same name, so the desktop keeps its place.
     pub fn rescale(&mut self, id: ScreenId, percent: u16) -> Result<()> {

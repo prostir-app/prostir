@@ -34,8 +34,8 @@ impl Model {
     /// Does `action`, pressed `by`.
     pub(super) fn act(&mut self, action: Action, by: By) {
         // Changing the setup by hand leaves the profile it came from.
-        if action.leaves_profile() {
-            self.menu.active_profile = None;
+        if action.leaves_profile() && self.menu.active_profile.take().is_some() {
+            self.profiles_changed();
         }
         // A press of the menu: what was said under the button pressed before goes
         // (another page too), and what this one asks of the PC is its own. A press
@@ -59,6 +59,8 @@ impl Model {
             | Action::DetachWindow
             | Action::WindowHere
             | Action::Screenshot
+            | Action::AddScale(_)
+            | Action::SetScale(..)
             | Action::FindMouse => self.act_monitors(action),
             Action::Cinema(_)
             | Action::CinemaScreen(_)
@@ -85,11 +87,16 @@ impl Model {
             | Action::ForgetPc(_)
             | Action::SetEncoding(_)
             | Action::SetAudio(_)
-            | Action::SetMirror(_)
+            | Action::ShowPhysical(..)
+            | Action::NoLimits(_)
             | Action::SetMic(_)
             | Action::AskMic
             | Action::GazeMouse(_) => self.act_pc(action),
-            Action::ApplyProfile(_) | Action::SaveProfile(_) => self.act_profiles(action),
+            Action::ApplyProfile(_)
+            | Action::SaveProfile(_)
+            | Action::NewProfile
+            | Action::DeleteProfile(_)
+            | Action::ProfilePage(_) => self.act_profiles(action),
             Action::Tab(_)
             | Action::IntroDone
             | Action::ShowTips

@@ -107,7 +107,7 @@ impl Sim {
             settings: Settings::default(),
             desk: Desk::default(),
             keyboard: None,
-            profiles: Default::default(),
+            profiles: Vec::new(),
             lang: LangState::new(crate::lang::builtin("en"), Vec::new()),
             system_lang: None,
             battery: Some((80, false)),
@@ -781,4 +781,339 @@ fn the_search_screen_follows_the_time() {
         miss_all(&mut sim);
     }
     assert_eq!(hint(&sim), Some(Hint::Silent));
+}
+
+/// A display of the PC itself: `connector`, the laptop's panel or not, shown or not,
+/// where it is on the desktop.
+fn physical(n: u32, connector: &str, builtin: bool, shown: bool, desk: [i32; 4]) -> Display {
+    Display {
+        id: DisplayId(n),
+        kind: DisplayKind::Physical {
+            builtin,
+            connector: connector.into(),
+            shown,
+        },
+        name: connector.into(),
+        mode: Mode::new(1920, 1080),
+        desk: Some(state::DeskRect {
+            x: desk[0],
+            y: desk[1],
+            w: desk[2].unsigned_abs(),
+            h: desk[3].unsigned_abs(),
+        }),
+        state: DisplayState::Running,
+    }
+}
+
+impl Sim {
+    /// The PC lists monitor 1 and `physical`, its primary monitor 1.
+    fn list_with(&mut self, physical: Vec<Display>) {
+        let mut displays = vec![monitor(1)];
+        displays.extend(physical);
+        let part = Displays {
+            displays,
+            primary: Some(DisplayId(1)),
+        };
+        self.net(NetEvent::Part(PC, HostMsg::Displays { part }));
+    }
+
+    /// The PC's limits, with `physical_max` of its own displays and three scales; it
+    /// makes monitors at another scale where `scale` (its capability 10).
+    fn limits(&mut self, physical_max: u8, scale: bool) {
+        let part = state::Limits {
+            virtual_max: 6,
+            windows_max: 3,
+            physical_max,
+            streams_max: 16,
+            min: (640, 480),
+            max: (5120, 2880),
+            sizes: vec![Mode::new(2560, 1440)],
+            scales: vec![100, 125, 150],
+        };
+        self.net(NetEvent::Part(PC, HostMsg::Limits { part }));
+        let features = if scale {
+            vec![caps::pc::SCALE]
+        } else {
+            Vec::new()
+        };
+        let part = state::HostCaps { features };
+        self.net(NetEvent::Part(PC, HostMsg::HostCaps { part }));
+    }
+
+    /// The PC answers request `req` with `outcome`.
+    fn reply(&mut self, req: ReqId, outcome: Outcome) {
+        self.net(NetEvent::Reply {
+            pc: PC,
+            req,
+            outcome,
+        });
+    }
+}
+
+/// The requests sent to the PC among `fx`, with their numbers.
+fn requests(fx: &[Effect]) -> Vec<(ReqId, Request)> {
+    sent(fx)
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Request {
+                req,
+                asked: Asked::Known(r),
+            } => Some((*req, r.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Each display of the PC itself has its switch, named as the PC names it: pressed, it
+/// moves at once and asks the PC; a refusal (the PC's limit) puts it back and says why
+/// under it; the PC's list shows it as it is once answered.
+#[test]
+fn each_display_of_the_pc_has_its_switch() {
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    sim.limits(1, false);
+    let laptop = physical(100, "eDP-1", true, true, [0, 1080, 1920, 1080]);
+    let hdmi = physical(117, "HDMI-A-1", false, false, [0, 0, 1920, 1080]);
+    sim.list_with(vec![laptop, hdmi.clone()]);
+    let shown = |sim: &Sim| -> Vec<(u32, bool)> {
+        crate::view::build(&sim.m)
+            .physical
+            .iter()
+            .map(|d| (d.id.id.0, d.shown))
+            .collect()
+    };
+    assert_eq!(shown(&sim), [(100, true), (117, false)]);
+    sim.take();
+    sim.menu(Action::ShowPhysical(k(117), true));
+    let asked = requests(&sim.take());
+    let [(req, Request::ShowPhysical { id, shown: true })] = asked.as_slice() else {
+        panic!("{asked:?}")
+    };
+    assert_eq!(*id, DisplayId(117));
+    assert_eq!(shown(&sim), [(100, true), (117, true)], "at once");
+    sim.reply(*req, Outcome::failed(ErrorCode::LIMIT, "1"));
+    assert_eq!(shown(&sim), [(100, true), (117, false)], "put back");
+    let note = crate::view::build(&sim.m).note.expect("why");
+    assert_eq!(note.on, Some(Action::ShowPhysical(k(117), true)));
+    assert_eq!(note.kind, note::Kind::Failed);
+
+    // Hidden the laptop's panel, shown the monitor: the PC's list, then its answer.
+    sim.menu(Action::ShowPhysical(k(100), false));
+    let [(req, _)] = requests(&sim.take())[..] else {
+        panic!("one request")
+    };
+    let hidden = physical(100, "eDP-1", true, false, [0, 1080, 1920, 1080]);
+    sim.list_with(vec![hidden, hdmi]);
+    sim.reply(req, Outcome::Done);
+    assert_eq!(shown(&sim), [(100, false), (117, false)]);
+    let note = crate::view::build(&sim.m).note.expect("done");
+    assert_eq!(&*note.text, "The PC display is hidden");
+}
+
+/// The PC's own displays shown stand under the primary monitor as one group, as they
+/// stand to each other on the PC's desktop: the monitor above the laptop's panel,
+/// side by side ones side by side.
+#[test]
+fn the_pcs_displays_stand_as_on_its_desktop() {
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    // The laptop's panel left, a monitor right of it and higher.
+    let laptop = physical(100, "eDP-1", true, true, [0, 400, 1920, 1080]);
+    let right = physical(117, "HDMI-A-1", false, true, [1920, 0, 2560, 1440]);
+    sim.list_with(vec![laptop, right]);
+    for (n, size) in [(100, (1920, 1080)), (117, (2560, 1440))] {
+        sim.handle(Event::StreamStarted { id: k(n), size });
+    }
+    sim.frames(Duration::from_secs(1));
+    let world = sim.m.world();
+    let at = |n| *world.placement(k(n)).expect("placed");
+    let (monitor, laptop, right) = (at(1), at(100), at(117));
+    // Both under the monitor, the panel on the left.
+    assert!(laptop.position.y < monitor.position.y && right.position.y < monitor.position.y);
+    let side = monitor.rotation * Vec3::X;
+    assert!(
+        (right.position - laptop.position).dot(side) > 0.0,
+        "left to right"
+    );
+    // As on the desktop: the monitor's top higher, sizes in proportion.
+    assert!(right.position.y > laptop.position.y);
+    assert!((right.width / laptop.width - 2560.0 / 1920.0).abs() < 0.01);
+    // Next to each other, without a gap: the panel's right edge at the monitor's left.
+    let edge =
+        |p: &Placement, s: f32| p.position + p.rotation * Vec3::new(s * p.width / 2.0, 0.0, 0.0);
+    assert!((edge(&right, -1.0) - edge(&laptop, 1.0)).dot(side).abs() < 1e-3);
+}
+
+/// A monitor added gets the scale chosen, where the PC makes monitors at its scales;
+/// another scale for a monitor is asked of the PC and leaves the profile in use.
+#[test]
+fn scales_from_the_menu() {
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    sim.limits(4, false);
+    sim.menu(Action::AddScale(150));
+    sim.menu(Action::Add {
+        width: 2560,
+        height: 1440,
+    });
+    let asked = requests(&sim.take());
+    assert!(
+        matches!(&asked[..], [(_, Request::AddDisplay { mode })] if mode.scale == 100),
+        "a PC without the capability: {asked:?}"
+    );
+    sim.limits(4, true);
+    sim.menu(Action::Add {
+        width: 2560,
+        height: 1440,
+    });
+    let asked = requests(&sim.take());
+    assert!(
+        matches!(&asked[..], [(_, Request::AddDisplay { mode })] if mode.scale == 150),
+        "{asked:?}"
+    );
+    assert!(crate::view::build(&sim.m).can_scale);
+    sim.m.menu.active_profile = Some(0);
+    sim.menu(Action::SetScale(k(1), 125));
+    let asked = requests(&sim.take());
+    assert!(
+        matches!(
+            &asked[..],
+            [(_, Request::SetScale { id, scale: 125 })] if *id == DisplayId(1)
+        ),
+        "{asked:?}"
+    );
+    assert_eq!(sim.m.menu().active_profile, None);
+}
+
+/// "No limits" from the menu: the PC hears at once, the setting is kept, and the
+/// button says what it does.
+#[test]
+fn no_limits_from_the_menu() {
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    sim.menu(Action::NoLimits(true));
+    let fx = sim.take();
+    assert!(
+        sent(&fx)
+            .iter()
+            .any(|m| matches!(m, ClientMsg::Prefs { part } if part.no_limits))
+    );
+    assert!(sim.m.settings().no_limits);
+    assert_eq!(sim.saves(), [persist::File::Settings]);
+    let note = crate::view::build(&sim.m).note.expect("said");
+    assert_eq!(&*note.text, "More monitors and displays allowed");
+}
+
+/// Profiles as a list: a new one saved from the setup, one saved over (asked twice,
+/// keeping its name), one deleted (asked twice); the PC hears the list and the one in
+/// use at the end of each pass, a name given from the PC before its answer; a command
+/// finds a profile by its name.
+#[test]
+fn profiles_are_a_list_the_pc_hears_of() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    let told = |fx: &[Effect]| -> Vec<state::Profiles> {
+        sent(fx)
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Profiles { part } => Some(part.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let named = |list: &[&str], active: Option<u8>| state::Profiles {
+        list: list
+            .iter()
+            .map(|n| state::ProfileName { name: (*n).into() })
+            .collect(),
+        active,
+    };
+    sim.menu(Action::NewProfile);
+    sim.menu(Action::NewProfile);
+    assert_eq!(sim.m.profiles().len(), 2);
+    assert_eq!(sim.saves(), [persist::File::Profiles]);
+    let fx = sim.take();
+    assert!(told(&fx).is_empty(), "taken with the saves");
+    sim.menu(Action::NewProfile);
+    sim.m.end_pass();
+    assert_eq!(told(&sim.take()), [named(&["", "", ""], Some(2))]);
+    let view = crate::view::build(&sim.m);
+    assert_eq!(view.profiles, ["Profile 1", "Profile 2", "Profile 3"]);
+    let note = view.note.expect("said");
+    assert_eq!(&*note.text, "Saved to \"Profile 3\"");
+
+    // A name from the PC: the list first, then the answer.
+    sim.command(
+        20,
+        Command::RenameProfile {
+            profile: "1".into(),
+            name: " Work\n".into(),
+        },
+    );
+    let fx = sim.take();
+    let msgs = sent(&fx);
+    let list = msgs
+        .iter()
+        .position(|m| matches!(m, ClientMsg::Profiles { .. }));
+    let reply = msgs
+        .iter()
+        .position(|m| matches!(m, ClientMsg::Reply { req, .. } if req.0 == 20));
+    assert!(list.is_some() && list < reply, "{msgs:?}");
+    assert_eq!(told(&fx), [named(&["Work", "", ""], Some(2))]);
+    assert_eq!(crate::view::build(&sim.m).profiles[0], "Work");
+    assert_eq!(sim.saves(), [persist::File::Profiles]);
+
+    // Saved over: asked first, its name kept.
+    sim.menu(Action::SaveProfile(0));
+    assert_eq!(sim.saves(), []);
+    sim.menu(Action::SaveProfile(0));
+    assert_eq!(sim.saves(), [persist::File::Profiles]);
+    assert_eq!(sim.m.profiles()[0].name.as_deref(), Some("Work"));
+    assert_eq!(sim.m.menu().active_profile, Some(0));
+
+    // Deleted: asked first; the one in use after it keeps being it.
+    sim.menu(Action::ApplyProfile(2));
+    sim.take();
+    sim.m.menu.active_profile = Some(2);
+    sim.menu(Action::DeleteProfile(1));
+    assert_eq!(sim.m.profiles().len(), 3);
+    sim.menu(Action::DeleteProfile(1));
+    assert_eq!(sim.m.profiles().len(), 2);
+    assert_eq!(sim.m.menu().active_profile, Some(1));
+    sim.m.end_pass();
+    assert_eq!(told(&sim.take()), [named(&["Work", ""], Some(1))]);
+
+    // By its name, from the PC: its monitors asked of the PC.
+    sim.command(
+        21,
+        Command::Profile {
+            name: "work".into(),
+        },
+    );
+    let asked = requests(&sim.take());
+    assert!(
+        matches!(&asked[..], [(_, Request::SetDisplays { modes, .. })] if modes.len() == 2),
+        "{asked:?}"
+    );
+    sim.command(
+        22,
+        Command::RenameProfile {
+            profile: "Games".into(),
+            name: "x".into(),
+        },
+    );
+    assert!(matches!(
+        reply_of(&sim.take(), 22),
+        Some(Outcome::Failed { error, .. }) if *error == ErrorCode::NO_SUCH_PROFILE
+    ));
+    // The next session starts with them.
+    let active = sim
+        .m
+        .menu()
+        .active_profile
+        .and_then(|a| u8::try_from(a).ok());
+    assert_eq!(
+        sim.m.headset_state().profiles,
+        Some(named(&["Work", ""], active))
+    );
 }

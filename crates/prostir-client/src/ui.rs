@@ -56,7 +56,27 @@ pub struct MonitorEntry {
     /// As seen from where the user sits, in radians: centre (right, up) and half
     /// size, for the map in the menu.
     pub seen: Option<[f32; 4]>,
+    /// Its scale, percent (100: one pixel of the picture is one of the desktop).
+    pub scale: u16,
 }
+
+/// A display of the PC itself, with its switch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhysicalEntry {
+    pub id: DisplayKey,
+    /// What the person calls it (see `physical::label`).
+    pub name: String,
+    /// Its connector (`HDMI-A-1`), shown smaller under a name of its own.
+    pub connector: Option<String>,
+    /// Shown in the headset (as asked, while the PC has not answered yet).
+    pub shown: bool,
+    /// Connected now: one that is not (a closed laptop's panel) shows nothing, and
+    /// counts for no limit.
+    pub connected: bool,
+}
+
+/// Profiles on one page of the Profiles tab.
+pub const PROFILES_PER_PAGE: usize = 10;
 
 /// What the user reads for a display named `name` by the PC: the number the PC's
 /// desktop gives its output (`Prostir-3` is monitor 3, as in the PC's display
@@ -136,12 +156,14 @@ pub struct UiState {
     pub monitors: Vec<MonitorEntry>,
     /// The monitor picked on the map (its actions show under it).
     pub selected: Option<DisplayKey>,
-    /// The laptop screen on the map: centre and half size as seen, in radians.
-    pub mirror_seen: Option<[f32; 4]>,
+    /// The PC's own displays shown, on the map: centre and half size as seen, in
+    /// radians.
+    pub physical_seen: Vec<[f32; 4]>,
+    /// The PC's own displays, each with its switch.
+    pub physical: Vec<PhysicalEntry>,
     pub primary: Option<DisplayKey>,
     /// The screen picked for cinema (see `layout::cinema_choice`).
     pub cinema_screen: Option<DisplayKey>,
-    pub mirror_wanted: bool,
     /// PC sound goes to the headset.
     pub audio_wanted: bool,
     pub mic_wanted: bool,
@@ -151,6 +173,11 @@ pub struct UiState {
     pub pc: Option<Encoding>,
     /// The monitors the PC makes for this headset (while connected).
     pub limits: Option<Limits>,
+    /// The PC makes monitors at another scale (its capability 10): the menu offers its
+    /// scales.
+    pub can_scale: bool,
+    /// The scale a monitor added gets, percent.
+    pub add_scale: u16,
     /// Window panels shown (detached PC windows).
     pub windows: Vec<MonitorEntry>,
     /// The PC can move the mouse (for following the gaze).
@@ -164,9 +191,6 @@ pub struct UiState {
     pub date: std::sync::Arc<str>,
     /// The paired PC waiting for a second press to be forgotten.
     pub confirm_forget: Option<usize>,
-    /// What the display of the PC the switch shows or hides is called; none while no
-    /// display of the PC is connected (the lid closed, no monitor).
-    pub mirror_name: Option<String>,
     pub settings: Settings,
     pub room_available: bool,
     pub panorama_available: bool,
@@ -178,8 +202,10 @@ pub struct UiState {
     pub error: Option<String>,
     /// Monitor whose "×" was pressed once and now asks for confirmation.
     pub confirm_remove: Option<DisplayKey>,
-    /// A profile whose "Save current" was pressed once (press again to overwrite).
+    /// A profile whose "Save here" was pressed once (press again to overwrite).
     pub confirm_save: Option<usize>,
+    /// A profile whose "×" was pressed once (press again to delete it).
+    pub confirm_delete: Option<usize>,
     pub tab: Tab,
     /// The menu's language.
     pub texts: Texts,
@@ -193,8 +219,10 @@ pub struct UiState {
     pub update: Option<(bool, String)>,
     /// Where this build of the headset app is updated (from its store).
     pub update_from: UpdateHint,
-    /// Which profile slots hold a saved profile (the others are empty).
-    pub saved_profiles: [bool; crate::profiles::SLOTS],
+    /// The profiles saved, by the names the menu shows (the one given, or "Profile 2").
+    pub profiles: Vec<String>,
+    /// Which of them the Profiles tab shows (see [`PROFILES_PER_PAGE`]).
+    pub profile_page: u8,
     /// The profile last switched to (until something is changed by hand).
     pub active_profile: Option<usize>,
     /// What the menu says under the button pressed last: done, waiting for the PC, or
@@ -209,7 +237,10 @@ pub enum Asked {
     AddMonitor,
     Remove(DisplayKey),
     MakePrimary(DisplayKey),
-    Mirror,
+    /// A display of the PC itself shown or hidden.
+    Physical(DisplayKey),
+    /// A monitor's scale.
+    Scale(DisplayKey),
     Sound,
     Encoding,
     DetachWindow,
@@ -267,6 +298,8 @@ pub enum Tab {
     #[default]
     Quick,
     Monitors,
+    /// Every profile: switched to, saved, deleted, a new one.
+    Profiles,
     Settings(Section),
 }
 
@@ -280,6 +313,8 @@ pub enum Section {
     Sound,
     Language,
     Pc,
+    /// The PCs this headset is paired with.
+    Paired,
     Help,
 }
 
@@ -310,7 +345,14 @@ pub enum Action {
         id: DisplayKey,
         delta: i32,
     },
-    SetMirror(bool),
+    /// Show (`true`) or hide a display of the PC itself.
+    ShowPhysical(DisplayKey, bool),
+    /// The scale a monitor added gets, percent.
+    AddScale(u16),
+    /// Another scale for a monitor, percent.
+    SetScale(DisplayKey, u16),
+    /// "No limits": more monitors and displays than the PC advises.
+    NoLimits(bool),
     SetAudio(bool),
     SetMic(bool),
     Preset(Preset),
@@ -323,7 +365,14 @@ pub enum Action {
     /// Which monitor (position in the row) cinema mode shows.
     CinemaScreen(DisplayKey),
     ApplyProfile(usize),
+    /// Save the setup over profile `n` (second press confirms).
     SaveProfile(usize),
+    /// Save the setup as a new profile, at the end of the list.
+    NewProfile,
+    /// Delete profile `n` (second press confirms).
+    DeleteProfile(usize),
+    /// Show these profiles on the Profiles tab (see `UiState::profile_page`).
+    ProfilePage(u8),
     Tab(Tab),
     /// Lay everything out again in front of the user, where they look now.
     Recenter,
@@ -409,7 +458,8 @@ impl Action {
                 | Action::Remove(_)
                 | Action::MakePrimary(_)
                 | Action::Move { .. }
-                | Action::SetMirror(_)
+                | Action::ShowPhysical(..)
+                | Action::SetScale(..)
                 | Action::Preset(_)
         )
     }
@@ -1576,6 +1626,9 @@ impl Panel {
             // The list of parts, and the part shown.
             Page::Tab(Tab::Settings(_)) if b.right() <= 300.0 => (44.0, 274.0),
             Page::Tab(Tab::Settings(_)) => (324.0, pw - 44.0),
+            // Two columns of profiles.
+            Page::Tab(Tab::Profiles) if b.right() <= 640.0 => (44.0, 624.0),
+            Page::Tab(Tab::Profiles) => (656.0, pw - 44.0),
             _ => (44.0, pw - 44.0),
         }
     }
@@ -1761,16 +1814,17 @@ impl Panel {
             return items;
         }
 
-        // Tabs: everyday things, the monitors, everything set once.
+        // Tabs: everyday things, the monitors, the profiles, everything set once.
         let tabs = [
             (Tab::Quick, l.t("tab-quick")),
             (Tab::Monitors, l.t("tab-monitors")),
+            (Tab::Profiles, l.t("tab-profiles")),
             (
                 Tab::Settings(s.tab.section().unwrap_or_default()),
                 l.t("tab-settings"),
             ),
         ];
-        let tab_w = (w - 2.0 * lx - 2.0 * 10.0) / 3.0;
+        let tab_w = (w - 2.0 * lx - 3.0 * 10.0) / 4.0;
         // A track the tabs sit in, so they read as one control, apart from the
         // option buttons below.
         items.push(Item::Box(
@@ -1794,16 +1848,20 @@ impl Panel {
                 in_column(&mut items[at..], lx, whole);
             }
             Tab::Monitors => {
-                let left = monitor_list(s, &mut items, lx, lw, top - 12.0);
+                monitor_list(s, &mut items, lx, lw, top - 12.0);
                 in_column(&mut items[at..], lx, lw);
                 let right = items.len();
                 build_monitor_options(s, &mut items, rx, rw, top);
                 in_column(&mut items[right..], rx, rw);
-                let below = items.len();
-                save_as_profile(s, &mut items, lx, lw, left + 30.0);
-                in_column(&mut items[below..], lx, lw);
             }
-            Tab::Settings(section) => build_settings(s, section, &mut items, top - 12.0),
+            Tab::Profiles => {
+                let wrap = |t: &str, size: f32, room: f32| self.wrapped(t, size, false, room);
+                build_profiles(s, &mut items, top - 12.0, &wrap);
+            }
+            Tab::Settings(section) => {
+                let wrap = |t: &str, size: f32, room: f32| self.wrapped(t, size, false, room);
+                build_settings(s, section, &mut items, top - 12.0, &wrap);
+            }
         }
         if let Some(e) = &s.error {
             items.push(text(lx, HEIGHT as f32 - 34.0, 21.0, true, DANGER, e));
@@ -2570,7 +2628,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         .monitors
         .iter()
         .filter_map(|m| m.seen)
-        .chain(s.mirror_seen)
+        .chain(s.physical_seen.iter().copied())
         .collect();
     let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
     for [cx, cy, hw, hh] in &all {
@@ -2595,8 +2653,8 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             (2.0 * hh * scale - 2.0 * gap).max(8.0),
         )
     };
-    if let Some(m) = s.mirror_seen {
-        items.push(Item::Box(to_rect(m), [255, 255, 255, 14]));
+    for m in &s.physical_seen {
+        items.push(Item::Box(to_rect(*m), [255, 255, 255, 14]));
     }
     let selected = s.selected.or(s.primary);
     for m in &s.monitors {
@@ -2678,6 +2736,39 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
                 },
             ),
         ));
+        // Another scale, where the PC makes monitors at its scales.
+        let scales = scales_of(s);
+        if !scales.is_empty() {
+            let (y0, bw) = (y + 66.0, 92.0);
+            let n = scales.len().min(3);
+            let label = l.t("scale");
+            items.push(text_in(
+                lw - n as f32 * (bw + 8.0) - 10.0,
+                text(lx, y0 + 25.0, 18.0, false, MUTED, label),
+            ));
+            for (i, &scale) in scales.iter().take(3).enumerate() {
+                let r = rect(
+                    lx + lw - 10.0 - (n - i) as f32 * (bw + 8.0) + 8.0,
+                    y0,
+                    bw,
+                    36.0,
+                );
+                let on = m.scale == scale;
+                let action = Action::SetScale(m.id, scale);
+                let mut b = button(
+                    r,
+                    &l.f("percent", &[("value", scale.into())]),
+                    if on { Style::Selected } else { Style::Normal },
+                    (!on).then_some(action),
+                );
+                if let Item::Button { key, size, .. } = &mut b {
+                    *key = Some(action);
+                    *size = 17.0;
+                }
+                items.push(b);
+            }
+            y += 48.0;
+        }
         if s.confirm_remove == Some(m.id) {
             items.push(button(
                 rect(
@@ -2747,41 +2838,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         ));
         y += 58.0;
     }
-    // A display of the PC: shown or hidden, said by the highlighted option, named; with
-    // none connected (the lid closed, no monitor) there is nothing to switch.
-    let connected = s.mirror_name.is_some();
-    let name = s
-        .mirror_name
-        .clone()
-        .unwrap_or_else(|| l.t("pc-display").to_owned());
-    let title = if !connected {
-        format!("{name} · {}", l.t("pc-display-not-connected"))
-    } else {
-        name
-    };
-    y += 34.0;
-    segmented(
-        items,
-        lx,
-        lw,
-        &mut y,
-        &title,
-        vec![
-            (
-                l.t("pc-display-shown"),
-                Action::SetMirror(true),
-                s.mirror_wanted,
-                connected,
-            ),
-            (
-                l.t("pc-display-hidden"),
-                Action::SetMirror(false),
-                !s.mirror_wanted,
-                connected,
-            ),
-        ],
-    );
-    y -= 16.0;
+    y = pc_displays(s, items, lx, lw, y + 34.0);
     items.push(button(
         rect(lx, y, lw, 52.0),
         l.t("monitors-line-up"),
@@ -2789,6 +2846,109 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         Some(Action::Tidy),
     ));
     y + 52.0
+}
+
+/// Scales the PC makes monitors at, where it makes them at more than one: what the
+/// menu offers.
+fn scales_of(s: &UiState) -> &[u16] {
+    match &s.limits {
+        Some(l) if s.can_scale && l.scales.len() > 1 => &l.scales,
+        _ => &[],
+    }
+}
+
+/// The PC's own displays from `y`, each on a row: its name, its connector smaller
+/// under it, and its switch (shown or hidden, said by the highlighted option). One not
+/// connected says so and keeps its switch; with as many shown as the PC allows, the
+/// others' "Shown" waits, saying why. As many rows as fit above "Line up"; the rest
+/// counted. Where the next thing goes.
+fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f32 {
+    let l = &s.texts;
+    if s.physical.is_empty() {
+        return y - 18.0;
+    }
+    items.push(text_in(
+        w,
+        text(x, y, 21.0, true, SECTION, l.t("pc-displays")),
+    ));
+    y += 16.0;
+    let max = s.limits.as_ref().map(|l| usize::from(l.physical_max));
+    let shown = s.physical.iter().filter(|d| d.shown && d.connected).count();
+    let full = max.is_some_and(|max| shown >= max);
+    // Room above "Line up" and the bottom line.
+    let rows = ((HEIGHT as f32 - 150.0 - y) / 60.0).floor().max(1.0) as usize;
+    let bw = 128.0;
+    for d in s.physical.iter().take(rows) {
+        items.push(Item::Box(rect(x, y, w, 54.0), [255, 255, 255, 8]));
+        let room = w - 2.0 * bw - 10.0 - 32.0;
+        let mut name = text_in(room, text(x + 16.0, y + 24.0, 19.0, true, TEXT, &d.name));
+        if let Item::Text { shorten, .. } = &mut name {
+            *shorten = true;
+        }
+        items.push(name);
+        let note = if !d.connected {
+            Some(l.t("pc-display-not-connected"))
+        } else if full && !d.shown {
+            Some(l.t("pc-display-limit"))
+        } else {
+            None
+        };
+        let under = match (&d.connector, note) {
+            (Some(c), Some(n)) => format!("{c} · {n}"),
+            (Some(c), None) => c.clone(),
+            (None, Some(n)) => n.to_owned(),
+            (None, None) => String::new(),
+        };
+        if !under.is_empty() {
+            let mut t = text_in(room, text(x + 16.0, y + 45.0, 15.0, false, MUTED, &under));
+            if let Item::Text { shorten, .. } = &mut t {
+                *shorten = true;
+            }
+            items.push(t);
+        }
+        let can_show = !full || d.shown || !d.connected;
+        for (i, (label, on, enabled)) in [
+            (l.t("pc-display-shown"), true, can_show),
+            (l.t("pc-display-hidden"), false, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = rect(
+                x + w - 2.0 * bw - 14.0 + i as f32 * (bw + 6.0),
+                y + 7.0,
+                bw,
+                40.0,
+            );
+            let action = Action::ShowPhysical(d.id, on);
+            let chosen = d.shown == on;
+            let style = match (enabled, chosen) {
+                (_, true) => Style::Selected,
+                (false, _) => Style::Disabled,
+                (true, false) => Style::Normal,
+            };
+            let mut b = button(r, label, style, (enabled && !chosen).then_some(action));
+            if let Item::Button { key, size, .. } = &mut b {
+                *key = Some(action);
+                *size = 17.0;
+            }
+            items.push(b);
+        }
+        y += 60.0;
+    }
+    if s.physical.len() > rows {
+        let more = s.physical.len() - rows;
+        items.push(text(
+            x,
+            y + 10.0,
+            16.0,
+            false,
+            MUTED,
+            &l.f("pc-displays-more", &[("count", more.into())]),
+        ));
+        y += 26.0;
+    }
+    y + 4.0
 }
 
 /// A row with a title, a muted note and one button on the right.
@@ -2841,7 +3001,49 @@ fn segmented(
 /// Add a monitor, layout, curve.
 fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, mut y: f32) -> f32 {
     let l = &s.texts;
-    items.push(text(rx, y, 21.0, false, MUTED, l.t("add-monitor")));
+    let scales = scales_of(s);
+    // The scale the new monitor gets, beside the title: small choices on its right.
+    let (sw, sgap) = (76.0, 6.0);
+    let shown = scales.len().min(3);
+    let choices_w = shown as f32 * (sw + sgap);
+    if shown > 0 {
+        let label = l.t("scale");
+        let label_w = 120.0;
+        items.push(text_in(
+            label_w,
+            text(rx + rw - choices_w - label_w, y, 17.0, false, MUTED, label),
+        ));
+        for (i, &scale) in scales.iter().take(3).enumerate() {
+            let r = rect(
+                rx + rw - choices_w + sgap + i as f32 * (sw + sgap),
+                y - 26.0,
+                sw,
+                36.0,
+            );
+            let on = s.add_scale == scale;
+            let action = Action::AddScale(scale);
+            let mut b = button(
+                r,
+                &l.f("percent", &[("value", scale.into())]),
+                if on { Style::Selected } else { Style::Normal },
+                (!on).then_some(action),
+            );
+            if let Item::Button { key, size, .. } = &mut b {
+                *key = Some(action);
+                *size = 16.0;
+            }
+            items.push(b);
+        }
+    }
+    let title_room = if shown > 0 {
+        rw - choices_w - 130.0
+    } else {
+        rw
+    };
+    items.push(text_in(
+        title_room,
+        text(rx, y, 21.0, false, MUTED, l.t("add-monitor")),
+    ));
     y += 18.0;
     // The sizes the PC offers (it says them when the headset connects), six at most.
     let max = s.limits.as_ref().map(|l| usize::from(l.virtual_max));
@@ -3417,29 +3619,46 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     let l = &s.texts;
     let st = s.settings;
     let connected = s.host.is_some();
-    items.push(text(x, y + 14.0, 21.0, true, SECTION, l.t("profile")));
+    items.push(text(x, y + 14.0, 21.0, true, SECTION, l.t("profiles")));
     y += 32.0;
-    let cw = (w - 2.0 * 12.0) / 3.0;
-    for (i, saved) in s.saved_profiles.iter().enumerate() {
-        let r = rect(x + i as f32 * (cw + 12.0), y, cw, 72.0);
+    // The first three, the one in use among them (in place of the third where it is
+    // further down the list), and the way to all of them.
+    let cw = (w - 3.0 * 12.0) / 4.0;
+    let mut first: Vec<usize> = (0..s.profiles.len().min(3)).collect();
+    if let Some(a) = s
+        .active_profile
+        .filter(|a| *a >= 3 && *a < s.profiles.len())
+    {
+        first[2] = a;
+    }
+    for (k, &i) in first.iter().enumerate() {
+        let r = rect(x + k as f32 * (cw + 12.0), y, cw, 72.0);
         let active = s.active_profile == Some(i);
-        let style = match (connected && *saved, active) {
+        let style = match (connected, active) {
             (false, _) => Style::Disabled,
             (true, true) => Style::Selected,
             (true, false) => Style::Normal,
         };
-        let action = (connected && *saved && !active).then_some(Action::ApplyProfile(i));
-        let name = l.f("profile-n", &[("n", (i + 1).into())]);
-        let mut b = button(r, &name, style, action);
+        let action = (connected && !active).then_some(Action::ApplyProfile(i));
+        let mut b = name_button(r, &s.profiles[i], 19.0, style, action);
         if let Item::Button { key, .. } = &mut b {
             *key = Some(Action::ApplyProfile(i));
         }
         items.push(b);
-        if !saved {
-            let empty = l.t("profile-empty");
-            items.push(text(r.left(), r.bottom() + 22.0, 17.0, false, MUTED, empty));
-        }
     }
+    if s.profiles.is_empty() {
+        let none = l.t("profiles-none-short");
+        items.push(text_in(
+            3.0 * (cw + 12.0) - 12.0,
+            text(x, y + 44.0, 19.0, false, MUTED, none),
+        ));
+    }
+    items.push(button(
+        rect(x + 3.0 * (cw + 12.0), y, cw, 72.0),
+        l.t("profiles-all"),
+        Style::Normal,
+        Some(Action::Tab(Tab::Profiles)),
+    ));
     y += 72.0 + 40.0;
     let on_off = |on: bool| {
         if on { l.t("on") } else { l.t("off") }
@@ -3533,40 +3752,171 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     }
 }
 
-/// Saves the current setup into one of the profiles (second press confirms).
-fn save_as_profile(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
+/// Every profile, ten to a page in two columns, each on a row: its name to switch to
+/// it (the one in use highlighted), "Save here" to save the setup over it and "×" to
+/// delete it (each asks again first); "New profile" saves the setup as one more, and
+/// with more than ten, "More profiles" shows the next ones.
+fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>) {
     let l = &s.texts;
-    items.push(text(x, y, 21.0, true, SECTION, l.t("profile-save")));
-    y += 18.0;
-    let bw = (w - 2.0 * 10.0) / 3.0;
+    let (x, w) = (44.0, WIDTH as f32 - 88.0);
+    let at = items.len();
+    let connected = s.host.is_some();
     // Something to save: the PC's monitors.
-    let can = s.host.is_some() && !s.monitors.is_empty();
-    for i in 0..s.saved_profiles.len() {
-        let armed = s.confirm_save == Some(i);
-        let label = if armed {
-            l.t("profile-replace").to_owned()
+    let can_save = connected && !s.monitors.is_empty();
+    let full = s.profiles.len() >= crate::profiles::MAX_PROFILES;
+    items.push(text_in(
+        w - 330.0,
+        text(x, y + 30.0, 21.0, true, SECTION, l.t("profiles")),
+    ));
+    let new = Action::NewProfile;
+    let mut b = button(
+        rect(x + w - 300.0, y, 300.0, 48.0),
+        l.t("profile-new"),
+        if can_save && !full {
+            Style::Normal
         } else {
-            l.f("profile-n", &[("n", (i + 1).into())])
-        };
-        // The profile the monitors are as now: saved to or switched to last.
+            Style::Disabled
+        },
+        (can_save && !full).then_some(new),
+    );
+    if let Item::Button { key, .. } = &mut b {
+        *key = Some(new);
+    }
+    items.push(b);
+    y += 70.0;
+    if s.profiles.is_empty() {
+        let none = l.t("profiles-none");
+        for (k, line) in wrap(none, 19.0, w).iter().enumerate() {
+            items.push(text(
+                x,
+                y + 30.0 + k as f32 * 28.0,
+                19.0,
+                false,
+                MUTED,
+                line,
+            ));
+        }
+    }
+    let pages = s.profiles.len().div_ceil(PROFILES_PER_PAGE).max(1);
+    let page = usize::from(s.profile_page) % pages;
+    let col_w = (w - 32.0) / 2.0;
+    for (k, (i, name)) in s
+        .profiles
+        .iter()
+        .enumerate()
+        .skip(page * PROFILES_PER_PAGE)
+        .take(PROFILES_PER_PAGE)
+        .enumerate()
+    {
+        let cx = x + (k / 5) as f32 * (col_w + 32.0);
+        let ry = y + (k % 5) as f32 * 62.0;
         let active = s.active_profile == Some(i);
-        let style = match (can, armed, active) {
-            (false, _, _) => Style::Disabled,
-            (true, true, _) => Style::Armed,
-            (true, false, true) => Style::Selected,
-            (true, false, false) => Style::Normal,
+        let (save_w, del_w) = (170.0, 52.0);
+        let name_w = col_w - save_w - del_w - 20.0;
+        let style = match (connected, active) {
+            (false, _) => Style::Disabled,
+            (true, true) => Style::Selected,
+            (true, false) => Style::Normal,
         };
-        items.push(button(
-            rect(x + i as f32 * (bw + 10.0), y, bw, 48.0),
-            &label,
+        let apply = Action::ApplyProfile(i);
+        let mut b = name_button(
+            rect(cx, ry, name_w, 52.0),
+            name,
+            19.0,
             style,
-            can.then_some(Action::SaveProfile(i)),
+            (connected && !active).then_some(apply),
+        );
+        if let Item::Button { key, .. } = &mut b {
+            *key = Some(apply);
+        }
+        items.push(b);
+        let tools = rect(cx + name_w + 10.0, ry, save_w + del_w + 10.0, 52.0);
+        if s.confirm_delete == Some(i) {
+            items.push(button(
+                tools,
+                l.t("profile-delete-confirm"),
+                Style::Armed,
+                Some(Action::DeleteProfile(i)),
+            ));
+            continue;
+        }
+        let save = Action::SaveProfile(i);
+        let armed = s.confirm_save == Some(i);
+        let mut b = button(
+            rect(tools.left(), ry, save_w, 52.0),
+            if armed {
+                l.t("profile-replace")
+            } else {
+                l.t("profile-save-here")
+            },
+            match (can_save, armed) {
+                (false, _) => Style::Disabled,
+                (true, true) => Style::Armed,
+                (true, false) => Style::Normal,
+            },
+            can_save.then_some(save),
+        );
+        if let Item::Button { key, .. } = &mut b {
+            *key = Some(save);
+        }
+        items.push(b);
+        items.push(button(
+            rect(tools.right() - del_w, ry, del_w, 52.0),
+            "×",
+            Style::Danger,
+            Some(Action::DeleteProfile(i)),
         ));
     }
+    y += 5.0 * 62.0 + 10.0;
+    if pages > 1 {
+        let next = u8::try_from((page + 1) % pages).unwrap_or(0);
+        items.push(button(
+            rect(x, y, 300.0, 48.0),
+            &l.f(
+                "profiles-more",
+                &[("page", (page + 1).into()), ("pages", pages.into())],
+            ),
+            Style::Normal,
+            Some(Action::ProfilePage(next)),
+        ));
+        y += 70.0;
+    }
+    if full {
+        items.push(text(
+            x,
+            y + 10.0,
+            18.0,
+            false,
+            MUTED,
+            &l.f(
+                "profiles-at-most",
+                &[("count", crate::profiles::MAX_PROFILES.into())],
+            ),
+        ));
+        y += 34.0;
+    }
+    for (k, line) in wrap(l.t("profiles-rename-hint"), 17.0, w)
+        .iter()
+        .enumerate()
+    {
+        items.push(text(
+            x,
+            y + 20.0 + k as f32 * 26.0,
+            17.0,
+            false,
+            MUTED,
+            line,
+        ));
+    }
+    in_column(&mut items[at..], x, w);
 }
 
+/// Splits a text at words into lines: `wrap(text, size, room)` (see
+/// [`Panel::wrapped`]), for the pages built without the fonts at hand.
+type Wrap<'a> = &'a dyn Fn(&str, f32, f32) -> Vec<String>;
+
 /// Settings: the parts listed on the left, the chosen one on the right.
-fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32) {
+fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32, wrap: Wrap<'_>) {
     let l = &s.texts;
     let (nx, nw) = (44.0, 230.0);
     let sections = [
@@ -3575,6 +3925,7 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
         (Section::Sound, l.t("section-sound")),
         (Section::Language, l.t("section-language")),
         (Section::Pc, l.t("section-pc")),
+        (Section::Paired, l.t("section-paired")),
         (Section::Help, l.t("section-help")),
     ];
     for (i, (sec, label)) in sections.into_iter().enumerate() {
@@ -3598,7 +3949,7 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
     let (cx, cw) = (nx + nw + 50.0, WIDTH as f32 - (nx + nw + 50.0) - 44.0);
     let ctop = top + 12.0;
     let at = items.len();
-    settings_page(s, section, items, cx, cw, ctop);
+    settings_page(s, section, items, cx, cw, ctop, wrap);
     in_column(&mut items[at..], cx, cw);
 }
 
@@ -3610,6 +3961,7 @@ fn settings_page(
     cx: f32,
     cw: f32,
     ctop: f32,
+    wrap: Wrap<'_>,
 ) {
     let l = &s.texts;
     match section {
@@ -3715,11 +4067,14 @@ fn settings_page(
         Section::Pc => {
             let w = cw.min(700.0);
             let mut y = build_pc(s, items, cx, w, ctop);
+            // Two switches side by side.
+            let half = (w - 16.0) / 2.0;
+            let mut y2 = y;
             let on = s.settings.notifications;
             segmented(
                 items,
                 cx,
-                w,
+                half,
                 &mut y,
                 l.t("pc-notifications"),
                 vec![
@@ -3727,8 +4082,30 @@ fn settings_page(
                     (l.t("on"), Action::Notifications(true), on, true),
                 ],
             );
-            paired_pcs(s, items, cx, w, y + 10.0);
+            let on = s.settings.no_limits;
+            segmented(
+                items,
+                cx + half + 16.0,
+                half,
+                &mut y2,
+                l.t("no-limits"),
+                vec![
+                    (l.t("off"), Action::NoLimits(false), !on, true),
+                    (l.t("on"), Action::NoLimits(true), on, true),
+                ],
+            );
+            for (k, line) in wrap(l.t("no-limits-note"), 18.0, w).iter().enumerate() {
+                items.push(text(
+                    cx,
+                    y - 18.0 + k as f32 * 24.0,
+                    18.0,
+                    false,
+                    MUTED,
+                    line,
+                ));
+            }
         }
+        Section::Paired => paired_pcs(s, items, cx, cw.min(700.0), ctop + 10.0),
         Section::Controls => build_controls(s, items, cx, cw.min(640.0), ctop),
         Section::Help => {
             hints(l, items, cx, ctop + 10.0);
@@ -3908,9 +4285,9 @@ fn paired_pcs(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         items.push(text(x, y + 26.0, 19.0, false, MUTED, l.t("paired-none")));
         return;
     }
-    // Two fit; with more, one and how many others.
-    let shown = if s.paired.len() > 2 {
-        1
+    // Eight fit; with more, seven and how many others.
+    let shown = if s.paired.len() > 8 {
+        7
     } else {
         s.paired.len()
     };
@@ -4467,6 +4844,7 @@ mod tests {
                 height: 800,
                 place: Place::Unknown,
                 seen: None,
+                scale: 100,
             }],
             host: Some("workstation".into()),
             found: Vec::new(),
@@ -4480,6 +4858,7 @@ mod tests {
                     height: 1440,
                     place: Place::Unknown,
                     seen: Some([-1.0, 0.0, 0.5, 0.28]),
+                    scale: 100,
                 },
                 MonitorEntry {
                     id: k(102),
@@ -4488,6 +4867,7 @@ mod tests {
                     height: 1440,
                     place: Place::Unknown,
                     seen: Some([0.0, 0.0, 0.5, 0.28]),
+                    scale: 100,
                 },
                 MonitorEntry {
                     id: k(103),
@@ -4496,16 +4876,31 @@ mod tests {
                     height: 2560,
                     place: Place::Unknown,
                     seen: Some([0.78, 0.12, 0.28, 0.5]),
+                    scale: 100,
                 },
             ],
             selected: None,
-            mirror_seen: Some([0.0, -0.55, 0.35, 0.22]),
+            physical_seen: vec![[0.0, -0.55, 0.35, 0.22]],
+            physical: vec![
+                PhysicalEntry {
+                    id: k(100),
+                    name: "Екран ноутбука".into(),
+                    connector: Some("eDP-1".into()),
+                    shown: false,
+                    connected: false,
+                },
+                PhysicalEntry {
+                    id: k(117),
+                    name: "DELL U2720Q".into(),
+                    connector: Some("HDMI-A-1".into()),
+                    shown: true,
+                    connected: true,
+                },
+            ],
             primary: Some(k(102)),
             cinema_screen: None,
-            mirror_wanted: true,
             audio_wanted: true,
             mic_wanted: true,
-            mirror_name: Some("Екран HDMI-A-1".into()),
             settings: Settings::default(),
             room_available: true,
             panorama_available: true,
@@ -4522,7 +4917,11 @@ mod tests {
             intro: false,
             update: None,
             update_from: NoStore.update_hint(),
-            saved_profiles: [true, false, true],
+            profiles: vec!["Профіль 1".into(), "Робота".into(), "Профіль 3".into()],
+            profile_page: 0,
+            confirm_delete: None,
+            can_scale: true,
+            add_scale: 100,
             active_profile: None,
             note: None,
         }
@@ -4559,6 +4958,7 @@ mod tests {
                         id: k(107),
                         label: "6".into(),
                         seen: None,
+                        scale: 100,
                         ..s.monitors[0].clone()
                     });
                     for t in texts(&s) {
@@ -4629,38 +5029,121 @@ mod tests {
         assert!(adds(&s).iter().all(|(_, on)| !on), "before the PC said");
     }
 
-    /// The switch of the PC's display names the display it acts on; with none of the
-    /// PC's displays connected it says so and switches nothing.
+    /// A display's row: its name, "Shown" (its action where pressable, its style) and
+    /// "Hidden".
+    type Row = (String, Option<Action>, Style, Option<Action>, Style);
+
+    /// The switches of the PC's own displays, a row each.
+    fn physical_rows(s: &UiState) -> Vec<Row> {
+        let items = Panel::new().build(s);
+        s.physical
+            .iter()
+            .map(|d| {
+                let of = |on: bool| {
+                    items
+                        .iter()
+                        .find_map(|i| match i {
+                            Item::Button {
+                                key: Some(Action::ShowPhysical(k, o)),
+                                action,
+                                style,
+                                ..
+                            } if *k == d.id && *o == on => Some((*action, *style)),
+                            _ => None,
+                        })
+                        .expect("a switch")
+                };
+                let (show, show_style) = of(true);
+                let (hide, hide_style) = of(false);
+                (d.name.clone(), show, show_style, hide, hide_style)
+            })
+            .collect()
+    }
+
+    /// Every display of the PC has its switch, named as the PC names it, its connector
+    /// under; one not connected says so and keeps its switch; with as many shown as
+    /// the PC allows, the others' "Shown" waits, saying why; none at all: no switches.
     #[test]
-    fn the_pc_display_switch_names_its_display() {
-        let items = |s: &UiState| Panel::new().build(s);
-        let switches = |s: &UiState| {
-            items(s)
-                .into_iter()
-                .filter(|i| {
-                    matches!(
-                        i,
-                        Item::Button {
-                            action: Some(Action::SetMirror(_)),
-                            ..
-                        }
-                    )
-                })
-                .count()
-        };
+    fn every_pc_display_has_its_switch() {
         let says = |s: &UiState, what: &str| {
-            items(s)
+            Panel::new()
+                .build(s)
                 .iter()
                 .any(|i| matches!(i, Item::Text { text, .. } if text == what))
         };
         let mut s = sample_state();
         s.tab = Tab::Monitors;
-        s.mirror_wanted = false;
-        assert!(says(&s, "Екран HDMI-A-1"));
-        assert_eq!(switches(&s), 1, "the option not chosen");
-        s.mirror_name = None;
-        assert!(says(&s, "Екран ПК · не підключено"));
-        assert_eq!(switches(&s), 0);
+        let rows = physical_rows(&s);
+        assert_eq!(
+            rows,
+            [
+                (
+                    "Екран ноутбука".into(),
+                    Some(Action::ShowPhysical(k(100), true)),
+                    Style::Normal,
+                    None,
+                    Style::Selected
+                ),
+                (
+                    "DELL U2720Q".into(),
+                    None,
+                    Style::Selected,
+                    Some(Action::ShowPhysical(k(117), false)),
+                    Style::Normal
+                ),
+            ]
+        );
+        assert!(says(&s, "Екран ноутбука"));
+        assert!(says(&s, "eDP-1 · не підключено"));
+        assert!(says(&s, "HDMI-A-1"));
+        // The laptop's lid opened, the PC allowing one: its "Shown" waits.
+        s.physical[0].connected = true;
+        let rows = physical_rows(&s);
+        assert_eq!((rows[0].1, rows[0].2), (None, Style::Disabled));
+        assert!(says(&s, "eDP-1 · досягнуто межі ПК"));
+        // Allowing two: it can be shown.
+        s.limits.as_mut().unwrap().physical_max = 2;
+        let rows = physical_rows(&s);
+        assert_eq!(rows[0].1, Some(Action::ShowPhysical(k(100), true)));
+        s.physical.clear();
+        assert!(!says(&s, crate::lang::builtin("uk").t("pc-displays")));
+    }
+
+    /// The scale: of a monitor picked, where the PC makes monitors at its scales,
+    /// its own highlighted; for a monitor added, the one chosen; none where the PC has
+    /// one scale or does not name the capability.
+    #[test]
+    fn scales_where_the_pc_makes_them() {
+        let scales = |s: &UiState| -> Vec<(Action, Style)> {
+            Panel::new()
+                .build(s)
+                .into_iter()
+                .filter_map(|i| match i {
+                    Item::Button {
+                        key: Some(a @ (Action::SetScale(..) | Action::AddScale(_))),
+                        style,
+                        ..
+                    } => Some((a, style)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut s = sample_state();
+        s.tab = Tab::Monitors;
+        s.selected = Some(k(102));
+        s.monitors[1].scale = 125;
+        s.add_scale = 150;
+        let all = scales(&s);
+        assert_eq!(all.len(), 6, "{all:?}");
+        assert!(all.contains(&(Action::AddScale(150), Style::Selected)));
+        assert!(all.contains(&(Action::AddScale(100), Style::Normal)));
+        assert!(all.contains(&(Action::SetScale(k(102), 125), Style::Selected)));
+        assert!(all.contains(&(Action::SetScale(k(102), 150), Style::Normal)));
+        s.can_scale = false;
+        assert!(scales(&s).is_empty());
+        s.can_scale = true;
+        s.limits.as_mut().unwrap().scales = vec![100];
+        assert!(scales(&s).is_empty());
     }
 
     /// Every page and state, in both languages, without text that does not fit.
@@ -4794,7 +5277,7 @@ mod tests {
         }
     }
 
-    /// The profile buttons of a tab: label, style, action.
+    /// The buttons of a page standing for a profile: label, style, action.
     fn profile_buttons(st: &UiState) -> Vec<(String, Style, Option<Action>)> {
         Panel::new()
             .build(st)
@@ -4804,24 +5287,29 @@ mod tests {
                     label,
                     style,
                     action,
+                    key:
+                        Some(
+                            Action::ApplyProfile(_)
+                            | Action::SaveProfile(_)
+                            | Action::DeleteProfile(_)
+                            | Action::NewProfile,
+                        ),
                     ..
-                } if label.starts_with("Profile") || label == "Replace?" => {
-                    Some((label, style, action))
-                }
+                } => Some((label, style, action)),
                 _ => None,
             })
             .collect()
     }
 
     /// The profile saved to or switched to last is the one highlighted, where it is
-    /// switched to (Quick) and where it is saved (Monitors); saving to it again asks
-    /// first, as for any saved one.
+    /// switched to (Quick and Profiles); saving over one or deleting one asks first;
+    /// a new one is saved from the setup as it is.
     #[test]
     fn the_active_profile_is_highlighted() {
         let mut st = sample_state();
         st.texts = crate::lang::builtin("en");
+        st.profiles = vec!["Profile 1".into(), "Work".into()];
         st.active_profile = Some(1);
-        st.saved_profiles = [true, true, false];
 
         st.tab = Tab::Quick;
         let quick = profile_buttons(&st);
@@ -4833,51 +5321,93 @@ mod tests {
                     Style::Normal,
                     Some(Action::ApplyProfile(0))
                 ),
-                ("Profile 2".into(), Style::Selected, None),
-                ("Profile 3".into(), Style::Disabled, None),
+                ("Work".into(), Style::Selected, None),
             ]
         );
 
-        st.tab = Tab::Monitors;
-        let save = profile_buttons(&st);
+        st.tab = Tab::Profiles;
+        let all = profile_buttons(&st);
+        let save = |i| {
+            (
+                "Save here".to_owned(),
+                Style::Normal,
+                Some(Action::SaveProfile(i)),
+            )
+        };
+        let delete = |i| {
+            (
+                "×".to_owned(),
+                Style::Danger,
+                Some(Action::DeleteProfile(i)),
+            )
+        };
         assert_eq!(
-            save,
+            all,
             [
+                (
+                    "New profile".into(),
+                    Style::Normal,
+                    Some(Action::NewProfile)
+                ),
                 (
                     "Profile 1".into(),
                     Style::Normal,
-                    Some(Action::SaveProfile(0))
+                    Some(Action::ApplyProfile(0))
                 ),
-                (
-                    "Profile 2".into(),
-                    Style::Selected,
-                    Some(Action::SaveProfile(1))
-                ),
-                (
-                    "Profile 3".into(),
-                    Style::Normal,
-                    Some(Action::SaveProfile(2))
-                ),
+                save(0),
+                delete(0),
+                ("Work".into(), Style::Selected, None),
+                save(1),
+                delete(1),
             ]
         );
 
-        // Pressed once to save over it: it asks, and the question shows over the mark.
+        // Pressed once to save over it, or to delete it: it asks.
         st.confirm_save = Some(1);
-        assert_eq!(
-            profile_buttons(&st)[1],
-            (
-                "Replace?".into(),
-                Style::Armed,
-                Some(Action::SaveProfile(1))
-            )
+        assert!(profile_buttons(&st).contains(&(
+            "Replace?".into(),
+            Style::Armed,
+            Some(Action::SaveProfile(1))
+        )));
+        st.confirm_save = None;
+        st.confirm_delete = Some(0);
+        assert!(profile_buttons(&st).contains(&(
+            "Delete? Again".into(),
+            Style::Armed,
+            Some(Action::DeleteProfile(0))
+        )));
+        st.confirm_delete = None;
+
+        // Without monitors nothing is saved; at most twenty.
+        let mut none = st.clone();
+        none.monitors.clear();
+        assert!(
+            profile_buttons(&none)
+                .iter()
+                .filter(|(_, _, a)| matches!(a, Some(Action::NewProfile | Action::SaveProfile(_))))
+                .count()
+                == 0
         );
+        let mut full = st.clone();
+        full.profiles = (1..=crate::profiles::MAX_PROFILES)
+            .map(|n| format!("Profile {n}"))
+            .collect();
+        assert_eq!(
+            profile_buttons(&full)[0],
+            ("New profile".into(), Style::Disabled, None)
+        );
+        // Ten a page: the second page has the rest, the page buttons say which.
+        full.profile_page = 1;
+        let second = profile_buttons(&full);
+        assert!(second.iter().any(|(l, ..)| l == "Profile 11"));
+        assert!(!second.iter().any(|(l, ..)| l == "Profile 10"));
 
         // Switching to a profile or saving one keeps it; a layout chosen, a monitor
         // moved, added or removed by hand leaves it, and then none is marked.
-        st.confirm_save = None;
         for keeps in [
             Action::ApplyProfile(0),
             Action::SaveProfile(1),
+            Action::NewProfile,
             Action::Recenter,
         ] {
             assert!(!keeps.leaves_profile(), "{keeps:?}");
@@ -4894,14 +5424,14 @@ mod tests {
             },
             Action::Remove(k(102)),
             Action::MakePrimary(k(103)),
-            Action::SetMirror(true),
+            Action::ShowPhysical(k(117), false),
+            Action::SetScale(k(102), 125),
         ];
+        st.tab = Tab::Quick;
         for action in by_hand {
             let mut st = st.clone();
             assert!(action.leaves_profile(), "{action:?}");
-            if action.leaves_profile() {
-                st.active_profile = None;
-            }
+            st.active_profile = None;
             assert!(
                 profile_buttons(&st)
                     .iter()
@@ -4927,7 +5457,9 @@ mod tests {
                 Tab::Settings(Section::Sound),
                 Tab::Settings(Section::Language),
                 Tab::Settings(Section::Pc),
+                Tab::Settings(Section::Paired),
                 Tab::Settings(Section::Help),
+                Tab::Profiles,
             ] {
                 let mut st = sample_state();
                 st.texts = lang.clone();
@@ -4938,8 +5470,11 @@ mod tests {
                 st.settings.focus = true;
                 st.mic_wanted = false;
                 st.audio_wanted = false;
-                st.mirror_wanted = false;
-                st.mirror_name = None;
+                for d in &mut st.physical {
+                    d.shown = false;
+                    d.connected = true;
+                }
+                st.confirm_delete = Some(1);
                 st.active_profile = Some(1);
                 st.error = Some(lang.f("monitors-at-most", &[("count", 6.into())]));
                 states.push(st.clone());
@@ -4971,6 +5506,7 @@ mod tests {
                         // The longest name.
                         place: Place::Right,
                         seen: Some([(id as f32 - 2.5) * 0.9, 0.0, 0.45, 0.19]),
+                        scale: 100,
                     })
                     .collect();
                 states.push(st);
@@ -5260,7 +5796,9 @@ mod tests {
                 Tab::Settings(Section::Sound),
                 Tab::Settings(Section::Language),
                 Tab::Settings(Section::Pc),
+                Tab::Settings(Section::Paired),
                 Tab::Settings(Section::Help),
+                Tab::Profiles,
             ] {
                 let mut st = sample_state();
                 st.texts = lang.clone();
@@ -5449,11 +5987,10 @@ mod tests {
                     p.damage(),
                     st.tab
                 );
-                let damage = p.damage().expect("a part");
-                assert!(
-                    damage.w * damage.h < p.pixmap.width() * p.pixmap.height() / 2,
-                    "only parts: {damage:?}"
-                );
+                // The parts of the one pointed at before and of this one, not the whole
+                // picture (the two may be far apart: the box around both).
+                let damage = p.damage().expect("parts");
+                assert!(!damage.is_empty());
                 if let Some(b) = before {
                     // Back to the one before: its kept copies.
                     let at = points.iter().find(|(j, _)| *j == b).unwrap().1;
@@ -5553,7 +6090,7 @@ mod tests {
         let mut st = sample_state();
         st.tab = Tab::Monitors;
         st.primary = Some(k(primary));
-        st.mirror_seen = spots.get(&MIRROR_ID).copied();
+        st.physical_seen = spots.get(&MIRROR_ID).copied().into_iter().collect();
         st.monitors = monitors
             .iter()
             .map(|&(id, width, height, ..)| MonitorEntry {
@@ -5563,6 +6100,7 @@ mod tests {
                 height,
                 place: Place::Center,
                 seen: spots.get(&id).copied(),
+                scale: 100,
             })
             .collect();
         for selected in std::iter::once(None).chain(monitors.iter().map(|m| Some(k(m.0)))) {

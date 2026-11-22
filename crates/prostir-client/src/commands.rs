@@ -8,6 +8,7 @@
 use prostir_proto::request::{Asked, Command};
 use prostir_proto::state::ErrorCode;
 
+use crate::profiles::{self, Slots};
 use crate::settings::Preset;
 use crate::ui::Action;
 
@@ -18,24 +19,29 @@ pub enum Does {
     Act(Action),
     /// Switch to profile `index`: answered once the PC answered its monitors.
     Profile(usize),
+    /// Profile `index` named so (none: by its number again).
+    Rename(usize, Option<String>),
     /// Closer (below 0) or further.
     Closer(i8),
-    /// "No limits".
-    NoLimits(bool),
     /// Answered with this failure, and nothing changes.
     Fail(ErrorCode, String),
 }
 
-/// What to do for `asked`. A kind this app does not know is unsupported.
-pub fn what_to_do(asked: &Asked<Command>) -> Does {
+/// What to do for `asked`, with `profiles` saved. A kind this app does not know is
+/// unsupported.
+pub fn what_to_do(asked: &Asked<Command>, profiles: &Slots) -> Does {
     let Asked::Known(command) = asked else {
         return Does::Fail(ErrorCode::UNSUPPORTED, String::new());
     };
     match command {
         Command::Recenter => Does::Act(Action::Recenter),
-        Command::Profile { name } => match profile_named(name) {
+        Command::Profile { name } => match profiles::find(profiles, name) {
             Some(i) => Does::Profile(i),
             None => Does::Fail(ErrorCode::NO_SUCH_PROFILE, name.clone()),
+        },
+        Command::RenameProfile { profile, name } => match profiles::find(profiles, profile) {
+            Some(i) => Does::Rename(i, profiles::clean_name(name)),
+            None => Does::Fail(ErrorCode::NO_SUCH_PROFILE, profile.clone()),
         },
         Command::Cinema { on } => Does::Act(Action::Cinema(*on)),
         Command::FocusMode { on } => Does::Act(Action::Focus(*on)),
@@ -51,19 +57,8 @@ pub fn what_to_do(asked: &Asked<Command>) -> Does {
         Command::Follow { on } => Does::Act(Action::Follow(*on)),
         // Comes with the arrangement's own step.
         Command::ResetArrangement => Does::Fail(ErrorCode::UNSUPPORTED, String::new()),
-        Command::NoLimits { on } => Does::NoLimits(*on),
+        Command::NoLimits { on } => Does::Act(Action::NoLimits(*on)),
     }
-}
-
-/// The profile slot a command names: by its number from 1, as the menu shows it, also
-/// with the menu's word before it (`2`, `Profile 2`, `Профіль 2`).
-pub fn profile_named(name: &str) -> Option<usize> {
-    name.split_whitespace()
-        .next_back()?
-        .parse::<usize>()
-        .ok()
-        .filter(|n| (1..=crate::profiles::SLOTS).contains(n))
-        .map(|n| n - 1)
 }
 
 #[cfg(test)]
@@ -84,7 +79,7 @@ mod tests {
                 let Ok(asked) = decode::<Asked<Command>>(&bytes) else {
                     continue;
                 };
-                let does = what_to_do(&asked);
+                let does = what_to_do(&asked, &Vec::new());
                 assert!(
                     !matches!(does, Does::Act(Action::SetMic(_) | Action::AskMic)),
                     "kind {kind} {body:?} comes to {does:?}"
@@ -94,14 +89,68 @@ mod tests {
         let set_mic = decode::<Asked<Command>>(&[9, 1]).unwrap();
         assert_eq!(set_mic, Asked::Unknown { kind: 9 });
         assert_eq!(
-            what_to_do(&set_mic),
+            what_to_do(&set_mic, &Vec::new()),
             Does::Fail(ErrorCode::UNSUPPORTED, String::new())
         );
     }
 
+    /// Three profiles, the second named "Робота".
+    fn three() -> Slots {
+        let p = profiles::Profile {
+            name: None,
+            monitors: vec![prostir_proto::state::Mode::new(1920, 1080)],
+            primary: 0,
+            shown: Vec::new(),
+            places: Vec::new(),
+            frame: None,
+            rows: Vec::new(),
+        };
+        let mut work = p.clone();
+        work.name = Some("Робота".into());
+        vec![p.clone(), work, p]
+    }
+
+    /// A profile is named by its number from 1 (with the menu's word before it or
+    /// not) or by the name it was given; renamed so, or by its number again with an
+    /// empty name.
+    #[test]
+    fn profiles_by_number_or_name() {
+        let profiles = three();
+        let does = |c: Command| what_to_do(&Asked::Known(c), &profiles);
+        for name in ["робота", " Робота ", "2", "Profile 2"] {
+            assert_eq!(
+                does(Command::Profile { name: name.into() }),
+                Does::Profile(1),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            does(Command::RenameProfile {
+                profile: "3".into(),
+                name: " Ігри\n".into(),
+            }),
+            Does::Rename(2, Some("Ігри".into()))
+        );
+        assert_eq!(
+            does(Command::RenameProfile {
+                profile: "Робота".into(),
+                name: "  ".into(),
+            }),
+            Does::Rename(1, None)
+        );
+        assert!(matches!(
+            does(Command::RenameProfile {
+                profile: "Кіно".into(),
+                name: "x".into(),
+            }),
+            Does::Fail(ErrorCode::NO_SUCH_PROFILE, _)
+        ));
+    }
+
     #[test]
     fn commands_are_the_menus_actions() {
-        let does = |c: Command| what_to_do(&Asked::Known(c));
+        let profiles = three();
+        let does = |c: Command| what_to_do(&Asked::Known(c), &profiles);
         assert_eq!(does(Command::LineUp), Does::Act(Action::Tidy));
         for name in [" 2 ", "Profile 2", "Профіль 2"] {
             assert_eq!(
@@ -129,7 +178,11 @@ mod tests {
             Does::Fail(ErrorCode::BAD_ARGUMENT, _)
         ));
         assert_eq!(
-            what_to_do(&Asked::Unknown { kind: 200 }),
+            does(Command::NoLimits { on: true }),
+            Does::Act(Action::NoLimits(true))
+        );
+        assert_eq!(
+            what_to_do(&Asked::Unknown { kind: 200 }, &profiles),
             Does::Fail(ErrorCode::UNSUPPORTED, String::new())
         );
     }

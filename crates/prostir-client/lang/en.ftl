@@ -36,6 +36,7 @@ status-searching = Looking for a PC…
 change-pc = Change PC
 tab-quick = Quick
 tab-monitors = Monitors
+tab-profiles = Profiles
 tab-settings = Settings
 
 ## The palm menu
@@ -127,9 +128,10 @@ intro-done = Got it
 
 ## Quick
 
-profile = Profile
+profiles = Profiles
 profile-n = Profile { $n }
-profile-empty = Empty
+profiles-all = All profiles
+profiles-none-short = No profiles yet
 layout-lying = Lying down
 quick-in-front = In front of me
 quick-in-front-state = Turn everything to me
@@ -169,6 +171,11 @@ laptop-screen = Laptop screen
 pc-display-not-connected = not connected
 pc-display-shown = Shown
 pc-display-hidden = Hidden
+pc-displays = PC displays
+pc-display-limit = the PC's limit reached
+# $count (Number): how many more displays of the PC there are
+pc-displays-more = And { $count } more
+scale = Scale
 monitors-line-up = Line up: close the seams (A button)
 add-monitor = Add a monitor
 # $count (Number): how many monitors the PC makes at most
@@ -190,8 +197,31 @@ drag = Drag
 drag-one = One monitor
 drag-all = All together
 cinema-screen = Cinema screen
-profile-save = Save as profile
 profile-replace = Replace?
+
+## Profiles
+
+profile-new = New profile
+profile-save-here = Save here
+profile-delete-confirm = Delete? Again
+profiles-none = Arrange the monitors and press "New profile": the arrangement is kept, one press away.
+# $page (Number): the page of profiles shown; $pages (Number): how many pages there are
+profiles-more = More profiles ({ $page } of { $pages })
+# $count (Number): how many profiles there can be
+profiles-at-most =
+    { $count ->
+        [one] At most { $count } profile
+       *[other] At most { $count } profiles
+    }
+profiles-rename-hint = A profile's name can be changed in the Prostir window on the PC.
+# $name (String): the profile, as the menu named it ("Profile 2")
+note-profile-deleted = Profile "{ $name }" deleted
+# $count (Number): how many profiles there can be
+note-profiles-full =
+    { $count ->
+        [one] Already { $count } profile: delete one first
+       *[other] Already { $count } profiles: delete one first
+    }
 
 ## Settings
 
@@ -200,6 +230,7 @@ section-controls = Controls
 section-sound = Sound
 section-language = Language
 section-pc = PC
+section-paired = Paired PCs
 section-help = Help
 
 ## Settings: look
@@ -285,6 +316,8 @@ pc-codec = Codec
 pc-codec-note = HEVC: the sharpest text. H.264: less memory on the PC.
 pc-sharp = Sharper text (+2 ms)
 pc-notifications = PC notifications in the headset
+no-limits = No limits
+no-limits-note = More monitors and displays than Prostir advises. Frames may be skipped, and the headset may get warm and run down faster.
 paired-pcs = Paired PCs
 paired-none = None
 paired-forget-confirm = Forget? Again
@@ -350,6 +383,9 @@ note-window-closed = The window is back on the monitors
 note-primary = Now the primary monitor
 note-display-shown = The PC display is shown
 note-display-hidden = The PC display is hidden
+note-scale = Scale changed
+note-no-limits-on = More monitors and displays allowed
+note-no-limits-off = The limits Prostir advises
 note-sound-headset = PC sound plays in the headset
 note-sound-pc = PC sound plays on the PC
 note-encoding = Video settings applied
@@ -387,7 +423,7 @@ failure-encoder = The PC's encoder did not start
 failure-capture = The picture could not be taken
 failure-sound = The sound could not be switched
 failure-not-on-displays = The mouse is not on the monitors
-failure-no-such-profile = No profile saved in that slot
+failure-no-such-profile = No such profile
 failure-bad-argument = A value out of range
 failure-other = It did not work
 

@@ -224,7 +224,7 @@ mod tests {
         assert_eq!(asks.ask(Asked::AddMonitor, later), ReqId(3));
         assert!(asks.waits(Asked::AddMonitor));
         asks.new_session();
-        assert_eq!(asks.ask(Asked::Mirror, later), ReqId(1));
+        assert_eq!(asks.ask(Asked::Sound, later), ReqId(1));
     }
 
     /// A command of the PC waiting for a request's answer gets it: `Done` for any

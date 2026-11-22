@@ -53,8 +53,8 @@ use packet::{Assembler, Encoded, Limits, Message};
 use request::{Asked, Command, Outcome, Request};
 use state::{
     Access, Battery, DisplayId, Displays, Encoding, ErrorCode, Focus, Gen, HeadsetCaps, HostCaps,
-    MAX_DETAIL, MAX_DISPLAYS, MAX_GROWING, Part, PcInfo, Prefs, Presence, ReqId, Row, Sound,
-    SoundFrom, UpFormat, UpKind, UpState, UpWanted, Volume, VolumeAsk,
+    MAX_DETAIL, MAX_DISPLAYS, MAX_GROWING, Part, PcInfo, Prefs, Presence, Profiles, ReqId, Row,
+    Sound, SoundFrom, UpFormat, UpKind, UpState, UpWanted, Volume, VolumeAsk,
 };
 use wire::{Reader, Wire, WireError, wire_enum};
 
@@ -393,6 +393,9 @@ wire_enum! {
         /// The headset starts an up stream `up` (the microphone) of `kind`, in `format`.
         /// In the sound lane, so it never overtakes the stream's data.
         139 => UpStart { up: u8, kind: UpKind, format: UpFormat },
+        /// Part: the profiles saved in the headset, their names and the one in use (from
+        /// 0.2.0 step 7.10; an older PC skips it).
+        143 => Profiles { part: Profiles },
         /// A piece of up stream `up` (10 ms of the microphone).
         140 => Up {
             up: u8,

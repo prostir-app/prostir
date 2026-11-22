@@ -203,7 +203,7 @@ fn connected() -> Loop {
         settings: Settings::default(),
         desk: Desk::default(),
         keyboard: None,
-        profiles: Default::default(),
+        profiles: Vec::new(),
         // The built-in texts only: no folder to read.
         lang: LangState::new(
             lang::Loader::new(None).load(lang::Lang::FALLBACK),

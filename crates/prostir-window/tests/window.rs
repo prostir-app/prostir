@@ -47,6 +47,54 @@ fn pairing_by_name_and_keyboard() {
     assert_eq!(handle.state().headsets.len(), 3);
 }
 
+/// The headset's profiles: one is renamed by name and keyboard (its new name typed and
+/// sent with Enter), one is given back its number with an empty name, and the one in
+/// use says so.
+#[test]
+fn a_profile_is_renamed() {
+    let mock = Mock::connected().edit(|s| {
+        let session = s.headsets[0].session.as_mut().unwrap();
+        session.profiles = vec![String::new(), "Робота".into()];
+        session.profile = Some("Робота".into());
+    });
+    let (mut h, handle) = window(mock, Setup::default());
+    open(&mut h, Page::Headsets);
+    h.get_by_label("Увімкнено зараз");
+    press(&mut h, "Перейменувати Профіль 1");
+    assert!(handle.calls().is_empty(), "not before it is saved");
+    h.get_by_label("Нова назва для Профіль 1").focus();
+    h.run_steps(1);
+    h.get_by_label("Нова назва для Профіль 1")
+        .type_text("  Ігри ");
+    h.run_steps(2);
+    h.key_press(Key::Enter);
+    h.run_steps(4);
+    assert_eq!(
+        handle.calls(),
+        [Request::RenameProfile {
+            profile: "1".into(),
+            name: "Ігри".into()
+        }]
+    );
+    h.get_by_label("Перейменувати Ігри");
+    press(&mut h, "Перейменувати Робота");
+    h.get_by_label("Нова назва для Робота").focus();
+    h.run_steps(1);
+    for _ in 0.."Робота".chars().count() {
+        h.key_press(Key::Backspace);
+    }
+    h.run_steps(1);
+    press(&mut h, "Зберегти");
+    assert_eq!(
+        handle.calls().last(),
+        Some(&Request::RenameProfile {
+            profile: "2".into(),
+            name: String::new()
+        })
+    );
+    h.get_by_label("Перейменувати Профіль 2");
+}
+
 #[test]
 fn forgetting_a_headset_asks_first() {
     let (mut h, handle) = window(Mock::connected(), Setup::default());

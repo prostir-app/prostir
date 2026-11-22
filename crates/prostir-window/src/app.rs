@@ -138,6 +138,9 @@ pub struct UiState {
     /// The volume while its slider is held.
     pub volume_drag: Option<u8>,
     pub forget_ask: Option<String>,
+    /// A profile of a headset being named anew: the headset's key, the profile's place
+    /// in its list, and the name typed so far.
+    pub rename: Option<(String, usize, String)>,
     pub code: String,
     /// The code sent, and the revision of the state with its result (none while the
     /// answer is awaited).
@@ -227,6 +230,7 @@ impl App {
                 unsupported: BTreeSet::new(),
                 volume_drag: None,
                 forget_ask: None,
+                rename: None,
                 code: String::new(),
                 submitted: None,
                 pair: PairWatch::default(),

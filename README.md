@@ -100,17 +100,24 @@ say); rows never merge, and a gap you left between two rows stays. With
 Monitors → Drag → All together, grabbing any monitor moves, turns, brings nearer and
 scales the whole arrangement as one piece.
 
-The laptop's own screen is part of the arrangement too, so you can see it without
-taking the headset off. It starts under the main monitor without a seam; wherever you
-put it, the PC puts it there as well, and the mouse crosses where you see them meet.
-Stick together treats it like any other monitor in a row; Line up leaves it where it is,
-or moves it down just enough when a monitor lined up over it would cover it. It
-disappears when you close the lid.
+The PC's own screens are part of the arrangement too (the laptop's panel, a monitor
+on its desk), so you can see them without taking the headset off. At first every one
+of them shows, up to the PC's limit, hanging under the main monitor as one group that
+stands as the screens stand on the PC's desktop; each has its own switch (Monitors →
+PC displays) to hide the ones you do not need. Wherever you put them, the PC puts them
+there as well, and the mouse crosses where you see them meet. Stick together treats
+them like any other monitor in a row; Line up leaves the first of them where it is, or
+moves it down just enough when a monitor lined up over it would cover it. A screen
+disappears when you close the lid or pull its cable, and keeps its place for when it
+comes back.
 
-Profiles switch the whole setup at once. "Work" is the setup you build yourself: the
-first time you pick a profile, the monitors you have then are saved as "Work", so you can
-always come back to them. "Cinema" (one 4K screen, big and far away, the rest
-hidden) and "Lying down" (two monitors overhead) are ready from the start. Save your own setup into any of them (Monitors → Save as profile).
+Profiles switch the whole setup at once: the monitors (their sizes and scales), the
+primary one, which of the PC's own screens show, and where everything stands. Save the
+setup as a new profile (Profiles → New profile), save it over one you have (Save here,
+pressed twice), switch to one with a press, delete one with ×, pressed twice. Up to
+twenty; the first three are on the Quick page too. A profile is called by its number
+until you give it a name in the Prostir window on the PC (Headsets → Profiles in the
+headset → Rename), or with `prostir ctl profile rename 2 Work`.
 Monitors that are the same size in both profiles stay, so their windows do not move.
 In cinema mode you pick which monitor becomes the big screen.
 
@@ -457,20 +464,27 @@ on the right hand, pressed with the left.
 
 ### Menu
 
-**Quick** opens first: the three profiles (Work, Cinema, Lying down) and big tiles for
-what you switch every day. In front of me, focus, cinema, the keyboard window, PC
-sound, microphone, detach window, window here and screenshot. What is on is lit.
+**Quick** opens first: the first three profiles (the one in use lit) with "All
+profiles", and big tiles for what you switch every day. In front of me, focus, cinema,
+the keyboard window, PC sound, microphone, detach window, window here and screenshot.
+What is on is lit.
 
-**Monitors** starts with a map of your monitors as seen from where you sit, the laptop
-screen fainter. Press a monitor to pick it: under the map are its number, size and
-where it stands (left, middle, right, above, below), "Make primary" and × to remove
-it. Detached windows are listed too, with a button to close them. Then the laptop
-screen (shown or hidden), "Line up: close the seams (A button)" and "Save as profile".
-Next to them: add a monitor in one of the sizes the PC offers (1920×1080, 2560×1440,
-3840×2160, 3440×1440, 1440×2560, and 5120×1440 when the headset decodes HEVC), up to
-six monitors and three windows, the layout (around me, wall, lying down), the curve, follow my head, stick
-together, drag (one monitor or all together) and the cinema screen. Cinema itself is
-a tile in Quick and a sector of the palm menu.
+**Monitors** starts with a map of your monitors as seen from where you sit, the PC's
+own screens fainter. Press a monitor to pick it: under the map are its number, size and
+where it stands (left, middle, right, above, below), "Make primary", × to remove it,
+and its scale (100 %, 125 %, 150 %, larger text) where the PC makes monitors at a
+scale. Detached windows are listed too, with a button to close them. Then the PC's own
+screens, each by its name (its maker and model, or the laptop screen) with its
+connector under it and its switch, shown or hidden; when as many show as the PC
+allows, the others say so. Then "Line up: close the seams (A button)". Next to them:
+add a monitor in one of the sizes the PC offers (1920×1080, 2560×1440, 3840×2160,
+3440×1440, 1440×2560, and 5120×1440 when the headset decodes HEVC), at the scale chosen
+beside it, up to six monitors and three windows, the layout (around me, wall, lying
+down), the curve, follow my head, stick together, drag (one monitor or all together)
+and the cinema screen. Cinema itself is a tile in Quick and a sector of the palm menu.
+
+**Profiles** lists every profile, ten to a page: its name to switch to it, "Save here"
+and ×; "New profile" saves the setup as one more.
 
 Line up keeps your own arrangement and straightens it row by row, on the Wall layout in
 the wall's plane and in Lying down overhead as it is; in cinema it rebuilds the cinema
@@ -497,9 +511,11 @@ down or cinema, and not while dragging all together.
   numbers.
 - **PC**: video quality (15, 30 or 50 Mbit/s per monitor), encoding on the graphics
   card or the processor, HEVC or H.264, sharper text, the PC's notifications in the
-  headset, and the PCs this headset is paired with, each of which you can forget.
+  headset, and No limits (more monitors and screens than Prostir advises; frames may be
+  skipped, and the headset may get warm and run down faster).
   The PC applies quality and sharper text at once; another codec restarts the encoders
   in a second, and the monitors and windows stay. The PC remembers these choices.
+- **Paired PCs**: the PCs this headset is paired with, each of which you can forget.
 - **Help**: the controls, the version, and the first-run tips again.
 
 ### Tray on the PC

@@ -218,7 +218,7 @@ fn connecting_puts_monitors_where_the_file_says() {
         Preset::Arc,
         &[(k(1), 2560, 1440), (k(2), 2560, 1440), (k(3), 2560, 1440)],
         None,
-        None,
+        &[],
         None,
     );
     laid.get_mut(&k(3)).unwrap().position.y += 0.05;

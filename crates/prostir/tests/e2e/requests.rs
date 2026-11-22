@@ -335,6 +335,76 @@ fn a_guest_is_not_asked_for_the_volume() {
     assert!(guest.view().volume_asks.is_empty());
 }
 
+/// Another scale for a monitor: the same number, made anew at it (starting in the
+/// list that comes with the reply, then running at the new scale); a scale the PC
+/// does not offer is `BAD_SIZE` and changes nothing; a display that is not there is
+/// `UNKNOWN_DISPLAY`.
+#[test]
+fn a_monitor_gets_another_scale() {
+    let (_dir, _pc, _keys, mut headset) = session("set-scale", &Options::default());
+    let id = headset.view().order()[0];
+    let scales = headset.view().pc.limits.as_ref().unwrap().scales.clone();
+    let larger = *scales.iter().find(|s| **s != 100).expect("a larger text");
+    let outcome = headset
+        .ask(Request::SetScale { id, scale: larger })
+        .unwrap();
+    assert_eq!(outcome, Outcome::Done);
+    let d = headset.view().display(id).cloned().unwrap();
+    assert_eq!(
+        (d.mode.scale, d.state),
+        (larger, DisplayState::Starting),
+        "starting with the reply"
+    );
+    headset
+        .wait(SOON, "running at the new scale", |v| {
+            v.display(id)
+                .is_some_and(|d| d.mode.scale == larger && d.state == DisplayState::Running)
+        })
+        .unwrap();
+    assert_eq!(headset.view().order()[0], id, "the same number");
+    let odd = headset.ask(Request::SetScale { id, scale: 133 }).unwrap();
+    assert_eq!(failed_with(&odd), Some(ErrorCode::BAD_SIZE), "{odd:?}");
+    assert_eq!(headset.view().display(id).unwrap().mode.scale, larger);
+    let nobody = headset
+        .ask(Request::SetScale {
+            id: DisplayId(4_000_000),
+            scale: 100,
+        })
+        .unwrap();
+    assert_eq!(failed_with(&nobody), Some(ErrorCode::UNKNOWN_DISPLAY));
+}
+
+/// Every display of the PC seen for the first time shows in the headset (the PC's
+/// displays wanted there), not only the one the desktop starts with: each streams.
+#[test]
+fn every_display_of_the_pc_shows_at_first() {
+    let options = Options {
+        physical: "HDMI-A-1=DEL 0x1 0@640x360;DP-2=LG 0x2 0@640x360".into(),
+        ..Options::default()
+    };
+    let dir = TestDir::new("physical-all");
+    dir.save_settings("mirror on\n");
+    let mut keys = dir.pair();
+    let pc = Pc::start(&dir, &options);
+    let mut headset = connect(&pc, &mut keys);
+    headset
+        .wait(SOON, "both displays of the PC shown and streaming", |v| {
+            let shown: Vec<_> = v
+                .displays()
+                .iter()
+                .filter(|d| d.is_shown_physical())
+                .map(|d| d.id)
+                .collect();
+            shown.len() == 2
+                && shown.iter().all(|id| {
+                    v.streams
+                        .get(id)
+                        .is_some_and(prostir_testkit::Stream::has_picture)
+                })
+        })
+        .unwrap();
+}
+
 /// A display of the PC shown from the headset is starting in the list that comes
 /// with the reply, and streams after; hidden, it stops at once.
 #[test]

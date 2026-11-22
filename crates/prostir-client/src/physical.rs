@@ -1,41 +1,25 @@
-//! The PC's own displays as the menu's one switch sees them: which display it shows or
-//! hides, and what it is called. A display that is not connected now (a closed
-//! laptop's panel, a monitor whose cable is out) is never the one: showing it would
-//! show nothing.
+//! The PC's own displays as the menu shows them: each with its switch, what it is
+//! called, and whether it is connected now (a closed laptop's panel, a monitor whose
+//! cable is out, shows nothing and counts for no limit).
 
 #![forbid(unsafe_code)]
 
-use prostir_proto::state::{Display, DisplayId, DisplayKind, DisplayState, Displays};
+use prostir_proto::state::{DeskRect, Display, DisplayKind, DisplayState, Displays};
 
+use crate::ids::{DisplayKey, PcId};
 use crate::lang::Texts;
+use crate::ui::PhysicalEntry;
 
 /// Connected now, so showing it shows something.
-fn connected(d: &Display) -> bool {
+pub fn connected(d: &Display) -> bool {
     d.is_physical() && d.state != DisplayState::Absent
 }
 
-/// The display of the PC the headset shows for the switch's sake: a shown one that is
-/// connected, else a shown one that is not (its place is kept while the lid is
-/// closed).
-pub fn mirror(displays: &Displays) -> Option<DisplayId> {
-    let shown = || displays.displays.iter().filter(|d| d.is_shown_physical());
-    shown()
-        .find(|d| connected(d))
-        .or_else(|| shown().next())
-        .map(|d| d.id)
-}
-
-/// The display of the PC the switch shows or hides, among those connected now: one
-/// shown already, else the PC's primary display, else an external monitor before
-/// the laptop's own panel, else the first in the PC's list. None while no display of
-/// the PC is connected.
-pub fn switch(displays: &Displays) -> Option<&Display> {
-    let here = || displays.displays.iter().filter(|d| connected(d));
-    here()
-        .find(|d| d.is_shown_physical())
-        .or_else(|| here().find(|d| displays.primary == Some(d.id)))
-        .or_else(|| here().find(|d| matches!(d.kind, DisplayKind::Physical { builtin: false, .. })))
-        .or_else(|| here().next())
+/// Where a display is on the PC's desktop, as the arrangement takes it: x, y, width,
+/// height.
+pub fn desk_rect(r: DeskRect) -> [i32; 4] {
+    let size = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+    [r.x, r.y, size(r.w), size(r.h)]
 }
 
 /// What the person calls display `d` of the PC: the laptop's own panel is the laptop
@@ -55,10 +39,56 @@ pub fn label(d: &Display, l: &Texts) -> String {
     }
 }
 
+/// The connector of display `d`, shown smaller under its name, where the name is not
+/// already the connector's.
+fn connector_under(d: &Display, name: &str) -> Option<String> {
+    match &d.kind {
+        DisplayKind::Physical { connector, .. }
+            if !connector.is_empty() && !name.contains(connector.as_str()) =>
+        {
+            Some(connector.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The displays of PC `pc` itself, in its list's order, as the menu shows their
+/// switches: each shown as `asked` says while the PC has not answered (the switch
+/// moves at once), else as the PC says.
+pub fn entries(
+    pc: PcId,
+    displays: &Displays,
+    asked: &[(DisplayKey, bool)],
+    texts: &Texts,
+) -> Vec<PhysicalEntry> {
+    displays
+        .displays
+        .iter()
+        .filter(|d| d.is_physical())
+        .map(|d| {
+            let id = DisplayKey::new(pc, d.id);
+            let name = label(d, texts);
+            PhysicalEntry {
+                id,
+                connector: connector_under(d, &name),
+                name,
+                shown: asked
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| *k == id)
+                    .map_or_else(|| d.is_shown_physical(), |(_, shown)| *shown),
+                connected: connected(d),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prostir_proto::state::Mode;
+    use prostir_proto::state::{DisplayId, Mode};
+
+    const PC: PcId = PcId([4; 8]);
 
     fn physical(id: u32, connector: &str, builtin: bool, shown: bool, here: bool) -> Display {
         Display {
@@ -90,70 +120,54 @@ mod tests {
         }
     }
 
-    fn list(displays: Vec<Display>, primary: Option<u32>) -> Displays {
-        Displays {
-            displays,
-            primary: primary.map(DisplayId),
-        }
-    }
-
-    /// The lid closed (the laptop's panel absent, still marked shown from before) and
-    /// one external monitor: the switch is the monitor's, shown or hidden, and never
-    /// the absent panel's.
+    /// Every display of the PC itself, in its order, with its switch as the PC says
+    /// or, asked and not answered yet, as asked; a closed laptop's panel is there,
+    /// not connected; monitors made for the headset are not.
     #[test]
-    fn a_closed_laptop_is_never_the_switch() {
-        let laptop = || physical(100, "eDP-1", true, true, false);
-        let hidden = list(
-            vec![
-                monitor(1),
-                laptop(),
-                physical(117, "HDMI-A-1", false, false, true),
-            ],
-            Some(1),
-        );
-        assert_eq!(switch(&hidden).map(|d| d.id.0), Some(117));
-        assert!(!switch(&hidden).unwrap().is_shown_physical(), "said hidden");
-        let shown = list(
-            vec![
-                monitor(1),
-                laptop(),
-                physical(117, "HDMI-A-1", false, true, true),
-            ],
-            Some(1),
-        );
-        assert_eq!(switch(&shown).map(|d| d.id.0), Some(117));
-        assert_eq!(
-            mirror(&shown),
-            Some(DisplayId(117)),
-            "the connected one first"
-        );
-        assert_eq!(mirror(&hidden), Some(DisplayId(100)), "its place kept");
-        assert_eq!(
-            label(switch(&shown).unwrap(), &crate::lang::builtin("uk")),
-            "Екран HDMI-A-1",
-            "named"
-        );
-        // A PC that says the display's maker and model: by them.
-        let mut dell = physical(117, "HDMI-A-1", false, true, true);
+    fn every_display_of_the_pc_with_its_switch() {
+        let uk = crate::lang::builtin("uk");
+        let mut dell = physical(117, "HDMI-A-1", false, false, true);
         dell.name = "DELL U2720Q".into();
-        assert_eq!(label(&dell, &crate::lang::builtin("uk")), "DELL U2720Q");
-        let none = list(vec![monitor(1), laptop()], Some(1));
-        assert_eq!(switch(&none).map(|d| d.id.0), None);
-    }
-
-    /// Among displays connected and hidden: the PC's primary, else an external one
-    /// before the laptop's panel, else the first.
-    #[test]
-    fn the_primary_then_an_external_display() {
-        let laptop = physical(100, "eDP-1", true, false, true);
-        let hdmi = physical(117, "HDMI-A-1", false, false, true);
-        let dp = physical(118, "DP-2", false, false, true);
-        let both = |primary| list(vec![laptop.clone(), hdmi.clone(), dp.clone()], primary);
-        assert_eq!(switch(&both(Some(100))).map(|d| d.id.0), Some(100));
-        assert_eq!(switch(&both(Some(118))).map(|d| d.id.0), Some(118));
-        assert_eq!(switch(&both(None)).map(|d| d.id.0), Some(117));
-        let only = list(vec![laptop.clone()], None);
-        assert_eq!(switch(&only).map(|d| d.id.0), Some(100));
-        assert_eq!(label(&laptop, &crate::lang::builtin("en")), "Laptop screen");
+        let list = Displays {
+            displays: vec![
+                monitor(1),
+                physical(100, "eDP-1", true, true, false),
+                dell,
+                physical(118, "DP-2", false, true, true),
+            ],
+            primary: Some(DisplayId(1)),
+        };
+        let all = entries(PC, &list, &[], &uk);
+        let seen: Vec<(u32, &str, Option<&str>, bool, bool)> = all
+            .iter()
+            .map(|e| {
+                (
+                    e.id.id.0,
+                    e.name.as_str(),
+                    e.connector.as_deref(),
+                    e.shown,
+                    e.connected,
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (100, "Екран ноутбука", Some("eDP-1"), true, false),
+                (117, "DELL U2720Q", Some("HDMI-A-1"), false, true),
+                (118, "Екран DP-2", None, true, true),
+            ]
+        );
+        let k = DisplayKey::new(PC, DisplayId(117));
+        let asked = entries(PC, &list, &[(k, false), (k, true)], &uk);
+        assert!(asked[1].shown, "as asked last");
+        assert_eq!(label(&monitor(1), &uk), "Екран Prostir-1");
+        assert_eq!(
+            label(
+                &physical(100, "eDP-1", true, true, true),
+                &crate::lang::builtin("en")
+            ),
+            "Laptop screen"
+        );
     }
 }

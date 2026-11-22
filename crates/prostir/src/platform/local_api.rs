@@ -533,6 +533,10 @@ impl Object {
         self.done(Request::Profile { name }).await
     }
 
+    async fn rename_profile(&self, profile: String, name: String) -> Result<(), BusError> {
+        self.done(Request::RenameProfile { profile, name }).await
+    }
+
     async fn cinema(&self, on: bool) -> Result<(), BusError> {
         self.done(Request::Cinema { on }).await
     }

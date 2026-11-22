@@ -328,4 +328,117 @@ pub(super) fn headsets(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
             }
         }
     });
+    // The profiles of a headset connected now that takes commands.
+    for h in &s.headsets {
+        if let Some(session) = h
+            .session
+            .as_ref()
+            .filter(|s| s.commands && !s.profiles.is_empty())
+        {
+            profiles_card(ui, v, h, session);
+        }
+    }
+}
+
+/// The most a profile's name takes, in bytes (as the headset protocol carries it).
+const PROFILE_NAME_MAX: usize = 64;
+
+/// `name` cut to [`PROFILE_NAME_MAX`] bytes at a character, without spaces around it.
+fn profile_name_to_send(name: &str) -> String {
+    let name = name.trim();
+    let mut end = name.len().min(PROFILE_NAME_MAX);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].trim_end().to_owned()
+}
+
+/// The profiles saved in headset `h`, in its menu's order: each by its name (or its
+/// number, as the headset's menu calls one without a name), the one in use said
+/// under it, and "Rename" to give it another name (an empty one gives it back its
+/// number).
+fn profiles_card(ui: &mut Ui, v: &mut View<'_, '_>, h: &Headset, session: &Session) {
+    let tk = v.tk;
+    let p = tk.p;
+    ui.add_space(tk.th.shape.section_gap);
+    w::section_title(ui, tk, &tk.f("hs-profiles", &[("name", (&h.name).into())]));
+    let can = !v.ui.unsupported.contains("rename_profile");
+    let n = session.profiles.len();
+    w::card(ui, tk, |ui| {
+        for (i, name) in session.profiles.iter().enumerate() {
+            let number = (i + 1).to_string();
+            let shown = if name.is_empty() {
+                tk.f("hs-profile-n", &[("n", (i + 1).into())])
+            } else {
+                name.clone()
+            };
+            let active = session
+                .profile
+                .as_deref()
+                .is_some_and(|a| a == number || (!name.is_empty() && a == name));
+            let editing =
+                v.ui.rename
+                    .as_ref()
+                    .is_some_and(|(key, j, _)| *key == h.key && *j == i);
+            if editing {
+                let label = tk.f("hs-profile-name", &[("name", shown.as_str().into())]);
+                ui.horizontal(|ui| {
+                    let enter = if let Some((_, _, typed)) = v.ui.rename.as_mut() {
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(typed)
+                                .font(tk.body())
+                                .desired_width(280.0),
+                        );
+                        let value = typed.clone();
+                        resp.widget_info(|| {
+                            let mut info =
+                                egui::WidgetInfo::text_edit(true, String::new(), value.clone(), "");
+                            info.label = Some(label.clone());
+                            info
+                        });
+                        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    } else {
+                        false
+                    };
+                    ui.add_space(tk.th.shape.spacing);
+                    let save = w::button(ui, tk, &tk.t("hs-profile-save"), Kind::Primary, true);
+                    if save.clicked() || enter {
+                        let typed = v.ui.rename.take().map(|r| r.2).unwrap_or_default();
+                        v.send(Request::RenameProfile {
+                            profile: number.clone(),
+                            name: profile_name_to_send(&typed),
+                        });
+                    }
+                    if w::button(ui, tk, &tk.t("hs-cancel"), Kind::Quiet, true).clicked() {
+                        v.ui.rename = None;
+                    }
+                });
+            } else {
+                let desc = active.then(|| tk.t("hs-profile-in-use"));
+                w::row(ui, tk, &shown, desc.as_deref(), |ui| {
+                    let named = tk.f(
+                        "hs-profile-rename-named",
+                        &[("name", shown.as_str().into())],
+                    );
+                    if w::button_named(
+                        ui,
+                        tk,
+                        &tk.t("hs-profile-rename"),
+                        &named,
+                        Kind::Secondary,
+                        can,
+                    )
+                    .clicked()
+                    {
+                        v.ui.rename = Some((h.key.clone(), i, name.clone()));
+                    }
+                });
+            }
+            if i + 1 < n {
+                w::divider(ui, tk);
+            }
+        }
+        ui.add_space(tk.th.shape.spacing);
+        text(ui, tk.t("hs-profiles-note"), tk.small(), p.text_muted);
+    });
 }
