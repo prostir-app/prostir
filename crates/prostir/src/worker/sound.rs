@@ -110,6 +110,13 @@ impl Backoff {
         self.next = Some(Instant::now() + Duration::from_secs(secs));
     }
 
+    /// It was made: nothing to wait for now, but the failures in a row stay until it
+    /// has lived a while (see [`Backoff::succeeded`]), so one that breaks again and
+    /// again waits longer each time.
+    fn started(&mut self) {
+        self.next = None;
+    }
+
     fn succeeded(&mut self) {
         *self = Self::default();
     }
@@ -261,9 +268,20 @@ impl Thread {
     /// on its speakers, and the headset microphone would reach no program.
     fn check(&mut self) {
         self.checked = Instant::now();
+        // Lived a while: what failed before counts no more.
+        let (audio_old, mic_old) = (
+            self.audio_made.elapsed() >= BROKE_SOON,
+            self.mic_made.elapsed() >= BROKE_SOON,
+        );
+        if audio_old && self.audio.is_some() {
+            self.audio_retry.succeeded();
+        }
+        if mic_old && self.mic.is_some() {
+            self.mic_retry.succeeded();
+        }
         if let Some(audio) = self.audio.take_if(|a| !a.alive()) {
             warn!("the PC's sound no longer reaches the headset's device: making it again");
-            if self.audio_made.elapsed() < BROKE_SOON {
+            if !audio_old {
                 self.audio_retry.failed();
             }
             let _ = timed::call(
@@ -276,7 +294,7 @@ impl Thread {
         }
         if let Some(mic) = self.mic.take_if(|m| !m.alive()) {
             warn!("the headset microphone is gone from the PC: making it again");
-            if self.mic_made.elapsed() < BROKE_SOON {
+            if !mic_old {
                 self.mic_retry.failed();
             }
             // Closed here, for every share: the control loop's, let go when it hears
@@ -307,7 +325,7 @@ impl Thread {
             .and_then(|r| r);
             match started {
                 Ok(audio) => {
-                    self.audio_retry.succeeded();
+                    self.audio_retry.started();
                     self.say(SoundDone::Audio(audio.route(), audio.device()));
                     self.audio = Some(audio);
                     self.audio_made = Instant::now();
@@ -340,7 +358,7 @@ impl Thread {
             .and_then(|r| r);
             match started {
                 Ok(mic) => {
-                    self.mic_retry.succeeded();
+                    self.mic_retry.started();
                     let mic = Arc::new(mic);
                     self.say(SoundDone::Mic(mic.clone()));
                     self.mic = Some(mic);

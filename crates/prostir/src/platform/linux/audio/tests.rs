@@ -76,9 +76,9 @@ fn a_burst_keeps_three_pieces_and_a_large_one_goes() {
 fn a_stopped_player_is_noticed() {
     let mut feed = Feed::spawn(&mut Command::new("true")).unwrap();
     let _ = feed.pacat.wait();
-    // Another test's child forked at the same moment holds the pipe's other end
-    // until it runs its program: give it that moment.
-    let until = Instant::now() + Duration::from_secs(2);
+    // Another test's child forked at the same moment may hold the pipe's other end
+    // (the other tests' players live up to 10 s): give it that long.
+    let until = Instant::now() + Duration::from_secs(12);
     while feed.write(&[0; 960]) {
         assert!(Instant::now() < until, "the stopped player was not noticed");
         std::thread::sleep(Duration::from_millis(10));

@@ -487,6 +487,18 @@ fn sound_and_microphone_come_back_after_the_sound_system_went() {
         assert!(Instant::now() < until, "{back}: {:?}", pc.lines("sound: "));
         headset.take_for(Duration::from_millis(100)).unwrap();
     }
+    // Gone again soon after: the pause is twice as long.
+    let devices = pc.count_log(DEVICE);
+    let offs = pc.count_log(OFF);
+    pc.desktop("sound-gone");
+    pc.wait_log_after(SOON, OFF, offs);
+    let noticed = Instant::now();
+    pc.wait_log_after(SOON + SOON, DEVICE, devices);
+    let remade = noticed.elapsed();
+    assert!(
+        remade >= Duration::from_secs(7),
+        "made again {remade:?} after the second time"
+    );
     assert_eq!(headset.view().goodbye, None, "still in the session");
 }
 

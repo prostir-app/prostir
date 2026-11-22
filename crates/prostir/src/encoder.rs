@@ -756,11 +756,16 @@ impl Encoder {
                                         gate.came.notify_all();
                                         break;
                                     }
-                                    // After the start: its stream is gone.
+                                    // After the start, once the stream flowed: its stream
+                                    // is gone. Before its first frame it may as well be
+                                    // the encoder that the source could not agree with
+                                    // (a format, a modifier): that goes on as a failure.
                                     drop(state);
-                                    warn!("encoder for {node}: its source is gone: {text}");
-                                    on_event(EncoderEvent::SourceLost(text));
-                                    break;
+                                    if encoded.load(Ordering::Relaxed) {
+                                        warn!("encoder for {node}: its source is gone: {text}");
+                                        on_event(EncoderEvent::SourceLost(text));
+                                        break;
+                                    }
                                 }
                                 // The encoder (or its converter) before its first frame:
                                 // it did not open, and another encoder may.
@@ -785,9 +790,14 @@ impl Encoder {
                                 warn!("encoder for {node}: {}", w.error());
                             }
                             // Only a source ends the stream (the desktop's stream of
-                            // the output ended).
+                            // the output ended); before the first frame, as above.
                             gst::MessageView::Eos(_) => {
-                                on_event(EncoderEvent::SourceLost("stream ended".into()));
+                                let why = "stream ended".to_owned();
+                                on_event(if encoded.load(Ordering::Relaxed) {
+                                    EncoderEvent::SourceLost(why)
+                                } else {
+                                    EncoderEvent::Failed(why)
+                                });
                                 break;
                             }
                             _ => {}
