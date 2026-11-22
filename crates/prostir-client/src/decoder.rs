@@ -337,6 +337,9 @@ impl Decoding<'_> {
                 IDLE
             };
             self.timing.report();
+            // An ask for a keyframe held back goes once its time comes, also when no
+            // frame follows: the sleep ends for it.
+            let wait = self.gate.held(now, wait);
             // Until a frame, the codec or `stop` wakes it. A wake that came meanwhile
             // is kept, so the thread does not sleep past it.
             std::thread::park_timeout(wait);
@@ -454,6 +457,17 @@ impl KeyframeGate {
         if self.wait.lost(Instant::now()) {
             self.ask();
         }
+    }
+
+    /// Sends the ask held back if its time came at `now`: how long the thread may
+    /// sleep (at most `sleep`) before the next one is due.
+    fn held(&mut self, now: Instant, sleep: Duration) -> Duration {
+        if self.wait.due(now) {
+            self.ask();
+        }
+        self.wait
+            .due_at()
+            .map_or(sleep, |at| sleep.min(at.saturating_duration_since(now)))
     }
 
     fn ask(&self) {

@@ -527,6 +527,20 @@ impl Drop for Streams<'_> {
     }
 }
 
+/// Asks the PC for a keyframe for each stream whose ask held back is due at `now`
+/// (see `KeyframeWait::due`).
+fn ask_held(streams: &mut Streams<'_>, feedback: &Feedback, now: Instant) -> io::Result<()> {
+    for (&id, slot) in &mut streams.slots {
+        if slot.keyframe.due(now) {
+            feedback.send(ClientMsg::RequestKeyframe {
+                id,
+                generation: slot.generation,
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// A trusted PC's session: `Open`, its snapshot, then everything it sends until the
 /// connection ends.
 fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Result<()> {
@@ -613,13 +627,47 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
     let mut media_bytes = 0u64;
     let mut report = Period::new(REPORT_EVERY);
     let caps = opened_with.caps.unwrap_or_default();
+    // When the last message came, and how long the next one is waited for: SILENCE,
+    // or less while an ask for a keyframe is held back (it goes once its time comes,
+    // also when nothing else does).
+    let mut heard = Instant::now();
+    let mut idle = SILENCE;
     let result = loop {
+        let wanted = match streams
+            .slots
+            .values()
+            .filter_map(|s| s.keyframe.due_at())
+            .min()
+        {
+            Some(at) => {
+                let quiet_left = SILENCE.saturating_sub(heard.elapsed());
+                at.saturating_duration_since(Instant::now())
+                    .min(quiet_left)
+                    .max(Duration::from_millis(1))
+            }
+            None => SILENCE,
+        };
+        if wanted != idle {
+            idle = wanted;
+            wire.receiver.set_idle_limit(Some(idle));
+        }
         let msg = match HostMsg::recv(&mut *wire.receiver, &mut wire.packets) {
             Ok(m) => m,
+            // Cut short for an ask held back, not silence yet.
+            Err(e) if e.kind() == io::ErrorKind::TimedOut && heard.elapsed() < SILENCE => {
+                if let Err(e) = ask_held(&mut streams, &feedback, Instant::now()) {
+                    break Err(e);
+                }
+                continue;
+            }
             Err(e) => break Err(e),
         };
         let now = Instant::now();
+        heard = now;
         gaps.event(now);
+        if let Err(e) = ask_held(&mut streams, &feedback, now) {
+            break Err(e);
+        }
         media_bytes += match &msg {
             HostMsg::Frame { data, .. } => data.len(),
             HostMsg::Audio { pcm } => pcm.len(),

@@ -174,11 +174,15 @@ pub const ASK_AGAIN: Duration = Duration::from_millis(400);
 
 /// Skipping frames until a keyframe, and when to ask the PC for one: once when frames
 /// are lost, and again every [`ASK_AGAIN`] while frames other than keyframes keep
-/// coming.
+/// coming. An ask held back (within [`ASK_AGAIN`] of the last) goes once its time
+/// comes, also when no frame follows: its owner looks at [`KeyframeWait::due_at`] and
+/// asks on [`KeyframeWait::due`].
 #[derive(Debug, Default)]
 pub struct KeyframeWait {
     waiting: bool,
     asked: Option<Instant>,
+    /// An ask was held back since the last one.
+    held: bool,
 }
 
 /// What [`KeyframeWait::passes`] says of a frame.
@@ -211,6 +215,25 @@ impl KeyframeWait {
         if due {
             self.asked = Some(now);
         }
+        self.held = !due;
+        due
+    }
+
+    /// When the ask held back is due, while it is (for a timer).
+    pub fn due_at(&self) -> Option<Instant> {
+        if !(self.waiting && self.held) {
+            return None;
+        }
+        self.asked.map(|t| t + ASK_AGAIN)
+    }
+
+    /// Whether to ask the PC for a keyframe now for the ask held back (once).
+    pub fn due(&mut self, now: Instant) -> bool {
+        let due = self.due_at().is_some_and(|at| now >= at);
+        if due {
+            self.asked = Some(now);
+            self.held = false;
+        }
         due
     }
 
@@ -219,6 +242,7 @@ impl KeyframeWait {
     pub fn passes(&mut self, keyframe: bool, now: Instant) -> Verdict {
         if keyframe {
             self.waiting = false;
+            self.held = false;
             return Verdict {
                 pass: true,
                 ask: false,
@@ -372,6 +396,32 @@ mod tests {
         // Lost again soon after an ask: no second ask within 400 ms of it.
         assert!(!wait.lost(t + ms(1100)));
         assert!(wait.passes(false, t + ms(1200)).ask);
+    }
+
+    /// Lost again within 400 ms of an ask: the ask held back goes once its time comes,
+    /// also when no frame follows (a still screen sends none); a keyframe ends it.
+    #[test]
+    fn an_ask_held_back_goes_when_its_time_comes() {
+        let t = Instant::now();
+        let mut wait = KeyframeWait::default();
+        assert!(wait.lost(t));
+        assert!(wait.passes(true, t + ms(50)).pass);
+        assert!(!wait.lost(t + ms(100)), "too soon after the last");
+        assert_eq!(wait.due_at(), Some(t + ASK_AGAIN));
+        assert!(!wait.due(t + ms(399)));
+        assert!(wait.due(t + ms(400)), "its time came");
+        assert!(!wait.due(t + ms(401)), "once");
+        assert_eq!(wait.due_at(), None);
+        // Held back, then the keyframe came: nothing left to ask.
+        assert!(!wait.lost(t + ms(500)));
+        assert!(wait.passes(true, t + ms(600)).pass);
+        assert_eq!(wait.due_at(), None);
+        assert!(!wait.due(t + ms(2000)));
+        // Nothing held back: nothing due, however long.
+        let mut wait = KeyframeWait::default();
+        wait.expect();
+        assert_eq!(wait.due_at(), None);
+        assert!(!wait.due(t + ms(5000)));
     }
 
     /// A stream starts with its keyframe: nothing is asked unless another frame
