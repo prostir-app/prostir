@@ -22,14 +22,15 @@ mod stick;
 mod tests;
 
 pub use arrange::{
-    Physical, ahead, arrange, carried, facing_yaw, frame, kept_to, line_up, place_new,
-    preset_radius, refit, spread, tilt,
+    Physical, ahead, arrange, carried, clear_along_up, covers_any, edge_to, facing_yaw, frame,
+    kept_to, left_of, lifted, line_up, make_room, place_new, preset_radius, refit, spread, tilt,
 };
 pub use cinema::{cinema, cinema_choice};
 pub use desktop::{Desktop, DesktopMemo};
 pub use draw::{DRAW_HOLD, draw_order};
 pub use grab::Grab;
 pub use hit::{Cylinder, Hit, Ray, hit, hit_surface, image_point, image_uv};
+pub use prostir_layout::space::cuts;
 pub use saved::{Arrangement, Desk, PixelSize, parse_keyboard, write_keyboard};
 pub(crate) use saved::{parse_place, parse_radius, parse_tilt, placed_well, upright, write_place};
 pub use stick::{Stick, StickScratch, stick, stick_on_wall};

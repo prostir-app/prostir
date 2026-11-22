@@ -1292,3 +1292,292 @@ fn the_origin_moved_keeps_the_arrangement() {
     assert_eq!(sim.m.world().placement(k(1)).copied(), before);
     assert_eq!(sim.saves(), []);
 }
+
+/// Switched to one profile, then to another before the PC answered: the first one's
+/// failure does not end the switch to the second.
+#[test]
+fn a_failed_older_profile_switch_leaves_the_newer_one() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::NewProfile);
+    sim.menu(Action::NewProfile);
+    sim.take();
+    sim.menu(Action::ApplyProfile(0));
+    let first = requests(&sim.take()).first().expect("asked").0;
+    sim.menu(Action::ApplyProfile(1));
+    let second = requests(&sim.take()).first().expect("asked").0;
+    assert!(sim.m.world().switching_with(PC, second));
+    sim.net(NetEvent::Reply {
+        pc: PC,
+        req: first,
+        outcome: Outcome::failed(ErrorCode::DESKTOP, "stuck"),
+    });
+    assert!(
+        sim.m.world().switching_with(PC, second),
+        "the newer switch goes on"
+    );
+}
+
+/// A profile in use, then the arrangement changed by hand (a monitor moved, "Line up",
+/// closer): no profile is in use any more, and its button can bring its places back.
+/// A press that changes nothing (a monitor taken and let go where it was, "In front")
+/// leaves it in use.
+#[test]
+fn changed_by_hand_the_profile_is_left() {
+    use crate::interaction::Scene as _;
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::NewProfile);
+    assert_eq!(sim.m.menu().active_profile, Some(0));
+    // Taken and let go where it was.
+    let thing = Thing::Display(k(1));
+    let at = sim.m.hold(thing).expect("taken");
+    sim.m.let_go(sim.now, thing);
+    sim.menu(Action::Recenter);
+    assert_eq!(sim.m.menu().active_profile, Some(0), "nothing changed");
+    // Moved by hand.
+    let at = sim.m.hold(thing).unwrap_or(at);
+    let moved = Placement {
+        position: at.position + Vec3::new(-1.0, 0.3, 0.0),
+        ..at
+    };
+    sim.m.drag(thing, moved, Vec3::ZERO);
+    sim.m.let_go(sim.now, thing);
+    assert_eq!(sim.m.menu().active_profile, None, "moved by hand");
+    sim.menu(Action::NewProfile);
+    sim.menu(Action::Tidy);
+    assert_eq!(sim.m.menu().active_profile, None, "lined up");
+    sim.menu(Action::NewProfile);
+    sim.command(30, Command::Distance { steps: -1 });
+    assert_eq!(sim.m.menu().active_profile, None, "closer");
+}
+
+/// What only asks, or asks nothing, leaves the profile in use: the first press of ×
+/// (asking to confirm), Add or a display of the PC shown while there is no PC.
+#[test]
+fn what_changes_nothing_leaves_the_profile() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::NewProfile);
+    assert_eq!(sim.m.menu().active_profile, Some(0));
+    sim.menu(Action::Remove(k(1)));
+    assert_eq!(sim.m.menu().active_profile, Some(0), "nothing removed yet");
+    sim.menu(Action::Remove(k(1)));
+    assert_eq!(sim.m.menu().active_profile, None, "removed");
+
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::NewProfile);
+    let other_pc = DisplayKey::new(PcId([4; 8]), DisplayId(7));
+    sim.menu(Action::ShowPhysical(other_pc, true));
+    assert_eq!(
+        sim.m.menu().active_profile,
+        Some(0),
+        "not asked: no such PC"
+    );
+    sim.menu(Action::Add {
+        width: 1920,
+        height: 1080,
+    });
+    assert_eq!(sim.m.menu().active_profile, None, "asked");
+}
+
+/// A profile switched to by the PC's command, whose request the PC never answers: the
+/// command is answered too once the request is given up on, not left waiting.
+#[test]
+fn a_profile_command_is_answered_when_its_request_times_out() {
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    sim.menu(Action::NewProfile);
+    sim.saves();
+    sim.take();
+    sim.command(5, Command::Profile { name: "1".into() });
+    let fx = sim.take();
+    assert_eq!(reply_of(&fx, 5), None, "waits for the profile's own answer");
+    sim.after(pending::ANSWER_WITHIN + MS);
+    let fx = sim.take();
+    assert!(
+        matches!(reply_of(&fx, 5), Some(Outcome::Failed { .. })),
+        "the PC's command is answered: {fx:?}"
+    );
+}
+
+/// Taken off for 10 minutes, the app hidden and no frame drawn meanwhile: that is a
+/// rest, and no reminder comes 5 minutes after it is put back on.
+#[test]
+fn off_the_head_without_frames_is_a_rest() {
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    sim.menu(Action::Close);
+    sim.menu(Action::RestEvery(20));
+    let frames = |sim: &mut Sim, d: Duration| {
+        let end = sim.now + d;
+        while sim.now < end {
+            sim.now += 100 * MS;
+            let input = FrameInput {
+                dt: 0.1,
+                ..frame(HandState::default())
+            };
+            sim.m.tick(sim.now, &input);
+            sim.m.animate(sim.now, &input);
+        }
+    };
+    frames(&mut sim, Duration::from_secs(15 * 60));
+    assert!(sim.m.toast().is_none());
+    sim.handle(Event::Platform(PlatformEvent::Session(
+        presence::Session::Hidden,
+    )));
+    sim.after(MS);
+    assert!(!sim.m.worn());
+    for _ in 0..600 {
+        sim.after(Duration::from_secs(1));
+    }
+    sim.handle(Event::Platform(PlatformEvent::Session(
+        presence::Session::Shown,
+    )));
+    sim.after(MS);
+    assert!(sim.m.worn());
+    let end = sim.now + Duration::from_secs(6 * 60);
+    while sim.now < end {
+        frames(&mut sim, Duration::from_secs(1));
+        assert!(
+            sim.m
+                .toast()
+                .is_none_or(|t| t.text != sim.m.texts().t("rest-eyes")),
+            "a reminder 5 min after a 10 min rest"
+        );
+    }
+}
+
+/// The encoding and the PC's sound show at once as asked; the PC refuses: they show
+/// what they were before, as the PC has them.
+#[test]
+fn a_refused_encoding_or_sound_shows_what_was() {
+    use prostir_proto::Codec;
+    use prostir_proto::state::{Encoding, MicDevice, Sound, Wanted};
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    let wanted = Wanted {
+        bitrate: 40,
+        codec: Some(Codec::H264),
+        software: false,
+        sharp: false,
+    };
+    sim.net(NetEvent::Part(
+        PC,
+        HostMsg::Encoding {
+            part: Encoding {
+                wanted,
+                using: None,
+                choices: Vec::new(),
+            },
+        },
+    ));
+    sim.take();
+    sim.menu(Action::SetEncoding(ui::EncodingChange {
+        bitrate: Some(80),
+        codec: None,
+        software: None,
+        sharp: None,
+    }));
+    let bitrate = |sim: &Sim| sim.m.pc().encoding.as_ref().map(|e| e.wanted.bitrate);
+    assert_eq!(bitrate(&sim), Some(80), "shown at once");
+    let req = requests(&sim.take()).first().expect("asked").0;
+    sim.net(NetEvent::Reply {
+        pc: PC,
+        req,
+        outcome: Outcome::failed(ErrorCode::ENCODER, "no"),
+    });
+    assert_eq!(bitrate(&sim), Some(40), "refused: as it was");
+    // The PC says how it stands before refusing: that is what shows.
+    sim.menu(Action::SetEncoding(ui::EncodingChange {
+        bitrate: Some(80),
+        codec: None,
+        software: None,
+        sharp: None,
+    }));
+    let req = requests(&sim.take()).first().expect("asked").0;
+    sim.net(NetEvent::Part(
+        PC,
+        HostMsg::Encoding {
+            part: Encoding {
+                wanted: Wanted {
+                    bitrate: 60,
+                    ..wanted
+                },
+                using: None,
+                choices: Vec::new(),
+            },
+        },
+    ));
+    sim.net(NetEvent::Reply {
+        pc: PC,
+        req,
+        outcome: Outcome::failed(ErrorCode::ENCODER, "no"),
+    });
+    assert_eq!(bitrate(&sim), Some(60), "as the PC said last");
+
+    let to_headset = |sim: &Sim| sim.m.pc().sound.as_ref().map(|s| s.to_headset);
+    sim.net(NetEvent::Part(
+        PC,
+        HostMsg::Sound {
+            part: Sound {
+                to_headset: true,
+                mic: MicDevice::Off,
+            },
+        },
+    ));
+    sim.take();
+    sim.menu(Action::SetAudio(false));
+    assert_eq!(to_headset(&sim), Some(false), "shown at once");
+    let req = requests(&sim.take()).first().expect("asked").0;
+    sim.net(NetEvent::Reply {
+        pc: PC,
+        req,
+        outcome: Outcome::failed(ErrorCode::SOUND, "no"),
+    });
+    assert_eq!(to_headset(&sim), Some(true), "refused: as it was");
+}
+
+/// The menu button (or its gesture, or the round button) closes the first-run tips as
+/// their own × does: they count as read, and do not open again in front.
+#[test]
+fn the_menu_button_closes_the_tips() {
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    assert!(sim.m.menu().open, "the tips opened the menu");
+    assert!(!sim.m.settings().intro_seen);
+    crate::interaction::Scene::toggle_menu(&mut sim.m);
+    assert!(!sim.m.menu().open);
+    sim.frames(11 * MS);
+    assert!(!sim.m.menu().open, "closed, and it stays closed");
+    assert!(sim.m.settings().intro_seen);
+}
+
+/// The keyboard window cannot be shown (the runtime refused it): the menu says so,
+/// it is not offered for the rest of this run, and the setting stays as chosen, so the
+/// next start tries again.
+#[test]
+fn a_keyboard_window_that_fails_is_said_and_kept() {
+    let mut caps = test_caps();
+    caps.room = Some(crate::caps::RoomCaps {
+        keyboard_window: true,
+    });
+    let mut sim = Sim::of(caps);
+    sim.connect(&[1]);
+    sim.menu(Action::KeyboardWindow(true));
+    sim.saves();
+    sim.frames(11 * MS);
+    assert!(sim.m.keyboard_window().is_some(), "shown");
+    sim.handle(Event::Platform(PlatformEvent::KeyboardWindowFailed));
+    sim.frames(11 * MS);
+    assert!(sim.m.keyboard_window().is_none(), "not shown");
+    let view = crate::view::build(&sim.m);
+    assert_eq!(
+        view.error.as_deref(),
+        Some(sim.m.texts().t("error-keyboard-window"))
+    );
+    assert!(!view.keyboard_available, "not offered now");
+    assert!(sim.m.settings().keyboard_window, "kept as chosen");
+    assert_eq!(sim.saves(), [], "nothing changed to save");
+}

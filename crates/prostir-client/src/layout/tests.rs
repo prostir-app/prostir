@@ -1414,6 +1414,10 @@ fn desk_format_2() {
         "0123456789abcdef:4 0 0 -1 0 0 0 1 0\n".to_owned(),
         "0123456789abcdef:4 0 0 -1 0 0 0 0 1\n".to_owned(),
         format!("0123456789abcdef:4 {place} 2560x1440 more\n"),
+        "rows 12\n".to_owned(),
+        "rows 0123456789abcdef:1 0123456789abcdef:1\n".to_owned(),
+        "rows 0123456789abcdef:1 /\n".to_owned(),
+        "rows 0123456789abcdef:1 fedcba9876543210:2\n".to_owned(),
     ] {
         let text = format!("format 2\ncenter 0 1.6 0 0.25\n{first}{bad}");
         let (desk, skipped) = Desk::parse(&text).unwrap();
@@ -2321,4 +2325,64 @@ fn a_long_follow_leaves_a_glued_seam_glued() {
     let lined = line_up(&p, &owner, center, tilt(Preset::Arc), Some(1), &rows, None);
     let moved = farthest_corner(&p, &lined, &owner);
     assert!(moved < 1e-4, "Line up after following moves {moved} m");
+}
+
+/// The rows each PC's desktop was laid out by are kept in `layout.txt`, one line a PC,
+/// and read back as they were; a display forgotten leaves its row, and an empty row
+/// goes.
+#[test]
+fn the_desk_keeps_each_pcs_rows() {
+    let other = |n: u32| DisplayKey::new(PcId([6; 8]), DisplayId(n));
+    let mut desk = Desk::default();
+    assert!(desk.keep_rows(PcId([5; 8]), &[vec![k(2), k(1)], vec![k(3)]]));
+    assert!(!desk.keep_rows(PcId([5; 8]), &[vec![k(2), k(1)], vec![k(3)]]));
+    assert!(desk.keep_rows(PcId([6; 8]), &[vec![other(7)]]));
+    let back = reread(&desk);
+    assert_eq!(back.rows(PcId([5; 8])), [vec![k(2), k(1)], vec![k(3)]]);
+    assert_eq!(back.rows(PcId([6; 8])), [vec![other(7)]]);
+    assert!(desk.forget(&[k(3)]));
+    assert_eq!(desk.rows(PcId([5; 8])), [vec![k(2), k(1)]]);
+    assert!(desk.forget(&[other(7)]));
+    assert!(desk.rows(PcId([6; 8])).is_empty());
+}
+
+/// Monitor 1, the PC's own displays 101 and 102 as one group, and monitor 3, glued edge
+/// to edge in that order on the arc. Monitor 1 grows: the group moves along as one
+/// piece, and monitor 3, beyond its far end, is pushed too and stays glued to it.
+#[test]
+fn a_monitor_grown_pushes_past_the_pcs_displays() {
+    let radius = 1.1;
+    let widths = [(1u32, 1.25f32), (101, 0.9375), (102, 0.9375), (3, 1.25)];
+    let mut yaw = -1.2f32;
+    let mut placements = HashMap::new();
+    for &(id, w) in &widths {
+        let half = (w / 2.0 / radius).asin();
+        placements.insert(id, circle::on_cylinder(yaw + half, -0.08, w, radius));
+        yaw += 2.0 * half;
+    }
+    // Monitor 1 at 3840x2160 now, at the size of a pixel it had.
+    placements.get_mut(&1).unwrap().width = 1.875;
+    let monitors = [
+        (1u32, 3840u32, 2160u32),
+        (101, 1920, 1080),
+        (102, 1920, 1080),
+        (3, 2560, 1440),
+    ];
+    let center = (Vec3::ZERO, 0.0);
+    make_room(
+        &mut placements,
+        &monitors,
+        (center, 0.0),
+        false,
+        &[101, 102],
+        1,
+    );
+    let frame = frame(center, 0.0);
+    let all = placed(&placements, &monitors);
+    let seen = prostir_layout::space::see(&frame, &all);
+    let of = |id: u32| seen.iter().find(|s| s.id == id).copied().unwrap();
+    for (a, b) in [(1, 101), (101, 102), (102, 3)] {
+        let gap = of(b).left - of(a).right;
+        assert!(gap.abs() < 1e-4, "{a} and {b} meet: {gap}");
+    }
 }

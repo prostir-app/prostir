@@ -90,7 +90,10 @@ impl Model {
             NetEvent::Notice(_, text) => self.show_toast(text),
             NetEvent::Reply { pc, req, outcome } => {
                 match (self.answered(pc, req, &outcome), outcome) {
-                    (Some(ui::Asked::Profile(_)), Outcome::Failed { .. }) => {
+                    // Only the switch it asked for: another one asked since goes on.
+                    (Some(ui::Asked::Profile(_)), Outcome::Failed { .. })
+                        if self.world.switching_with(pc, req) =>
+                    {
                         self.world.switch_to(None);
                     }
                     // Said by `answered`.
@@ -244,6 +247,17 @@ impl Model {
         let listed = matches!(part, M::Displays { .. });
         if let M::HostCaps { part } = &part {
             info!("the PC can: {:?}", part.features);
+        }
+        // What the PC says of its encoding or sound is how it stands: what was shown
+        // before a request about it is not put back any more.
+        match &part {
+            M::Encoding { .. } => {
+                self.menu.encoding_before.take_if(|(p, ..)| *p == pc);
+            }
+            M::Sound { .. } => {
+                self.menu.sound_before.take_if(|(p, ..)| *p == pc);
+            }
+            _ => {}
         }
         // Checked by the network thread already: a part of the PC's state.
         if let Err(e) = self.session.part(pc, part) {

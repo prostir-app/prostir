@@ -18,6 +18,8 @@ use crate::pending::{PROFILE_STANDS_WITHIN, ProfileSwitch};
 use crate::persist::File;
 use crate::settings::{Preset, Settings};
 
+mod property;
+
 const PC: PcId = PcId([7; 8]);
 const OTHER_PC: PcId = PcId([8; 8]);
 
@@ -580,7 +582,7 @@ fn a_ray_hits_a_monitor_where_it_is_drawn() {
     // drawn on its way.
     let (one, other) = (sim.world.monitors()[0].0, sim.world.monitors()[1].0);
     let (a, b) = (sim.place(one), sim.place(other));
-    sim.world.swap(one, 1);
+    sim.world.swap(&sim.s, one, 1);
     assert!(near(&sim.place(one), &b) && near(&sim.place(other), &a));
     sim.after(11);
     let drawn = sim.drawn(one);
@@ -928,7 +930,7 @@ fn a_drag_is_drawn_in_the_same_pass() {
 
     // Swapped, and taken on the way.
     sim.settled();
-    sim.world.swap(k(1), 1);
+    sim.world.swap(&sim.s, k(1), 1);
     sim.after(30);
     let drawn = sim.drawn(k(1));
     assert!(!near(&drawn, &sim.place(k(1))), "still on its way");
@@ -946,7 +948,7 @@ fn moving_all_from_the_way_nothing_jumps() {
     let mut sim = Sim::at_desk();
     sim.s.move_all = true;
     let (one, other) = (sim.world.monitors()[0].0, sim.world.monitors()[1].0);
-    sim.world.swap(one, 1);
+    sim.world.swap(&sim.s, one, 1);
     sim.after(30);
     let drawn: HashMap<DisplayKey, Placement> = sim
         .world
@@ -1023,8 +1025,8 @@ fn following_the_head() {
     );
 }
 
-/// Closer and further a step at a time, each keeping its size and the arrangement its
-/// shape; in front: the arrangement turned and carried to the head as it stood.
+/// Closer and further a step at a time, each keeping its size to the eye and the
+/// arrangement its shape; in front: the arrangement turned and carried to the head as it stood.
 #[test]
 fn closer_further_and_in_front() {
     let mut sim = Sim::at_desk();
@@ -1033,7 +1035,10 @@ fn closer_further_and_in_front() {
     for (k, p) in &before {
         let q = sim.place(*k);
         assert!((q.position.length() - p.position.length() / 1.15).abs() < 1e-4);
-        assert!((q.width - p.width).abs() < 1e-6, "its size kept");
+        assert!(
+            (q.width - p.width / 1.15).abs() < 1e-4,
+            "its size to the eye kept"
+        );
     }
     sim.world.closer(1, sim.now);
     assert!(same_places(&sim.places(), &before), "and back");
@@ -1306,6 +1311,46 @@ fn none_covers(sim: &Sim, sizes: &[(u32, (u32, u32))]) {
     }
 }
 
+/// No two of `sizes` (number, pixels) seen over each other from the eye, by more than
+/// a hundredth of the smaller one across and up.
+fn none_seen_over(sim: &Sim, sizes: &[(u32, (u32, u32))]) {
+    use prostir_layout::space::{Monitor, PixelSize, overlaps, see};
+    let frame = layout::frame(sim.world.center, sim.world.tilt);
+    let all: Vec<Monitor<u32>> = sizes
+        .iter()
+        .map(|&(n, (w, h))| Monitor {
+            id: n,
+            px: PixelSize::new(w, h),
+            placement: sim.place(k(n)),
+        })
+        .collect();
+    let seen = see(&frame, &all);
+    for (i, a) in seen.iter().enumerate() {
+        for b in &seen[i + 1..] {
+            assert!(
+                !overlaps(a, b, 0.01),
+                "{} and {} seen over each other: {a:?} {b:?}",
+                a.id,
+                b.id
+            );
+        }
+    }
+}
+
+/// No two of `sizes` (number, pixels) cut into each other in the room.
+fn none_cut(sim: &Sim, sizes: &[(u32, (u32, u32))]) {
+    let height = |p: &Placement, (w, h): (u32, u32)| p.width * h as f32 / w as f32;
+    for (i, &(a, ap)) in sizes.iter().enumerate() {
+        for &(b, bp) in &sizes[i + 1..] {
+            let (pa, pb) = (sim.place(k(a)), sim.place(k(b)));
+            assert!(
+                !layout::cuts(&pa, height(&pa, ap), &pb, height(&pb, bp)),
+                "{a} and {b} cut into each other: {pa:?} {pb:?}"
+            );
+        }
+    }
+}
+
 /// The PC's displays glued to each other on its desktop stand a little apart in the
 /// headset, never over each other; "Line up" takes them along with the first of them
 /// and leaves no monitor covering any.
@@ -1381,4 +1426,208 @@ fn a_display_moved_by_hand_stays_when_another_comes() {
         local.x > a.width * 0.9 && local.y.abs() < 1e-3,
         "beside it: {local:?}"
     );
+}
+
+/// The ids of each row, top to bottom.
+fn row_ids(rows: &[Row]) -> Vec<Vec<u32>> {
+    rows.iter()
+        .map(|r| r.ids().map(|id| id.0).collect())
+        .collect()
+}
+
+/// A monitor that could not start and never had a place (it stays in the list,
+/// failed) does not hold the desktop up: a monitor moved by hand is still told.
+#[test]
+fn a_failed_monitor_never_placed_does_not_hold_the_desktop_up() {
+    let mut sim = Sim::new(None);
+    sim.s.magnet = false;
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    sim.stream(1, QHD);
+    sim.stream(2, QHD);
+    sim.settled();
+    sim.list(vec![
+        monitor(1, QHD),
+        monitor(2, QHD),
+        failed(monitor(3, QHD)),
+    ]);
+    sim.settled();
+    sim.arranged.clear();
+    // Monitor 2 put well above monitor 1, by hand.
+    let mut p = sim.place(k(1));
+    p.position.y += 1.0;
+    sim.world.hold(Thing::Display(k(2)), &sim.s);
+    sim.world.drag(&sim.s, Thing::Display(k(2)), p, sim.head.0);
+    sim.world.let_go(Thing::Display(k(2)), &sim.s, sim.now);
+    sim.settled();
+    assert!(sim.world.placement(k(3)).is_none(), "never placed");
+    let told = sim.arranged.last().map(|r| row_ids(r));
+    assert_eq!(told, Some(vec![vec![2], vec![1]]), "the PC is told");
+}
+
+/// "Add" pressed twice before the first new monitor's picture comes: each new monitor
+/// gets a place of its own next to the others, and the placeholder still waiting moves
+/// out of the way of the one placed first.
+#[test]
+fn two_monitors_added_at_once_each_get_a_place() {
+    let mut sim = Sim::new(None);
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    sim.stream(1, QHD);
+    sim.stream(2, QHD);
+    sim.settled();
+    let gaze = sim.head.1;
+    sim.world.adding_started(Some(ReqId(1)), QHD, gaze, sim.now);
+    sim.world.adding_started(Some(ReqId(2)), QHD, gaze, sim.now);
+    sim.world.adding_made(PC, ReqId(1), Some(k(3)));
+    sim.world.adding_made(PC, ReqId(2), Some(k(4)));
+    let mut list = vec![monitor(1, QHD), monitor(2, QHD), monitor(3, QHD)];
+    sim.list(list.clone());
+    sim.stream(3, QHD);
+    let waiting = sim.world.adding().expect("the second one waits").place;
+    assert!(
+        !cover(&sim.place(k(3)), QHD, &waiting, QHD),
+        "its placeholder is where the first one went"
+    );
+    list.push(monitor(4, QHD));
+    sim.list(list);
+    sim.stream(4, QHD);
+    sim.settled();
+    none_covers(&sim, &[(1, QHD), (2, QHD), (3, QHD), (4, QHD)]);
+}
+
+/// Two monitors side by side, the right one raised by hand, a step at a time, until it
+/// shares only a third of its height with the other: still one row, as the PC has it
+/// (a monitor leaves its row only once clearly moved out of it). The rows the PC was
+/// told, top to bottom.
+fn raised_beside() -> (Sim, Vec<Vec<u32>>) {
+    let mut sim = Sim::new(None);
+    sim.s.magnet = false;
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    sim.stream(1, QHD);
+    sim.stream(2, QHD);
+    sim.settled();
+    let h = sim.world.height_of(k(2));
+    for _ in 0..13 {
+        let mut p = sim.place(k(2));
+        p.position.y += h * 0.05;
+        sim.world.hold(Thing::Display(k(2)), &sim.s);
+        sim.world.drag(&sim.s, Thing::Display(k(2)), p, sim.head.0);
+        sim.world.let_go(Thing::Display(k(2)), &sim.s, sim.now);
+        sim.settled();
+    }
+    let rows = row_ids(sim.arranged.last().expect("told"));
+    assert_eq!(rows.len(), 1, "one row: {rows:?}");
+    (sim, rows)
+}
+
+/// The link drops and comes back with nothing moved: the PC is told its desktop again,
+/// the same rows (they are kept, as those it had, through the reconnect).
+#[test]
+fn a_reconnect_keeps_the_rows() {
+    let (mut sim, rows) = raised_beside();
+    let places = sim.places();
+    sim.world.disconnected(PC);
+    sim.world.stream_ended(k(1));
+    sim.world.stream_ended(k(2));
+    sim.arranged.clear();
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    sim.stream(1, QHD);
+    sim.stream(2, QHD);
+    sim.settled();
+    assert!(same_places(&sim.places(), &places), "nothing moved");
+    let told = sim.arranged.last().map(|r| row_ids(r));
+    assert_eq!(told, Some(rows), "told again, the same rows");
+}
+
+/// The app starts again with what `layout.txt` keeps: the PC is told the rows it had.
+#[test]
+fn a_restart_keeps_the_rows() {
+    let (sim, rows) = raised_beside();
+    let mut text = String::new();
+    sim.world.desk().write_text(&mut text);
+    let mut again = Sim::new(Some(&text));
+    again.connect(PC);
+    again.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    again.stream(1, QHD);
+    again.stream(2, QHD);
+    again.settled();
+    assert!(
+        same_places(&again.places(), &sim.places()),
+        "where they were"
+    );
+    let told = again.arranged.last().map(|r| row_ids(r));
+    assert_eq!(told, Some(rows), "the same rows");
+}
+
+/// Closer or further, the arrangement keeps its shape as seen: monitors glued edge to
+/// edge stay glued, none over another, and each stays the same size to the eye.
+#[test]
+fn closer_keeps_glued_monitors_apart() {
+    for steps in [-2, -1, 1, 2] {
+        let mut sim = Sim::at_desk();
+        let before = sim.places();
+        sim.world.closer(steps, sim.now);
+        none_covers(&sim, &[(1, QHD), (2, QHD), (3, QHD)]);
+        none_cut(&sim, &[(1, QHD), (2, QHD), (3, QHD)]);
+        let k_ = 1.15f32.powi(i32::from(steps));
+        for n in 1..=3 {
+            let (a, b) = (before[&k(n)], sim.place(k(n)));
+            assert!(
+                (b.width / a.width - k_).abs() < 1e-4,
+                "{steps}: its size to the eye"
+            );
+            assert!(
+                (b.position.length() / a.position.length() - k_).abs() < 1e-4,
+                "{steps}: as far as asked"
+            );
+        }
+    }
+}
+
+/// Monitors of different widths moved left or right ("Move" in the menu): the two
+/// swapped stand edge to edge where the pair stood, neither over the other or over a
+/// neighbour.
+#[test]
+fn swapping_monitors_of_different_widths_keeps_them_apart() {
+    let sizes = [(1, (3440, 1440)), (2, (1920, 1080)), (3, QHD)];
+    for (first, delta) in [(0, 1), (1, 1), (2, -1), (1, -1)] {
+        let mut sim = Sim::new(None);
+        sim.connect(PC);
+        sim.list(sizes.iter().map(|&(n, s)| monitor(n, s)).collect());
+        for &(n, s) in &sizes {
+            sim.stream(n, s);
+        }
+        sim.settled();
+        let order: Vec<DisplayKey> = sim.world.monitors().iter().map(|m| m.0).collect();
+        sim.world.swap(&sim.s, order[first], delta);
+        none_seen_over(&sim, &sizes);
+        none_cut(&sim, &sizes);
+    }
+}
+
+/// A monitor comes back at a larger resolution under the same number (the PC changed
+/// it): the same size of a pixel, so it is wider, and its neighbours in the row move
+/// out of its way; none is over another.
+#[test]
+fn a_monitor_grown_pushes_its_neighbours_clear() {
+    for n in 1..=3 {
+        let mut sim = Sim::at_desk();
+        sim.world.stream_ended(k(n));
+        let mut list = three();
+        list[n as usize - 1] = monitor(n, (3840, 2160));
+        sim.list(list);
+        sim.stream(n, (3840, 2160));
+        sim.settled();
+        let mut sizes = vec![(1, QHD), (2, QHD), (3, QHD)];
+        sizes[n as usize - 1].1 = (3840, 2160);
+        assert!(
+            (sim.place(k(n)).width - 1.875).abs() < 1e-4,
+            "as large a pixel"
+        );
+        none_seen_over(&sim, &sizes);
+        none_cut(&sim, &sizes);
+    }
 }

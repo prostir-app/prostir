@@ -1,11 +1,11 @@
 //! The arrangement as its files keep it: `layout.txt` (the desk) and `keyboard.txt`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use glam::{Quat, Vec3};
 
 use super::{Key, Placement};
-use crate::ids::DisplayKey;
+use crate::ids::{DisplayKey, PcId};
 use crate::persist::{self, LoadError, Skipped};
 
 /// The desk arrangement: where the user put the monitors and the PCs' own displays.
@@ -17,6 +17,10 @@ pub struct Desk {
     pub(super) saved: Arrangement,
     /// The screen cinema shows (see [`cinema_choice`]): one picked in the menu.
     cinema: Option<DisplayKey>,
+    /// The rows each PC's desktop was last laid out by, top to bottom and each left to
+    /// right: its monitors stay neighbours until clearly moved apart, after a restart
+    /// too (see `layout::Desktop::history`).
+    rows: BTreeMap<PcId, Vec<Vec<DisplayKey>>>,
 }
 
 /// A stream's size in pixels, width then height.
@@ -59,8 +63,12 @@ impl Desk {
     /// radius 1.3
     /// tilt 0
     /// cinema 0123456789abcdef:3
+    /// rows 0123456789abcdef:3 0123456789abcdef:1 / 0123456789abcdef:2
     /// 0123456789abcdef:3 -0.6 1.6 -1.2 0 0.2 0 0.98 0.77 2560x1440
     /// ```
+    ///
+    /// A `rows` line is the rows one PC's desktop was last laid out by, top to bottom
+    /// (`/` between them), each left to right.
     ///
     /// A file without the format line is not read at all. Within, a line this
     /// version does not know, or one whose value it cannot read, is passed over (and
@@ -69,6 +77,7 @@ impl Desk {
     pub fn parse(text: &str) -> Result<(Self, Skipped), LoadError> {
         let mut saved = Arrangement::default();
         let mut cinema = None;
+        let mut rows = BTreeMap::new();
         let mut tilt_read = false;
         let mut skipped = Skipped::default();
         for (n, line) in persist::body(text)? {
@@ -101,6 +110,10 @@ impl Desk {
                         cinema.is_some()
                     }
                 }
+                "rows" => parse_rows(rest)
+                    .filter(|(pc, _)| !rows.contains_key(pc))
+                    .map(|(pc, r)| rows.insert(pc, r))
+                    .is_some(),
                 _ => DisplayKey::parse(word)
                     .filter(|key| !saved.placements.contains_key(key))
                     .zip(parse_place(rest, true))
@@ -116,7 +129,14 @@ impl Desk {
                 skipped.line(n);
             }
         }
-        Ok((Self { saved, cinema }, skipped))
+        Ok((
+            Self {
+                saved,
+                cinema,
+                rows,
+            },
+            skipped,
+        ))
     }
 
     /// The desk arrangement as last kept.
@@ -172,7 +192,8 @@ impl Desk {
     }
 
     /// Forgets the places of the displays `gone`, and the cinema's pick if it is one of
-    /// them; true when it had one of them, and `layout.txt` is to be written.
+    /// them, and takes them out of their rows; true when it had one of them, and
+    /// `layout.txt` is to be written.
     pub fn forget(&mut self, gone: &[DisplayKey]) -> bool {
         let saved = &mut self.saved;
         let before = saved.placements.len();
@@ -182,7 +203,38 @@ impl Desk {
         if picked {
             self.cinema = None;
         }
-        saved.placements.len() != before || picked
+        let mut in_rows = false;
+        for rows in self.rows.values_mut() {
+            for row in rows.iter_mut() {
+                let had = row.len();
+                row.retain(|k| !gone.contains(k));
+                in_rows |= row.len() != had;
+            }
+            rows.retain(|r| !r.is_empty());
+        }
+        self.rows.retain(|_, r| !r.is_empty());
+        saved.placements.len() != before || picked || in_rows
+    }
+
+    /// The rows PC `pc`'s desktop was last laid out by (empty: none kept).
+    pub fn rows(&self, pc: PcId) -> &[Vec<DisplayKey>] {
+        self.rows.get(&pc).map_or(&[], Vec::as_slice)
+    }
+
+    /// PC `pc`'s desktop is laid out by `rows` now; true when that is a change, and
+    /// `layout.txt` is to be written.
+    pub fn keep_rows(&mut self, pc: PcId, rows: &[Vec<DisplayKey>]) -> bool {
+        let rows = rows.iter().filter(|r| !r.is_empty());
+        let same = self.rows(pc).iter().eq(rows.clone());
+        if !same {
+            let kept = self.rows.entry(pc).or_default();
+            kept.clear();
+            kept.extend(rows.cloned());
+            if kept.is_empty() {
+                self.rows.remove(&pc);
+            }
+        }
+        !same
     }
 
     /// The text of `layout.txt` (see [`Desk::parse`]), added to `out` (a buffer kept
@@ -203,6 +255,18 @@ impl Desk {
         if let Some(screen) = self.cinema {
             let _ = writeln!(out, "cinema {screen}");
         }
+        for rows in self.rows.values() {
+            out.push_str("rows");
+            for (i, row) in rows.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(" /");
+                }
+                for key in row {
+                    let _ = write!(out, " {key}");
+                }
+            }
+            out.push('\n');
+        }
         for key in ascending(&saved.placements) {
             if let Some(p) = saved.placements.get(&key) {
                 let _ = write!(out, "{key}");
@@ -210,6 +274,26 @@ impl Desk {
             }
         }
     }
+}
+
+/// `k k / k`: the rows of one PC's desktop (see [`Desk::parse`]), each display once,
+/// all of that PC.
+fn parse_rows(text: &str) -> Option<(PcId, Vec<Vec<DisplayKey>>)> {
+    let rows: Vec<Vec<DisplayKey>> = text
+        .split(" / ")
+        .map(|row| {
+            row.split(' ')
+                .map(DisplayKey::parse)
+                .collect::<Option<Vec<_>>>()
+        })
+        .collect::<Option<_>>()?;
+    let pc = rows.first()?.first()?.pc;
+    let mut seen: Vec<DisplayKey> = rows.iter().flatten().copied().collect();
+    let count = seen.len();
+    seen.sort_unstable();
+    seen.dedup();
+    let one_pc = seen.iter().all(|k| k.pc == pc);
+    (one_pc && seen.len() == count && rows.iter().all(|r| !r.is_empty())).then_some((pc, rows))
 }
 
 /// Where the keyboard window lies, as `keyboard.txt` keeps it (none: placed in front

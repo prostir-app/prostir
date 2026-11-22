@@ -461,21 +461,6 @@ pub enum Action {
 }
 
 impl Action {
-    /// Changes the setup by hand: the monitors are no longer as the active profile has
-    /// them, so no profile is the active one after it.
-    pub fn leaves_profile(&self) -> bool {
-        matches!(
-            self,
-            Action::Add { .. }
-                | Action::Remove(_)
-                | Action::MakePrimary(_)
-                | Action::Move { .. }
-                | Action::ShowPhysical(..)
-                | Action::SetScale(..)
-                | Action::Preset(_)
-        )
-    }
-
     /// The same control as `other`: the same action, or a switch whose one button
     /// turns it on and off (a tile on the Quick page), which after a press stands for
     /// the other value.
@@ -1737,8 +1722,19 @@ impl Panel {
     }
 
     fn build_page(&mut self, s: &UiState) -> Vec<Item> {
-        let l = &s.texts;
         let mut items = vec![Item::Panel(rect(0.0, 0.0, WIDTH as f32, HEIGHT as f32))];
+        self.build_body(s, &mut items);
+        // The error line, on every page (each leaves room for it): what went wrong
+        // shows whatever the page, pairing and the first screens too.
+        if let Some(e) = &s.error {
+            items.push(text(44.0, HEIGHT as f32 - 34.0, 21.0, true, DANGER, e));
+        }
+        items
+    }
+
+    /// The page under the error line: the header, then the page itself.
+    fn build_body(&mut self, s: &UiState, items: &mut Vec<Item>) {
+        let l = &s.texts;
         let w = WIDTH as f32;
 
         // Header.
@@ -1794,33 +1790,33 @@ impl Panel {
         // Pairing has the page to itself.
         let whole = w - 2.0 * lx;
         if let Some((host, why)) = &s.pair_offer {
-            build_pair_offer(l, &mut items, lx, lw, host, *why);
+            build_pair_offer(l, items, lx, lw, host, *why);
             in_column(&mut items[at..], lx, whole);
-            return items;
+            return;
         }
         if let Some(p) = &s.pairing {
-            self.build_pairing(l, p, &mut items, lx, lw, 150.0);
+            self.build_pairing(l, p, items, lx, lw, 150.0);
             in_column(&mut items[at..], lx, whole);
-            return items;
+            return;
         }
         if let Some((pc_newer, pc_app)) = &s.update {
-            build_update(l, &mut items, lx, whole, *pc_newer, pc_app, s.update_from);
+            build_update(l, items, lx, whole, *pc_newer, pc_app, s.update_from);
             in_column(&mut items[at..], lx, whole);
-            return items;
+            return;
         }
         if s.intro && s.host.is_some() {
-            build_intro(l, &mut items, lx, whole);
+            build_intro(l, items, lx, whole);
             in_column(&mut items[at..], lx, whole);
-            return items;
+            return;
         }
         // No PC yet: how to get one, and the PCs found so far.
         if s.host.is_none() {
-            build_welcome(l, &mut items, lx, lw, 150.0);
+            build_welcome(l, items, lx, lw, 150.0);
             in_column(&mut items[at..], lx, lw);
             let right = items.len();
-            self.build_connection(s, &mut items, rx, rw, 150.0);
+            self.build_connection(s, items, rx, rw, 150.0);
             in_column(&mut items[right..], rx, rw);
-            return items;
+            return;
         }
 
         // Tabs: everyday things, the monitors, the profiles, everything set once.
@@ -1853,29 +1849,25 @@ impl Panel {
         let at = items.len();
         match s.tab {
             Tab::Quick => {
-                build_quick(s, &mut items, lx, whole, top - 12.0);
+                build_quick(s, items, lx, whole, top - 12.0);
                 in_column(&mut items[at..], lx, whole);
             }
             Tab::Monitors => {
-                monitor_list(s, &mut items, lx, lw, top - 12.0);
+                monitor_list(s, items, lx, lw, top - 12.0);
                 in_column(&mut items[at..], lx, lw);
                 let right = items.len();
-                build_monitor_options(s, &mut items, rx, rw, top);
+                build_monitor_options(s, items, rx, rw, top);
                 in_column(&mut items[right..], rx, rw);
             }
             Tab::Profiles => {
                 let wrap = |t: &str, size: f32, room: f32| self.wrapped(t, size, false, room);
-                build_profiles(s, &mut items, top - 12.0, &wrap);
+                build_profiles(s, items, top - 12.0, &wrap);
             }
             Tab::Settings(section) => {
                 let wrap = |t: &str, size: f32, room: f32| self.wrapped(t, size, false, room);
-                build_settings(s, section, &mut items, top - 12.0, &wrap);
+                build_settings(s, section, items, top - 12.0, &wrap);
             }
         }
-        if let Some(e) = &s.error {
-            items.push(text(lx, HEIGHT as f32 - 34.0, 21.0, true, DANGER, e));
-        }
-        items
     }
 
     /// The code to type on the PC, or a keypad for the PC's code.
@@ -3713,7 +3705,8 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             (true, true) => Style::Selected,
             (true, false) => Style::Normal,
         };
-        let action = (connected && !active).then_some(Action::ApplyProfile(i));
+        // The one in use too: pressed again, its monitors go back where it has them.
+        let action = connected.then_some(Action::ApplyProfile(i));
         let mut b = name_button(r, &s.profiles[i], 19.0, style, action);
         if let Item::Button { key, .. } = &mut b {
             *key = Some(Action::ApplyProfile(i));
@@ -3914,7 +3907,7 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>
             name,
             19.0,
             style,
-            (connected && !active).then_some(apply),
+            connected.then_some(apply),
         );
         if let Item::Button { key, .. } = &mut b {
             *key = Some(apply);
@@ -5466,7 +5459,11 @@ mod tests {
                     Style::Normal,
                     Some(Action::ApplyProfile(0))
                 ),
-                ("Work".into(), Style::Selected, None),
+                (
+                    "Work".into(),
+                    Style::Selected,
+                    Some(Action::ApplyProfile(1))
+                ),
             ]
         );
 
@@ -5501,7 +5498,11 @@ mod tests {
                 ),
                 save(0),
                 delete(0),
-                ("Work".into(), Style::Selected, None),
+                (
+                    "Work".into(),
+                    Style::Selected,
+                    Some(Action::ApplyProfile(1))
+                ),
                 save(1),
                 delete(1),
             ]
@@ -5547,43 +5548,14 @@ mod tests {
         assert!(second.iter().any(|(l, ..)| l == "Profile 11"));
         assert!(!second.iter().any(|(l, ..)| l == "Profile 10"));
 
-        // Switching to a profile or saving one keeps it; a layout chosen, a monitor
-        // moved, added or removed by hand leaves it, and then none is marked.
-        for keeps in [
-            Action::ApplyProfile(0),
-            Action::SaveProfile(1),
-            Action::NewProfile,
-            Action::Recenter,
-        ] {
-            assert!(!keeps.leaves_profile(), "{keeps:?}");
-        }
-        let by_hand = [
-            Action::Preset(Preset::Wall),
-            Action::Move {
-                id: k(102),
-                delta: 1,
-            },
-            Action::Add {
-                width: 1920,
-                height: 1080,
-            },
-            Action::Remove(k(102)),
-            Action::MakePrimary(k(103)),
-            Action::ShowPhysical(k(117), false),
-            Action::SetScale(k(102), 125),
-        ];
+        // None in use (the setup changed by hand, see `app`): none is marked.
         st.tab = Tab::Quick;
-        for action in by_hand {
-            let mut st = st.clone();
-            assert!(action.leaves_profile(), "{action:?}");
-            st.active_profile = None;
-            assert!(
-                profile_buttons(&st)
-                    .iter()
-                    .all(|(_, style, _)| *style == Style::Normal),
-                "after {action:?}"
-            );
-        }
+        st.active_profile = None;
+        assert!(
+            profile_buttons(&st)
+                .iter()
+                .all(|(_, style, _)| *style == Style::Normal)
+        );
     }
 
     #[test]
@@ -5704,6 +5676,18 @@ mod tests {
                 states.push(pairing);
             }
         }
+        // Each page with the error line too, the longest ones there are.
+        let with_error: Vec<UiState> = states
+            .iter()
+            .filter(|st| st.error.is_none())
+            .flat_map(|st| {
+                ["error-cameras-lost", "error-keyboard-window"].map(|id| UiState {
+                    error: Some(st.texts.t(id).to_owned()),
+                    ..st.clone()
+                })
+            })
+            .collect();
+        states.extend(with_error);
         let mut problems = Vec::new();
         for st in &states {
             let mut p = Panel::new();
@@ -6332,6 +6316,46 @@ mod tests {
             let laptop = (rng.below(2) == 0).then(|| (rng.within(spread), rng.within(spread)));
             let primary = rng.below(u64::from(count)) as u32;
             pick_each(&mut panel, &monitors, laptop, primary);
+        }
+    }
+
+    /// The error line shows on every page: the tabs, and also the pages before them
+    /// (no PC yet, pairing, a PC to pair with, another version, the first tips), so
+    /// what the store or the PC says while connecting is seen.
+    #[test]
+    fn the_error_line_is_on_every_page() {
+        let says = |s: &UiState, what: &str| {
+            Panel::new()
+                .build(s)
+                .iter()
+                .any(|i| matches!(i, Item::Text { text, .. } if text == what))
+        };
+        let mut tabs = sample_state();
+        tabs.error = Some("Not confirmed".into());
+        let mut welcome = tabs.clone();
+        welcome.host = None;
+        let mut intro = tabs.clone();
+        intro.intro = true;
+        let mut pairing = welcome.clone();
+        pairing.pairing = Some(PairingView {
+            host: "PC".into(),
+            code: None,
+            typed: String::new(),
+            failed: false,
+        });
+        let mut offer = welcome.clone();
+        offer.pair_offer = Some(("PC".into(), OfferWhy::New));
+        let mut update = welcome.clone();
+        update.update = Some((true, "0.12.3".into()));
+        for (page, st) in [
+            ("tabs", tabs),
+            ("welcome", welcome),
+            ("intro", intro),
+            ("pairing", pairing),
+            ("offer", offer),
+            ("update", update),
+        ] {
+            assert!(says(&st, "Not confirmed"), "not on the {page} page");
         }
     }
 }

@@ -82,7 +82,7 @@ impl Scene for Model {
 
     fn toggle_menu(&mut self) {
         if self.menu.open {
-            self.close_panel();
+            self.close_menu();
         } else {
             self.open_panel();
         }
@@ -142,6 +142,7 @@ impl Scene for Model {
         // The map shows the desktop anew.
         self.rev += 1;
         self.world.resize_end();
+        self.world_done();
     }
 
     fn cancel_holds(&mut self) {

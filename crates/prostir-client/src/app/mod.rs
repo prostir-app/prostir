@@ -30,7 +30,7 @@ use log::{info, warn};
 use prostir_proto::ClientMsg;
 use prostir_proto::request::{Outcome, Request};
 use prostir_proto::state::{
-    self, Battery, DisplayId, HeadsetState, PcState, Prefs, Presence, ReqId, caps,
+    self, Battery, DisplayId, ErrorCode, HeadsetState, PcState, Prefs, Presence, ReqId, caps,
 };
 
 use crate::caps::{Caps, Offer};
@@ -282,6 +282,10 @@ pub struct Menu {
     /// Displays of the PC itself asked to be shown or hidden, the last ask of each
     /// first: their switches show it until the PC answers.
     pub physical_asked: Vec<(DisplayKey, bool)>,
+    /// The encoding and the PC's sound shown at once as asked: as they were before the
+    /// last request about them, with its PC and number, put back if it fails.
+    pub encoding_before: Option<(PcId, ReqId, state::Wanted)>,
+    pub sound_before: Option<(PcId, ReqId, bool)>,
     /// What the open menu says under the button pressed (see `note`).
     pub notes: Notes,
     /// Which languages the Language page shows, when there are many.
@@ -489,6 +493,8 @@ impl Model {
                 physical_page: 0,
                 add_scale: 100,
                 physical_asked: Vec::new(),
+                encoding_before: None,
+                sound_before: None,
                 notes: Notes::default(),
                 language_page: 0,
                 active_profile: None,
@@ -910,6 +916,10 @@ impl Model {
     /// What the world asks for after it changed: the PC is told the rows of its
     /// desktop (see `World::settle`).
     fn world_done(&mut self) {
+        // Changed by hand: no longer as the profile it came from has it.
+        if self.world.take_rearranged() {
+            self.leave_profile();
+        }
         while let Some((pc, rows)) = self.world.take_arrange() {
             self.rev += 1;
             // Only to a PC in a session: the world sends nothing otherwise.
@@ -974,6 +984,19 @@ impl Model {
         };
         info!("headset {state:?}");
         self.rev += 1;
+        // Off the head counts as a rest from when it was taken off, whether frames
+        // are drawn meanwhile or not (hidden, none are).
+        if self.presence.worn() {
+            if self
+                .off_since
+                .take()
+                .is_some_and(|t| now.saturating_duration_since(t) >= REST_OFF)
+            {
+                self.worn_for = Duration::ZERO;
+            }
+        } else {
+            self.off_since.get_or_insert(now);
+        }
         self.tell_presence();
         if state == presence::State::Asleep {
             self.tell_all(&ClientMsg::Asleep);
@@ -1030,9 +1053,15 @@ impl Model {
                 let text = self.texts().f("error-cameras", &[("error", error.into())]);
                 self.show_error(text);
             }
+            // Not offered for the rest of this run, and said; the setting stays as
+            // chosen, and the next start tries again.
             PlatformEvent::KeyboardWindowFailed => {
-                self.settings.keyboard_window = false;
+                if let Some(room) = &mut self.headset.caps.room {
+                    room.keyboard_window = false;
+                }
                 self.keyboard_window = None;
+                let text = self.texts().t("error-keyboard-window").to_owned();
+                self.show_error(text);
             }
             PlatformEvent::CustomPanorama(there) => self.headset.custom_panorama = there,
         }
@@ -1231,17 +1260,9 @@ impl Model {
         if every == 0 {
             return;
         }
-        let now = self.now;
+        // Off the head is a rest (see `presence_due`).
         if !self.presence.worn() {
-            self.off_since.get_or_insert(now);
             return;
-        }
-        if self
-            .off_since
-            .take()
-            .is_some_and(|t| now.saturating_duration_since(t) >= REST_OFF)
-        {
-            self.worn_for = Duration::ZERO;
         }
         self.worn_for += Duration::from_secs_f32(dt);
         if self.worn_for.as_secs() < every {
@@ -1286,6 +1307,14 @@ impl Model {
             place: None,
             n: self.toasts,
         });
+    }
+
+    /// The setup changed where it is made (a monitor moved, added, removed...): no
+    /// profile is the one in use.
+    fn leave_profile(&mut self) {
+        if self.menu.active_profile.take().is_some() {
+            self.profiles_changed();
+        }
     }
 
     /// The profiles or the one in use changed: the PCs hear of it once this pass ends
@@ -1354,6 +1383,16 @@ impl Model {
     fn close_panel(&mut self) {
         self.menu.open = false;
         self.rev += 1;
+    }
+
+    /// The person closes the menu (its ×, the menu button or its gesture): the
+    /// first-run tips count as read, or they would open again right away.
+    fn close_menu(&mut self) {
+        self.close_panel();
+        if !self.settings.intro_seen {
+            self.settings.intro_seen = true;
+            self.saves.mark(persist::File::Settings);
+        }
     }
 
     /// Tells the PC whether the headset is worn (quietly: nothing to show the user),
@@ -1487,6 +1526,7 @@ impl Model {
         if let ui::Asked::Physical(k) = what {
             self.menu.physical_asked.retain(|(a, _)| *a != k);
         }
+        self.shown_as_asked(pc, req, matches!(outcome, Outcome::Failed { .. }));
         let took = answered.took.unwrap_or_default().as_millis();
         info!("request {} answered in {took} ms", req.0);
         if let Outcome::Failed { error, detail } = outcome {
@@ -1499,6 +1539,35 @@ impl Model {
         Some(what)
     }
 
+    /// Request `req` of PC `pc` was answered (`failed`: refused, or no answer will
+    /// come): the encoding or the sound it showed at once as asked shows what it was
+    /// before when it failed, and what the PC says from then on either way.
+    fn shown_as_asked(&mut self, pc: PcId, req: ReqId, failed: bool) {
+        if let Some((_, _, before)) = self
+            .menu
+            .encoding_before
+            .take_if(|(p, r, _)| *p == pc && *r == req)
+            && failed
+            && let Some(e) = self
+                .session
+                .pc_mut(pc)
+                .and_then(|p| p.state.encoding.as_mut())
+        {
+            e.wanted = before;
+            self.rev += 1;
+        }
+        if let Some((_, _, before)) = self
+            .menu
+            .sound_before
+            .take_if(|(p, r, _)| *p == pc && *r == req)
+            && failed
+            && let Some(s) = self.session.pc_mut(pc).and_then(|p| p.state.sound.as_mut())
+        {
+            s.to_headset = before;
+            self.rev += 1;
+        }
+    }
+
     /// A request was not sent, for `why`: said under the button pressed for it.
     fn ask_failed(&mut self, why: ui::Failure) {
         let note = Note::failure(self.menu.notes.pressed(), why, "", self.texts());
@@ -1508,6 +1577,25 @@ impl Model {
     /// Request `req` of PC `pc` got no answer and never will (`why`: no answer in time,
     /// the connection broke): said under the button that asked.
     fn given_up(&mut self, pc: PcId, req: ReqId, why: ui::Failure) {
+        self.shown_as_asked(pc, req, true);
+        // A command of the PC waiting for it gets its answer: none came.
+        if let Some(command) = self
+            .session
+            .pc_mut(pc)
+            .and_then(|p| p.asks.take_command_after(req))
+        {
+            let detail = format!(
+                "the headset got no answer in {} s",
+                pending::ANSWER_WITHIN.as_secs()
+            );
+            self.send_to(
+                pc,
+                ClientMsg::Reply {
+                    req: command,
+                    outcome: Outcome::failed(ErrorCode::OTHER, &detail),
+                },
+            );
+        }
         let on = self.menu.notes.answered(pc, req).on;
         let note = Note::failure(on, why, "", self.texts());
         self.tell(note, true, on.is_some());

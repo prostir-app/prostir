@@ -4,8 +4,9 @@
 use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
+use log::debug;
 use prostir_layout::circle::{self, Limits};
-use prostir_layout::space::{Frame, Monitor};
+use prostir_layout::space::{Frame, Monitor, azimuth, covers, cuts, see};
 use prostir_layout::view::Room;
 use prostir_layout::{place, rows, tidy};
 
@@ -289,6 +290,35 @@ pub fn place_new<K: Key>(
     )
 }
 
+/// Seen overlaps smaller than this share of the smaller monitor are a shared edge (as
+/// for a new monitor, see `prostir_layout::place`).
+const SLACK: f64 = 0.01;
+
+/// Whether a monitor of `size` pixels at `p` would cover one of the placed ones of
+/// `monitors` (other than itself, `id`) as seen from `center` tilted up by `tilt`, or go
+/// through one in the room: no place for it.
+pub fn covers_any<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    id: K,
+    size: (u32, u32),
+    p: &Placement,
+    (center, tilt): ((Vec3, f32), f32),
+) -> bool {
+    let frame = frame(center, tilt);
+    let height = p.width * size.1 as f32 / size.0.max(1) as f32;
+    let mine = frame.unplace(*p);
+    let corners = mine.corners(height);
+    placed(placements, monitors)
+        .iter()
+        .filter(|m| m.id != id)
+        .any(|m| {
+            let o = frame.unplace(m.placement);
+            let oh = m.height();
+            covers(&o.corners(oh), &corners, SLACK) || cuts(&o, oh, &mine, height)
+        })
+}
+
 /// `p` for a stream now `now` pixels in size instead of `was`: the same size of a
 /// pixel, centred where it was. A monitor that comes back with another resolution
 /// under the same number (a profile, a rotated monitor) would otherwise keep its old
@@ -300,6 +330,263 @@ pub fn refit(p: Placement, was: PixelSize, now: PixelSize) -> Placement {
     Placement {
         width: p.width * now.0 as f32 / was.0 as f32,
         ..p
+    }
+}
+
+/// `p` moved along the row it stands in: turned about the eye by `angle` (radians,
+/// positive to the right as seen), or on a wall (`wall`) carried along its plane by
+/// `metres`.
+fn along_row(p: Placement, frame: &Frame, wall: bool, angle: f32, metres: f32) -> Placement {
+    if wall {
+        return Placement {
+            position: p.position + frame.turn * Vec3::X * metres,
+            ..p
+        };
+    }
+    let turn = frame.turn * Quat::from_rotation_y(-angle) * frame.turn.inverse();
+    Placement {
+        position: frame.eye + turn * (p.position - frame.eye),
+        rotation: (turn * p.rotation).normalize(),
+        width: p.width,
+    }
+}
+
+/// Where the middle of `p`'s left (`side` -1) or right (1) edge is seen, around the eye
+/// of `frame` (radians, positive to the right), and along a wall in its plane.
+fn edge(p: &Placement, frame: &Frame, side: f32) -> (f32, f32) {
+    let at = frame.to_local(p.position + p.rotation * Vec3::X * (side * p.width / 2.0));
+    (azimuth(at.as_dvec3()) as f32, at.x)
+}
+
+/// `p` moved along its row so its `side` edge (-1 left, 1 right) is where `slot`'s
+/// is: a monitor taking another's place at its own width keeps that place's edge.
+pub fn edge_to(p: Placement, slot: &Placement, side: f32, frame: &Frame, wall: bool) -> Placement {
+    let (to, to_x) = edge(slot, frame, side);
+    let (from, from_x) = edge(&p, frame, side);
+    along_row(p, frame, wall, to - from, to_x - from_x)
+}
+
+/// Whether `a` is seen left of `b` from `frame`'s eye.
+pub fn left_of(a: &Placement, b: &Placement, frame: &Frame) -> bool {
+    let az = |p: &Placement| azimuth(frame.to_local(p.position).as_dvec3());
+    az(a) < az(b)
+}
+
+/// How far apart two monitors side by side may be seen to overlap before one is
+/// pushed clear of the other (radians: a hundredth of a millimetre a metre away), what
+/// the last bits of a float leave of a seam.
+const SEAM: f64 = 1e-5;
+
+/// Monitor `id` of `monitors` is larger, or stands elsewhere, than before (another
+/// resolution, a place swapped): a monitor beside it in its row (seen at its height
+/// for at least half of the lower one) that it now covers as seen is pushed clear
+/// along the row, just as far as it reaches into it (they meet edge to edge), and so on
+/// for what that one then covers: only the chain that touches moves, not monitors
+/// further along or behind the user. Around the eye; on a wall (`wall`) along its
+/// plane. Then what any of them goes through over or under it moves up or down out of
+/// its way (see [`clear_above_and_below`]). The displays of `group` (the PC's own,
+/// shown as one group) move as one piece, all the same way.
+pub fn make_room<K: Key>(
+    placements: &mut HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    (center, tilt): ((Vec3, f32), f32),
+    wall: bool,
+    group: &[K],
+    id: K,
+) {
+    let frame = frame(center, tilt);
+    let piece = |k: K| -> Vec<K> {
+        if group.contains(&k) {
+            group.to_vec()
+        } else {
+            vec![k]
+        }
+    };
+    let mut moved = piece(id);
+    let mut work = vec![(id, 1.0f32), (id, -1.0)];
+    // Each push goes further out along the row: a bound only against a float gone wrong.
+    let mut left = 8 * monitors.len().max(1);
+    while let Some((m, side)) = work.pop() {
+        if left == 0 {
+            debug!(
+                "making room along the row: out of passes, {} left",
+                work.len() + 1
+            );
+            break;
+        }
+        left -= 1;
+        let Some(mine) = monitor_of(placements, monitors, m) else {
+            continue;
+        };
+        let pushed_with = piece(m);
+        for &(o, ..) in monitors {
+            if pushed_with.contains(&o) {
+                continue;
+            }
+            let Some(other) = monitor_of(placements, monitors, o) else {
+                continue;
+            };
+            let pair = see(&frame, &[mine, other]);
+            let (me, it) = (&pair[0], &pair[1]);
+            let reach = if side > 0.0 {
+                me.right - it.left
+            } else {
+                it.right - me.left
+            };
+            if it.vertical_overlap(me) < 0.5
+                || (it.center_x() > me.center_x()) != (side > 0.0)
+                || it.horizontal_overlap(me) <= 0.0
+                || reach <= SEAM
+            {
+                continue;
+            }
+            // How far its near edge goes to meet this one's.
+            let (to, to_x) = edge(&mine.placement, &frame, side);
+            let (from, from_x) = edge(&other.placement, &frame, -side);
+            let (angle, metres) = (to - from, to_x - from_x);
+            // Every display of a piece moved pushes on: a monitor beyond the group's
+            // far end is pushed by the display it now covers.
+            for k in piece(o) {
+                if let Some(p) = placements.get_mut(&k) {
+                    *p = along_row(*p, &frame, wall, angle, metres);
+                    if !moved.contains(&k) {
+                        moved.push(k);
+                    }
+                }
+                work.push((k, side));
+            }
+        }
+    }
+    clear_above_and_below(placements, monitors, &frame, group, moved);
+}
+
+/// Monitor `k` of `monitors` where it stands, if it has a place.
+fn monitor_of<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    k: K,
+) -> Option<Monitor<K>> {
+    let &(_, w, h) = monitors.iter().find(|m| m.0 == k)?;
+    Some(Monitor {
+        id: k,
+        px: prostir_layout::space::PixelSize::new(w, h),
+        placement: *placements.get(&k)?,
+    })
+}
+
+/// `p` carried up (`up` above 0) or down along the frame's up by `up` metres.
+pub fn lifted(p: Placement, frame: &Frame, up: f32) -> Placement {
+    Placement {
+        position: p.position + frame.turn * Vec3::Y * up,
+        ..p
+    }
+}
+
+/// How far `p` (`ph` high) must go along the frame's up (`dir` 1) or down (-1) to cut
+/// into none of `others` (place, height), to a tenth of a millimetre: none of them
+/// further than both heights together.
+pub fn clear_along_up(
+    p: Placement,
+    ph: f32,
+    others: &[(Placement, f32)],
+    frame: &Frame,
+    dir: f32,
+) -> f32 {
+    let cut_any = |t: f32| {
+        let at = lifted(p, frame, dir * t);
+        others.iter().any(|(o, oh)| cuts(&at, ph, o, *oh))
+    };
+    if !cut_any(0.0) {
+        return 0.0;
+    }
+    let mut hi = ph + others.iter().map(|o| o.1).fold(0.0, f32::max);
+    while cut_any(hi) && hi < 100.0 {
+        hi *= 2.0;
+    }
+    let mut lo = 0.0;
+    while hi - lo > 1e-4 {
+        let mid = (lo + hi) / 2.0;
+        if cut_any(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    hi
+}
+
+/// The monitors those of `moved` go through now (over or under them, or beside them
+/// still) are carried up or down out of their way, just far enough, and so on for the
+/// monitors those then go through, until none goes through another (those moved are
+/// looked at again). The displays of `group` move as one piece. A row glued over a row
+/// may be seen over it a little, as "Line up" leaves it: only going through it is
+/// undone.
+fn clear_above_and_below<K: Key>(
+    placements: &mut HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    frame: &Frame,
+    group: &[K],
+    moved: Vec<K>,
+) {
+    let height = |k: K, p: &Placement| {
+        monitors
+            .iter()
+            .find(|m| m.0 == k)
+            .map(|&(_, w, h)| p.width * h as f32 / w.max(1) as f32)
+    };
+    let piece = |k: K| -> Vec<K> {
+        if group.contains(&k) {
+            group.to_vec()
+        } else {
+            vec![k]
+        }
+    };
+    let mut work = moved;
+    // Each lift goes further up or down: a bound only against a float gone wrong.
+    let mut left = 8 * monitors.len().max(1) + work.len();
+    while let Some(m) = work.pop() {
+        if left == 0 {
+            debug!(
+                "clearing over and under: out of passes, {} left",
+                work.len() + 1
+            );
+            break;
+        }
+        left -= 1;
+        let Some(mp) = placements.get(&m).copied() else {
+            continue;
+        };
+        let Some(mh) = height(m, &mp) else { continue };
+        let with = piece(m);
+        for &(o, ..) in monitors {
+            if with.contains(&o) {
+                continue;
+            }
+            let Some(op) = placements.get(&o).copied() else {
+                continue;
+            };
+            let Some(oh) = height(o, &op) else { continue };
+            if !cuts(&mp, mh, &op, oh) {
+                continue;
+            }
+            let up = frame.to_local(op.position).y >= frame.to_local(mp.position).y;
+            let dir = if up { 1.0 } else { -1.0 };
+            // The whole piece, as far as the member that needs it most.
+            let members = piece(o);
+            let t = members
+                .iter()
+                .filter_map(|&k| {
+                    let p = *placements.get(&k)?;
+                    Some(clear_along_up(p, height(k, &p)?, &[(mp, mh)], frame, dir))
+                })
+                .fold(0.0f32, f32::max);
+            for k in members {
+                if let Some(p) = placements.get_mut(&k) {
+                    *p = lifted(*p, frame, dir * t);
+                    work.push(k);
+                }
+            }
+        }
     }
 }
 

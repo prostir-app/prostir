@@ -33,10 +33,6 @@ pub enum By {
 impl Model {
     /// Does `action`, pressed `by`.
     pub(super) fn act(&mut self, action: Action, by: By) {
-        // Changing the setup by hand leaves the profile it came from.
-        if action.leaves_profile() && self.menu.active_profile.take().is_some() {
-            self.profiles_changed();
-        }
         // A press of the menu: what was said under the button pressed before goes
         // (another page too), and what this one asks of the PC is its own. A press
         // elsewhere leaves the menu's note as it is, and says what it comes to with a

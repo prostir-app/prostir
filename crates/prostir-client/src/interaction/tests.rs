@@ -564,3 +564,103 @@ fn nothing_without_a_frame() {
         .step(sim.now, &input, &mut sim.scene, &mut sim.menus);
     assert!(sim.scene.take().is_empty());
 }
+
+/// The controller holding a monitor with its grip is put down and the hand takes over:
+/// the monitor is let go, it does not follow the hand.
+#[test]
+fn a_controller_put_down_mid_drag_lets_go() {
+    let mut sim = Sim::new();
+    let id = Thing::Display(monitor(1));
+    sim.scene.pick_for[1] = on(id);
+    sim.frame(MS, 0.0, 0.0, false);
+    let took = sim.frame(11 * MS, 0.0, 1.0, false);
+    assert!(took.contains(&Call::Hold(id)), "{took:?}");
+    let mut calls = Vec::new();
+    for _ in 0..10 {
+        calls.extend(sim.frame(11 * MS, 0.0, 0.0, true));
+    }
+    assert!(calls.contains(&Call::LetGo(id)), "{calls:?}");
+}
+
+/// A monitor held with a pinch, then the hands stop being the app's pointers (the
+/// setting changed, so their input stops, its pinch never seen opening): the monitor
+/// is let go, and a pinch waiting to click does not click later.
+#[test]
+fn hands_no_longer_pointing_let_go() {
+    let mut sim = Sim::new();
+    let k = Thing::Display(monitor(1));
+    sim.scene.pick_for[1] = on(k);
+    sim.frame(MS, 1.0, 0.0, true);
+    sim.frame(HOLD_TO_DRAG + MS, 1.0, 0.0, true);
+    assert_eq!(sim.hands.held().collect::<Vec<_>>(), [k]);
+    // The hand's input as the shell gives it then: no ray, no pinch, nothing let go.
+    sim.right = HandState {
+        is_hand: true,
+        ..HandState::default()
+    };
+    let input = frame(sim.right);
+    sim.now += 11 * MS;
+    sim.hands.buttons(sim.now, &input, &mut sim.scene);
+    sim.hands
+        .step(sim.now, &input, &mut sim.scene, &mut sim.menus);
+    assert!(sim.scene.take().contains(&Call::LetGo(k)));
+    assert_eq!(sim.hands.held().count(), 0);
+
+    // A pinch on a button, then the hands stop: it never clicks.
+    let mut sim = Sim::new();
+    sim.scene.pick_for[1] = on(Thing::Menu);
+    sim.frame(MS, 1.0, 0.0, true);
+    let stopped = HandState {
+        is_hand: true,
+        ..HandState::default()
+    };
+    for _ in 0..3 {
+        sim.now += 11 * MS;
+        let input = frame(stopped);
+        sim.hands
+            .step(sim.now, &input, &mut sim.scene, &mut sim.menus);
+    }
+    assert!(!sim.hands.busy(), "nothing waits to click");
+}
+
+/// A pinch on a menu button, then the menu closes before the pinch opens (the menu
+/// button of the other hand): nothing is clicked.
+#[test]
+fn a_pinch_on_a_closed_menu_clicks_nothing() {
+    let mut sim = Sim::new();
+    sim.scene.pick_for[1] = on(Thing::Menu);
+    assert_eq!(sim.frame(MS, 1.0, 0.0, true), []);
+    sim.scene.menu = None;
+    sim.scene.pick_for[1] = None;
+    let calls = sim.frame(100 * MS, 0.0, 0.0, true);
+    assert!(
+        !calls.iter().any(|c| matches!(c, Call::PressMenu(_))),
+        "clicked on a closed menu: {calls:?}"
+    );
+}
+
+/// A pinch on a menu button, then another press on the menu (a touch, the other
+/// hand) changes it before the pinch opens: the pinch clicks nothing on what the menu
+/// shows now.
+#[test]
+fn a_pinch_after_another_press_clicks_nothing() {
+    let mut sim = Sim::new();
+    sim.scene.pick_for[1] = on(Thing::Menu);
+    assert_eq!(sim.frame(MS, 1.0, 0.0, true), []);
+    // The other hand's menu gesture toggles the menu twice: closed, open again.
+    for _ in 0..2 {
+        let mut input = frame(sim.right);
+        input.menu_gesture = true;
+        sim.now += 11 * MS;
+        sim.hands.buttons(sim.now, &input, &mut sim.scene);
+        let mut input = frame(sim.right);
+        input.menu_gesture = false;
+        sim.hands.buttons(sim.now, &input, &mut sim.scene);
+    }
+    assert!(sim.scene.take().contains(&Call::Toggle));
+    let calls = sim.frame(100 * MS, 0.0, 0.0, true);
+    assert!(
+        !calls.iter().any(|c| matches!(c, Call::PressMenu(_))),
+        "{calls:?}"
+    );
+}

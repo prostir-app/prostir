@@ -4,17 +4,17 @@
 //! around the eye its end monitor stands on, or that monitor's plane on a wall), its
 //! middle level with the end monitor's; and over every monitor of the top row and under
 //! every monitor of the bottom row, on its surface. A candidate that would cover a
-//! monitor, or take its row past the widest arc, is dropped; of the rest, the one seen
-//! nearest the gaze wins. If none is left, it goes over everything (or under, or
-//! behind the user), where nothing can be.
+//! monitor (or go through one in the room), or take its row past the widest arc, is
+//! dropped; of the rest, the one seen nearest the gaze wins. If none is left, it goes
+//! over everything (or under, or behind the user), where nothing can be.
 
 use glam::{DVec3, Vec3};
 
 use crate::circle::{EYE_DROP, Limits, clear_of, on_cylinder};
 use crate::rows::rows_of;
 use crate::space::{
-    Frame, METRES_PER_PIXEL, Monitor, PixelSize, Placement, Seen, azimuth, covers, seen_local,
-    unwrap,
+    Frame, METRES_PER_PIXEL, Monitor, PixelSize, Placement, Seen, azimuth, covers, cuts,
+    seen_local, unwrap,
 };
 use crate::view::Room;
 
@@ -91,10 +91,13 @@ pub fn place_new<K: Copy + Ord>(
         if !(p.position.is_finite() && p.rotation.is_finite() && p.width.is_finite()) {
             return false;
         }
-        let mine = p.corners(p.width * px.aspect());
+        let height = p.width * px.aspect();
+        let mine = p.corners(height);
+        // Seen apart by a hair is not enough: nearer the eye than its neighbour, a
+        // monitor seen next to it can still go through it in the room.
         if local
             .iter()
-            .any(|(_, o, oh)| covers(&o.corners(*oh), &mine, SLACK))
+            .any(|(_, o, oh)| covers(&o.corners(*oh), &mine, SLACK) || cuts(o, *oh, p, height))
         {
             return false;
         }

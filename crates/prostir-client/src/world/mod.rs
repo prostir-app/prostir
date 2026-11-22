@@ -143,6 +143,8 @@ pub struct Adding {
     pub size: (u32, u32),
     pub id: Option<DisplayKey>,
     since: Instant,
+    /// Where the head looked when it was asked for: its place is near there.
+    gaze: Vec3,
 }
 
 impl Adding {
@@ -252,6 +254,12 @@ pub struct World {
     /// What the hands hold (two at most), and the monitor resized with both.
     held: [Option<Thing>; 2],
     resizing: Option<DisplayKey>,
+    /// A display in a hand moved, or the one resized changed size, since it was taken.
+    dragged: bool,
+    /// The arrangement was changed by hand since the app last asked: a display moved
+    /// or resized, "Line up", closer or further, two swapped, a layout chosen (see
+    /// [`World::take_rearranged`]).
+    rearranged: bool,
 
     /// The magnet's memory (see `stick_of`), asked every frame of a drag.
     stick: layout::StickScratch<DisplayKey>,
@@ -315,6 +323,8 @@ impl World {
             wrist: None,
             held: [None, None],
             resizing: None,
+            dragged: false,
+            rearranged: false,
             stick: layout::StickScratch::default(),
             gone: Vec::new(),
             waiting: Vec::new(),
@@ -446,11 +456,19 @@ impl World {
         }
     }
 
-    /// A session with PC `pc` began: its desktop is told afresh.
+    /// A session with PC `pc` began: its desktop is told afresh, by the rows it had (the
+    /// last session's, or after a start those `layout.txt` keeps): nothing moved, the
+    /// same rows, so its desktop is not rearranged.
     pub fn connected(&mut self, pc: PcId) {
+        let kept = self.desk.rows(pc);
         let view = self.pcs.entry(pc).or_default();
         view.connected = true;
-        view.sent_layout = None;
+        let rows = view
+            .sent_layout
+            .take()
+            .map_or_else(|| kept.to_vec(), |d| d.rows);
+        view.sent_layout = Desktop::history(rows);
+        view.pending_layout = None;
         self.last = Some(pc);
     }
 
@@ -597,8 +615,18 @@ impl World {
         let size = self.streams.get(&id).copied();
         if let (Kind::Monitor, Some(size)) = (kind, size)
             && !self.cinema
+            && self.fit_to_stream(id, size)
         {
-            self.fit_to_stream(id, size);
+            // Larger now: the neighbours it reaches into make room along the row.
+            let group = self.placed_group();
+            layout::make_room(
+                &mut self.placements,
+                &self.sizes,
+                (self.center, self.tilt),
+                s.preset == Preset::Wall,
+                &group,
+                id,
+            );
         }
         match kind {
             Kind::Window => {
@@ -685,6 +713,12 @@ impl World {
     /// The monitor resized with both hands.
     pub fn resizing(&self) -> Option<DisplayKey> {
         self.resizing
+    }
+
+    /// Whether the arrangement was changed by hand since this was last asked: the
+    /// profile it came from is not how it stands any more.
+    pub fn take_rearranged(&mut self) -> bool {
+        std::mem::take(&mut self.rearranged)
     }
 
     /// The files changed since this was last asked, to be written after this pass.
@@ -777,16 +811,25 @@ impl World {
             center,
             tilt,
             listed,
+            desk,
+            saves,
             ..
         } = self;
         let Some(view) = pcs.get_mut(&pc) else {
             return false;
         };
         // Wait until every monitor the PC has is placed: a partial picture would make
-        // the desktop rearrange (and blink) once per arriving monitor. One whose stream could
-        // not start keeps its place and does not hold the others up.
+        // the desktop rearrange (and blink) once per arriving monitor. One that could
+        // not start does not hold the others up: it keeps its place if it had one, and
+        // one that never had a place gets one only once it streams.
+        let due =
+            |id: &DisplayKey| streams.contains_key(id) || listed.get(id).is_some_and(|l| !l.failed);
         let complete = view.order.iter().any(|id| streams.contains_key(id))
-            && view.order.iter().all(|id| placements.contains_key(id));
+            && view
+                .order
+                .iter()
+                .filter(|id| due(id))
+                .all(|id| placements.contains_key(id));
         if !complete {
             return false;
         }
@@ -840,6 +883,10 @@ impl World {
                 .map(|id| DisplayKey::new(pc, id))
                 .filter(|id| listed.get(id).is_some_and(|l| l.kind == Kind::Monitor)),
         );
+        // Kept for the next start too.
+        if desk.keep_rows(pc, &desktop.rows) {
+            saves.mark(File::Desk);
+        }
         view.sent_layout = Some(desktop);
         view.arrange = Some(rows);
         true
@@ -939,21 +986,68 @@ impl World {
     }
 
     /// The PC's own displays that show and have no place yet get one in the group: all
-    /// of them where none has one; else each where the group puts it next to one placed
-    /// already, wherever the person moved that one (see `layout::kept_to`). Those
-    /// placed stay where they are.
+    /// of them where none has one (under the primary monitor, and further down if a
+    /// monitor stands there: they go through none); else each where the group puts it
+    /// next to one placed already, wherever the person moved that one (see
+    /// `layout::kept_to`). Those placed stay where they are.
     fn place_new_physical(&mut self, s: &Settings) {
-        let laid = self.physical_laid(s);
-        let anchor = laid
+        let mut laid = self.physical_laid(s);
+        let placed = laid
             .iter()
-            .find_map(|(id, at)| Some((*at, *self.placements.get(id)?)));
+            .find_map(|(id, at)| Some((*id, *at, *self.placements.get(id)?)));
+        let anchor = placed.map(|(_, from, to)| (from, to));
+        let frame = layout::frame(self.center, self.tilt);
+        let height = |id: &DisplayKey, p: &Placement| self.height_at(*id, p).unwrap_or(0.0);
+        let others = self.placed_heights(&self.lineup);
+        let anchor_clear = placed.is_some_and(|(id, _, to)| {
+            let h = height(&id, &to);
+            !others.iter().any(|(o, oh)| layout::cuts(&to, h, o, *oh))
+        });
+        if anchor.is_none() {
+            let down = laid
+                .iter()
+                .map(|(id, p)| layout::clear_along_up(*p, height(id, p), &others, &frame, -1.0))
+                .fold(0.0f32, f32::max);
+            for (_, p) in &mut laid {
+                *p = layout::lifted(*p, &frame, -down);
+            }
+        }
         for (id, at) in laid {
             if self.placements.contains_key(&id) {
                 continue;
             }
-            let p = anchor.map_or(at, |(from, to)| layout::kept_to(at, from, to));
+            let mut p = anchor.map_or(at, |(from, to)| layout::kept_to(at, from, to));
+            // Next to one of the group that goes through no monitor, where a monitor
+            // stands: further down, out of its way. A group put over monitors by hand
+            // is the person's to move.
+            if anchor_clear {
+                let h = self.height_at(id, &p).unwrap_or(0.0);
+                let down = layout::clear_along_up(p, h, &others, &frame, -1.0);
+                p = layout::lifted(p, &frame, -down);
+            }
             self.placements.insert(id, p);
         }
+    }
+
+    /// The main PC's own displays that show and have a place: the group they stand in,
+    /// moved as one piece (see `layout::make_room`).
+    fn placed_group(&self) -> Vec<DisplayKey> {
+        self.physical()
+            .iter()
+            .map(|p| p.0)
+            .filter(|id| self.streams.contains_key(id) && self.placements.contains_key(id))
+            .collect()
+    }
+
+    /// Where each of `monitors` that has a place stands, and how high it is.
+    fn placed_heights(&self, monitors: &[(DisplayKey, u32, u32)]) -> Vec<(Placement, f32)> {
+        monitors
+            .iter()
+            .filter_map(|m| {
+                let p = *self.placements.get(&m.0)?;
+                Some((p, self.height_at(m.0, &p)?))
+            })
+            .collect()
     }
 
     /// Lays the monitors of this session's PC (and its own display shown) out by the
@@ -996,6 +1090,7 @@ impl World {
     /// Another preset was chosen (`s` says which): the arrangement's tilt is its, and
     /// everything is laid out by it.
     pub fn preset_chosen(&mut self, s: &Settings, now: Instant) {
+        self.rearranged = true;
         self.tilt = layout::tilt(s.preset);
         self.arrange_all(s, now);
     }
@@ -1035,14 +1130,35 @@ impl World {
             if self.placements.contains_key(&m.0) {
                 continue;
             }
-            // Where its placeholder stood, for the monitor being added.
+            // Where its placeholder stood, for the monitor being added, while nothing
+            // took that place meanwhile.
             let at = match &self.adding {
-                Some(a) if a.id == Some(m.0) => a.place,
+                Some(a)
+                    if a.id == Some(m.0)
+                        && !layout::covers_any(
+                            &self.placements,
+                            &self.sizes,
+                            m.0,
+                            (m.1, m.2),
+                            &a.place,
+                            (self.center, self.tilt),
+                        ) =>
+                {
+                    a.place
+                }
                 _ => self.place_for_new((m.1, m.2), gaze),
             };
             info!("monitor {} placed next to the others", m.0);
             self.placements.insert(m.0, at);
             placed = true;
+            // A placeholder still waiting (another monitor asked for meanwhile) moves
+            // to where its monitor goes now, out of the way of this one.
+            if let Some(a) = self.adding.filter(|a| a.id != Some(m.0)) {
+                let place = self.place_for_new(a.size, a.gaze);
+                if let Some(a) = &mut self.adding {
+                    a.place = place;
+                }
+            }
         }
         if self
             .physical()
@@ -1160,12 +1276,16 @@ impl World {
     }
 
     /// The desk placement of monitor `id` follows its stream, now `size` pixels: the
-    /// same size of a pixel as before (see `layout::refit`).
-    fn fit_to_stream(&mut self, id: DisplayKey, size: PixelSize) {
+    /// same size of a pixel as before (see `layout::refit`). Whether its size changed.
+    fn fit_to_stream(&mut self, id: DisplayKey, size: PixelSize) -> bool {
+        let mut changed = false;
         if let (Some(p), Some(&was)) = (self.placements.get_mut(&id), self.placed_for.get(&id)) {
-            *p = layout::refit(*p, was, size);
+            let now = layout::refit(*p, was, size);
+            changed = now != *p;
+            *p = now;
         }
         self.placed_for.insert(id, size);
+        changed
     }
 
     /// Turns cinema mode on or off (`s`: the settings, for the preset it lays out
@@ -1236,6 +1356,7 @@ impl World {
             .keys()
             .copied()
             .chain(self.desk.cinema())
+            .chain(self.desk.rows(pc).iter().flatten().copied())
             .filter(of_pc)
             .collect();
         if self.desk.forget(&gone) {
@@ -1406,6 +1527,7 @@ impl World {
                 size,
                 id: None,
                 since: now,
+                gaze,
             })
         });
     }
@@ -1525,7 +1647,10 @@ impl World {
     }
 
     /// Brings the monitors closer (`steps` below 0) or further, a step at a time, as
-    /// they stand around the user: each keeps its size, the arrangement its shape.
+    /// they stand around the user: the arrangement as a whole, made as much smaller or
+    /// larger, so each monitor keeps its size to the eye and the arrangement its shape.
+    /// Glued monitors stay glued and none goes into another: a monitor brought nearer
+    /// at its own width would be seen larger, and reach into its neighbours.
     pub fn closer(&mut self, steps: i8, now: Instant) {
         const STEP: f32 = 1.15;
         let (center, _) = self.center;
@@ -1534,9 +1659,11 @@ impl World {
         for (id, p) in &mut self.placements {
             if !window(&self.listed, *id) {
                 p.position = center + (p.position - center) * k;
+                p.width *= k;
             }
         }
         self.radius *= k;
+        self.rearranged |= k != 1.0;
         self.save_layout();
         self.send_layout(now);
     }
@@ -1550,6 +1677,16 @@ impl World {
             self.arrange_all(s, now);
             return;
         }
+        self.line_up_rows();
+        self.rearranged = true;
+        self.held = [None, None];
+        self.save_layout();
+        self.send_layout(now);
+    }
+
+    /// Every row of the desk arrangement lined up (see `layout::line_up`), the PC's own
+    /// displays with the first of them.
+    fn line_up_rows(&mut self) {
         // The first display of the PC itself that shows is lined up as a laptop's
         // screen; the others go with it, standing to it as they stood (they are not
         // lined up, and so cover no monitor the first one does not).
@@ -1590,14 +1727,14 @@ impl World {
                 }
             }
         }
-        self.held = [None, None];
-        self.save_layout();
-        self.send_layout(now);
     }
 
-    /// Swaps the places of monitor `id` and its neighbour `delta` along in the order;
-    /// the others stay. Each takes the other's place at the size of its own pixels.
-    pub fn swap(&mut self, id: DisplayKey, delta: i32) {
+    /// Swaps the places of monitor `id` and its neighbour `delta` along in the order.
+    /// Each takes the other's place at the size of its own pixels, the two edge to edge
+    /// where the pair stood (the one going left from the left edge of the pair, the
+    /// other from its right edge); neighbours either reaches into are pushed clear along
+    /// the row (see `layout::make_room`), the others stay.
+    pub fn swap(&mut self, s: &Settings, id: DisplayKey, delta: i32) {
         let Some(i) = self.lineup.iter().position(|m| m.0 == id) else {
             return;
         };
@@ -1611,8 +1748,31 @@ impl World {
             self.placements.get(&other).copied(),
         ) {
             let (sa, sb) = ((aw, ah), (bw, bh));
-            self.placements.insert(id, layout::refit(b, sb, sa));
-            self.placements.insert(other, layout::refit(a, sa, sb));
+            let frame = layout::frame(self.center, self.tilt);
+            let wall = s.preset == Preset::Wall;
+            // Into `b`'s place goes `id`, into `a`'s the other, each from the pair's
+            // outer edge on its side.
+            let side = if layout::left_of(&a, &b, &frame) {
+                1.0
+            } else {
+                -1.0
+            };
+            let to_b = layout::edge_to(layout::refit(b, sb, sa), &b, side, &frame, wall);
+            let to_a = layout::edge_to(layout::refit(a, sa, sb), &a, -side, &frame, wall);
+            self.placements.insert(id, to_b);
+            self.placements.insert(other, to_a);
+            self.rearranged = true;
+            let group = self.placed_group();
+            for moved in [other, id] {
+                layout::make_room(
+                    &mut self.placements,
+                    &self.sizes,
+                    (self.center, self.tilt),
+                    wall,
+                    &group,
+                    moved,
+                );
+            }
             self.save_layout();
         }
     }
@@ -1778,6 +1938,7 @@ impl World {
         let before = *target;
         *target = p;
         if let Some(id) = thing.display() {
+            self.dragged |= before != p;
             self.carry_all(s, id, &before, &p);
         }
     }
@@ -1807,10 +1968,17 @@ impl World {
             }
             Thing::Menu if !self.cinema => self.save_layout(),
             Thing::Display(id) if !self.cinema => {
+                let mut moved = std::mem::take(&mut self.dragged);
                 if let Some(st) = self.stick_of(s, id) {
-                    self.placements.insert(id, st.placement);
+                    // Stuck where it stood already (taken and let go): no change.
+                    let was = self.placements.insert(id, st.placement);
+                    moved |= was.is_none_or(|w| {
+                        w.position.distance(st.placement.position) > 1e-4
+                            || w.rotation.angle_between(st.placement.rotation) > 1e-4
+                    });
                     stuck = true;
                 }
+                self.rearranged |= moved;
                 self.save_layout();
                 self.send_layout(now);
             }
@@ -1843,12 +2011,14 @@ impl World {
         let before = *p;
         p.width = width;
         let after = *p;
+        self.dragged |= before != after;
         self.carry_all(s, id, &before, &after);
     }
 
     /// The second hand let go: resizing ends, and the arrangement is kept.
     pub fn resize_end(&mut self) {
         self.resizing = None;
+        self.rearranged |= std::mem::take(&mut self.dragged);
         self.save_layout();
     }
 
