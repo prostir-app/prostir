@@ -2345,3 +2345,44 @@ fn the_desk_keeps_each_pcs_rows() {
     assert!(desk.forget(&[other(7)]));
     assert!(desk.rows(PcId([6; 8])).is_empty());
 }
+
+/// Monitor 1, the PC's own displays 101 and 102 as one group, and monitor 3, glued edge
+/// to edge in that order on the arc. Monitor 1 grows: the group moves along as one
+/// piece, and monitor 3, beyond its far end, is pushed too and stays glued to it.
+#[test]
+fn a_monitor_grown_pushes_past_the_pcs_displays() {
+    let radius = 1.1;
+    let widths = [(1u32, 1.25f32), (101, 0.9375), (102, 0.9375), (3, 1.25)];
+    let mut yaw = -1.2f32;
+    let mut placements = HashMap::new();
+    for &(id, w) in &widths {
+        let half = (w / 2.0 / radius).asin();
+        placements.insert(id, circle::on_cylinder(yaw + half, -0.08, w, radius));
+        yaw += 2.0 * half;
+    }
+    // Monitor 1 at 3840x2160 now, at the size of a pixel it had.
+    placements.get_mut(&1).unwrap().width = 1.875;
+    let monitors = [
+        (1u32, 3840u32, 2160u32),
+        (101, 1920, 1080),
+        (102, 1920, 1080),
+        (3, 2560, 1440),
+    ];
+    let center = (Vec3::ZERO, 0.0);
+    make_room(
+        &mut placements,
+        &monitors,
+        (center, 0.0),
+        false,
+        &[101, 102],
+        1,
+    );
+    let frame = frame(center, 0.0);
+    let all = placed(&placements, &monitors);
+    let seen = prostir_layout::space::see(&frame, &all);
+    let of = |id: u32| seen.iter().find(|s| s.id == id).copied().unwrap();
+    for (a, b) in [(1, 101), (101, 102), (102, 3)] {
+        let gap = of(b).left - of(a).right;
+        assert!(gap.abs() < 1e-4, "{a} and {b} meet: {gap}");
+    }
+}

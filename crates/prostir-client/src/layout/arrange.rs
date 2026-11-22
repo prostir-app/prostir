@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
+use log::debug;
 use prostir_layout::circle::{self, Limits};
 use prostir_layout::space::{Frame, Monitor, azimuth, covers, cuts, see};
 use prostir_layout::view::Room;
@@ -407,6 +408,10 @@ pub fn make_room<K: Key>(
     let mut left = 8 * monitors.len().max(1);
     while let Some((m, side)) = work.pop() {
         if left == 0 {
+            debug!(
+                "making room along the row: out of passes, {} left",
+                work.len() + 1
+            );
             break;
         }
         left -= 1;
@@ -439,6 +444,8 @@ pub fn make_room<K: Key>(
             let (to, to_x) = edge(&mine.placement, &frame, side);
             let (from, from_x) = edge(&other.placement, &frame, -side);
             let (angle, metres) = (to - from, to_x - from_x);
+            // Every display of a piece moved pushes on: a monitor beyond the group's
+            // far end is pushed by the display it now covers.
             for k in piece(o) {
                 if let Some(p) = placements.get_mut(&k) {
                     *p = along_row(*p, &frame, wall, angle, metres);
@@ -446,8 +453,8 @@ pub fn make_room<K: Key>(
                         moved.push(k);
                     }
                 }
+                work.push((k, side));
             }
-            work.push((o, side));
         }
     }
     clear_above_and_below(placements, monitors, &frame, group, moved);
@@ -539,6 +546,10 @@ fn clear_above_and_below<K: Key>(
     let mut left = 8 * monitors.len().max(1) + work.len();
     while let Some(m) = work.pop() {
         if left == 0 {
+            debug!(
+                "clearing over and under: out of passes, {} left",
+                work.len() + 1
+            );
             break;
         }
         left -= 1;
