@@ -14,6 +14,10 @@
 //!   started again, and the reverse set up again on the new server.
 //! - An `adb reverse` that fails is tried again after 5, 10, 20… up to 60 s while the
 //!   device stays ready.
+//! - A program that leaves when idle waits for a headset without its `adb reverse`
+//!   only for a minute after it came or its state changed (its owner allows USB
+//!   debugging then, or not today): then it may leave, and the retries rest until the
+//!   next event of a device.
 //! - Without the kernel's events (no netlink), `/sys` is looked at every 10 s instead.
 //!   Without adb, nothing runs at all.
 
@@ -34,8 +38,14 @@ use super::system::run;
 const META: &str = "2833";
 
 /// A Quest is plugged in and has no `adb reverse` yet (USB debugging not allowed yet,
-/// say): the program it started waits for it rather than leave.
+/// say), and came or changed its state at most [`PATIENCE`] ago: the program it
+/// started waits for it rather than leave.
 static WAITING: AtomicBool = AtomicBool::new(false);
+
+/// How long a Quest plugged in without its `adb reverse` is waited for, after it came
+/// or its state changed: its owner allows USB debugging in that time, or the program
+/// may leave (the next event of the device has it wait again).
+const PATIENCE: Duration = Duration::from_secs(60);
 
 /// Whether a Quest on USB waits for its `adb reverse` now.
 pub fn usb_waiting() -> bool {
@@ -303,6 +313,10 @@ struct Follow {
     spec: String,
     /// Whether the kernel's events come (otherwise `/sys` is looked at now and then).
     events: bool,
+    /// How long after a headset came, or changed its state, it is waited for.
+    patience: Duration,
+    /// Where it says whether one is waited for now ([`WAITING`], or a test's).
+    waiting: &'static AtomicBool,
 }
 
 /// `adb track-devices` running, number `n`.
@@ -363,9 +377,18 @@ impl Follow {
         let mut reversed: BTreeSet<String> = BTreeSet::new();
         let mut retry: Option<(Instant, Duration)> = None;
         let mut restart: Option<(Instant, Duration)> = None;
+        // Until when a headset that came, or changed its state, is waited for; the
+        // last list of devices, to see a change.
+        let mut patient_until: Option<Instant> = None;
+        let mut was_plugged = false;
+        let mut last_list: Vec<(String, String)> = Vec::new();
         loop {
             let now = Instant::now();
             let plugged = meta_plugged_in(&self.devices);
+            if plugged && !was_plugged {
+                patient_until = Some(now + self.patience);
+            }
+            was_plugged = plugged;
             if !plugged && tracker.is_some() {
                 info!("no headset on USB any more: adb is left alone");
                 (tracker, retry, restart) = (None, None, None);
@@ -379,7 +402,7 @@ impl Follow {
                     Ok(t) => tracker = Some(t),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         info!("a headset is on USB, but adb is not installed: no adb reverse");
-                        WAITING.store(false, Ordering::Relaxed);
+                        self.waiting.store(false, Ordering::Relaxed);
                         return;
                     }
                     Err(e) => {
@@ -411,10 +434,14 @@ impl Follow {
                     (Instant::now() + wait, wait)
                 });
             }
-            WAITING.store(plugged && reversed.is_empty(), Ordering::Relaxed);
+            let patient = patient_until.is_some_and(|until| Instant::now() < until);
+            self.waiting
+                .store(plugged && reversed.is_empty() && patient, Ordering::Relaxed);
             let deadline = [
-                retry.map(|(at, _)| at),
+                // The retries rest once nothing is waited for, until the next event.
+                retry.filter(|_| patient).map(|(at, _)| at),
                 restart.filter(|_| plugged).map(|(at, _)| at),
+                patient_until.filter(|_| patient && plugged),
                 (!self.events).then(|| Instant::now() + POLL_WITHOUT_EVENTS),
             ]
             .into_iter()
@@ -428,11 +455,16 @@ impl Follow {
             };
             match note {
                 Some(Note::Devices(n, list)) if tracker.as_ref().is_some_and(|t| t.n == n) => {
-                    ready = list
-                        .into_iter()
-                        .filter(|(serial, state)| state == "device" && !serial.contains(':'))
-                        .map(|(serial, _)| serial)
-                        .collect();
+                    if list != last_list {
+                        patient_until = Some(Instant::now() + self.patience);
+                    }
+                    ready.clear();
+                    ready.extend(
+                        list.iter()
+                            .filter(|(serial, state)| state == "device" && !serial.contains(':'))
+                            .map(|(serial, _)| serial.clone()),
+                    );
+                    last_list = list;
                     // Gone or no longer ready: set up again when it is back.
                     reversed.retain(|s| ready.contains(s));
                     retry = None;
@@ -450,9 +482,11 @@ impl Follow {
                         restart.map_or(Duration::from_secs(1), |(_, w)| longer(w, LONGEST_RESTART));
                     restart = Some((Instant::now() + wait, wait));
                 }
+                // A device came, went or changed: waited for again.
+                Some(Note::Usb) => patient_until = Some(Instant::now() + self.patience),
                 #[cfg(test)]
                 Some(Note::Stop) => return,
-                // A device came or went, a timer, or news of an earlier tracker.
+                // A timer, or news of an earlier tracker.
                 _ => {}
             }
         }
@@ -479,6 +513,8 @@ pub fn keep_adb_reverse(port: u16) {
         devices: "/sys/bus/usb/devices".into(),
         spec: format!("tcp:{port}"),
         events,
+        patience: PATIENCE,
+        waiting: &WAITING,
     };
     let spawned = std::thread::Builder::new()
         .name("adb-reverse".into())
@@ -678,11 +714,15 @@ exit 1
             format!("{}; exec sleep 30\n", list("R3Q\tdevice\n")),
         )
         .unwrap();
+        static WAITING: AtomicBool = AtomicBool::new(false);
+        let waiting = || WAITING.load(Ordering::Relaxed);
         let follow = Follow {
             adb: fake_adb(&dir),
             devices: usb.clone(),
             spec: "tcp:47830".into(),
             events: true,
+            patience: PATIENCE,
+            waiting: &WAITING,
         };
         let (sender, notes) = mpsc::channel();
         let stopper = sender.clone();
@@ -709,15 +749,11 @@ exit 1
             s.spawn(move || follow.run(&notes, &sender));
             let _stop = Stop(stopper.clone());
             // Plugged in, not allowed yet: it waits (the program it started stays).
-            wait_for(
-                "waiting for the reverse",
-                Duration::from_secs(5),
-                usb_waiting,
-            );
+            wait_for("waiting for the reverse", Duration::from_secs(5), waiting);
             wait_for("the reverse once ready", Duration::from_secs(5), || {
                 reversed() == 1
             });
-            wait_for("done waiting", Duration::from_secs(5), || !usb_waiting());
+            wait_for("done waiting", Duration::from_secs(5), || !waiting());
             assert_eq!(starts(), 1);
             wait_for(
                 "the reverse on the new server",
@@ -732,6 +768,62 @@ exit 1
             assert_eq!(starts(), 2);
             assert_eq!(reversed(), 2);
         });
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A Meta headset whose owner does not allow USB debugging: waited for a while
+    /// after it came, then the program may leave; a change of its state has it waited
+    /// for again, as long.
+    #[test]
+    fn a_headset_not_allowed_is_waited_for_a_while_only() {
+        let dir = std::env::temp_dir().join(format!("prostir-adb-wait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let usb = dir.join("usb");
+        std::fs::create_dir_all(usb.join("1-2")).unwrap();
+        std::fs::write(usb.join("1-2/idVendor"), "2833\n").unwrap();
+        std::fs::write(
+            dir.join("track-1"),
+            format!(
+                "{}; sleep 1.5; {}; exec sleep 30\n",
+                list("R3Q\tunauthorized\n"),
+                list("R3Q\toffline\n")
+            ),
+        )
+        .unwrap();
+        static WAITING: AtomicBool = AtomicBool::new(false);
+        let waiting = || WAITING.load(Ordering::Relaxed);
+        let follow = Follow {
+            adb: fake_adb(&dir),
+            devices: usb,
+            spec: "tcp:47830".into(),
+            events: true,
+            patience: Duration::from_millis(400),
+            waiting: &WAITING,
+        };
+        let (sender, notes) = mpsc::channel();
+        let stopper = sender.clone();
+        /// Stops the follower however the test ends, so a failure does not hang it.
+        struct Stop(Sender<Note>);
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                let _ = self.0.send(Note::Stop);
+            }
+        }
+        std::thread::scope(|s| {
+            s.spawn(move || follow.run(&notes, &sender));
+            let _stop = Stop(stopper);
+            wait_for("waiting once plugged in", Duration::from_secs(5), waiting);
+            wait_for("waiting no more", Duration::from_secs(5), || !waiting());
+            wait_for(
+                "waiting again after a change",
+                Duration::from_secs(5),
+                waiting,
+            );
+            wait_for("waiting no more again", Duration::from_secs(5), || {
+                !waiting()
+            });
+        });
+        assert!(!dir.join("reversed").exists(), "nothing reversed");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
