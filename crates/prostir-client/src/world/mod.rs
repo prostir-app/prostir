@@ -618,11 +618,13 @@ impl World {
             && self.fit_to_stream(id, size)
         {
             // Larger now: the neighbours it reaches into make room along the row.
+            let group = self.placed_group();
             layout::make_room(
                 &mut self.placements,
                 &self.sizes,
                 (self.center, self.tilt),
                 s.preset == Preset::Wall,
+                &group,
                 id,
             );
         }
@@ -1025,6 +1027,16 @@ impl World {
             }
             self.placements.insert(id, p);
         }
+    }
+
+    /// The main PC's own displays that show and have a place: the group they stand in,
+    /// moved as one piece (see `layout::make_room`).
+    fn placed_group(&self) -> Vec<DisplayKey> {
+        self.physical()
+            .iter()
+            .map(|p| p.0)
+            .filter(|id| self.streams.contains_key(id) && self.placements.contains_key(id))
+            .collect()
     }
 
     /// Where each of `monitors` that has a place stands, and how high it is.
@@ -1750,12 +1762,14 @@ impl World {
             self.placements.insert(id, to_b);
             self.placements.insert(other, to_a);
             self.rearranged = true;
+            let group = self.placed_group();
             for moved in [other, id] {
                 layout::make_room(
                     &mut self.placements,
                     &self.sizes,
                     (self.center, self.tilt),
                     wall,
+                    &group,
                     moved,
                 );
             }

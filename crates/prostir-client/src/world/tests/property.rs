@@ -417,13 +417,20 @@ fn each_arrangement_step_cuts_into_nothing() {
     }
 }
 
-/// Everything that changes the arrangement, in any order. Not yet: "Line up" after
-/// monitors were dropped or added by hand (its rows pushed clear go into a third
-/// monitor, `prostir_layout::tidy`), and the PC's own displays as one group next to
-/// monitors grown, swapped or lined up (each moved on its own, or the group under the
-/// primary over a monitor below it) still cut into one another on some of these desks.
+/// A monitor swapped or grown next to the PC's own displays: they move as one group,
+/// still glued, and nothing cuts.
 #[test]
-#[ignore = "known: Line up after steps by hand, and the PC's displays with other steps"]
+fn the_pcs_displays_move_as_one_group() {
+    holds_through(&[Step::Swap, Step::Refit, Step::PcDisplays], 300);
+}
+
+/// Everything that changes the arrangement, in any order. Not yet: "Line up" still
+/// makes cuts on some of these desks (about one in twenty): the PC's own displays, which
+/// go along with the first of them, go into a monitor lined up next to them; and after
+/// monitors were added and moved by hand, rows pushed clear go into another row
+/// (`prostir_layout::tidy`).
+#[test]
+#[ignore = "known: Line up with the PC's displays, and after monitors added by hand"]
 fn no_arrangement_step_cuts_one_display_into_another() {
     holds_through(
         &[
