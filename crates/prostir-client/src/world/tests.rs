@@ -1382,3 +1382,40 @@ fn a_display_moved_by_hand_stays_when_another_comes() {
         "beside it: {local:?}"
     );
 }
+
+/// The ids of each row, top to bottom.
+fn row_ids(rows: &[Row]) -> Vec<Vec<u32>> {
+    rows.iter()
+        .map(|r| r.ids().map(|id| id.0).collect())
+        .collect()
+}
+
+/// A monitor that could not start and never had a place (it stays in the list,
+/// failed) does not hold the desktop up: a monitor moved by hand is still told.
+#[test]
+fn a_failed_monitor_never_placed_does_not_hold_the_desktop_up() {
+    let mut sim = Sim::new(None);
+    sim.s.magnet = false;
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    sim.stream(1, QHD);
+    sim.stream(2, QHD);
+    sim.settled();
+    sim.list(vec![
+        monitor(1, QHD),
+        monitor(2, QHD),
+        failed(monitor(3, QHD)),
+    ]);
+    sim.settled();
+    sim.arranged.clear();
+    // Monitor 2 put well above monitor 1, by hand.
+    let mut p = sim.place(k(1));
+    p.position.y += 1.0;
+    sim.world.hold(Thing::Display(k(2)), &sim.s);
+    sim.world.drag(&sim.s, Thing::Display(k(2)), p, sim.head.0);
+    sim.world.let_go(Thing::Display(k(2)), &sim.s, sim.now);
+    sim.settled();
+    assert!(sim.world.placement(k(3)).is_none(), "never placed");
+    let told = sim.arranged.last().map(|r| row_ids(r));
+    assert_eq!(told, Some(vec![vec![2], vec![1]]), "the PC is told");
+}

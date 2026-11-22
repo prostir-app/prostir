@@ -783,10 +783,17 @@ impl World {
             return false;
         };
         // Wait until every monitor the PC has is placed: a partial picture would make
-        // the desktop rearrange (and blink) once per arriving monitor. One whose stream could
-        // not start keeps its place and does not hold the others up.
+        // the desktop rearrange (and blink) once per arriving monitor. One that could
+        // not start does not hold the others up: it keeps its place if it had one, and
+        // one that never had a place gets one only once it streams.
+        let due =
+            |id: &DisplayKey| streams.contains_key(id) || listed.get(id).is_some_and(|l| !l.failed);
         let complete = view.order.iter().any(|id| streams.contains_key(id))
-            && view.order.iter().all(|id| placements.contains_key(id));
+            && view
+                .order
+                .iter()
+                .filter(|id| due(id))
+                .all(|id| placements.contains_key(id));
         if !complete {
             return false;
         }
