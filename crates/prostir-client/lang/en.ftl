@@ -352,12 +352,12 @@ note-lined-up = Seams closed
 note-in-front = Everything is in front of you
 note-mic-headset = PC apps hear the headset microphone
 note-mic-pc = PC apps hear the PC microphone
-note-mic-ask = The system asks for microphone access when recording starts
+note-mic-ask = The system will ask for microphone access
 note-mic-allowed = Microphone access allowed
 note-mic-denied = No access to the microphone
 note-language = Menu language changed
 # $pc (String): the PC's name
-note-pc-forgotten = Forgot { $pc }
+note-pc-forgotten = { $pc } removed from paired PCs
 # $pc (String): the PC's name
 note-paired = Paired with { $pc }
 note-no-monitor-in-front = No monitor in front of you
@@ -381,6 +381,7 @@ failure-sound = The sound could not be switched
 failure-not-on-displays = The mouse is not on the monitors
 failure-no-such-profile = No profile saved in that slot
 failure-bad-argument = A value out of range
+failure-other = It did not work
 
 ## The palm menu's date and the 12-hour clock
 

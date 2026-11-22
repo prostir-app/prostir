@@ -95,9 +95,11 @@
 - Every button of the open menu answers right under itself, for a few seconds: a
   profile saved, a monitor added or removed (or why not), a new layout, where the
   microphone goes and whether the headset may use it, the menu's language, a PC paired
-  or forgotten, a screenshot saved. Pressing the note or another button takes it away,
-  and so does another page. A separate message in front of you is left for news that
-  comes while the menu is closed, which before also showed behind an open menu.
+  or forgotten, a screenshot saved. A wait for the PC shows on the menu's bottom line
+  instead. Pressing the note (or its ×) or another button takes it away, and so does
+  another page. A separate message in front of you is left for news that comes while
+  the menu is closed and for the palm menu and the PC's commands, which before also
+  showed behind an open menu.
 - A desktop that thinks or hangs (KScreen, KWin, a graphics driver starting or
   stopping an encoder) no longer holds anything else up: the headset's requests are
   answered at once, sound, the microphone, the menu and the tray go on, and the

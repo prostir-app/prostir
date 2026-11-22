@@ -488,6 +488,8 @@ enum Item {
         rect: Rect,
         tip: Option<f32>,
         above: bool,
+        /// Inside its own (tall) button: a press there is the button's.
+        inside: bool,
         kind: Kind,
         text: String,
         size: f32,
@@ -634,6 +636,10 @@ const NOTE_DETAIL_SIZE: f32 = 15.0;
 const NOTE_PAD: f32 = 18.0;
 /// The gap between a button and its note, where the note's point is.
 const NOTE_GAP: f32 = 10.0;
+/// Room on a note's right for its "×".
+const NOTE_CLOSE: f32 = 26.0;
+/// The highest a note reaches: under the tabs, which stay in view.
+const NOTE_TOP: f32 = 192.0;
 
 impl Default for Panel {
     fn default() -> Self {
@@ -687,9 +693,10 @@ impl Panel {
     /// Updates the hovered button from a point in panel pixels (`None`: not pointing at the panel).
     pub fn hover(&mut self, point: Option<(f32, f32)>) {
         let hovered = point.and_then(|(x, y)| {
-            // A note lies over the buttons below its own one.
+            // A note lies over the buttons below its own one; one inside its own tile
+            // leaves the press to the tile.
             let on_note = self.items.iter().rposition(|item| {
-                matches!(item, Item::Note { rect, .. }
+                matches!(item, Item::Note { rect, inside: false, .. }
                     if x >= rect.left() && x <= rect.right() && y >= rect.top() && y <= rect.bottom())
             });
             on_note.or_else(|| self.items.iter().position(|item| match item {
@@ -826,7 +833,7 @@ impl Panel {
                     ..
                 } => {
                     found.extend(self.missing_glyphs(text));
-                    let room = r.width() - 2.0 * NOTE_PAD;
+                    let room = r.width() - 2.0 * NOTE_PAD - NOTE_CLOSE;
                     let tw = self.text_width(text, *size, true);
                     if tw > room + 0.5 {
                         found.push(format!("note wider than its box: {text:?}"));
@@ -840,13 +847,14 @@ impl Panel {
                     if r.left() < 16.0 || r.right() > width - 16.0 {
                         found.push(format!("note off the panel: {text:?}"));
                     }
-                    if r.top() < 8.0 || r.bottom() > height - 12.0 {
-                        found.push(format!("note off the panel: {text:?}"));
+                    if r.top() < NOTE_TOP || r.bottom() > height - 12.0 {
+                        found.push(format!("note over the tabs or off the panel: {text:?}"));
                     }
                 }
                 _ => {}
             }
         }
+        found.extend(self.under_the_note(&items));
         for (i, (a, ta, a_button)) in boxes.iter().enumerate() {
             for (b, tb, b_button) in &boxes[i + 1..] {
                 if (*a_button && *b_button) || !overlap(a, b) {
@@ -856,6 +864,55 @@ impl Panel {
             }
         }
         self.items = items;
+        found
+    }
+
+    /// What a note over the page (not one inside its own tile) leaves half covered: a
+    /// button or a text it covers only in part (peeking out from under it), and the
+    /// error line it covers at all.
+    fn under_the_note(&mut self, items: &[Item]) -> Vec<String> {
+        let height = self.pixmap.height() as f32;
+        let mut found = Vec::new();
+        let Some(note) = items.iter().find_map(|i| match i {
+            Item::Note {
+                rect,
+                inside: false,
+                ..
+            } => Some(*rect),
+            _ => None,
+        }) else {
+            return found;
+        };
+        let inside = |c: &Rect| {
+            c.left() >= note.left() - 0.5
+                && c.right() <= note.right() + 0.5
+                && c.top() >= note.top() - 0.5
+                && c.bottom() <= note.bottom() + 0.5
+        };
+        for item in items {
+            let (c, what) = match item {
+                Item::Button { rect, label, .. } => (*rect, label.clone()),
+                Item::Text {
+                    x,
+                    baseline,
+                    size,
+                    medium,
+                    text,
+                    ..
+                } => {
+                    let tw = self.text_width(text, *size, *medium);
+                    let c = rect(*x, baseline - size * 0.75, tw.max(1.0), size * 0.95);
+                    if *baseline > height - 40.0 && overlap(&c, &note) {
+                        found.push(format!("the note covers the error line {text:?}"));
+                    }
+                    (c, text.clone())
+                }
+                _ => continue,
+            };
+            if overlap(&c, &note) && !inside(&c) {
+                found.push(format!("{what:?} peeks out from under the note"));
+            }
+        }
         found
     }
 
@@ -904,7 +961,7 @@ impl Panel {
                     detail_size,
                     ..
                 } => {
-                    let room = rect.width() - 2.0 * NOTE_PAD;
+                    let room = rect.width() - 2.0 * NOTE_PAD - NOTE_CLOSE;
                     *size = self.fitting(text, *size, true, room);
                     self.shorten(text, *size, true, room);
                     if let Some(detail) = detail {
@@ -1108,12 +1165,12 @@ impl Panel {
 
     /// `note` as drawn: right under its button (above it where there is no room
     /// below), over whatever lies there, as wide as its text and at least as the
-    /// button, within the panel, and grown over any control or text it would cut
-    /// through, so nothing peeks out from under it; inside the lower part of a tall
-    /// button (a tile, whose state line it covers) where it fits across it, so the row
-    /// below stays as it is; on the bottom line (above the error line, when there is
-    /// one) where the page has no button for it. Its texts are made to fit by
-    /// [`Panel::fit`].
+    /// button, within the panel under the tabs, and grown over whatever it would cut
+    /// through (see [`Panel::covering`]); inside the lower part of a tall button (a
+    /// tile, whose state line it covers) where it fits across it, so the row below
+    /// stays as it is; on the bottom line (above the error line, when there is one) for
+    /// a wait, which can last long and covers no row meanwhile, and where the page has
+    /// no button for it. Its texts are made to fit by [`Panel::fit`].
     fn note_item(&mut self, note: &Note, items: &[Item], error: bool) -> Item {
         let (pw, ph) = (WIDTH as f32, HEIGHT as f32);
         let text_w = self.text_width(&note.text, NOTE_SIZE, true);
@@ -1122,39 +1179,62 @@ impl Panel {
             .as_deref()
             .map_or(0.0, |d| self.text_width(d, NOTE_DETAIL_SIZE, false));
         let h = if note.detail.is_some() { 66.0 } else { 46.0 };
-        // A little more than the text, which then never measures wider than its room.
-        let wanted = text_w.max(detail_w) + 2.0 * NOTE_PAD + 2.0;
+        // A little more than the text and its "×", which then never measure wider than
+        // their room.
+        let wanted = text_w.max(detail_w) + 2.0 * NOTE_PAD + NOTE_CLOSE + 2.0;
         let widest = pw - 64.0;
-        let (rect_, tip, above) = match note.on.and_then(|on| self.note_anchor(on, items)) {
+        // The lowest it reaches: above the error line, when there is one.
+        let lowest = if error { ph - 66.0 } else { ph - 24.0 };
+        let anchor = match note.kind {
+            Kind::Waiting => None,
+            _ => note.on.and_then(|on| self.note_anchor(on, items)),
+        };
+        let placed = anchor.and_then(|b| {
             // A tile: room enough under its title, for a text that fits across it.
-            Some(b) if b.height() >= 2.0 * h + 20.0 && wanted <= b.width() - 20.0 => {
+            if b.height() >= 2.0 * h + 20.0 && wanted <= b.width() - 20.0 {
                 let w = (b.width() - 20.0).min(widest);
-                (
-                    rect(b.left() + 10.0, b.bottom() - 10.0 - h, w, h),
-                    None,
-                    false,
-                )
+                let r = rect(b.left() + 10.0, b.bottom() - 10.0 - h, w, h);
+                return Some((r, None, false, true));
             }
-            Some(b) => {
-                let w = wanted.max(b.width()).min(widest);
-                let mid = b.left() + b.width() / 2.0;
-                let x = (mid - w / 2.0).clamp(32.0, pw - 32.0 - w);
-                let below = b.bottom() + NOTE_GAP;
-                let above = below + h > ph - 24.0;
-                let y = if above { b.top() - NOTE_GAP - h } else { below };
-                let r = self.covering(rect(x, y, w, h), b, above, items);
-                (r, Some(mid.clamp(x + 18.0, x + w - 18.0)), above)
-            }
+            // Within the column of its button.
+            let (cl, cr) = self.column(b);
+            let w = wanted.max(b.width()).min(cr - cl);
+            let mid = b.left() + b.width() / 2.0;
+            let x = (mid - w / 2.0).clamp(cl, cr - w);
+            // Below, else above (where what it would cover below reaches too low).
+            [false, true].into_iter().find_map(|above| {
+                let y = if above {
+                    b.top() - NOTE_GAP - h
+                } else {
+                    b.bottom() + NOTE_GAP
+                };
+                let r = self.covering(rect(x, y, w, h), b, above, items, (cl, cr), lowest)?;
+                let tip = mid.clamp(r.left() + 18.0, r.right() - 18.0);
+                Some((r, Some(tip), above, false))
+            })
+        });
+        let (rect_, tip, above, inside) = match placed {
+            Some(placed) => placed,
+            // On the bottom line, grown over what it would cut through as anywhere;
+            // just under the tabs where the bottom of the page is too full for that.
             None => {
                 let w = wanted.min(widest);
-                let bottom = if error { ph - 66.0 } else { ph - 24.0 };
-                (rect((pw - w) / 2.0, bottom - h, w, h), None, false)
+                let x = (pw - w) / 2.0;
+                let nothing = rect(0.0, ph, pw, 1.0);
+                let whole = (44.0, pw - 44.0);
+                let bottom = rect(x, lowest - h, w, h);
+                let r = [bottom, rect(x, NOTE_TOP, w, h)]
+                    .into_iter()
+                    .find_map(|r| self.covering(r, nothing, false, items, whole, lowest))
+                    .unwrap_or(bottom);
+                (r, None, false, false)
             }
         };
         Item::Note {
             rect: rect_,
             tip,
             above,
+            inside,
             kind: note.kind,
             text: note.text.to_string(),
             size: NOTE_SIZE,
@@ -1163,48 +1243,113 @@ impl Panel {
         }
     }
 
-    /// Note box `r`, below its button `b` (or `above` it), grown away from the button
-    /// over each button and text it covers only in part, within the panel.
-    fn covering(&mut self, mut r: Rect, b: Rect, above: bool, items: &[Item]) -> Rect {
-        let (top, bottom) = (8.0, HEIGHT as f32 - 12.0);
-        // Growing can reach the next control: a few passes settle it.
-        for _ in 0..4 {
+    /// The column of the page button `b` is in: left and right edge.
+    fn column(&self, b: Rect) -> (f32, f32) {
+        let pw = WIDTH as f32;
+        match self.page {
+            // Two columns: the monitors' map and their options; the welcome and the
+            // PCs found.
+            Page::Tab(Tab::Monitors) | Page::Welcome if b.right() <= 640.0 => (44.0, 624.0),
+            Page::Tab(Tab::Monitors) | Page::Welcome => (680.0, pw - 44.0),
+            // The list of parts, and the part shown.
+            Page::Tab(Tab::Settings(_)) if b.right() <= 300.0 => (44.0, 274.0),
+            Page::Tab(Tab::Settings(_)) => (324.0, pw - 44.0),
+            _ => (44.0, pw - 44.0),
+        }
+    }
+
+    /// Note box `r`, below its button `b` (or `above` it), made so that nothing peeks
+    /// out from under it: grown over each button and text of its column (`cl` to `cr`)
+    /// it covers only in part, up and down and to the sides; a title goes with the
+    /// buttons right under it, so a row is never left without its title. Above its
+    /// button, it stays above the button's own title. Under the tabs and down to
+    /// `lowest`; none where it does not fit there, or would cover its own button.
+    fn covering(
+        &mut self,
+        r: Rect,
+        b: Rect,
+        above: bool,
+        items: &[Item],
+        (cl, cr): (f32, f32),
+        lowest: f32,
+    ) -> Option<Rect> {
+        // What lies in the column: buttons, and texts as wide as they measure.
+        let mut buttons = Vec::new();
+        let mut texts = Vec::new();
+        for item in items {
+            match item {
+                Item::Button { rect: c, .. } if *c != b => buttons.push(*c),
+                Item::Text {
+                    x,
+                    baseline,
+                    size,
+                    medium,
+                    text,
+                    ..
+                } => {
+                    let tw = self.text_width(text, *size, *medium);
+                    texts.push(rect(*x, baseline - size * 0.8, tw.max(1.0), size * 1.05));
+                }
+                _ => {}
+            }
+        }
+        // A text with buttons starting right under it, from its left edge on: their
+        // title, covered with them or not at all.
+        let row_under = |t: &Rect, c: &Rect| {
+            c.top() >= t.bottom() - 2.0
+                && c.top() <= t.bottom() + 34.0
+                && c.left() >= t.left() - 4.0
+                && c.left() < t.left() + 720.0
+        };
+        let in_column = |c: &Rect| c.left() >= cl - 1.0 && c.right() <= cr + 1.0;
+        buttons.retain(in_column);
+        texts.retain(in_column);
+        let mut units: Vec<Rect> = buttons.iter().chain(&texts).copied().collect();
+        for t in &texts {
+            let group = buttons
+                .iter()
+                .filter(|c| row_under(t, c))
+                .fold(None, |u: Option<Rect>, c| {
+                    Some(u.map_or(*c, |u| union(&u, c)))
+                });
+            if let Some(group) = group {
+                units.push(union(t, &group));
+            }
+        }
+        let mut r = r;
+        if above {
+            // The button's own title stays readable: the note goes above it.
+            let own = texts
+                .iter()
+                .filter(|t| row_under(t, &b))
+                .map(Rect::top)
+                .fold(f32::MAX, f32::min);
+            if own < f32::MAX && r.bottom() > own - NOTE_GAP {
+                let h = r.height();
+                r = rect(r.left(), own - NOTE_GAP - h, r.width(), h);
+            }
+        }
+        // Growing can reach the next thing: a few passes settle it.
+        for _ in 0..6 {
             let mut grown = r;
-            for item in items {
-                let c = match item {
-                    Item::Button { rect: c, .. } if *c != b => *c,
-                    Item::Text {
-                        x,
-                        baseline,
-                        size,
-                        medium,
-                        text,
-                        ..
-                    } => {
-                        let tw = self.text_width(text, *size, *medium);
-                        rect(*x, baseline - size * 0.8, tw.max(1.0), size * 1.05)
-                    }
-                    _ => continue,
-                };
-                if !overlap(&grown, &c) {
+            for u in &units {
+                // What its own button is part of stays as it is.
+                if overlap(u, &b) || !overlap(&grown, u) {
                     continue;
                 }
-                grown = if above && c.top() < grown.top() {
-                    let t = (c.top() - 4.0).max(top);
-                    rect(grown.left(), t, grown.width(), grown.bottom() - t)
-                } else if !above && c.bottom() > grown.bottom() {
-                    let end = (c.bottom() + 4.0).min(bottom);
-                    rect(grown.left(), grown.top(), grown.width(), end - grown.top())
-                } else {
-                    grown
-                };
+                grown = union(&grown, u);
             }
             if grown == r {
                 break;
             }
             r = grown;
         }
-        r
+        // Within the column, under the tabs, above the error line, off its button.
+        let fits = r.top() >= NOTE_TOP
+            && r.bottom() <= lowest
+            && r.left() >= cl - 1.0
+            && r.right() <= cr + 1.0;
+        (fits && !overlap(&r, &b)).then_some(r)
     }
 
     fn build_page(&mut self, s: &UiState) -> Vec<Item> {
@@ -1697,6 +1842,7 @@ impl Panel {
             size,
             detail,
             detail_size,
+            ..
         }) = items.iter().rev().find(|i| matches!(i, Item::Note { .. }))
         {
             let hovered = matches!(
@@ -1725,7 +1871,8 @@ impl Panel {
     }
 
     /// A note (see [`Item::Note`]): a dark box with an edge in its kind's colour, a
-    /// point towards its button, its text in the middle and the detail under it.
+    /// point towards its button, its text in the middle and the detail under it, and
+    /// a "×" on its right (pressing anywhere on it takes it away).
     fn draw_note(
         &mut self,
         pixmap: &mut Pixmap,
@@ -1737,6 +1884,7 @@ impl Panel {
             Kind::Done => (GOOD, TEXT),
             Kind::Waiting => (WAIT, TEXT),
             Kind::Failed => (DANGER, DANGER),
+            Kind::Info => (MUTED, TEXT),
         };
         if let Some(tx) = tip {
             let (base, point) = if above {
@@ -1756,16 +1904,23 @@ impl Panel {
         let [er, eg, eb, _] = edge;
         let alpha = if hovered { 255 } else { 190 };
         stroke(pixmap, shape, [er, eg, eb, alpha], 2.0);
-        // In the middle of the box, which may have grown over what it covers.
-        let tw = self.text_width(text, size, true);
-        let x = r.left() + (r.width() - tw) / 2.0;
+        // In the middle of the box (which may have grown over what it covers), left
+        // of the "×".
         let mid = r.top() + r.height() / 2.0;
+        let close = if hovered { TEXT } else { MUTED };
+        let cw = self.text_width("×", 26.0, true);
+        let cx = r.right() - NOTE_PAD / 2.0 - NOTE_CLOSE / 2.0 - cw / 2.0;
+        let cy = mid.min(r.top() + 23.0) + 8.0;
+        self.draw_text(pixmap, cx, cy, 26.0, true, close, "×");
+        let (left, room) = (r.left() + NOTE_PAD, r.width() - 2.0 * NOTE_PAD - NOTE_CLOSE);
+        let tw = self.text_width(text, size, true);
+        let x = left + (room - tw) / 2.0;
         match detail {
             None => self.draw_text(pixmap, x, mid + size * 0.36, size, true, fg, text),
             Some((detail, dsize)) => {
                 self.draw_text(pixmap, x, mid - 4.0, size, true, fg, text);
                 let dw = self.text_width(detail, dsize, false);
-                let dx = r.left() + (r.width() - dw) / 2.0;
+                let dx = left + (room - dw) / 2.0;
                 self.draw_text(pixmap, dx, mid + dsize + 4.0, dsize, false, MUTED, detail);
             }
         }
@@ -3642,6 +3797,13 @@ fn overlap(a: &Rect, b: &Rect) -> bool {
     a.left() < b.right() && b.left() < a.right() && a.top() < b.bottom() && b.top() < a.bottom()
 }
 
+/// The smallest rectangle holding both.
+fn union(a: &Rect, b: &Rect) -> Rect {
+    let (l, t) = (a.left().min(b.left()), a.top().min(b.top()));
+    let (r, bottom) = (a.right().max(b.right()), a.bottom().max(b.bottom()));
+    rect(l, t, r - l, bottom - t)
+}
+
 // Shapes that come out degenerate (negative or non-finite sizes) are a bug, caught
 // by the debug asserts in tests. In the app they are drawn as nothing: one bad shape
 // must not close the menu, and with it the app.
@@ -4512,10 +4674,11 @@ mod tests {
     }
 
     /// A note sits right under the button it is about, its point at the button's
-    /// middle, over the row below (which it keeps from being pressed: pressed, the
-    /// note goes); above a button too near the bottom; under a switch that stands for
-    /// the other value since; where a button was pressed after the button has gone;
-    /// on the bottom line where the page has no button for it.
+    /// middle, over the whole row below (which it keeps from being pressed: pressed,
+    /// the note goes); above a button too near the bottom, and above its title; inside
+    /// a tile that stands for the other value since, which still takes its own press;
+    /// where a button was pressed after the button has gone; on the bottom line for a
+    /// wait and where the page has no button for it, above the error line.
     #[test]
     fn a_note_sits_under_its_button() {
         let texts = crate::lang::builtin("uk");
@@ -4554,6 +4717,15 @@ mod tests {
         assert!(r.top() <= below.top() && r.bottom() >= below.bottom());
         p.hover(Some(middle(below)));
         assert_eq!(p.press(), Some(Action::HideNote));
+        // The whole row, not a part of its outer sizes.
+        let left = button_at(
+            &p,
+            Action::Add {
+                width: 3440,
+                height: 1440,
+            },
+        );
+        assert!(r.left() <= left.left());
 
         // The last row of the page: the note goes above.
         let cinema = Action::CinemaScreen(k(103));
@@ -4563,7 +4735,8 @@ mod tests {
         let b = button_at(&p, cinema);
         let (r, _, above, ..) = note_of(&p).expect("a note");
         assert!(above);
-        assert!((r.bottom() - (b.top() - NOTE_GAP)).abs() < 0.01);
+        // Above "Cinema screen" too, which stays over its buttons.
+        assert!(r.bottom() < b.top() - 30.0, "{r:?} over {b:?}");
         assert!(p.overflows().is_empty(), "{:?}", p.overflows());
 
         // A tile pressed: it turns the sound to the PC, and then stands for turning
@@ -4582,6 +4755,12 @@ mod tests {
         assert_eq!(tip, None);
         assert!(r.left() > tile.left() && r.right() < tile.right());
         assert!(r.top() > tile.top() + 70.0 && r.bottom() < tile.bottom());
+        p.hover(Some(middle(r)));
+        assert_eq!(
+            p.press(),
+            Some(Action::SetAudio(true)),
+            "the tile's own press"
+        );
 
         // Monitor 2 removed: the note stays where its "×" was.
         let mut st = sample_state();
@@ -4597,19 +4776,36 @@ mod tests {
         st.note = Some(Note::done(Some(remove), texts.t("note-monitor-removed")));
         p.set_state(&st);
         let (r, tip, ..) = note_of(&p).expect("a note");
-        assert!((r.top() - (cross.bottom() + NOTE_GAP)).abs() < 0.01);
+        assert!(
+            (r.top() - (cross.bottom() + NOTE_GAP)).abs() < 0.01,
+            "{r:?} under {cross:?}"
+        );
         assert_eq!(tip, Some(middle(cross).0));
 
         // No button for it here: the bottom line, above the error line when there is
         // one.
-        for (on, error) in [
-            (None, None),
-            (Some(Action::FindMouse), None),
-            (None, Some("Не вдалося зберегти налаштування".to_owned())),
+        for (on, error, waiting) in [
+            (None, None, false),
+            (Some(Action::FindMouse), None, false),
+            (
+                None,
+                Some("Не вдалося зберегти налаштування".to_owned()),
+                false,
+            ),
+            (Some(add), None, true),
+            (
+                Some(add),
+                Some("Не вдалося зберегти налаштування".to_owned()),
+                true,
+            ),
         ] {
             let mut st = sample_state();
             st.error.clone_from(&error);
-            st.note = Some(Note::failed(on, texts.t("failure-not-on-displays")));
+            st.note = Some(if waiting {
+                Note::waiting(on, &texts)
+            } else {
+                Note::failed(on, texts.t("failure-not-on-displays"))
+            });
             let mut p = Panel::new();
             p.set_state(&st);
             let (r, tip, ..) = note_of(&p).expect("a note");
@@ -4621,8 +4817,11 @@ mod tests {
     }
 
     /// The longest notes, a failure with the PC's detail and a long "done", fit under
-    /// every button of every page, in both languages at their own size, in the longer
-    /// pseudo-language made smaller.
+    /// every button of every page, with and without the error line, in both languages
+    /// at their own size, in the longer pseudo-language made smaller: nothing peeks out
+    /// from under them, and the tabs and the error line stay in view (see
+    /// `Panel::under_the_note`). A wait and news without a button go on the bottom line
+    /// of every page.
     #[test]
     fn notes_fit_under_every_button() {
         let mut problems = Vec::new();
@@ -4646,6 +4845,8 @@ mod tests {
                 st.texts = lang.clone();
                 st.tab = tab;
                 st.selected = Some(k(103));
+                pages.push(st.clone());
+                st.error = Some(lang.t("error-not-connected").to_owned());
                 pages.push(st);
             }
             let mut offline = sample_state();
@@ -4660,12 +4861,33 @@ mod tests {
             let done = Note::done(None, lang.t("note-mic-ask"));
             let mut p = Panel::new();
             for page in pages {
+                // On the bottom line, above the error line when there is one.
+                let lowest = HEIGHT as f32 - if page.error.is_some() { 66.0 } else { 24.0 };
+                for note in [Note::waiting(Some(Action::Tidy), &lang), done.clone()] {
+                    let mut st = page.clone();
+                    st.note = Some(note);
+                    p.set_state(&st);
+                    problems.extend(p.overflows());
+                    let (r, tip, ..) = note_of(&p).expect("a note");
+                    let bottom = (r.bottom() - lowest).abs() < 0.01;
+                    let top = (r.top() - NOTE_TOP).abs() < 0.01;
+                    if tip.is_some() || !(bottom || top) {
+                        problems.push(format!("{:?}: not on the bottom line", page.tab));
+                    }
+                }
                 p.set_state(&page);
                 let keys: Vec<Action> = p
                     .items
                     .iter()
                     .filter_map(|i| match i {
-                        Item::Button { key, .. } => *key,
+                        // The header, the tabs and the parts of Settings: their news is
+                        // never under them (a page changes, or the menu closes), it
+                        // goes on the bottom line.
+                        Item::Button { key, rect, .. }
+                            if rect.top() > NOTE_TOP && !matches!(key, Some(Action::Tab(_))) =>
+                        {
+                            *key
+                        }
                         _ => None,
                     })
                     .collect();
@@ -4690,20 +4912,22 @@ mod tests {
                                 if b.left() <= r.left() && b.right() >= r.right()
                                     && b.top() <= r.top() && b.bottom() >= r.bottom())
                         });
-                        if tip.is_none() && !inside {
+                        // The monitors on the map overlap one another: a note about
+                        // one (picking it says nothing) goes on the bottom line.
+                        let map = matches!(on, Action::SelectMonitor(_));
+                        if tip.is_none() && !inside && !map {
                             problems.push(format!("{on:?}: not by its button"));
                         }
-                        let fits = p.items.iter().all(|i| match i {
-                            Item::Note {
-                                size, detail_size, ..
-                            } => {
-                                (size - NOTE_SIZE).abs() < f32::EPSILON
-                                    && (detail_size - NOTE_DETAIL_SIZE).abs() < f32::EPSILON
+                        // The built-in languages are made smaller at most (in a narrow
+                        // column), never cut short.
+                        let whole = p.items.iter().all(|i| match i {
+                            Item::Note { text, detail, .. } => {
+                                **text == *note.text && detail.as_deref() == note.detail.as_deref()
                             }
                             _ => true,
                         });
-                        if lang.lang().as_str() != "qps" && !fits {
-                            problems.push(format!("{lang:?}/{on:?}: note drawn smaller"));
+                        if lang.lang().as_str() != "qps" && !whole {
+                            problems.push(format!("{lang:?}/{on:?}: note cut short"));
                         }
                     }
                 }

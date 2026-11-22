@@ -318,11 +318,11 @@ note-lined-up = Шви прибрано
 note-in-front = Усе перед вами
 note-mic-headset = Програми на ПК чують мікрофон шолома
 note-mic-pc = Програми на ПК чують мікрофон ПК
-note-mic-ask = Доступ до мікрофона система спитає, коли почнеться запис
+note-mic-ask = Дозвіл на мікрофон спитає система
 note-mic-allowed = Доступ до мікрофона дозволено
 note-mic-denied = Немає доступу до мікрофона
 note-language = Мову меню змінено
-note-pc-forgotten = ПК { $pc } забуто
+note-pc-forgotten = { $pc } прибрано зі сполучених ПК
 note-paired = Сполучено з { $pc }
 note-no-monitor-in-front = Перед вами немає монітора
 
@@ -345,6 +345,7 @@ failure-sound = Звук не перемкнувся
 failure-not-on-displays = Миша не на моніторах
 failure-no-such-profile = У цьому слоті немає збереженого профілю
 failure-bad-argument = Неправильне значення
+failure-other = Не вдалося
 
 ## Дата й 12-годинний годинник на долоні
 

@@ -410,6 +410,11 @@ struct Scene {
     toast: Option<(String, Instant, Option<Placement>)>,
     /// What the open menu says under the button pressed (see `note`).
     notes: Notes,
+    /// The press being done is the main menu's (not the palm menu's, nor a command of
+    /// the PC): what it comes to is said in the menu.
+    press_in_menu: bool,
+    /// The user chose a language in the menu: said once it shows.
+    language_asked: bool,
     /// The PC speaks another protocol: (the PC is newer, its app version).
     update_needed: Option<(bool, String)>,
     /// Head position and gaze this frame.
@@ -919,9 +924,9 @@ impl Scene {
         let req = self.asks.ask(what, Instant::now());
         info!("request {}: {asked:?}", req.0);
         self.send(ClientMsg::request(req, asked));
-        if let Some(on) = self.notes.asked(what) {
+        if let Some(on) = self.notes.asked(req, what) {
             let waiting = Note::waiting(Some(on), self.texts());
-            self.tell(waiting, false);
+            self.tell(waiting, false, true);
         }
         Some(req)
     }
@@ -973,12 +978,12 @@ impl Scene {
         };
         let took = answered.took.unwrap_or_default().as_millis();
         info!("request {} answered in {took} ms", req.0);
-        if let Outcome::Failed { error, .. } = outcome {
-            warn!("request {} failed (code {})", req.0, error.code());
+        if let Outcome::Failed { error, detail } = outcome {
+            warn!("request {} failed (code {}): {detail}", req.0, error.code());
         }
-        let on = self.notes.answered(what);
-        if let Some(told) = note::answer(what, on, outcome, self.texts()) {
-            self.tell(told.note, told.toast);
+        let asker = self.notes.answered(req);
+        if let Some(told) = note::answer(what, asker, outcome, self.texts()) {
+            self.tell(told.note, told.toast, asker.on.is_some());
         }
         Some(what)
     }
@@ -986,29 +991,35 @@ impl Scene {
     /// A request was not sent, for `why`: said under the button pressed for it.
     fn ask_failed(&mut self, why: ui::Failure) {
         let note = Note::failure(self.notes.pressed(), why, "", self.texts());
-        self.tell(note, true);
+        self.tell_press(note, true);
     }
 
-    /// The request of control `what` got no answer and never will (`why`: no answer
-    /// in time, the connection broke): said under the button that asked.
-    fn given_up(&mut self, what: ui::Asked, why: ui::Failure) {
-        let on = self.notes.answered(what);
+    /// Request `req` got no answer and never will (`why`: no answer in time, the
+    /// connection broke): said under the button that asked.
+    fn given_up(&mut self, req: ReqId, why: ui::Failure) {
+        let on = self.notes.answered(req).on;
         let note = Note::failure(on, why, "", self.texts());
-        self.tell(note, true);
+        self.tell(note, true, on.is_some());
     }
 
-    /// What a press came to (or news about it): said under the button while the menu
-    /// is open; while it is closed, a toast where `toast` says it is worth one.
+    /// News worth a `toast` (or not), about a press `in_menu` (or the menu's own news):
+    /// said where `note::said` puts it.
     #[expect(
         clippy::disallowed_methods,
         reason = "until step 7.7 passes the time in and moves the threads to the shell"
     )]
-    fn tell(&mut self, note: Note, toast: bool) {
-        if self.panel_open {
-            self.notes.say(note, Instant::now());
-        } else if toast {
-            self.show_toast(note.text.to_string());
+    fn tell(&mut self, note: Note, toast: bool, in_menu: bool) {
+        match note::said(self.panel_open, in_menu, toast) {
+            note::Said::Note => self.notes.say(note, Instant::now()),
+            note::Said::Toast => self.show_toast(note.toast_text()),
+            note::Said::Nothing => {}
         }
+    }
+
+    /// What the press being done came to: in the menu for a press of the menu, else a
+    /// toast where it is worth one.
+    fn tell_press(&mut self, note: Note, toast: bool) {
+        self.tell(note, toast, self.press_in_menu);
     }
 
     /// The menu's own action `action` was done: said under its button, where what it
@@ -1016,27 +1027,25 @@ impl Scene {
     fn done(&mut self, action: Action) {
         if let Some(id) = note::done_text(action) {
             let note = Note::done(Some(action), self.texts().t(id));
-            self.tell(note, false);
+            self.tell_press(note, false);
         }
     }
 
     /// `action` needs a monitor in front of the user, and there is none.
     fn no_monitor_in_front(&mut self, action: Action) {
         let note = Note::failed(Some(action), self.texts().t("note-no-monitor-in-front"));
-        self.tell(note, true);
+        self.tell_press(note, true);
     }
 
-    /// The menu shows the language chosen (loaded, or the one it had): said under the
-    /// choice, or that some of the file's lines could not be read (those show in
-    /// English), which is worth a toast while the menu is closed.
+    /// The menu shows the language chosen (loaded, or the one it had): see
+    /// `note::language_note`.
     fn language_shown(&mut self) {
-        let on = Some(Action::Language(self.settings.language));
-        let note = match self.texts().warning() {
-            Some(warning) => Note::failed(on, warning),
-            None => Note::done(on, self.texts().t("note-language")),
-        };
-        let failed = note.kind == note::Kind::Failed;
-        self.tell(note, failed);
+        let asked = std::mem::take(&mut self.language_asked);
+        let chosen = self.settings.language;
+        let texts = self.texts();
+        if let Some(told) = note::language_note(chosen, asked, texts.warning(), texts) {
+            self.tell(told.note, told.toast, true);
+        }
     }
 
     /// Requests without an answer for 30 s count as failed (a late answer is let go),
@@ -1048,9 +1057,9 @@ impl Scene {
     )]
     fn expire_asks(&mut self) {
         let now = Instant::now();
-        for (req, what) in self.asks.expire(now) {
+        for (req, _) in self.asks.expire(now) {
             self.world.switch_given_up(req);
-            self.given_up(what, ui::Failure::TimedOut);
+            self.given_up(req, ui::Failure::TimedOut);
         }
         self.notes.expire(now);
         self.world.switch_due(&self.settings, now);
@@ -1591,6 +1600,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         finder: None,
         toast: None,
         notes: Notes::default(),
+        press_in_menu: false,
+        language_asked: false,
         head: (Vec3::ZERO, -Vec3::Z),
         head_right: Vec3::X,
         view_eye: None,
@@ -1983,7 +1994,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 if let Some(&(id, _, _)) = scene.world.monitors().first() {
                     let took = Instant::now();
                     let action = Action::Move { id, delta: 1 };
-                    handle_action(&mut scene, action, &mut passthrough, &mut controls);
+                    handle_action(
+                        &mut scene,
+                        action,
+                        By::Elsewhere,
+                        &mut passthrough,
+                        &mut controls,
+                    );
                     // Handed to the files' writer now, so the time is the whole of what
                     // saving costs the frame.
                     scene.save_due();
@@ -2002,6 +2019,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 handle_action(
                     &mut scene,
                     Action::Tab(tab),
+                    By::Elsewhere,
                     &mut passthrough,
                     &mut controls,
                 );
@@ -2011,7 +2029,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 }
             }
             Act::CloseMenu => {
-                handle_action(&mut scene, Action::Close, &mut passthrough, &mut controls);
+                handle_action(
+                    &mut scene,
+                    Action::Close,
+                    By::Elsewhere,
+                    &mut passthrough,
+                    &mut controls,
+                );
             }
             Act::Nothing | Act::Finish => {}
         }
@@ -2022,10 +2046,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if scene.mic.permission() != scene.mic_permission {
             scene.mic_changed();
             if scene.mic_wanted
-                && let Some(note) = note::permission_note(scene.mic_permission, scene.texts())
+                && let Some(told) = note::permission_note(scene.mic_permission, scene.texts())
             {
-                let failed = note.kind == note::Kind::Failed;
-                scene.tell(note, failed);
+                scene.tell(told.note, told.toast, true);
             }
         }
         // The palm menu shows the battery: the system thread reads it afresh when the
@@ -2108,7 +2131,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             wrist_panel.hover(wrist_hover);
             if wrist_pressed && let Some(action) = wrist_panel.hovered_action() {
                 controls.pulse(&session, poking_hand);
-                handle_action(&mut scene, action, &mut passthrough, &mut controls);
+                handle_action(
+                    &mut scene,
+                    action,
+                    By::Elsewhere,
+                    &mut passthrough,
+                    &mut controls,
+                );
             }
         }
         let panel_point = |hit: &Hit, large: bool| {
@@ -2182,7 +2211,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 panel.hover(Some(px));
                 match panel.press() {
                     Some(action) => {
-                        handle_action(&mut scene, action, &mut passthrough, &mut controls);
+                        handle_action(
+                            &mut scene,
+                            action,
+                            By::Menu,
+                            &mut passthrough,
+                            &mut controls,
+                        );
                     }
                     None => poke.drag = Some(at),
                 }
@@ -2255,6 +2290,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         handle_action(
                             &mut scene,
                             Action::CloseWindow(id),
+                            By::Elsewhere,
                             &mut passthrough,
                             &mut controls,
                         );
@@ -2272,7 +2308,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                                 rings.push((hit.point, Instant::now()));
                                 clicked = true;
                                 controls.pulse(&session, hand);
-                                handle_action(&mut scene, action, &mut passthrough, &mut controls);
+                                handle_action(
+                                    &mut scene,
+                                    action,
+                                    By::Menu,
+                                    &mut passthrough,
+                                    &mut controls,
+                                );
                             }
                         }
                     }
@@ -2285,7 +2327,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         if let Some(action) = wrist_panel.hovered_action() {
                             rings.push((hit.point, Instant::now()));
                             controls.pulse(&session, hand);
-                            handle_action(&mut scene, action, &mut passthrough, &mut controls);
+                            handle_action(
+                                &mut scene,
+                                action,
+                                By::Elsewhere,
+                                &mut passthrough,
+                                &mut controls,
+                            );
                         }
                     }
                     Some(Target {
@@ -2313,7 +2361,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 if let Some((action, point)) = pending_click[hand].take() {
                     rings.push((point, Instant::now()));
                     controls.pulse(&session, hand);
-                    handle_action(&mut scene, action, &mut passthrough, &mut controls);
+                    handle_action(
+                        &mut scene,
+                        action,
+                        By::Menu,
+                        &mut passthrough,
+                        &mut controls,
+                    );
                 }
             }
             let (start_grab, end_grab) = if input.is_hand {
@@ -2985,6 +3039,7 @@ fn handle_net_event(
             scene.host = Some(host);
             scene.feedback = Some(feedback);
             scene.asks.new_session();
+            scene.notes.forget_requests();
             scene.update_needed = None;
             // Whether the system lets the app record (the PC shows when it does not).
             scene.mic.refresh_permission();
@@ -3034,7 +3089,8 @@ fn handle_net_event(
                     let text = scene
                         .texts()
                         .f("toast-profile-switched", &[("name", name.into())]);
-                    scene.tell(Note::done(Some(Action::ApplyProfile(slot)), &text), true);
+                    let note = Note::done(Some(Action::ApplyProfile(slot)), &text);
+                    scene.tell(note, true, true);
                     let keys = ids.into_iter().filter_map(|id| scene.key(id)).collect();
                     scene
                         .world
@@ -3084,7 +3140,7 @@ fn handle_net_event(
         NetEvent::Paired => {
             if let Some(p) = scene.pairing.take() {
                 let text = scene.texts().f("note-paired", &[("pc", p.host.into())]);
-                scene.tell(Note::done(None, &text), true);
+                scene.tell(Note::done(None, &text), true, true);
             }
         }
         NetEvent::PairOffer { host, why } => {
@@ -3097,9 +3153,10 @@ fn handle_net_event(
         }
         NetEvent::Disconnected { why } => {
             // What waited for an answer gets none, nor do the commands of that PC.
-            for what in scene.asks.disconnected() {
-                scene.given_up(what, ui::Failure::Disconnected);
+            for (req, _) in scene.asks.disconnected() {
+                scene.given_up(req, ui::Failure::Disconnected);
             }
+            scene.notes.forget_requests();
             scene.offline_since = Some(Instant::now());
             scene.pairing = None;
             scene.host = None;
@@ -3108,8 +3165,8 @@ fn handle_net_event(
             scene.world.disconnected();
             scene.pc = PcState::default();
             if let Some(id) = disconnect_text(why) {
-                let text = scene.texts().t(id).to_owned();
-                scene.show_toast(text);
+                let note = Note::info(scene.texts().t(id));
+                scene.tell(note, true, true);
             }
         }
         NetEvent::HostError(text) => scene.show_error(text),
@@ -3322,7 +3379,7 @@ fn take_command(
     info!("the PC asks: {asked:?}");
     let outcome = match crate::commands::what_to_do(asked) {
         Does::Act(action) => {
-            handle_action(scene, action, passthrough, controls);
+            handle_action(scene, action, By::Elsewhere, passthrough, controls);
             Outcome::Done
         }
         Does::Profile(i) if scene.profiles.get(i).is_none_or(Option::is_none) => {
@@ -3330,7 +3387,13 @@ fn take_command(
         }
         Does::Profile(i) => {
             let before = scene.asks.last();
-            handle_action(scene, Action::ApplyProfile(i), passthrough, controls);
+            handle_action(
+                scene,
+                Action::ApplyProfile(i),
+                By::Elsewhere,
+                passthrough,
+                controls,
+            );
             if scene.asks.last() > before {
                 // Answered with the PC's answer to the profile's monitors.
                 scene.asks.answer_command_after(scene.asks.last(), req);
@@ -3373,6 +3436,15 @@ fn set_passthrough(scene: &mut Scene, passthrough: &mut Option<passthrough::Pass
     }
 }
 
+/// Where a press comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum By {
+    /// A button of the main menu: what it comes to is said under it.
+    Menu,
+    /// The palm menu, the "Attach" pill, a command of the PC, the selftest.
+    Elsewhere,
+}
+
 #[expect(
     clippy::disallowed_methods,
     reason = "until step 7.7 passes the time in and moves the threads to the shell"
@@ -3380,6 +3452,7 @@ fn set_passthrough(scene: &mut Scene, passthrough: &mut Option<passthrough::Pass
 fn handle_action(
     scene: &mut Scene,
     action: Action,
+    by: By,
     passthrough: &mut Option<passthrough::Passthrough>,
     controls: &mut Controls,
 ) {
@@ -3387,9 +3460,16 @@ fn handle_action(
     if action.leaves_profile() {
         scene.active_profile = None;
     }
-    // What was said under the button pressed before goes (another page too); what
-    // this one asks of the PC is its own.
-    scene.notes.press(action);
+    // A press of the menu: what was said under the button pressed before goes
+    // (another page too), and what this one asks of the PC is its own. A press
+    // elsewhere leaves the menu's note as it is, and says what it comes to with a
+    // toast where it is worth one.
+    scene.press_in_menu = by == By::Menu;
+    if scene.press_in_menu {
+        scene.notes.press(action);
+    } else {
+        scene.notes.press_elsewhere();
+    }
     match action {
         Action::Add { width, height } => {
             let req = scene.request(
@@ -3445,6 +3525,7 @@ fn handle_action(
             scene.settings.language = language;
             scene.saves.mark(persist::File::Settings);
             // Another language is said once it is loaded (see `language_shown`).
+            scene.language_asked = scene.press_in_menu;
             let s = &scene.settings;
             let shows = crate::lang::resolve(
                 language,
@@ -3602,7 +3683,7 @@ fn handle_action(
             scene.mic.set_allowed(enabled);
             scene.mic_changed();
             let note = note::mic_note(enabled, scene.mic.permission(), scene.texts());
-            scene.tell(note, false);
+            scene.tell_press(note, false);
         }
         Action::SetAudio(enabled) => {
             scene.audio_wanted = enabled;
@@ -3692,7 +3773,7 @@ fn handle_action(
                     let text = scene
                         .texts()
                         .f("toast-profile-saved", &[("name", name.into())]);
-                    scene.tell(Note::done(Some(action), &text), true);
+                    scene.tell_press(Note::done(Some(action), &text), true);
                 }
             } else {
                 scene.confirm_save = Some((i, Instant::now()));
@@ -3724,11 +3805,11 @@ fn handle_action(
                             scene.steering.forget_current();
                         }
                         let text = scene.texts().f("note-pc-forgotten", &[("pc", name.into())]);
-                        scene.tell(Note::done(Some(action), &text), true);
+                        scene.tell_press(Note::done(Some(action), &text), true);
                     }
                     Err(e) => {
                         warn!("{e}");
-                        scene.tell(Note::failed(Some(action), &e.to_string()), true);
+                        scene.tell_press(Note::failed(Some(action), &e.to_string()), true);
                     }
                 }
                 scene.paired = store.entries().to_vec();
@@ -3811,7 +3892,7 @@ fn handle_action(
                 }
                 None => {
                     let text = scene.texts().f("error-not-ip", &[("typed", typed.into())]);
-                    scene.tell(Note::failed(Some(action), &text), true);
+                    scene.tell_press(Note::failed(Some(action), &text), true);
                 }
             }
         }

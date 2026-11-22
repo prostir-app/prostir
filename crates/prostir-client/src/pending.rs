@@ -113,12 +113,12 @@ impl Asks {
     }
 
     /// The connection broke: nothing waiting gets an answer, nor do the PC's
-    /// commands. The controls that waited.
-    pub fn disconnected(&mut self) -> Vec<Asked> {
+    /// commands. The requests that waited, and their controls.
+    pub fn disconnected(&mut self) -> Vec<(ReqId, Asked)> {
         self.command_after.clear();
         std::mem::take(&mut self.waiting)
-            .into_values()
-            .map(|(what, _)| what)
+            .into_iter()
+            .map(|(req, (what, _))| (req, what))
             .collect()
     }
 
@@ -264,7 +264,7 @@ mod tests {
         assert!(!asks.waits(Asked::Screenshot));
         asks.answer_command_after(quick, ReqId(5));
         let now = t + Duration::from_secs(21);
-        assert_eq!(asks.disconnected(), [Asked::Sound]);
+        assert_eq!(asks.disconnected(), [(quick, Asked::Sound)]);
         assert!(!asks.waits(Asked::Sound));
         assert_eq!(asks.answered(quick, &Outcome::Done, now).command, None);
     }
