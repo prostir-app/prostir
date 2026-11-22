@@ -14,12 +14,72 @@ use std::time::{Duration, Instant};
 use prostir_proto::secure::{Identity, TrustStore};
 use prostir_testkit::Keys;
 
+/// One of the places for tests that run at once: at most [`jobs`] tests run their PC
+/// apps together, however many threads the test harness runs (one per CPU by
+/// default). Each PC app starts GStreamer, probes its encoders and encodes, and
+/// besides the tests' own sleeps the PC apps of one per CPU only add to what the
+/// machine has to do while it is busy with something else too. A test takes its place
+/// with its first directory and holds it until its thread ends.
+struct Slot;
+
+/// The places taken now, and the wait for one.
+static SLOTS: (Mutex<usize>, std::sync::Condvar) = (Mutex::new(0), std::sync::Condvar::new());
+
+thread_local! {
+    static HELD: std::cell::RefCell<Option<Slot>> = const { std::cell::RefCell::new(None) };
+}
+
+/// How many tests run at once: `PROSTIR_E2E_JOBS`, else half the CPUs, four at
+/// least (as many as a CI runner has).
+fn jobs() -> usize {
+    std::env::var("PROSTIR_E2E_JOBS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| {
+            let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+            (cpus / 2).max(4)
+        })
+}
+
+impl Slot {
+    /// Waits for a place for this test, unless it has one.
+    fn take() {
+        if HELD.with_borrow(Option::is_some) {
+            return;
+        }
+        let (taken, freed) = &SLOTS;
+        let max = jobs();
+        let mut n = taken
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *n >= max {
+            n = freed
+                .wait(n)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *n += 1;
+        HELD.set(Some(Slot));
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let (taken, freed) = &SLOTS;
+        *taken
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+        freed.notify_one();
+    }
+}
+
 /// A directory for one test under Cargo's temporary directory. Removed when the test
 /// passes; kept (with the PC app's log) when it fails, to look at.
 pub struct TestDir(PathBuf);
 
 impl TestDir {
     pub fn new(name: &str) -> Self {
+        Slot::take();
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("e2e-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -393,6 +453,46 @@ pub fn port_in(line: &str, after: &str) -> u16 {
         .unwrap_or_else(|_| panic!("no port in {line:?}"))
 }
 
+/// GStreamer's plugin registry, which the PC apps of every test share. Brought up to
+/// date once, before the first PC app starts: without it (a new target directory, CI)
+/// or after GStreamer or a plugin changed, every PC app would scan the plugins at the
+/// same moment, which on a busy machine takes longer than a headset waits for its
+/// session.
+fn registry() -> PathBuf {
+    static SCANNED: std::sync::Once = std::sync::Once::new();
+    let registry = Path::new(env!("CARGO_TARGET_TMPDIR")).join("gst-registry.bin");
+    SCANNED.call_once(|| scan_plugins(&registry));
+    registry
+}
+
+/// Has `gst-inspect-1.0` bring `registry` up to date, with an empty home as every PC
+/// app has (no plugins of the user's); without it, says so loudly (CI installs it).
+fn scan_plugins(registry: &Path) {
+    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("e2e-gst-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let scanned = Command::new("gst-inspect-1.0")
+        .arg("--version")
+        .env("GST_REGISTRY", registry)
+        .env("HOME", &home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match scanned {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("gst-inspect-1.0 --version: {status}"),
+        Err(e) => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "no gst-inspect-1.0 ({e}), which CI must have"
+            );
+            eprintln!(
+                "\n*** no gst-inspect-1.0 ({e}): the PC apps scan GStreamer's plugins themselves ***\n"
+            );
+        }
+    }
+}
+
 /// A running PC app. Stopped (killed if it has to be) when dropped.
 pub struct Pc {
     child: Child,
@@ -400,6 +500,8 @@ pub struct Pc {
     /// Where it answers headsets that ask for it, with `Options::discovery`.
     pub discovery: Option<SocketAddr>,
     log: Arc<Mutex<Vec<String>>>,
+    /// Its log was read to its end: the program and everything it started ended.
+    read_all: Arc<std::sync::atomic::AtomicBool>,
     /// Its `XDG_RUNTIME_DIR`.
     run_dir: PathBuf,
     /// Its session bus, where `dbus-daemon` is installed.
@@ -493,10 +595,7 @@ impl Pc {
             .env("LANGUAGE", "en")
             .env("RUST_LOG", "info")
             // One plugin registry for all tests, so GStreamer scans its plugins once.
-            .env(
-                "GST_REGISTRY",
-                Path::new(env!("CARGO_TARGET_TMPDIR")).join("gst-registry.bin"),
-            )
+            .env("GST_REGISTRY", registry())
             // Nothing of the real desktop session, should anything look.
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("DISPLAY")
@@ -548,6 +647,8 @@ impl Pc {
         let log = Arc::new(Mutex::new(Vec::new()));
         let stderr = child.stderr.take().unwrap();
         let lines = log.clone();
+        let read_all = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let all = read_all.clone();
         let file = root.join("pc.log");
         std::thread::spawn(move || {
             let mut copy = std::fs::File::create(file).ok();
@@ -558,12 +659,14 @@ impl Pc {
                 }
                 lines.lock().unwrap().push(line);
             }
+            all.store(true, std::sync::atomic::Ordering::Release);
         });
         let mut pc = Self {
             child,
             addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             discovery: None,
             log,
+            read_all,
             run_dir: root.join("run"),
             bus,
             env,
@@ -653,7 +756,11 @@ impl Pc {
             if let Some(line) = found {
                 return line;
             }
-            if let Ok(Some(status)) = self.child.try_wait() {
+            // Ended, once what it wrote last was read too.
+            if let Ok(Some(status)) = self.child.try_wait()
+                && self.read_all.load(std::sync::atomic::Ordering::Acquire)
+                && self.count_log(needle) <= skip
+            {
                 panic!("the PC app ended ({status}) before logging {needle:?}");
             }
             assert!(
@@ -787,11 +894,17 @@ impl Pc {
         unsafe { libc::kill(self.child.id() as libc::pid_t, signal) };
     }
 
-    /// Waits up to `timeout` for the PC app to end by itself: how it ended.
+    /// Waits up to `timeout` for the PC app to end by itself: how it ended. Its log
+    /// is read to the end by then, as far as the time allows.
     pub fn wait_end(&mut self, timeout: Duration) -> std::process::ExitStatus {
         let until = Instant::now() + timeout;
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
+                while !self.read_all.load(std::sync::atomic::Ordering::Acquire)
+                    && Instant::now() < until
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
                 return status;
             }
             assert!(

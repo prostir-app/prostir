@@ -31,7 +31,7 @@ pub use choice::{Backend, Choice, Kind, Wanted, codec_label, note};
 pub use gpu::GpuDevices;
 #[cfg(not(feature = "fake-desktop"))]
 pub use probe::file_identity;
-pub use probe::{Next, PROBE_TIMEOUT, catalog, settle, start_probing};
+pub use probe::{Next, catalog, probe_timeout, settle, start_probing};
 
 use crate::platform::AdapterId;
 
@@ -223,6 +223,35 @@ pub struct NotOpened {
     pub resumed: bool,
 }
 
+/// The source of the frames failed before the encoder started: its stream, not the
+/// encoder (KWin's PipeWire node is gone, or WirePlumber links it to nothing).
+/// Another encoder on the same source fails the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFailed(pub String);
+
+impl std::fmt::Display for SourceFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SourceFailed {}
+
+/// How long a failed start waits for its source to say why, on the bus: the state
+/// change and the source's error come from two threads.
+const SOURCE_SAYS: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A source's failure while the encoder starts: kept for [`Encoder::start`] to return
+/// rather than told as the encoder's (which would end the session); and whether the
+/// source failed at all, for [`Encoder`]'s drop.
+#[derive(Default)]
+struct SourceGate {
+    /// Started (failures are told from then on), and the failure kept before.
+    state: Mutex<(bool, Option<String>)>,
+    came: std::sync::Condvar,
+    failed: AtomicBool,
+}
+
 /// What encoders say when they have no session left: GStreamer's "no space left" and
 /// "busy" resource errors (the fake encoder of the tests says the first), NVENC's out
 /// of memory and client key errors (a consumer card's session cap), and VA-API's
@@ -256,6 +285,8 @@ pub struct Encoder {
     /// It takes frames straight from GPU buffers (dmabuf), so a capture hands it those.
     takes_dmabuf: bool,
     bus_thread: Option<JoinHandle<()>>,
+    /// Whether its source failed, and what it said while starting.
+    gate: Arc<SourceGate>,
     kind: Kind,
     codec: Codec,
     /// It has encoded a frame since it last started.
@@ -268,7 +299,7 @@ pub struct Encoder {
     copies: bool,
     /// The graphics devices it took, let go after the pipeline stopped (the fields
     /// drop after `Drop::drop` and in this order).
-    _devices: gpu::Lease,
+    devices: gpu::Lease,
     /// A fake hardware encoder that opened, counted until dropped.
     #[cfg(feature = "fake-desktop")]
     fake_open: bool,
@@ -283,6 +314,13 @@ pub struct Input {
     pub source: String,
     /// What it is, for logs: `node 42`, `Prostir-1`.
     pub label: String,
+    /// The frame rate the encoder is told when the source says none (KWin's PipeWire
+    /// stream says `0/1`: a frame whenever the screen changes). Frames still come only
+    /// when they come; see [`tell_frame_rate`].
+    pub frame_rate: Option<gst::Fraction>,
+    /// The source is live, though it may not say so when the encoder first asks
+    /// (`pipewiresrc`); see [`tell_live`].
+    pub live: bool,
 }
 
 fn pipeline_description(input: &Input, cfg: &EncoderConfig) -> Result<String> {
@@ -376,16 +414,90 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
     } else {
         ""
     };
-    // The queue's thread converts and encodes: named after the output (`q-node-42`,
-    // `q-Prostir-1`), so the system's list of threads tells whose it is.
-    let queue: String = format!("q-{}", input.label)
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
+    let queue = queue_name(input);
     Ok(format!(
         "{source} ! queue name={queue} max-size-buffers=2 leaky=downstream{stamp} ! {encoder} \
          ! {parser} ! {caps}"
     ))
+}
+
+/// The queue right after the source, whose thread converts and encodes: named after
+/// the output (`q-node-42`, `q-Prostir-1`), so the system's list of threads tells
+/// whose it is.
+fn queue_name(input: &Input) -> String {
+    format!("q-{}", input.label)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Tells everything after `pad` that its frames come at `rate` when their caps say
+/// no rate, or a rate of 0 (KWin's PipeWire stream), by rewriting the caps as they
+/// pass. An encoder without a frame rate budgets badly (VA-API spends about twice the
+/// bitrate on a busy screen, x264 holds each frame back until the next comes).
+///
+/// Not an element after the source (`capssetter`): that one answers the source's
+/// question of which formats the encoder takes with "any", so `pipewiresrc` offers
+/// PipeWire no format, WirePlumber links it to nothing ("target not found") and its
+/// start hangs. The caps query passes a probe untouched.
+pub fn tell_frame_rate(pad: &gst::Pad, rate: gst::Fraction) {
+    pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+        let Some(gst::PadProbeData::Event(event)) = &mut info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let told = match event.view() {
+            gst::EventView::Caps(c) => with_frame_rate(c.caps(), rate),
+            _ => None,
+        };
+        if let Some(caps) = told {
+            *event = gst::event::Caps::builder(&caps)
+                .seqnum(event.seqnum())
+                .build();
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// Answers the question whether the source is live with yes, as it passes `pad`
+/// (the latency query, answered upstream). VA-API asks once, when it first
+/// configures, and keeps up to four frames back for a source that is not live;
+/// `pipewiresrc` 1.6 says it is live only once its stream is up, about 30 ms after
+/// VA-API asked. So VA-API kept each picture of a still screen until the next frame
+/// came: PipeWire's keepalive, 2 s later (4 s, two kept). Told live, it gives each
+/// out at once (measured with a frame every 2 s from a PipeWire node: 75 to 100 ms
+/// from the converter to the parser, the card idle between frames, against 4 s).
+pub fn tell_live(pad: &gst::Pad) {
+    pad.add_probe(
+        gst::PadProbeType::QUERY_UPSTREAM | gst::PadProbeType::PULL,
+        |_, info| {
+            if let Some(query) = info.query_mut()
+                && let gst::QueryViewMut::Latency(q) = query.view_mut()
+            {
+                let (_, min, max) = q.result();
+                q.set(true, min, max);
+            }
+            gst::PadProbeReturn::Ok
+        },
+    );
+}
+
+/// `caps` with frame rate `rate` where they say none or 0; `None` when every
+/// structure says a rate already.
+fn with_frame_rate(caps: &gst::CapsRef, rate: gst::Fraction) -> Option<gst::Caps> {
+    let unsaid = |s: &gst::StructureRef| {
+        s.get::<gst::Fraction>("framerate")
+            .map_or(true, |r| r.numer() == 0)
+    };
+    if !caps.iter().any(unsaid) {
+        return None;
+    }
+    let mut told = caps.to_owned();
+    for s in told.make_mut().iter_mut() {
+        if unsaid(s) {
+            s.set("framerate", rate);
+        }
+    }
+    Some(told)
 }
 
 /// The test mode for measuring the latency from the PC to the eye (`prostir serve
@@ -476,6 +588,19 @@ impl Encoder {
             .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
             .ok_or_else(|| anyhow!("appsink missing"))?;
         tune(&pipeline, cfg);
+        // The source's last pad, before the queue.
+        if let Some(pad) = pipeline
+            .by_name(&queue_name(input))
+            .and_then(|q| q.static_pad("sink"))
+            .and_then(|p| p.peer())
+        {
+            if let Some(rate) = input.frame_rate {
+                tell_frame_rate(&pad, rate);
+            }
+            if input.live {
+                tell_live(&pad);
+            }
+        }
         if let Some(pad) = pipeline
             .by_name("timecode")
             .and_then(|e| e.static_pad("src"))
@@ -567,6 +692,7 @@ impl Encoder {
         }
 
         let stop = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(SourceGate::default());
         let bus = pipeline
             .bus()
             .ok_or_else(|| anyhow!("pipeline without bus"))?;
@@ -574,6 +700,7 @@ impl Encoder {
             let stop = stop.clone();
             let encoded = encoded.clone();
             let resumed = resumed.clone();
+            let gate = gate.clone();
             std::thread::Builder::new()
                 .name(format!("gst-bus-{node}"))
                 .spawn(move || {
@@ -588,6 +715,25 @@ impl Encoder {
                         match msg.view() {
                             gst::MessageView::Error(e) => {
                                 let text = format!("{} ({:?})", e.error(), e.debug());
+                                // The source (an element taking nothing in) lost its
+                                // resource (its stream, a file): not the encoder's
+                                // doing. Not a stream error (not negotiated, the
+                                // data flow stopped), which may well be the encoder's.
+                                let by_source = e.error().is::<gst::ResourceError>()
+                                    && msg
+                                        .src()
+                                        .and_then(|s| s.downcast_ref::<gst::Element>())
+                                        .is_some_and(|e| e.sink_pads().is_empty());
+                                if by_source {
+                                    gate.failed.store(true, Ordering::Relaxed);
+                                    let mut state = gate.state.lock().unwrap();
+                                    if !state.0 {
+                                        warn!("encoder for {node}: its source failed: {text}");
+                                        state.1 = Some(text);
+                                        gate.came.notify_all();
+                                        break;
+                                    }
+                                }
                                 // The encoder (or its converter) before its first frame:
                                 // it did not open, and another encoder may.
                                 let by_encoder = msg
@@ -633,13 +779,14 @@ impl Encoder {
             restart_on_resume,
             takes_dmabuf: cfg.backend.takes_dmabuf(),
             bus_thread: Some(bus_thread),
+            gate,
             kind: (cfg.backend, adapter),
             codec: cfg.codec,
             encoded,
             resumed,
             note: None,
             copies: false,
-            _devices: devices,
+            devices,
             #[cfg(feature = "fake-desktop")]
             fake_open,
         };
@@ -647,10 +794,26 @@ impl Encoder {
         if fake_open {
             probe::fake::OPEN.fetch_add(1, Ordering::Relaxed);
         }
-        encoder
-            .pipeline
-            .set_state(gst::State::Playing)
-            .context("cannot start encoder pipeline")?;
+        let started = encoder.pipeline.set_state(gst::State::Playing);
+        // A source that failed is its own failure, at once (the encoder is dropped
+        // without waiting for it to stop: see `Drop`).
+        let failed = {
+            let mut state = encoder.gate.state.lock().unwrap();
+            if started.is_err() && state.1.is_none() {
+                state = encoder
+                    .gate
+                    .came
+                    .wait_timeout_while(state, SOURCE_SAYS, |s| s.1.is_none())
+                    .unwrap()
+                    .0;
+            }
+            state.0 = true;
+            state.1.take()
+        };
+        if let Some(why) = failed {
+            return Err(SourceFailed(why).into());
+        }
+        started.context("cannot start encoder pipeline")?;
         // One more fake hardware encoder than it opens says so, as a real one does once
         // it has the first frame's format.
         #[cfg(feature = "fake-desktop")]
@@ -879,7 +1042,30 @@ impl Drop for Encoder {
                 "prostir-stop",
             )));
         }
-        let _ = self.pipeline.set_state(gst::State::Null);
+        // A PipeWire source whose stream failed waits up to 30 s for a format that
+        // never comes before it stops (gst-plugin-pipewire 1.6, `wait_negotiated`):
+        // stopped on a thread of its own, holding nobody up; the graphics devices go
+        // to it once it runs, and after the pipeline stopped.
+        let stopper = self.gate.failed.load(Ordering::Relaxed).then(|| {
+            let pipeline = self.pipeline.clone();
+            let (give, take) = std::sync::mpsc::channel::<gpu::Lease>();
+            std::thread::Builder::new()
+                .name("gst-stop".into())
+                .spawn(move || {
+                    let _ = pipeline.set_state(gst::State::Null);
+                    drop(take.recv());
+                })
+                .map(|_| give)
+        });
+        match stopper {
+            Some(Ok(give)) => {
+                let _ = give.send(std::mem::take(&mut self.devices));
+            }
+            // No thread: stopped here, the devices after it (the fields drop later).
+            _ => {
+                let _ = self.pipeline.set_state(gst::State::Null);
+            }
+        }
         if let Some(t) = self.bus_thread.take() {
             let _ = t.join();
         }
@@ -1026,31 +1212,40 @@ mod pause {
     use super::Pause;
 
     /// A capture sleeps on its encoder's pause until it is resumed, or woken to stop,
-    /// and not at all while it is not paused.
+    /// and not at all while it is not paused. What is seen is whether a sleeper ended,
+    /// never how long it took: a busy machine starts a thread late.
     #[test]
     fn a_pause_is_slept_on_until_resumed_or_woken() {
         let pause = Arc::new(Pause::default());
         let stop = Arc::new(AtomicBool::new(false));
         let sleeper = |pause: &Arc<Pause>, stop: &Arc<AtomicBool>| {
             let (pause, stop) = (pause.clone(), stop.clone());
-            std::thread::spawn(move || {
-                let started = Instant::now();
-                pause.wait(&stop);
-                started.elapsed()
-            })
+            std::thread::spawn(move || pause.wait(&stop))
         };
-        assert!(sleeper(&pause, &stop).join().unwrap() < Duration::from_millis(50));
+        let ends = |sleeper: std::thread::JoinHandle<()>| {
+            let until = Instant::now() + Duration::from_secs(10);
+            while !sleeper.is_finished() {
+                if Instant::now() > until {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            sleeper.join().is_ok()
+        };
+        assert!(ends(sleeper(&pause, &stop)), "not paused: no sleep");
         pause.set(true);
         let resumed = sleeper(&pause, &stop);
         std::thread::sleep(Duration::from_millis(100));
+        assert!(!resumed.is_finished(), "paused: it sleeps");
         pause.set(false);
-        assert!(resumed.join().unwrap() >= Duration::from_millis(90));
+        assert!(ends(resumed), "resumed: it wakes");
         pause.set(true);
         let stopped = sleeper(&pause, &stop);
         std::thread::sleep(Duration::from_millis(100));
+        assert!(!stopped.is_finished(), "paused: it sleeps");
         stop.store(true, Ordering::Relaxed);
         pause.wake();
-        assert!(stopped.join().unwrap() >= Duration::from_millis(90));
+        assert!(ends(stopped), "woken to stop");
         assert!(pause.is_on(), "still paused, only woken");
     }
 }
@@ -1059,6 +1254,133 @@ mod pause {
 mod tests {
     use gstreamer as gst;
     use gstreamer::prelude::*;
+
+    /// A source that fails as the encoder starts (a file that is not there here;
+    /// KWin's node gone on KDE): the start says so at once as the source's failure,
+    /// and the encoder is not told it failed (which would end the session).
+    #[test]
+    fn a_failed_source_is_the_starts_own_failure() {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        use super::{
+            Backend, Encoder, EncoderConfig, EncoderEvent, GpuDevices, Input, SourceFailed,
+        };
+        gst::init().unwrap();
+        if gst::ElementFactory::find("x264enc").is_none() {
+            eprintln!("skipped: no x264enc");
+            return;
+        }
+        let input = Input {
+            source: "filesrc location=/nonexistent/prostir-test ! \
+                     rawvideoparse width=64 height=64 format=i420"
+                .into(),
+            label: "test".into(),
+            frame_rate: None,
+            live: false,
+        };
+        let cfg = EncoderConfig {
+            codec: prostir_proto::Codec::H264,
+            bitrate_kbps: 1000,
+            backend: Backend::X264,
+            sharp: false,
+        };
+        let told = Arc::new(Mutex::new(0));
+        let kept = told.clone();
+        let started = Instant::now();
+        let result = Encoder::start(&input, &cfg, None, &GpuDevices::default(), move |e| {
+            if matches!(e, EncoderEvent::Failed(_) | EncoderEvent::Unopened(_)) {
+                *kept.lock().unwrap() += 1;
+            }
+            false
+        });
+        let Err(e) = result else {
+            panic!("started on a file that is not there")
+        };
+        assert!(e.downcast_ref::<SourceFailed>().is_some(), "{e:#}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(*told.lock().unwrap(), 0, "not told as the encoder's");
+    }
+
+    /// Told live, the answer to the latency query that passes the pad says live,
+    /// whatever the source said, with its latencies; without, as the source says.
+    #[test]
+    fn a_source_told_live_is_live_to_the_encoder() {
+        gst::init().unwrap();
+        let asked = |live: bool| {
+            let pipeline =
+                gst::parse::launch("videotestsrc ! identity name=told ! queue name=q ! fakesink")
+                    .unwrap()
+                    .downcast::<gst::Pipeline>()
+                    .unwrap();
+            if live {
+                let pad = pipeline.by_name("told").unwrap().static_pad("src").unwrap();
+                super::tell_live(&pad);
+            }
+            pipeline.set_state(gst::State::Paused).unwrap();
+            let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+            let mut q = gst::query::Latency::new();
+            let sink = pipeline.by_name("q").unwrap().static_pad("sink").unwrap();
+            assert!(sink.peer_query(&mut q));
+            pipeline.set_state(gst::State::Null).unwrap();
+            q.result().0
+        };
+        assert!(!asked(false), "videotestsrc is not live");
+        assert!(asked(true));
+    }
+
+    /// Caps that say no frame rate, or 0, get the one told; a rate said stays.
+    #[test]
+    fn a_frame_rate_is_told_where_none_is_said() {
+        gst::init().unwrap();
+        let rate = gst::Fraction::new(60, 1);
+        let told = |caps: &str| {
+            super::with_frame_rate(&caps.parse::<gst::Caps>().unwrap(), rate).map(|c| c.to_string())
+        };
+        assert_eq!(
+            told("video/x-raw,format=BGRx,framerate=0/1").as_deref(),
+            Some("video/x-raw, format=(string)BGRx, framerate=(fraction)60/1")
+        );
+        assert_eq!(
+            told("video/x-raw(memory:DMABuf),format=DMA_DRM").as_deref(),
+            Some("video/x-raw(memory:DMABuf), format=(string)DMA_DRM, framerate=(fraction)60/1")
+        );
+        assert_eq!(told("video/x-raw,framerate=30/1"), None);
+    }
+
+    /// Frames from a source that says no frame rate reach what comes after the pad
+    /// with the rate told, and the source is still asked for what comes after (not
+    /// "any").
+    #[test]
+    fn the_frames_after_the_pad_come_at_the_rate_told() {
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "videotestsrc name=source num-buffers=1 ! \
+             video/x-raw,format=I420,width=64,height=64,framerate=0/1 ! \
+             identity name=told ! queue ! video/x-raw,format=I420 ! appsink name=out",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let told = pipeline.by_name("told").unwrap();
+        super::tell_frame_rate(&told.static_pad("src").unwrap(), gst::Fraction::new(60, 1));
+        let asked = told.static_pad("src").unwrap().peer_query_caps(None);
+        assert!(!asked.is_any());
+        let out = pipeline
+            .by_name("out")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let sample = out.pull_sample().unwrap();
+        pipeline.set_state(gst::State::Null).unwrap();
+        let rate = sample
+            .caps()
+            .and_then(|c| c.structure(0))
+            .and_then(|s| s.get::<gst::Fraction>("framerate").ok());
+        assert_eq!(rate, Some(gst::Fraction::new(60, 1)));
+    }
 
     /// A frame that passes the time code's pad has the time it was captured drawn
     /// into it, on the PC's monotonic clock, as the headset reads it back.
@@ -1195,6 +1517,8 @@ mod live {
                                  max-buffers=2 leaky-type=downstream"
                             .into(),
                         label: format!("measure {i}"),
+                        frame_rate: None,
+                        live: false,
                     };
                     let cfg = EncoderConfig {
                         codec: prostir_proto::Codec::H265,

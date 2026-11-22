@@ -812,7 +812,9 @@ compositor draws the monitors, and the app itself renders only the hands.
 
 `cargo test` runs the protocol, layout, profile and menu tests on the PC. `cargo e2e`
 runs the PC app with a fake desktop against a fake headset (pairing, monitors, taking
-the headset off, reconnecting, codec switch); it needs GStreamer with x264enc.
+the headset off, reconnecting, codec switch); it needs GStreamer with x264enc. It runs
+as many tests at once as half the CPUs, four at least; `PROSTIR_E2E_JOBS=N` sets another
+number.
 `cargo run -p prostir-testkit --bin prostir-probe -- [HOST:PORT] [SECONDS] [DIR]` connects
 like a headset, pairs, and saves the video and sound it receives, to check the PC side
 without a headset.

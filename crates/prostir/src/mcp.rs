@@ -117,45 +117,48 @@ struct Asked {
 }
 
 /// What the thread reading stdin and the server share: the request being handled and
-/// its cancellation, and requests cancelled before they began.
+/// its cancellation, and requests cancelled before they began. Under one lock: a
+/// cancellation that comes as its request begins is seen either way.
 #[derive(Default)]
-struct Running {
-    now: Mutex<Option<(Value, Arc<AtomicBool>)>>,
-    early: Mutex<Vec<Value>>,
+struct Running(Mutex<Requests>);
+
+#[derive(Default)]
+struct Requests {
+    now: Option<(Value, Arc<AtomicBool>)>,
+    early: Vec<Value>,
 }
 
 impl Running {
     /// The client cancelled request `id`.
     fn cancel(&self, id: &Value) {
-        if let Some((now, flag)) = self.now.lock().unwrap().as_ref()
+        let mut requests = self.0.lock().unwrap();
+        if let Some((now, flag)) = requests.now.as_ref()
             && now == id
         {
             flag.store(true, Ordering::Release);
             return;
         }
-        let mut early = self.early.lock().unwrap();
         // Only a few are kept: one cancelled long ago never comes.
-        if early.len() >= 64 {
-            early.remove(0);
+        if requests.early.len() >= 64 {
+            requests.early.remove(0);
         }
-        early.push(id.clone());
+        requests.early.push(id.clone());
     }
 
     /// Request `id` begins: `None` when it was cancelled already.
     fn begin(&self, id: &Value) -> Option<Arc<AtomicBool>> {
-        let mut early = self.early.lock().unwrap();
-        if let Some(i) = early.iter().position(|e| e == id) {
-            early.remove(i);
+        let mut requests = self.0.lock().unwrap();
+        if let Some(i) = requests.early.iter().position(|e| e == id) {
+            requests.early.remove(i);
             return None;
         }
-        drop(early);
         let flag = Arc::new(AtomicBool::new(false));
-        *self.now.lock().unwrap() = Some((id.clone(), flag.clone()));
+        requests.now = Some((id.clone(), flag.clone()));
         Some(flag)
     }
 
     fn end(&self) {
-        self.now.lock().unwrap().take();
+        self.0.lock().unwrap().now.take();
     }
 }
 

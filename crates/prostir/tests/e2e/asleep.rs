@@ -31,6 +31,17 @@ fn silent(to: SocketAddr, keys: &Keys, name: &str) -> bool {
     find::ask(to, &find::query(keys, name), SILENCE).is_none()
 }
 
+/// Asks until the PC answers no more, for up to [`SOON`]. A pause between the
+/// questions: the PC answers 20 a second at most, and more would leave the next
+/// question unanswered.
+fn until_silent(to: SocketAddr, keys: &Keys, what: &str) {
+    let started = Instant::now();
+    while !silent(to, keys, "") {
+        assert!(started.elapsed() < SOON, "{what}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// The PC app's state on its local API, `None` without a session bus.
 fn state(pc: &Pc) -> Option<State> {
     let ctl = pc.ctl(&["status", "--json"])?;
@@ -132,7 +143,10 @@ fn the_pc_answers_everyone_until_paired_then_only_its_own() {
 }
 
 /// The pairing window answers strangers: opened from the notice's button, the tray
-/// and the local API; closed by "Stop pairing" and at its time.
+/// and the local API; closed by "Stop pairing" and at its time. Open, it stays so for
+/// as long as a release keeps it (a busy machine can take seconds between opening it
+/// and asking); that it closes at its time is seen with a short one, on a PC started
+/// again with it.
 #[test]
 fn the_pairing_window_lets_strangers_find_the_pc() {
     let dir = TestDir::new("find-pairing");
@@ -140,7 +154,8 @@ fn the_pairing_window_lets_strangers_find_the_pc() {
     dir.pair();
     let options = Options {
         discovery: true,
-        env: vec![("PROSTIR_TEST_PAIR_SECONDS".into(), "2".into())],
+        // Each query and whether it was answered, for a look when it fails.
+        env: vec![("RUST_LOG".into(), "info,prostir::find=debug".into())],
         ..Options::default()
     };
     let mut pc = Pc::start(&dir, &options);
@@ -151,29 +166,48 @@ fn the_pairing_window_lets_strangers_find_the_pc() {
     pc.wait_log(SOON, "pairing a new headset: from the notice");
     let a = asks(to, &stranger, "").expect("the window is open");
     assert_eq!(a.flags, flags::ANSWERS_ALL | flags::PAIRING);
-    // Closed at its time.
-    std::thread::sleep(Duration::from_millis(2500));
-    assert!(silent(to, &stranger, ""), "the window closed at its time");
+    pc.tray("pair stop");
+    until_silent(to, &stranger, "stopped");
 
     pc.tray("pair");
     pc.wait_log(SOON, "pairing a new headset: from the tray");
     assert!(asks(to, &stranger, "").is_some());
     pc.tray("pair stop");
-    let started = Instant::now();
-    while !silent(to, &stranger, "") {
-        assert!(started.elapsed() < SOON, "stopped");
-    }
+    until_silent(to, &stranger, "stopped");
 
     if let Some(ctl) = pc.ctl(&["pair", "--json"]) {
         assert_eq!(ctl.code, 0, "{ctl:?}");
-        assert_eq!(ctl.json()["seconds_left"], 2);
+        assert_eq!(ctl.json()["seconds_left"], 180);
         assert!(asks(to, &stranger, "").is_some());
         let s = state(&pc).unwrap();
         let p = s.pairing.expect("pairing");
-        assert_eq!(p.seconds_total, 2);
+        assert_eq!(p.seconds_total, 180);
         assert_eq!(pc.ctl(&["pair", "stop"]).unwrap().code, 0);
         assert!(silent(to, &stranger, ""));
     }
+    pc.quit();
+
+    // A window of a second closes by itself.
+    let short = Options {
+        discovery: true,
+        env: vec![("PROSTIR_TEST_PAIR_SECONDS".into(), "1".into())],
+        ..Options::default()
+    };
+    let mut pc = Pc::start(&dir, &short);
+    let to = pc.discovery.unwrap();
+    // Opened for that second (the local API says for how long; without a session
+    // bus, the tray's item opens it).
+    match pc.ctl(&["pair", "--json"]) {
+        Some(ctl) => {
+            assert_eq!(ctl.code, 0, "{ctl:?}");
+            assert_eq!(ctl.json()["seconds_left"], 1, "{ctl:?}");
+        }
+        None => {
+            pc.tray("pair");
+            pc.wait_log(SOON, "pairing a new headset: from the tray");
+        }
+    }
+    until_silent(to, &stranger, "the window closed at its time");
     pc.quit();
 }
 
@@ -241,34 +275,59 @@ fn a_headset_pairs_through_the_settings_window() {
     pc.quit();
 }
 
-/// Waits until process `pid` does not wake for a second, then checks it does not
-/// wake at all for [`WATCH`].
-fn assert_asleep(pid: u32, what: &str) {
-    let woke = |before: &BTreeMap<u32, (String, u64)>, after: &BTreeMap<u32, (String, u64)>| {
-        after
-            .iter()
-            .filter_map(|(tid, (name, n))| {
-                let was = before.get(tid).map_or(0, |(_, n)| *n);
-                (*n > was).then(|| format!("{name} ({tid}): {}", n - was))
-            })
-            .collect::<Vec<_>>()
-    };
+type Wakeups = BTreeMap<u32, (String, u64)>;
+
+/// The threads that woke between `before` and `after`, with how often.
+fn woke(before: &Wakeups, after: &Wakeups) -> Vec<(String, u64)> {
+    after
+        .iter()
+        .filter_map(|(tid, (name, n))| {
+            let was = before.get(tid).map_or(0, |(_, n)| *n);
+            (*n > was).then(|| (format!("{name} ({tid})"), n - was))
+        })
+        .collect()
+}
+
+/// Waits until process `pid` keeps its threads for a second and only those named in
+/// `waking` wake in it.
+fn settle(pid: u32, waking: &[&str], what: &str) {
     let started = Instant::now();
     loop {
         let before = wakeups_of(pid);
         std::thread::sleep(Duration::from_secs(1));
         let after = wakeups_of(pid);
-        if before.keys().eq(after.keys()) && woke(&before, &after).is_empty() {
-            break;
+        let others = after.iter().any(|(tid, (name, n))| {
+            !waking.contains(&name.as_str()) && before.get(tid).is_none_or(|(_, was)| n > was)
+        });
+        if before.keys().eq(after.keys()) && !others {
+            return;
         }
-        assert!(started.elapsed() < SOON, "{what}: did not settle");
+        assert!(
+            started.elapsed() < SOON,
+            "{what}: did not settle: {:?}",
+            woke(&before, &after)
+        );
     }
+}
+
+/// Waits until process `pid` does not wake for a second, then checks it does not
+/// wake at all for [`WATCH`].
+fn assert_asleep(pid: u32, what: &str) {
+    settle(pid, &[], what);
     let before = wakeups_of(pid);
     std::thread::sleep(WATCH);
     let after = wakeups_of(pid);
+    let only_in = |a: &Wakeups, b: &Wakeups| {
+        a.iter()
+            .filter(|(tid, _)| !b.contains_key(tid))
+            .map(|(tid, (name, _))| format!("{name} ({tid})"))
+            .collect::<Vec<_>>()
+    };
     assert!(
         before.keys().eq(after.keys()),
-        "{what}: threads came or went"
+        "{what}: threads came {:?} or went {:?}",
+        only_in(&after, &before),
+        only_in(&before, &after)
     );
     let woke = woke(&before, &after);
     assert!(woke.is_empty(), "{what}: woke in {WATCH:?}: {woke:?}");
@@ -504,28 +563,25 @@ fn the_beacon_is_the_only_thing_that_wakes_a_running_pc() {
         beacon_to: Some(heard.local_addr().unwrap()),
         ..Options::default()
     };
-    let pc = Pc::start(&dir, &options);
+    let mut pc = Pc::start(&dir, &options);
     let mut buf = [0u8; 512];
     let n = heard.recv(&mut buf).expect("a beacon");
     let (port, name) = prostir_proto::decode_beacon(&buf[..n]).expect("a beacon");
     assert_eq!((port, name.as_str()), (pc.addr.port(), "fake-pc"));
-    // Settled, every wakeup is the beacon's, about one a second.
-    std::thread::sleep(Duration::from_secs(2));
+    // Settled, once the encoders' probe at the start is over, every wakeup is the
+    // beacon's, about one a second.
+    pc.wait_log(START, "video encoders probed in");
+    settle(pc.pid(), &["beacon"], "the running PC");
     let before = wakeups_of(pc.pid());
     std::thread::sleep(WATCH);
     let after = wakeups_of(pc.pid());
     let mut beacon = 0;
-    for (tid, (name, n)) in &after {
-        let was = before.get(tid).map_or(0, |(_, n)| *n);
-        if *n > was {
-            assert_eq!(
-                name,
-                "beacon",
-                "only the beacon wakes: {name} woke {}",
-                n - was
-            );
-            beacon += n - was;
-        }
+    for (who, n) in woke(&before, &after) {
+        assert!(
+            who.starts_with("beacon ("),
+            "only the beacon wakes: {who} woke {n}"
+        );
+        beacon += n;
     }
     assert!(
         (2..=5).contains(&beacon),

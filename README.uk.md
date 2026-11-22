@@ -766,7 +766,8 @@ VA-API читає напряму, тож через процесор нічог�
 `cargo test` запускає тести протоколу, розкладок, профілів і меню на ПК. `cargo e2e`
 запускає програму для ПК з несправжньою стільницею проти несправжнього шолома
 (сполучення, монітори, зняття шолома, перепідключення, зміна кодека); потрібен
-GStreamer з x264enc.
+GStreamer з x264enc. Водночас іде стільки тестів, скільки половина процесорів, але не
+менше чотирьох; `PROSTIR_E2E_JOBS=N` задає інше число.
 `cargo run -p prostir-client --example panel_preview -- menu.png` рендерить меню шолома
 в PNG (`TAB=monitors|look|controls|sound|language|pc|help`, `LANG_UI=en`, `WRIST=1`), а `--example sky_preview -- DIR`
 рендерить панорами. `cargo run -p prostir-testkit --bin prostir-probe -- [HOST:PORT]

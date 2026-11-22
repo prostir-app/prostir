@@ -115,14 +115,21 @@ fn quitting_while_the_encoders_are_probed() {
 /// next start reads what was found instead. A probe that never ends holds nothing up
 /// past its time limit, the encoder it was for is not used, and it is not kept as
 /// missing: the next start uses what works at once and probes it again meanwhile.
+/// The time limit is longer here than a busy machine takes to show the monitors, so
+/// waiting for the probe shows in how long they took.
 #[test]
 fn probes_are_kept_and_one_that_hangs_holds_nothing_up() {
+    const LIMIT: Duration = Duration::from_secs(15);
     let dir = TestDir::new("probe-hangs");
     dir.save_monitors(THREE_MONITORS);
     let mut keys = dir.pair();
     let options = Options {
         software: false,
         encoder: Some("hangs"),
+        env: vec![(
+            "PROSTIR_TEST_PROBE_SECONDS".into(),
+            LIMIT.as_secs().to_string(),
+        )],
         ..Options::default()
     };
     let mut pc = Pc::start(&dir, &options);
@@ -135,16 +142,21 @@ fn probes_are_kept_and_one_that_hangs_holds_nothing_up() {
         .unwrap();
     let took = started.elapsed();
     assert!(
-        took < Duration::from_secs(3),
+        took < LIMIT * 2 / 3,
         "monitors after {took:?}, the probe held them up"
     );
-    assert_eq!(pc.count_log("fake hardware H264: did not answer in 3 s"), 1);
+    assert_eq!(
+        pc.count_log("fake hardware H264: did not answer in 15 s"),
+        1
+    );
     assert_eq!(pc.count_log("encoding with fake hardware"), 0);
     let kept = cache(&dir);
     assert!(kept.contains("retry fake - h264 did not answer"), "{kept}");
     assert!(!kept.contains("missing fake"), "{kept}");
     headset.disconnect();
-    pc.quit();
+    // Not quit: the PC would wait the limit for the hung probe (quitting so is
+    // `quitting_while_the_encoders_are_probed`'s).
+    drop(pc);
 
     // Started again: from the cache, the hung one probed again in the background,
     // not waited for.
@@ -155,7 +167,7 @@ fn probes_are_kept_and_one_that_hangs_holds_nothing_up() {
         .wait(START, "every monitor showing", View::all_monitors_show)
         .unwrap();
     let took = started.elapsed();
-    assert!(took < Duration::from_secs(3), "monitors after {took:?}");
+    assert!(took < LIMIT * 2 / 3, "monitors after {took:?}");
     pc.wait_log(START, "video encoders as found before");
     pc.wait_log(START, "probing again in the background: fake hardware H264");
     assert_eq!(pc.count_log("video encoders probed in"), 0, "not all again");
@@ -262,4 +274,87 @@ fn an_encoder_that_fails_its_probe_is_not_used() {
     pc.wait_log(START, "fake hardware H264: broken on purpose");
     assert_eq!(pc.count_log("encoding with fake hardware"), 0);
     assert!(cache(&dir).contains("retry fake - h264 broken on purpose"));
+}
+
+/// A monitor added while the stream of its picture fails once (KWin's PipeWire node
+/// not there): its source is tried once more with the same encoder, and it streams;
+/// no other encoder is tried, nothing waits for a time limit, and the encoder is
+/// not counted as one that did not open.
+#[test]
+fn a_source_that_fails_once_is_tried_again() {
+    let options = Options {
+        software: false,
+        encoder: Some("works"),
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = crate::session("source-fails-once", &options);
+    let before = pc.count_log("encoding with fake hardware");
+    // The monitor added next.
+    pc.desktop("fail-source Fake-3 1");
+    pc.wait_log(SOON, "the next 1 source starts of Fake-3 fail");
+    let asked = Instant::now();
+    let added = headset
+        .ask(Request::AddDisplay {
+            mode: prostir_proto::state::Mode::new(320, 240),
+        })
+        .unwrap();
+    let Outcome::Added { id } = added else {
+        panic!("added, not {added:?}")
+    };
+    headset
+        .wait(SOON, "the new monitor shows", |v| {
+            v.streams
+                .get(&id)
+                .is_some_and(prostir_testkit::Stream::has_picture)
+        })
+        .unwrap();
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        asked.elapsed()
+    );
+    assert_eq!(pc.count_log("its stream is gone (fail-source)"), 1);
+    assert_eq!(pc.count_log("trying it once more"), 1);
+    assert_eq!(pc.count_log(" did not start: "), 0);
+    assert_eq!(pc.count_log(" did not open: "), 0);
+    assert_eq!(pc.count_log("encoding with fake hardware"), before + 1);
+    assert_eq!(pc.count_log("Prostir-3: encoding with fake hardware"), 1);
+    assert!(!headset.view().closed);
+}
+
+/// A source that fails again: the monitor gives up at once with the reason, without
+/// trying any other encoder on it, and the session goes on.
+#[test]
+fn a_source_that_keeps_failing_gives_up_with_its_reason() {
+    let options = Options {
+        software: false,
+        encoder: Some("works"),
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = crate::session("source-fails", &options);
+    pc.desktop("fail-source Fake-3 2");
+    pc.wait_log(SOON, "the next 2 source starts of Fake-3 fail");
+    let asked = Instant::now();
+    let added = headset
+        .ask(Request::AddDisplay {
+            mode: prostir_proto::state::Mode::new(320, 240),
+        })
+        .unwrap();
+    assert!(matches!(added, Outcome::Added { .. }), "{added:?}");
+    pc.wait_log(SOON, "the source of the frames fails");
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        asked.elapsed()
+    );
+    assert_eq!(pc.count_log("its stream is gone (fail-source)"), 2);
+    assert_eq!(pc.count_log(" did not start: "), 0);
+    assert_eq!(pc.count_log(" did not open: "), 0);
+    assert_eq!(
+        pc.count_log("Prostir-3: encoding with"),
+        0,
+        "no other encoder"
+    );
+    headset.take_for(Duration::from_secs(1)).unwrap();
+    assert!(!headset.view().closed);
 }

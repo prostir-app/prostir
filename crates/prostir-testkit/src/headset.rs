@@ -956,7 +956,11 @@ impl FakeHeadset {
                     reason: reason.code(),
                 },
             )?;
-            w.finish()?;
+            match w.finish() {
+                // The PC closed the connection on the goodbye already.
+                Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {}
+                finished => finished?,
+            }
         }
         self.wait_closed(GOODBYE_WAIT)
     }
