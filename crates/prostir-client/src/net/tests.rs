@@ -119,7 +119,15 @@ fn start(
         tx,
         Arc::new(FakeSource(played.clone())),
         HeadsetState {
-            caps: Some(crate::device::headset_caps("Test headset")),
+            caps: Some(
+                crate::caps::Caps::without_extensions(
+                    "Test headset".into(),
+                    crate::caps::DECODERS_UNSAID.to_vec(),
+                    crate::caps::STREAMS_UNSAID,
+                    None,
+                )
+                .headset_caps(),
+            ),
             ..HeadsetState::default()
         },
     )

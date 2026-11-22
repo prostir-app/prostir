@@ -11,6 +11,7 @@
 # store's, which ignores it (no report comes: exit 3).
 #
 #   scripts/selftest-headset.sh [--seconds N] [--relaunch] [--decoder-rate max]
+#                                [--caps minimal] [--perf low|high]
 #                                [--pc] [--pc-port PORT] [--package NAME] [--out DIR]
 #
 #   --seconds N    how long the calm part, where frame times are measured, lasts (30);
@@ -20,6 +21,12 @@
 #   --decoder-rate max  the decoders are asked to run as fast as they can
 #                  (operating-rate), which the app never asks otherwise: an A/B of
 #                  decode_ms against battery.* with a run without it
+#   --caps minimal the app turns on only the OpenXR extensions it cannot do without, so
+#                  it runs as on a headset without the others (the menu hides what needs
+#                  them; caps= in the report says minimal)
+#   --perf L       asks the runtime for performance level L (low or high; the app
+#                  itself asks none): frame times and battery.* to compare with a run
+#                  without it
 #   --pc           against a real PC app instead (pc=usb): this script builds and
 #                  starts `prostir serve` with the fake desktop and its own settings,
 #                  bus and runtime directory (`--no-adb --no-discovery --time-code`, on
@@ -41,6 +48,8 @@ set -euo pipefail
 SECONDS_CALM=30
 RELAUNCH=0
 DECODER_RATE=default
+CAPS=full
+PERF=default
 PC=0
 PC_PORT=47930
 CLOCK_PORT=47931
@@ -55,7 +64,9 @@ while [[ $# -gt 0 ]]; do
         --out) OUT="$2"; shift 2 ;;
         --pc) PC=1; shift ;;
         --pc-port) PC_PORT="$2"; shift 2 ;;
-        -h | --help) sed -n '2,38p' "$0"; exit 0 ;;
+        --caps) CAPS="$2"; shift 2 ;;
+        --perf) PERF="$2"; shift 2 ;;
+        -h | --help) sed -n '2,45p' "$0"; exit 0 ;;
         *) echo "!! unknown option $1 (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -315,6 +326,8 @@ OPTIONS="seconds=$SECONDS_CALM"
 (( PC )) && OPTIONS+=",pc=usb"
 (( RELAUNCH )) && OPTIONS+=",relaunch=1"
 [[ $DECODER_RATE != default ]] && OPTIONS+=",decoder_rate=$DECODER_RATE"
+[[ $CAPS != full ]] && OPTIONS+=",caps=$CAPS"
+[[ $PERF != default ]] && OPTIONS+=",perf=$PERF"
 echo ">> $PACKAGE on a $MAKER $(shell getprop ro.product.model): selftest $OPTIONS (up to ${WAIT}s)"
 STARTED=1
 start "$OPTIONS"

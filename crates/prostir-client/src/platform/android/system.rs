@@ -13,13 +13,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use jni::objects::{JString, JValue};
-use jni::strings::JNIStr;
-use jni::{jni_sig, jni_str};
 use log::warn;
 
 use crate::lang::{Known, Lang, Loader, Texts};
-use crate::mic::with_app_context;
 
 /// How often the battery is read, and while the palm menu shows it.
 const BATTERY_EVERY: Duration = Duration::from_secs(60);
@@ -151,7 +147,7 @@ fn run(cmds: &Receiver<SystemCmd>, events: &Sender<SystemEvent>, mut loader: Loa
         };
         if read {
             read_at = Instant::now();
-            if events.send(SystemEvent::Battery(battery())).is_err() {
+            if events.send(SystemEvent::Battery(super::battery())).is_err() {
                 return;
             }
         }
@@ -173,115 +169,4 @@ pub fn join_within(name: &str, thread: JoinHandle<()>, limit: Duration) {
     } else if thread.join().is_err() {
         warn!("the {name} thread panicked");
     }
-}
-
-/// What the headset is, as the system names it (`Build.MANUFACTURER` and
-/// `Build.MODEL`, see [`crate::device::model_name`]); empty when it does not say.
-pub fn model() -> String {
-    let said = with_app_context(|env, _| {
-        let mut field = |name: &JNIStr| -> jni::errors::Result<String> {
-            let value = env
-                .get_static_field(
-                    jni_str!("android/os/Build"),
-                    name,
-                    jni_sig!("Ljava/lang/String;"),
-                )?
-                .l()?;
-            if value.is_null() {
-                return Ok(String::new());
-            }
-            env.cast_local::<JString<'_>>(value)?.try_to_string(env)
-        };
-        Ok((field(jni_str!("MANUFACTURER"))?, field(jni_str!("MODEL"))?))
-    });
-    let (manufacturer, model) = said.unwrap_or_default();
-    crate::device::model_name(&manufacturer, &model)
-}
-
-/// The headset's own language (`Locale.getDefault()`, else the system property
-/// `persist.sys.locale`); none when the system does not say.
-pub fn language() -> Option<Lang> {
-    let tag = with_app_context(|env, _| {
-        let locale = env
-            .call_static_method(
-                jni_str!("java/util/Locale"),
-                jni_str!("getDefault"),
-                jni_sig!("()Ljava/util/Locale;"),
-                &[],
-            )?
-            .l()?;
-        let tag = env
-            .call_method(
-                &locale,
-                jni_str!("toLanguageTag"),
-                jni_sig!("()Ljava/lang/String;"),
-                &[],
-            )?
-            .l()?;
-        if tag.is_null() {
-            return Ok(String::new());
-        }
-        env.cast_local::<JString<'_>>(tag)?.try_to_string(env)
-    })
-    .filter(|t| !t.is_empty() && t != "und")
-    .or_else(|| {
-        let out = std::process::Command::new("getprop")
-            .arg("persist.sys.locale")
-            .output()
-            .ok()?;
-        Some(String::from_utf8_lossy(&out.stdout).into_owned())
-    })?;
-    let lang = Lang::from_tag(&tag);
-    log::info!("system language {tag:?}: {lang:?}");
-    lang
-}
-
-/// Whether the screen is on for the user (`PowerManager.isInteractive`): false once
-/// the system goes to sleep (its power button, or taken off for long enough). One
-/// call into Android: asked only while the app is put away, never in a drawn frame.
-pub fn interactive() -> Option<bool> {
-    with_app_context(|env, context| {
-        let name = env.new_string("power")?;
-        let manager = env
-            .call_method(
-                context,
-                jni_str!("getSystemService"),
-                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
-                &[JValue::Object(&name)],
-            )?
-            .l()?;
-        env.call_method(&manager, jni_str!("isInteractive"), jni_sig!("()Z"), &[])?
-            .z()
-    })
-}
-
-/// The headset's battery: percent and whether it is charging (`BatteryManager`).
-pub fn battery() -> Option<(u8, bool)> {
-    with_app_context(|env, context| {
-        let name = env.new_string("batterymanager")?;
-        let manager = env
-            .call_method(
-                context,
-                jni_str!("getSystemService"),
-                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
-                &[JValue::Object(&name)],
-            )?
-            .l()?;
-        let property = |env: &mut jni::Env<'_>, id| {
-            env.call_method(
-                &manager,
-                jni_str!("getIntProperty"),
-                jni_sig!("(I)I"),
-                &[JValue::Int(id)],
-            )?
-            .i()
-        };
-        // BatteryManager.BATTERY_PROPERTY_CAPACITY
-        let percent = property(env, 4)?;
-        // BATTERY_PROPERTY_STATUS: 2 is charging (isCharging also says yes when full
-        // and plugged in).
-        let status = property(env, 6)?;
-        let charging = status == 2;
-        Ok((percent.clamp(0, 100) as u8, charging))
-    })
 }

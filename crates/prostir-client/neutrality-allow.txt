@@ -1,12 +1,17 @@
-# Where the headset's crate may name a desktop of the PC, a sound system, a headset
-# or a store (plan step 7, 13.1): one line each, `<path> <word>: <why>`, the path from
-# this folder, the word as the check looks for it (whole word, any case). A new line
-# here is a new exception, and the review of its step says why.
-#
-# The names of headsets and stores (Meta, Quest, Oculus, Horizon) stay in more
-# places until the platform is split (step 7.8a); their lines come with it.
+# Where the headset's crate may name a desktop of the PC, a sound system, a headset,
+# a maker or a store (plan step 7, 13.1): one line each, `<path> <word>: <why>`, the
+# path from this folder (one ending in `/` stands for every file below it), the word
+# as the check looks for it (whole word, any case; `_` is part of a word). A new line
+# here is a new exception, and the review of its step says why. Checked by
+# tests/neutrality.rs, which also refuses a line nothing needs any more.
 
 src/background.rs sway: the verb (curtains fold and sway), not the desktop
+src/background.rs horizon: where the sky meets the ground, not the store
+src/platform/ meta: the platform's modules of that maker's extensions and store, and the calls between them
+src/main_loop.rs meta: calls into the module of that maker's extensions
+src/platform/store/meta.rs horizon: the store's own name
+src/platform/controllers.rs oculus: an interaction profile's path, as OpenXR names it
+src/platform/controllers.rs htc: an interaction profile's path, as OpenXR names it
 tests/texts.rs kde: the list of names the texts must not use
 tests/texts.rs plasma: the list of names the texts must not use
 tests/texts.rs kwin: the list of names the texts must not use

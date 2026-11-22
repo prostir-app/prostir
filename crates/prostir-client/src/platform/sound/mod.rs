@@ -1,10 +1,14 @@
-//! The network's sessions' sound and microphone on the headset: AAudio (see
-//! [`crate::audio`], [`crate::mic`]) behind the network code's [`Media`].
+//! The sound on the headset, shared by every headset on Android: the PC's sound played
+//! and the microphone recorded with AAudio ([`audio`], [`mic`]), behind the network
+//! code's [`Media`].
+
+pub mod audio;
+pub mod mic;
 
 use std::sync::Arc;
 
-use crate::audio::{Gains, Player};
-use crate::mic::{Mic, Recorder};
+use self::audio::{Gains, Player};
+use self::mic::{Mic, Recorder};
 use crate::net::{Feedback, Media, MediaSource};
 
 /// What sessions play the PC's sound and record the microphone with: made once for
@@ -26,7 +30,7 @@ impl MediaSource for Sound {
     }
 
     fn raise_priority(&self) {
-        crate::xrutil::raise_thread_priority(crate::xrutil::Priority::Video);
+        crate::platform::android::raise_thread_priority(crate::platform::android::Priority::Video);
     }
 }
 

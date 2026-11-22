@@ -1,13 +1,16 @@
 //! Controller and hand input, mapped onto the same actions: a ray (aim pose),
-//! "select" (trigger or pinch) and "grab" (grip or fist).
+//! "select" (trigger or pinch) and "grab" (grip or fist). Which inputs of which
+//! controller are bound comes from the table in `platform::controllers`.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use glam::{Vec2, Vec3};
+use log::{info, warn};
 use openxr as xr;
 
 use crate::interaction::{Button, HandState};
 use crate::layout::Ray;
-use crate::xrutil::{Gfx, quat, vec3};
+use crate::platform::controllers::{self, Role};
+use crate::platform::openxr::{Gfx, has, quat, vec3};
 
 pub struct Controls {
     set: xr::ActionSet,
@@ -20,8 +23,8 @@ pub struct Controls {
     menu: xr::Action<bool>,
     align: xr::Action<bool>,
     pinch_ready: xr::Action<bool>,
-    /// `/interaction_profiles/ext/hand_interaction_ext`, when hands are bound.
-    hand_profile: Option<xr::Path>,
+    /// The profiles of tracked hands bound (see `controllers::Profile::hands`).
+    hand_profiles: Vec<xr::Path>,
     /// Which sides are currently driven by tracked hands rather than controllers.
     tracked_hands: [bool; 2],
     /// Last reported profile per side, to log changes.
@@ -35,10 +38,12 @@ pub struct Controls {
 }
 
 impl Controls {
+    /// The actions, and the bindings of every profile of the table whose extension is
+    /// on in `exts`.
     pub fn new(
         instance: &xr::Instance,
         session: &xr::Session<Gfx>,
-        hand_interaction: bool,
+        exts: &xr::ExtensionSet,
     ) -> Result<Self> {
         let set = instance.create_action_set("monitors", "Monitors", 0)?;
         let hands = [
@@ -55,48 +60,45 @@ impl Controls {
         let pinch_ready =
             set.create_action::<bool>("pinch_ready", "Hand ready to pinch", &hands)?;
         let align = set.create_action::<bool>("align", "Align monitors", &[])?;
-        let p = |s: &str| instance.string_to_path(s);
-
-        let mut touch = Vec::new();
-        for side in ["left", "right"] {
-            let path = |input: &str| p(&format!("/user/hand/{side}/{input}"));
-            touch.push(xr::Binding::new(&aim, path("input/aim/pose")?));
-            touch.push(xr::Binding::new(&grab, path("input/squeeze/value")?));
-            touch.push(xr::Binding::new(&select, path("input/trigger/value")?));
-            touch.push(xr::Binding::new(&thumbstick, path("input/thumbstick")?));
-            touch.push(xr::Binding::new(&haptic, path("output/haptic")?));
-        }
-        touch.push(xr::Binding::new(
-            &menu,
-            p("/user/hand/left/input/menu/click")?,
-        ));
-        touch.push(xr::Binding::new(&menu, p("/user/hand/left/input/x/click")?));
-        touch.push(xr::Binding::new(
-            &align,
-            p("/user/hand/right/input/a/click")?,
-        ));
-        instance.suggest_interaction_profile_bindings(
-            p("/interaction_profiles/oculus/touch_controller")?,
-            &touch,
-        )?;
-
-        let hand_profile = if hand_interaction {
-            Some(p("/interaction_profiles/ext/hand_interaction_ext")?)
-        } else {
-            None
-        };
-        if let Some(profile) = hand_profile {
-            let mut hand = Vec::new();
-            for side in ["left", "right"] {
-                let path = |input: &str| p(&format!("/user/hand/{side}/input/{input}"));
-                hand.push(xr::Binding::new(&aim, path("aim/pose")?));
-                hand.push(xr::Binding::new(&select, path("pinch_ext/value")?));
-                // Pointing only while the hand is raised in a pinch-ready pose, so
-                // hands resting on the keyboard never aim or click.
-                hand.push(xr::Binding::new(&pinch_ready, path("pinch_ext/ready_ext")?));
+        // Each profile of the table the runtime can have; one it refuses (an input it
+        // does not know) is left out, the others still bound.
+        let mut hand_profiles = Vec::new();
+        let mut suggested = 0;
+        for profile in controllers::PROFILES {
+            if !has(exts, profile.needs) {
+                continue;
             }
-            instance.suggest_interaction_profile_bindings(profile, &hand)?;
+            let mut bindings = Vec::new();
+            for input in profile.inputs {
+                for path in input.paths() {
+                    let path = instance.string_to_path(&path)?;
+                    bindings.push(match input.role {
+                        Role::Aim => xr::Binding::new(&aim, path),
+                        Role::Select => xr::Binding::new(&select, path),
+                        Role::Grab => xr::Binding::new(&grab, path),
+                        Role::Stick => xr::Binding::new(&thumbstick, path),
+                        Role::Haptic => xr::Binding::new(&haptic, path),
+                        Role::Menu => xr::Binding::new(&menu, path),
+                        Role::Align => xr::Binding::new(&align, path),
+                        Role::PinchReady => xr::Binding::new(&pinch_ready, path),
+                    });
+                }
+            }
+            let path = instance.string_to_path(profile.path)?;
+            match instance.suggest_interaction_profile_bindings(path, &bindings) {
+                Ok(()) => {
+                    suggested += 1;
+                    if profile.hands {
+                        hand_profiles.push(path);
+                    }
+                }
+                Err(e) => warn!("controllers {}: {e}", profile.path),
+            }
         }
+        if suggested == 0 {
+            bail!("the runtime took no controller's bindings");
+        }
+        info!("bindings for {suggested} interaction profiles");
 
         session.attach_action_sets(&[&set])?;
         let aim_spaces = [
@@ -114,7 +116,7 @@ impl Controls {
             menu,
             align,
             pinch_ready,
-            hand_profile,
+            hand_profiles,
             tracked_hands: [false; 2],
             last_profile: [None; 2],
             joint_hands: [false; 2],
@@ -125,24 +127,28 @@ impl Controls {
     }
 
     /// Call when the runtime reports an interaction profile change (controllers
-    /// picked up or put down).
-    pub fn refresh_profiles(&mut self, session: &xr::Session<Gfx>) {
+    /// picked up or put down). Whether a side's profile changed.
+    pub fn refresh_profiles(&mut self, session: &xr::Session<Gfx>) -> bool {
+        let mut changed = false;
         for hand in 0..2 {
             let profile = session.current_interaction_profile(self.hands[hand]).ok();
-            let is_hand = profile.is_some() && profile == self.hand_profile;
+            let is_hand = profile.is_some_and(|p| self.hand_profiles.contains(&p));
             if is_hand != self.tracked_hands[hand] || profile != self.last_profile[hand] {
+                // Nothing to something at the start is not a change of controllers.
+                changed |= self.last_profile[hand].is_some_and(|p| p != xr::Path::NULL);
                 let name = profile
                     .filter(|p| *p != xr::Path::NULL)
                     .and_then(|p| session.instance().path_to_string(p).ok())
                     .unwrap_or_else(|| "none".into());
-                log::info!("{} hand: {name}", if hand == 0 { "left" } else { "right" });
+                info!("{} hand: {name}", if hand == 0 { "left" } else { "right" });
                 self.last_profile[hand] = profile;
             }
             self.tracked_hands[hand] = is_hand;
         }
+        changed
     }
 
-    /// Quest sometimes keeps reporting a controller for a side whose controller was put
+    /// A runtime may keep reporting a controller for a side whose controller was put
     /// down while the cameras already track the hand. Then that side's input is worked
     /// out from the hand joints: the thumb and index tips together are a pinch, and the
     /// ray runs from about the shoulder through the pinch, like the system's own.
@@ -159,7 +165,7 @@ impl Controls {
         for hand in 0..2 {
             let use_joints = !self.tracked_hands[hand] && joints[hand].is_some();
             if use_joints != self.joint_hands[hand] {
-                log::info!(
+                info!(
                     "{} hand: {}",
                     if hand == 0 { "left" } else { "right" },
                     if use_joints {
@@ -209,16 +215,17 @@ impl Controls {
         }
     }
 
-    /// Reads all inputs for this frame.
+    /// Reads all inputs for this frame; whether a side's controllers changed (which a
+    /// runtime does not always announce).
     pub fn sync(
         &mut self,
         session: &xr::Session<Gfx>,
         base: &xr::Space,
         time: xr::Time,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         session.sync_actions(&[(&self.set).into()])?;
         // Cheap, and the runtime does not always announce the profile at start-up.
-        self.refresh_profiles(session);
+        let changed = self.refresh_profiles(session);
         for hand in 0..2 {
             let path = self.hands[hand];
             let location = self.aim_spaces[hand].locate(base, time)?;
@@ -269,7 +276,7 @@ impl Controls {
                     Vec2::new(s.current_state.x, s.current_state.y)
                 });
         }
-        Ok(())
+        Ok(changed)
     }
 
     pub fn menu_pressed(&self, session: &xr::Session<Gfx>) -> bool {

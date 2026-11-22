@@ -7,14 +7,14 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
-description = "Prostir client for Meta Quest 3 and 3S: virtual monitors as OpenXR compositor layers"
+description = "Prostir client for headsets with OpenXR on Android: virtual monitors as compositor layers"
 
 [features]
 default = ["selftest"]
-# Meta Horizon Store build: the store's entitlement check through the Meta Platform
-# SDK, loaded at run time (scripts/build-apk.sh with PROSTIR_STORE=1, which also
-# turns the selftest off). With `store` the selftest is never built, whatever else is
-# on.
+# The store build: the store's entitlement check, through its SDK loaded at run time
+# (for Meta Horizon Store, the Meta Platform SDK; scripts/build-apk.sh with
+# PROSTIR_STORE=1, which also turns the selftest off). With `store` the selftest is
+# never built, whatever else is on.
 store = []
 # The selftest against a fake PC in the app's own process (scripts/selftest-headset.sh):
 # every build but the store's.
