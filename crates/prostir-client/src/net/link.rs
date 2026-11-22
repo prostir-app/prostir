@@ -62,8 +62,6 @@ pub(super) struct Dial {
     pub pair: Option<[u8; 32]>,
     pub pc_shows_code: bool,
     pub host_file: Option<PathBuf>,
-    /// The keys of the trusted PCs.
-    pub trusted: Vec<[u8; 32]>,
     /// The addresses of the connections already open: never dialed twice (a second
     /// connection from this headset would replace the first on the PC).
     pub busy: Vec<SocketAddr>,
@@ -255,6 +253,11 @@ fn before_trust(conn: &mut Conn, stream: TcpStream) -> io::Result<Option<(Wire, 
         return Ok(None);
     }
     conn.claimed = Some(pc);
+    conn.current.took(pc);
+    // Trusted as the network thread's file has it now, not as it was when the dial
+    // began: a PC forgotten meanwhile is a stranger (and should Forget come after this
+    // look, it leaves this connection, which it knows as the PC's from `took`).
+    let trusted = shared.trusts(&peer.key);
     // Versions first, before pairing: this exchange is the same in every version, so
     // a PC of any version says which side to update.
     let app = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
@@ -282,7 +285,7 @@ fn before_trust(conn: &mut Conn, stream: TcpStream) -> io::Result<Option<(Wire, 
     };
     // A PC we have never paired with: pair only once the user said so in the menu,
     // and never on our own (a hostile PC on the network could keep guessing codes).
-    if !conn.d.trusted.contains(&wire.peer.key) && !pair_if_approved(conn, &mut wire)? {
+    if !trusted && !pair_if_approved(conn, &mut wire)? {
         return Ok(None);
     }
     Ok(Some((wire, language)))
@@ -426,7 +429,6 @@ fn pair(conn: &mut Conn, wire: &mut Wire) -> io::Result<bool> {
                     key,
                     name: pairing_name(addr),
                 });
-                conn.d.trusted.push(key);
                 conn.ended.paired = true;
                 wire.receiver.set_idle_limit(Some(Duration::from_secs(10)));
                 return Ok(true);

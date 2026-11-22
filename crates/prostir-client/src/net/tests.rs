@@ -261,6 +261,53 @@ fn a_session_opens_streams_and_comes_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The events until the connection of step `step` ended (within 10 s), in order.
+fn until_ended(rx: &Receiver<NetEvent>, step: u32) -> Vec<NetEvent> {
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut seen = Vec::new();
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        let e = rx
+            .recv_timeout(left)
+            .expect("the connection did not end in time");
+        let end = matches!(e, NetEvent::Ended { step: s, .. } if s == StepId(step));
+        seen.push(e);
+        if end {
+            return seen;
+        }
+    }
+}
+
+/// Forgotten while its dial is still on the way (before the PC said who it is): no
+/// session opens with it; it is a PC like any other now, offered to the user.
+#[test]
+fn forgetting_during_a_dial_opens_no_session() {
+    let dir = temp_dir("forget-dialing");
+    let (pc, mut net, rx, _) = start(&dir, false, false);
+    let id = PcId::of(&pc.key());
+    wait(&rx, |e| matches!(e, NetEvent::Paired(_)).then_some(()));
+    dial(&net, 1, pc.addr());
+    net.send(NetCmd::Forget(id));
+    let seen = until_ended(&rx, 1);
+    assert!(
+        !seen.iter().any(|e| matches!(e, NetEvent::Connected { .. })),
+        "a session with the PC forgotten"
+    );
+    assert!(
+        seen.iter().any(|e| matches!(
+            e,
+            NetEvent::PairOffer {
+                why: OfferWhy::New,
+                ..
+            }
+        )),
+        "offered as a new PC"
+    );
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Forgetting a PC whose file cannot be written changes nothing: it is still trusted
 /// (the list says so), and its session goes on.
 #[test]
