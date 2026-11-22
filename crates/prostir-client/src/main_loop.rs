@@ -142,10 +142,18 @@ fn moment(tm: &libc::tm) -> Moment {
 struct Monitor {
     width_px: u32,
     height_px: u32,
-    decoder: Option<JoinHandle<()>>,
+    decoder: Option<JoinHandle<decoder::Stopped>>,
+    /// How many times its decoder thread was made again lately, and when last (see
+    /// `Shell::decoders_now`).
+    restarts: (u32, Option<Instant>),
     stop: Arc<AtomicBool>,
     swapchain: xr::Swapchain<Gfx>,
 }
+
+/// A decoder thread that gave up is made again this many times for its stream within
+/// [`DECODER_RESTARTS_WITHIN`] of the last time; then the stream counts as failed.
+const DECODER_RESTARTS: u32 = 3;
+const DECODER_RESTARTS_WITHIN: Duration = Duration::from_secs(60);
 
 impl Monitor {
     fn aspect(&self) -> f32 {
@@ -429,6 +437,7 @@ impl Shell<'_> {
                                 width_px: width,
                                 height_px: height,
                                 decoder: Some(decoder),
+                                restarts: (0, None),
                                 stop,
                                 swapchain,
                             },
@@ -449,6 +458,66 @@ impl Shell<'_> {
                 }
                 self.handle(now, Event::Net(event));
             }
+        }
+    }
+
+    /// A decoder thread that ended on its own while its monitor stays (its codec
+    /// failed again and again, or it panicked) is made again with its job, the PC asked
+    /// for a keyframe, up to [`DECODER_RESTARTS`] times; then (or after a panic) the
+    /// stream counts as failed and its monitor goes. Looked at once a pass: a look at
+    /// each monitor, nothing made.
+    fn decoders_now(&mut self, now: Instant) {
+        let mut failed = None;
+        for (id, m) in &mut self.monitors {
+            if m.stop.load(Ordering::Relaxed)
+                || !m.decoder.as_ref().is_some_and(JoinHandle::is_finished)
+            {
+                continue;
+            }
+            let Some(thread) = m.decoder.take() else {
+                continue;
+            };
+            // Made again long ago: it ran well since.
+            if m.restarts
+                .1
+                .is_some_and(|at| now.saturating_duration_since(at) >= DECODER_RESTARTS_WITHIN)
+            {
+                m.restarts.0 = 0;
+            }
+            let gave_up = match thread.join() {
+                // The stream ended: its end comes from the network.
+                Ok(decoder::Stopped { failed: false, .. }) => false,
+                Ok(decoder::Stopped { job, failed: true }) if m.restarts.0 < DECODER_RESTARTS => {
+                    m.restarts = (m.restarts.0 + 1, Some(now));
+                    warn!(
+                        "monitor {id}: its decoder gave up, made again ({} of {DECODER_RESTARTS})",
+                        m.restarts.0
+                    );
+                    let _ = job
+                        .feedback
+                        .send(prostir_proto::ClientMsg::RequestKeyframe {
+                            id: job.stream.id,
+                            generation: job.stream.generation,
+                        });
+                    m.decoder = Some(decoder::spawn(job));
+                    false
+                }
+                Ok(_) => {
+                    error!("monitor {id}: its decoder gave up for good");
+                    true
+                }
+                Err(_) => {
+                    error!("monitor {id}: its decoder panicked");
+                    true
+                }
+            };
+            if gave_up {
+                failed = Some(*id);
+            }
+        }
+        if let Some(id) = failed {
+            self.monitors.remove(&id);
+            self.handle(now, Event::StreamFailed(id));
         }
     }
 
@@ -999,6 +1068,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             }
             shell.net_event(now, event, &vm);
         }
+        shell.decoders_now(now);
         // Only the newest battery reading matters (several wait after a pause).
         let mut newest = None;
         while let Some(event) = shell.system.try_recv() {

@@ -5,7 +5,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::Thread;
 use std::time::{Duration, Instant};
 
@@ -37,8 +37,6 @@ pub const QUEUE_ROOM: usize = 16;
 /// `Arc` and pushes; the decoder takes through [`Frames`].
 pub struct FrameQueue {
     queued: Mutex<Queued>,
-    /// The decoder thread, once it started.
-    decoder: OnceLock<Thread>,
 }
 
 struct Queued {
@@ -48,6 +46,9 @@ struct Queued {
     caught_up: bool,
     /// The network side is gone: no frame comes any more.
     closed: bool,
+    /// The decoder thread, once it started (a decoder made again for the stream puts
+    /// its own).
+    decoder: Option<Thread>,
 }
 
 /// What [`FrameQueue::push`] did with a frame.
@@ -74,8 +75,8 @@ impl Default for FrameQueue {
                 frames: VecDeque::with_capacity(QUEUE_ROOM),
                 caught_up: false,
                 closed: false,
+                decoder: None,
             }),
-            decoder: OnceLock::new(),
         }
     }
 }
@@ -85,8 +86,10 @@ impl FrameQueue {
         self.queued.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn wake(&self) {
-        if let Some(t) = self.decoder.get() {
+    /// Wakes `decoder`, the thread taken from the queue under its lock (a handle,
+    /// nothing made).
+    fn wake(decoder: Option<Thread>) {
+        if let Some(t) = decoder {
             t.unpark();
         }
     }
@@ -105,7 +108,7 @@ impl FrameQueue {
     /// is behind. A keyframe always goes in, in place of the frames still waiting:
     /// they came before it and are of no use once it is decoded.
     pub fn push(&self, frame: Frame, now: Instant) -> Pushed {
-        {
+        let decoder = {
             let mut q = self.lock();
             if frame.keyframe {
                 q.frames.clear();
@@ -119,15 +122,20 @@ impl FrameQueue {
                 }
             }
             q.frames.push_back(frame);
-        }
-        self.wake();
+            q.decoder.clone()
+        };
+        Self::wake(decoder);
         Pushed::Queued
     }
 
     /// No frame comes any more: the decoder ends once it took those waiting.
     pub fn close(&self) {
-        self.lock().closed = true;
-        self.wake();
+        let decoder = {
+            let mut q = self.lock();
+            q.closed = true;
+            q.decoder.clone()
+        };
+        Self::wake(decoder);
     }
 }
 
@@ -135,9 +143,10 @@ impl FrameQueue {
 pub struct Frames(Arc<FrameQueue>);
 
 impl Frames {
-    /// The thread to wake when a frame comes or the stream ends (the decoder's own).
+    /// The thread to wake when a frame comes or the stream ends (the decoder's own;
+    /// a decoder made again for the stream puts its own in place of the last one).
     pub fn wake(&self, decoder: Thread) {
-        let _ = self.0.decoder.set(decoder);
+        self.0.lock().decoder = Some(decoder);
     }
 
     /// The next frame, if one waits.
@@ -311,6 +320,21 @@ mod tests {
         assert!(matches!(frames.take(), Taken::Ended));
         drop(frames);
         assert!(queue.abandoned());
+    }
+
+    /// A decoder made again for the same stream (the last one failed) is the one a
+    /// frame wakes, not the thread that ended.
+    #[test]
+    fn a_decoder_made_again_is_woken() {
+        let queue = Arc::new(FrameQueue::default());
+        let frames = queue.frames();
+        let gone = std::thread::spawn(std::thread::current).join().unwrap();
+        frames.wake(gone);
+        frames.wake(std::thread::current());
+        let t = Instant::now();
+        queue.push(frame(0, true, t), t);
+        std::thread::park_timeout(Duration::from_secs(2));
+        assert!(t.elapsed() < Duration::from_secs(1), "woken at once");
     }
 
     /// While the decoder starts, frames pile up without being dropped; once it caught
