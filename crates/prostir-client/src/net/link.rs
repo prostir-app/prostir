@@ -508,6 +508,25 @@ impl Drop for StreamSlot {
     }
 }
 
+/// A session's streams. However the session ends (an error, a panic), each one left
+/// is told ended, so no monitor keeps the decoder of a connection that is gone (and a
+/// frozen picture after the next one opens).
+struct Streams<'a> {
+    pc: PcId,
+    shared: &'a Shared,
+    slots: HashMap<DisplayId, StreamSlot>,
+}
+
+impl Drop for Streams<'_> {
+    fn drop(&mut self) {
+        let pc = self.pc;
+        for (id, slot) in self.slots.drain() {
+            drop(slot);
+            self.shared.tell(NetEvent::StreamEnd { pc, id });
+        }
+    }
+}
+
 /// A trusted PC's session: `Open`, its snapshot, then everything it sends until the
 /// connection ends.
 fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Result<()> {
@@ -579,7 +598,11 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
     for part in state.parts() {
         shared.tell(NetEvent::Part(pc, part));
     }
-    let mut streams: HashMap<DisplayId, StreamSlot> = HashMap::new();
+    let mut streams = Streams {
+        pc,
+        shared: &shared,
+        slots: HashMap::new(),
+    };
     let mut media = shared.media.open();
     // Recording only while a PC program records from the headset microphone, the
     // user's switch on the headset is on, and this session has the microphone.
@@ -657,7 +680,7 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 codec,
             } => {
                 info!("stream {} {generation:?}: {w}x{h} {codec:?}", id.0);
-                if streams.remove(&id).is_some() {
+                if streams.slots.remove(&id).is_some() {
                     shared.tell(NetEvent::StreamEnd { pc, id });
                 }
                 // The PC sends only what this headset decodes. One that does not
@@ -685,7 +708,7 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 let mut keyframe = KeyframeWait::default();
                 // The PC starts every stream with one.
                 keyframe.expect();
-                streams.insert(
+                streams.slots.insert(
                     id,
                     StreamSlot {
                         generation,
@@ -713,14 +736,22 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 data,
             } => {
                 // A frame of another start of the stream is of no use.
-                let Some(slot) = streams.get_mut(&id).filter(|s| s.generation == generation) else {
+                let Some(slot) = streams
+                    .slots
+                    .get_mut(&id)
+                    .filter(|s| s.generation == generation)
+                else {
                     continue;
                 };
                 // Asked again while frames come and no keyframe: the PC may have
                 // ignored the last ask (it answers one every 300 ms at most).
                 let verdict = slot.keyframe.passes(keyframe, now);
-                if verdict.ask {
-                    feedback.send(ClientMsg::RequestKeyframe { id, generation })?;
+                // A send that fails (the outbox closed, or the goodbye said) ends the
+                // session, never skipping what follows the loop.
+                if verdict.ask
+                    && let Err(e) = feedback.send(ClientMsg::RequestKeyframe { id, generation })
+                {
+                    break Err(e);
                 }
                 // Its decoder is gone (the monitor was closed here): nobody takes it.
                 if !verdict.pass || slot.queue.abandoned() {
@@ -735,16 +766,22 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 };
                 if slot.queue.push(frame, now) == Pushed::Behind {
                     warn!("decoder {} is behind, dropping until next keyframe", id.0);
-                    if slot.keyframe.lost(now) {
-                        feedback.send(ClientMsg::RequestKeyframe { id, generation })?;
+                    if slot.keyframe.lost(now)
+                        && let Err(e) = feedback.send(ClientMsg::RequestKeyframe { id, generation })
+                    {
+                        break Err(e);
                     }
                     #[cfg(all(feature = "selftest", not(feature = "store")))]
                     crate::selftest::dropped_to_keyframe();
                 }
             }
             HostMsg::StreamEnd { id, generation } => {
-                if streams.get(&id).is_some_and(|s| s.generation == generation) {
-                    streams.remove(&id);
+                if streams
+                    .slots
+                    .get(&id)
+                    .is_some_and(|s| s.generation == generation)
+                {
+                    streams.slots.remove(&id);
                     shared.tell(NetEvent::StreamEnd { pc, id });
                 }
             }
@@ -781,7 +818,11 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 secret,
             }),
             // Answered at once, from here: the round trip is the network's.
-            HostMsg::Ping { seq } => feedback.send(ClientMsg::Pong { seq })?,
+            HostMsg::Ping { seq } => {
+                if let Err(e) = feedback.send(ClientMsg::Pong { seq }) {
+                    break Err(e);
+                }
+            }
             HostMsg::Pong { seq } => feedback.outbox.pong(seq),
             HostMsg::Goodbye { reason } => {
                 let reason = PcGoodbye::from_code(reason);
@@ -804,8 +845,7 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
     if recording {
         media.record(false, &feedback);
     }
-    for id in streams.into_keys() {
-        shared.tell(NetEvent::StreamEnd { pc, id });
-    }
+    // Every stream left ends here (see `Streams`), before the connection does.
+    drop(streams);
     result
 }

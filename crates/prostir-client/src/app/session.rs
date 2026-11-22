@@ -162,6 +162,12 @@ impl Model {
                 self.menu.notes.forget_requests(pc);
                 self.menu.physical_asked.retain(|(k, _)| k.pc != pc);
                 self.sessions.remove(&pc);
+                // Its streams went with it, also one whose end the network never said.
+                self.effects.extend(
+                    self.world
+                        .streams_of(pc)
+                        .map(|k| Effect::Video(VideoCmd::Drop(k))),
+                );
                 // The next session's list is news, not displays removed.
                 self.world.disconnected(pc);
                 if ended.opened

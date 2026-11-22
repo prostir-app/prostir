@@ -228,6 +228,8 @@ enum Cmd {
     Presence(bool),
     /// From the reader: the connection is over.
     Ended,
+    /// From the reader: the headset said goodbye.
+    Left,
     Broken(DisplayId),
     Restart(DisplayId),
     RestartWithoutKeyframe(DisplayId),
@@ -244,6 +246,9 @@ struct Shared {
     events: Sender<Event>,
     current: Mutex<Option<Current>>,
     stop: AtomicBool,
+    /// When the headset leaves, one more ping goes before the session closes (see
+    /// [`FakePc::ping_when_left`]).
+    ping_when_left: AtomicBool,
     /// The last generation of any stream: they never repeat, not even across
     /// sessions, so what a headset reports of one is never taken for another's.
     generation: AtomicU32,
@@ -346,6 +351,7 @@ impl FakePc {
             events: tx,
             current: Mutex::new(None),
             stop: AtomicBool::new(false),
+            ping_when_left: AtomicBool::new(false),
             generation: AtomicU32::new(0),
             frames: Mutex::default(),
         });
@@ -422,6 +428,13 @@ impl FakePc {
             }
             None => false,
         }
+    }
+
+    /// From now on, once the headset said goodbye, one more ping goes to it before the
+    /// session closes, as from a PC whose ping crossed the goodbye: the headset has to
+    /// read it while it sends nothing any more.
+    pub fn ping_when_left(&self, on: bool) {
+        self.shared.ping_when_left.store(on, Ordering::Relaxed);
     }
 
     /// Ends the session with a goodbye saying `reason` (a `PcGoodbye` code).
@@ -768,6 +781,14 @@ fn stream_until_over(
                 std::thread::sleep(Duration::from_millis(300));
                 return Ok(());
             }
+            Ok(Cmd::Left) => {
+                if shared.ping_when_left.load(Ordering::Relaxed) {
+                    ping_seq += 1;
+                    send(tx, lane::CONTROL, HostMsg::Ping { seq: ping_seq })?;
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                return Ok(());
+            }
             Ok(Cmd::Ended) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
             Err(RecvTimeoutError::Timeout) => {}
         }
@@ -909,7 +930,7 @@ fn read(
             }
             ClientMsg::Goodbye { reason } => {
                 shared.tell(Happened::Goodbye { reason });
-                let _ = cmds.send(Cmd::Ended);
+                let _ = cmds.send(Cmd::Left);
                 return;
             }
             _ => {}

@@ -374,6 +374,11 @@ impl World {
         self.streams.contains_key(&id)
     }
 
+    /// The displays of PC `pc` whose streams show.
+    pub fn streams_of(&self, pc: PcId) -> impl Iterator<Item = DisplayKey> + '_ {
+        self.streams.keys().copied().filter(move |k| k.pc == pc)
+    }
+
     /// The window panels whose streams show, with their sizes in pixels (in no order).
     pub fn windows(&self) -> impl Iterator<Item = (DisplayKey, PixelSize)> + '_ {
         self.streams
@@ -467,6 +472,8 @@ impl World {
             view.arrange = None;
         }
         self.listed.retain(|k, _| k.pc != pc);
+        // Its streams went with the connection (the app drops their decoders).
+        self.streams.retain(|k, _| k.pc != pc);
         self.switch = None;
         self.relist();
     }

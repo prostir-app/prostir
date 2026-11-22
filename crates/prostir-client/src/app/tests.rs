@@ -486,6 +486,32 @@ fn streams_gone_are_dropped() {
     assert!(fx.contains(&Effect::Video(VideoCmd::Drop(k(1)))), "{fx:?}");
 }
 
+/// A session that ends drops every stream of its PC, also one whose end the network
+/// never said: no monitor keeps a decoder of a connection that is gone.
+#[test]
+fn a_session_that_ends_drops_its_streams() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.net(NetEvent::StreamEnd {
+        pc: PC,
+        id: DisplayId(1),
+    });
+    sim.take();
+    sim.net(NetEvent::Ended {
+        step: StepId(1),
+        pc: Some(PC),
+        why: Disconnect::Closed,
+        ended: Ended {
+            opened: true,
+            ..Ended::default()
+        },
+        lasted: Duration::from_secs(60),
+    });
+    let fx = sim.take();
+    assert!(fx.contains(&Effect::Video(VideoCmd::Drop(k(2)))), "{fx:?}");
+    assert!(!sim.m.world().streams(k(2)));
+}
+
 /// Paired again inside the session's opening (the PC had forgotten the headset): the
 /// note says it, as for a PC paired with before its session.
 #[test]

@@ -407,6 +407,33 @@ fn forgetting_leaves_and_drops_the_pc() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Leaving a PC (another picked, say) ends every stream before the connection, also
+/// when the PC's ping crossed the goodbye: nothing is sent any more, and the monitors
+/// must not keep their decoders.
+#[test]
+fn leaving_ends_every_stream() {
+    let dir = temp_dir("leave-streams");
+    let (pc, mut net, rx, _) = start(&dir, false, false);
+    let pc_id = PcId::of(&pc.key());
+    dial(&net, 1, pc.addr());
+    let stream = wait(&rx, |e| match e {
+        NetEvent::StreamStart { pc: p, id, .. } if p == pc_id => Some(id),
+        _ => None,
+    });
+    pc.ping_when_left(true);
+    net.send(NetCmd::Leave(pc_id, HeadsetGoodbye::OtherPc));
+    let seen = until_ended(&rx, 1);
+    assert!(
+        seen.iter().any(
+            |e| matches!(e, NetEvent::StreamEnd { pc: p, id: s } if *p == pc_id && *s == stream)
+        ),
+        "the stream did not end"
+    );
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A PC that takes the connection and the versions, then refuses each request to pair
 /// with `text` (as the PC app does when it has no dialog for the code, or another
 /// headset is pairing): its address and key, and what the headset asked of it, by the
