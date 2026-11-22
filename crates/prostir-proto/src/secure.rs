@@ -157,7 +157,8 @@ pub fn to_hex(bytes: &[u8]) -> String {
         })
 }
 
-fn from_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
+/// `N` bytes from `2 * N` hex digits, else nothing.
+pub fn from_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
     if s.len() != N * 2 {
         return None;
     }

@@ -56,11 +56,12 @@ const PAIR_ATTEMPTS: u32 = 3;
 pub(super) struct Dial {
     pub step: StepId,
     pub to: Dest,
+    /// For [`Dest::LastOf`]: the PC's last address, as the network thread keeps it.
+    pub last: Option<SocketAddr>,
     /// The key of the PC the user agreed to pair with.
     pub pair: Option<[u8; 32]>,
     pub pc_shows_code: bool,
     pub host_file: Option<PathBuf>,
-    pub last_host_file: PathBuf,
     /// The keys of the trusted PCs.
     pub trusted: Vec<[u8; 32]>,
     /// The addresses of the connections already open: never dialed twice (a second
@@ -79,19 +80,9 @@ pub(super) fn dial(d: Dial) {
         )),
         Dest::Addr(a) => Some(*a),
         Dest::HostFile => d.host_file.as_deref().and_then(read_addr),
-        Dest::LastHost => discovery::read_last(&d.last_host_file).map(|(_, addr)| addr),
+        Dest::LastOf(_) => d.last,
     };
     match addr.filter(|a| !d.busy.contains(a)).and_then(try_connect) {
-        Some(stream) => connection(d, stream),
-        None => d.shared.tell(NetEvent::Missed { step: d.step }),
-    }
-}
-
-/// Probes the local network, then goes on as [`dial`] with what answered.
-pub(super) fn scan(d: Dial) {
-    let found =
-        discovery::scan_subnet().filter(|s| s.peer_addr().is_ok_and(|a| !d.busy.contains(&a)));
-    match found {
         Some(stream) => connection(d, stream),
         None => d.shared.tell(NetEvent::Missed { step: d.step }),
     }
@@ -142,15 +133,6 @@ impl Conn {
             }
             Ok(()) => info!("host {addr} closed the connection"),
             Err(e) => warn!("connection to {addr} lost: {e}"),
-        }
-        // Remembered only once the PC proved it is a trusted one: a single connection
-        // to anything else must not redirect the next start.
-        if self.ended.opened
-            && !addr.ip().is_loopback()
-            && let Some(pc) = self.pc
-            && let Err(e) = discovery::keep_last(&self.d.last_host_file, pc, addr)
-        {
-            warn!("cannot keep the last PC's address: {e}");
         }
         let shared = &self.d.shared;
         shared.note(Inbox::Gone { step: self.d.step });
@@ -517,6 +499,15 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
     };
     let mut state = PcState::from_snapshot(&snapshot).map_err(io::Error::from)?;
     conn.ended.opened = true;
+    // Its address, kept only now that the PC proved its key in the handshake and its
+    // session opened: nothing else (an answer, a connection to anything else) may
+    // redirect the next search.
+    if !discovery::is_usb(addr) {
+        shared.note(Inbox::Seen {
+            key: wire.peer.key,
+            addr,
+        });
+    }
     // Just paired: the PC is kept by the name it gives itself.
     if conn.ended.paired
         && let Some(info) = state.info.as_ref().filter(|i| !i.name.is_empty())
@@ -737,6 +728,12 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 shared.tell(NetEvent::Command { pc, req, asked });
             }
             HostMsg::Notice { text } => shared.tell(NetEvent::Notice(pc, text)),
+            // What the next queries ask for this PC with: from this PC's own session
+            // only, kept under its key.
+            HostMsg::FindSecret { secret } => shared.note(Inbox::Secret {
+                key: wire.peer.key,
+                secret,
+            }),
             // Answered at once, from here: the round trip is the network's.
             HostMsg::Ping { seq } => feedback.send(ClientMsg::Pong { seq })?,
             HostMsg::Pong { seq } => feedback.outbox.pong(seq),

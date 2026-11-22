@@ -62,9 +62,11 @@ pub fn build(m: &Model) -> UiState {
         found: search
             .found
             .iter()
-            .map(|h| (h.name.clone(), h.addr.ip().to_string()))
+            // Made when the PC answered (see `Session::heard`).
+            .map(|h| (h.label.clone(), h.ip.clone()))
             .collect(),
         ip_input: menu.ip_input.clone(),
+        hint: search.hint,
         pairing: match &search.attempt {
             Some(Attempt::Pairing { view, .. }) => Some(view.clone()),
             _ => None,

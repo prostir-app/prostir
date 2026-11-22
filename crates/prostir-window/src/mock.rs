@@ -126,6 +126,7 @@ fn base() -> State {
             app: env!("CARGO_PKG_VERSION").into(),
             desktop: String::new(),
             phase: Phase::Idle,
+            addresses: Vec::new(),
         },
         window: WindowLook::default(),
         autostart: Some(true),

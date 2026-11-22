@@ -1,6 +1,5 @@
-//! When the search tries to connect again (see `crate::session`): after a session ends,
-//! and how often it probes the local network for a PC that does not announce itself.
-//! Built and tested on any system.
+//! When the search tries to connect again after a session ends (see
+//! `crate::session`). Built and tested on any system.
 
 #![forbid(unsafe_code)]
 
@@ -44,36 +43,6 @@ impl Ended {
     }
 }
 
-/// The first probe of the local network for a PC that does not announce itself, and
-/// how much longer each next one waits, up to [`PROBE_AT_MOST`].
-pub const PROBE_FIRST: Duration = Duration::from_millis(7500);
-pub const PROBE_AT_MOST: Duration = Duration::from_secs(60);
-
-/// When to probe the local network next: at once when the search starts, then less
-/// and less often while no PC is found (each probe starts 253 short connections).
-#[derive(Debug, Default)]
-pub struct Probing {
-    /// When the next probe is due, and the wait after it; `None` before the first.
-    next: Option<(Instant, Duration)>,
-}
-
-impl Probing {
-    /// Whether to probe at `now`; if so, the next one waits twice as long as the last.
-    pub fn due(&mut self, now: Instant) -> bool {
-        match self.next {
-            Some((at, _)) if now < at => false,
-            Some((_, wait)) => {
-                self.next = Some((now + wait, (wait * 2).min(PROBE_AT_MOST)));
-                true
-            }
-            None => {
-                self.next = Some((now + PROBE_FIRST, PROBE_FIRST * 2));
-                true
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 #[expect(
     clippy::disallowed_methods,
@@ -109,24 +78,5 @@ mod tests {
             ..Ended::default()
         };
         assert!(!refused.retry_at_once(long));
-    }
-
-    #[test]
-    fn probing_backs_off_to_once_a_minute() {
-        let t = Instant::now();
-        let mut probing = Probing::default();
-        let mut at = Vec::new();
-        // Looked at every half second for ten minutes.
-        for k in 0..1200u32 {
-            let now = t + Duration::from_millis(500) * k;
-            if probing.due(now) {
-                at.push((now - t).as_secs_f32());
-            }
-        }
-        assert_eq!(&at[..6], [0.0, 7.5, 22.5, 52.5, 112.5, 172.5]);
-        assert!(at.windows(2).skip(4).all(|w| w[1] - w[0] == 60.0));
-        // A new search starts over.
-        let mut probing = Probing::default();
-        assert!(probing.due(t + Duration::from_secs(1000)));
     }
 }

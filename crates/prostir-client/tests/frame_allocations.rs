@@ -235,6 +235,14 @@ fn connected() -> Loop {
     l.now += Duration::from_millis(1);
     l.m.tick(l.now, &FrameInput::hidden(None));
     l.m.take_effects(&mut l.fx);
+    // The fake PC is asked first; no answer (no find secret yet): then dialed.
+    let asked = l.fx.iter().find_map(|e| match e {
+        Effect::Net(NetCmd::Ask { step, .. }) => Some(*step),
+        _ => None,
+    });
+    if let Some(step) = asked {
+        l.handle(Event::Net(NetEvent::Missed { step }));
+    }
     let step =
         l.fx.iter()
             .find_map(|e| match e {

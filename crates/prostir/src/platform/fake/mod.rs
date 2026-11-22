@@ -141,8 +141,10 @@ pub fn hostname() -> String {
     "fake-pc".into()
 }
 
-pub fn broadcast_addresses() -> Vec<Ipv4Addr> {
-    Vec::new()
+/// An address for the tests to see shown (`192.0.2.10`, an address for
+/// documentation only: nothing is ever sent there).
+pub fn local_addresses() -> Vec<Ipv4Addr> {
+    vec![Ipv4Addr::new(192, 0, 2, 10)]
 }
 
 /// Calls `on_text` with what a test writes to `$XDG_RUNTIME_DIR/NAME`, on a thread

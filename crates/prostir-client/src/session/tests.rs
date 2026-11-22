@@ -69,10 +69,45 @@ impl Sim {
         assert_eq!(cmds.len(), 1, "one step: {cmds:?}");
         let cmd = cmds.into_iter().next().unwrap();
         let step = match &cmd {
-            NetCmd::Dial { step, .. } | NetCmd::Listen { step } | NetCmd::Scan { step } => *step,
+            NetCmd::Dial { step, .. } | NetCmd::Ask { step, .. } => *step,
             other => panic!("not a step: {other:?}"),
         };
         (step, cmd)
+    }
+
+    /// The headset trusts the PCs `ns`, as the network thread says.
+    fn paired(&mut self, ns: &[u8]) {
+        let list = ns
+            .iter()
+            .map(|n| PairedPc {
+                pc: pc(*n),
+                name: format!("PC {n}"),
+            })
+            .collect();
+        self.s.paired_list(list);
+    }
+
+    /// An answer to the query under way: of trusted PC `n`, or (`None`) of one that
+    /// answers everyone.
+    fn answer(&mut self, n: Option<u8>, at: SocketAddr) {
+        let host = found(
+            n.map_or_else(|| "Desk".into(), |n| format!("PC {n}")),
+            at,
+            n.map(pc),
+            self.now,
+        );
+        self.s.heard(host, self.now, &self.texts);
+    }
+
+    /// The step is a query, sent around (and to `also`); whether it carries the name.
+    fn asked(&mut self, also: Option<SocketAddr>) -> (StepId, bool) {
+        match self.step() {
+            (s, NetCmd::Ask { to, pairing, .. }) => {
+                assert_eq!(to, AskTo::Around { also });
+                (s, pairing)
+            }
+            other => panic!("not a query: {other:?}"),
+        }
     }
 
     fn missed(&mut self, step: StepId) {
@@ -91,6 +126,38 @@ impl Sim {
     }
 }
 
+/// An answer as the network thread tells it.
+fn found(name: String, addr: SocketAddr, pc: Option<PcId>, heard: Instant) -> FoundHost {
+    FoundHost {
+        name,
+        addr,
+        pc,
+        pairing: false,
+        heard,
+        at_last: false,
+        label: String::new(),
+        ip: String::new(),
+    }
+}
+
+/// Every step asked for meanwhile is missed, and so is each that follows: what was
+/// asked for, in order.
+fn miss_all(sim: &mut Sim) -> Vec<NetCmd> {
+    let mut all = Vec::new();
+    loop {
+        let cmds = sim.cmds();
+        if cmds.is_empty() {
+            return all;
+        }
+        for cmd in cmds {
+            if let NetCmd::Ask { step, .. } | NetCmd::Dial { step, .. } = &cmd {
+                sim.missed(*step);
+            }
+            all.push(cmd);
+        }
+    }
+}
+
 fn dest(cmd: &NetCmd) -> Dest {
     match cmd {
         NetCmd::Dial { to, .. } => *to,
@@ -98,48 +165,104 @@ fn dest(cmd: &NetCmd) -> Dest {
     }
 }
 
-/// A round goes: USB, the typed address, the last PC's, listening, the one PC heard, a
-/// probe of the network; then a pause, and again.
+/// A round goes: USB, a query, the typed address, the trusted PC's last address; then
+/// a pause until the next query is due (a second at first). The last address goes
+/// once in ten seconds at most. A late word about an older step changes nothing.
 #[test]
 fn a_round_tries_each_way_in_turn() {
     let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
     sim.after(MS);
     let (s, cmd) = sim.step();
     assert_eq!(dest(&cmd), Dest::Usb);
+    sim.missed(s);
+    let (s, pairing) = sim.asked(None);
+    assert!(!pairing, "a trusted PC: the query carries no name");
     sim.missed(s);
     let (s, cmd) = sim.step();
     assert_eq!(dest(&cmd), Dest::HostFile);
     sim.missed(s);
     let (s, cmd) = sim.step();
-    assert_eq!(dest(&cmd), Dest::LastHost);
-    sim.missed(s);
-    let (s, cmd) = sim.step();
-    assert!(matches!(cmd, NetCmd::Listen { .. }));
-    sim.missed(s);
-    // Nobody heard: no sole PC; the first probe of the network is due at once.
-    let (s, cmd) = sim.step();
-    assert!(matches!(cmd, NetCmd::Scan { .. }));
+    assert_eq!(dest(&cmd), Dest::LastOf(pc(1)), "its last address, at once");
     sim.missed(s);
     assert!(sim.cmds().is_empty(), "a pause");
-    sim.after(RETRY_PAUSE - MS);
+    sim.after(ASK_FAST - Duration::from_millis(2));
     assert!(sim.cmds().is_empty());
-    sim.after(MS);
+    sim.after(Duration::from_millis(2));
     let (s, cmd) = sim.step();
     assert_eq!(dest(&cmd), Dest::Usb);
-    // A late word about an older step changes nothing.
     sim.missed(StepId(1));
     assert!(sim.cmds().is_empty());
     sim.missed(s);
-    let (s, _) = sim.step();
-    // One PC heard: the round tries it after the files; the probe is not due again yet.
-    sim.s.hosts(vec![FoundHost {
-        name: "Desk".into(),
-        addr: addr(7),
-    }]);
+    let (s, _) = sim.asked(None);
     sim.missed(s);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::HostFile);
+    sim.missed(s);
+    assert!(
+        sim.cmds().is_empty(),
+        "the last address not again within 10 s"
+    );
+    // Ten seconds on, the last address again.
+    let mut last = 0;
+    for _ in 0..10 {
+        sim.after(ASK_FAST);
+        last += miss_all(&mut sim)
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    NetCmd::Dial {
+                        to: Dest::LastOf(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+    }
+    assert_eq!(last, 1, "once in ten seconds");
+}
+
+/// A trusted PC's answer leads to its connection at once, while the query still waits
+/// for more; the one PC that answers everyone is dialed at the end of the round, and
+/// refusing the connection, it is most likely behind a firewall.
+#[test]
+fn answers_lead_to_the_pc() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
     let (s, _) = sim.step();
     sim.missed(s);
+    let (_, _) = sim.asked(None);
+    sim.answer(Some(1), addr(5));
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(5)), "at once");
+    sim.reach(s, 1, addr(5));
+    assert_eq!(sim.s.host(), Some("PC 1"), "named as it answered");
+    let _ = sim.cmds();
+    // A session: no queries at all, however long.
+    for _ in 0..60 {
+        sim.after(Duration::from_secs(1));
+        assert!(sim.cmds().is_empty(), "nothing asked during a session");
+    }
+    // Unpaired, one PC answers everyone: it is dialed after the typed address.
+    let mut sim = Sim::new(MAX_PCS);
+    sim.after(MS);
     let (s, _) = sim.step();
+    sim.missed(s);
+    let (s, pairing) = sim.asked(None);
+    assert!(
+        pairing,
+        "no trusted PC: the query carries the headset's name"
+    );
+    sim.answer(None, addr(7));
+    assert!(
+        sim.cmds().is_empty(),
+        "an unknown PC waits for the end of the query"
+    );
+    sim.missed(s);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::HostFile);
     sim.missed(s);
     let (s, cmd) = sim.step();
     assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
@@ -147,27 +270,155 @@ fn a_round_tries_each_way_in_turn() {
     assert_eq!(
         sim.s.search().unreachable.as_deref(),
         Some("Desk"),
-        "heard but refusing: a firewall"
+        "it answers but refuses: a firewall"
     );
-    assert!(sim.cmds().is_empty(), "no probe yet");
+    // Two of them: none is picked for the user.
+    sim.after(ASK_FAST);
+    let (s, _) = sim.step();
+    sim.missed(s);
+    let (s, _) = sim.asked(None);
+    sim.answer(None, addr(7));
+    sim.answer(None, addr(8));
+    sim.missed(s);
+    let (s, _) = sim.step();
+    sim.missed(s);
+    assert!(sim.cmds().is_empty(), "two PCs: the user picks");
+    assert_eq!(sim.s.search().found.len(), 2);
+    // Answers go from the list once not heard for a while.
+    sim.after(HEARD_WITHIN);
+    assert!(sim.s.search().found.is_empty());
 }
 
-/// The selftest's fake PC is the only address dialed, again and again.
+/// Once a second for the first 30 s of a search, then every 3 s.
 #[test]
-fn the_selftest_dials_its_fake_pc_alone() {
+fn queries_go_less_often_after_a_while() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    let mut asked = Vec::new();
+    let start = sim.now;
+    for _ in 0..600 {
+        sim.after(Duration::from_millis(100));
+        let at = (sim.now - start).as_secs_f32().round() as u32;
+        for cmd in miss_all(&mut sim) {
+            if matches!(cmd, NetCmd::Ask { .. }) {
+                asked.push(at);
+            }
+        }
+    }
+    let early: Vec<u32> = asked.iter().copied().filter(|t| *t <= 30).collect();
+    assert!(early.len() >= 29, "about once a second: {early:?}");
+    let late: Vec<u32> = asked.iter().copied().filter(|t| *t > 33).collect();
+    assert!(
+        late.windows(2).all(|w| w[1] - w[0] == 3),
+        "every 3 s: {late:?}"
+    );
+}
+
+/// The hints: without a trusted PC, five seconds without an answer say how to make
+/// the PC answer, until one answers; with one, thirty seconds of its silence say it
+/// does not answer, until it does.
+#[test]
+fn the_search_says_why_nothing_comes() {
+    let mut sim = Sim::new(MAX_PCS);
+    let answer_all = |sim: &mut Sim| {
+        miss_all(sim);
+    };
+    sim.after(MS);
+    for _ in 0..48 {
+        answer_all(&mut sim);
+        sim.after(Duration::from_millis(100));
+    }
+    assert_eq!(sim.s.search().hint, None, "not yet");
+    for _ in 0..3 {
+        answer_all(&mut sim);
+        sim.after(Duration::from_millis(100));
+    }
+    assert_eq!(sim.s.search().hint, Some(Hint::NewPc));
+    sim.answer(None, addr(7));
+    sim.after(MS);
+    assert_eq!(sim.s.search().hint, None, "a PC answered");
+    // Trusted: silent for 30 s.
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    for _ in 0..290 {
+        answer_all(&mut sim);
+        sim.after(Duration::from_millis(100));
+    }
+    assert_eq!(
+        sim.s.search().hint,
+        None,
+        "not yet, and never the one for a new PC"
+    );
+    for _ in 0..20 {
+        answer_all(&mut sim);
+        sim.after(Duration::from_millis(100));
+    }
+    assert_eq!(sim.s.search().hint, Some(Hint::Silent));
+    sim.answer(Some(1), addr(5));
+    sim.after(MS);
+    assert_eq!(sim.s.search().hint, None, "it answered");
+    // "Change PC" with a trusted PC: the hint for a new one.
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.s.change_pc();
+    sim.after(MS);
+    for _ in 0..60 {
+        answer_all(&mut sim);
+        sim.after(Duration::from_millis(100));
+    }
+    assert_eq!(sim.s.search().hint, Some(Hint::NewPc));
+}
+
+/// The selftest's fake PC is the only one asked and dialed: asked first, dialed
+/// whether it answered or not, and again at once when it answers.
+#[test]
+fn the_selftest_asks_its_fake_pc_alone() {
     let now = Instant::now();
     let mut s = Session::new(MAX_PCS, Some(addr(9)), now);
     s.tick(now);
     let cmds: Vec<NetCmd> = s.take_cmds().collect();
+    let [NetCmd::Ask { step, to, .. }] = cmds.as_slice() else {
+        panic!("{cmds:?}");
+    };
+    assert_eq!(*to, AskTo::Exactly(addr(9)));
+    s.missed(*step, now);
+    let cmds: Vec<NetCmd> = s.take_cmds().collect();
     let [NetCmd::Dial { step, to, .. }] = cmds.as_slice() else {
         panic!("{cmds:?}");
     };
-    assert_eq!(*to, Dest::Addr(addr(9)));
+    assert_eq!(
+        *to,
+        Dest::Addr(addr(9)),
+        "not answered: dialed all the same"
+    );
     s.missed(*step, now);
     assert_eq!(s.take_cmds().count(), 0);
-    s.tick(now + RETRY_PAUSE);
+    let later = now + ASK_FAST;
+    s.tick(later);
     let cmds: Vec<NetCmd> = s.take_cmds().collect();
-    assert!(matches!(cmds.as_slice(), [NetCmd::Dial { to: Dest::Addr(a), .. }] if *a == addr(9)));
+    let [NetCmd::Ask { .. }] = cmds.as_slice() else {
+        panic!("{cmds:?}");
+    };
+    s.heard(
+        found("Prostir selftest".into(), addr(9), Some(pc(1)), later),
+        later,
+        &lang::builtin("en"),
+    );
+    let cmds: Vec<NetCmd> = s.take_cmds().collect();
+    assert!(
+        matches!(cmds.as_slice(), [NetCmd::Dial { to: Dest::Addr(a), .. }] if *a == addr(9)),
+        "{cmds:?}"
+    );
+    assert_eq!(s.search().hint, None, "no hint in the selftest");
+    // Against a real PC over USB: never asked, dialed straight away.
+    let mut s = Session::new(MAX_PCS, Some(usb()), now);
+    s.tick(now);
+    let cmds: Vec<NetCmd> = s.take_cmds().collect();
+    assert!(
+        matches!(cmds.as_slice(), [NetCmd::Dial { to: Dest::Addr(a), .. }] if *a == usb()),
+        "{cmds:?}"
+    );
 }
 
 /// Connected, the search stops (one PC at a time); the session ending starts it again,
@@ -240,10 +491,6 @@ fn after_a_session_the_search_rests_as_it_ended() {
 #[test]
 fn an_unknown_pc_waits_for_the_users_answer() {
     let mut sim = Sim::new(MAX_PCS);
-    sim.s.hosts(vec![FoundHost {
-        name: "Desk".into(),
-        addr: addr(7),
-    }]);
     sim.after(MS);
     let (s, _) = sim.step();
     sim.s.dialed(s, usb());
@@ -297,7 +544,7 @@ fn an_unknown_pc_waits_for_the_users_answer() {
     sim.after(APPROVAL);
     let (_, cmd) = sim.step();
     assert!(matches!(cmd, NetCmd::Dial { pair: None, .. }));
-    // "Not now": wait for the user to pick a PC, listening only.
+    // "Not now": wait for the user to pick a PC, only asking (to list the PCs).
     let mut sim = Sim::new(MAX_PCS);
     sim.after(MS);
     let (s, _) = sim.step();
@@ -307,8 +554,10 @@ fn an_unknown_pc_waits_for_the_users_answer() {
     sim.end(s, None, &Ended::default(), MS);
     sim.s.answer_offer(false, sim.now);
     sim.after(RETRY_PAUSE);
-    let (_, cmd) = sim.step();
-    assert!(matches!(cmd, NetCmd::Listen { .. }), "{cmd:?}");
+    let (s, pairing) = sim.asked(None);
+    assert!(pairing);
+    sim.missed(s);
+    assert!(sim.cmds().is_empty(), "nothing dialed");
 }
 
 /// The user's picks: another PC is tried first and the one in use left; "Change PC"
@@ -329,25 +578,23 @@ fn the_users_picks_steer_the_search() {
     let (s, cmd) = sim.step();
     assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
     sim.missed(s);
-    let (s, cmd) = sim.step();
-    assert!(matches!(cmd, NetCmd::Listen { .. }));
+    // Asked straight too (a VPN address gets no broadcast).
+    let (s, _) = sim.asked(Some(addr(7)));
     sim.missed(s);
-    assert!(
-        sim.cmds().is_empty(),
-        "its choice unreachable: only listening"
-    );
+    assert!(sim.cmds().is_empty(), "its choice unreachable: only asking");
     // The choice answers this time.
-    sim.after(RETRY_PAUSE);
+    sim.after(ASK_FAST);
     let (s, _) = sim.step();
     sim.reach(s, 2, addr(7));
     let _ = sim.cmds();
     sim.s.change_pc();
     assert_eq!(sim.cmds(), [NetCmd::Leave(pc(2), HeadsetGoodbye::OtherPc)]);
     sim.end(s, Some(2), &Ended::default(), Duration::from_secs(9));
-    sim.after(RETRY_PAUSE);
-    let (s, cmd) = sim.step();
-    assert!(matches!(cmd, NetCmd::Listen { .. }), "picking: no USB");
+    sim.after(ASK_FAST);
+    let (s, pairing) = sim.asked(None);
+    assert!(pairing, "picking another PC: the query carries the name");
     sim.missed(s);
+    assert!(sim.cmds().is_empty(), "picking: no USB, nothing dialed");
     sim.s.connect_to(usb(), sim.now);
     sim.after(Duration::ZERO);
     let (s, cmd) = sim.step();
@@ -357,12 +604,12 @@ fn the_users_picks_steer_the_search() {
     sim.s.forget(pc(1));
     assert_eq!(sim.cmds(), [NetCmd::Forget(pc(1))]);
     sim.end(s, Some(1), &Ended::default(), Duration::from_secs(9));
-    sim.after(RETRY_PAUSE);
-    let (_, cmd) = sim.step();
-    assert!(
-        matches!(cmd, NetCmd::Listen { .. }),
-        "forgotten: not back on its own"
-    );
+    sim.after(ASK_FAST);
+    let (s, _) = sim.asked(None);
+    // Even should it still answer (its answer has no trusted tag now): not dialed.
+    sim.answer(None, usb());
+    sim.missed(s);
+    assert!(sim.cmds().is_empty(), "forgotten: not back on its own");
 }
 
 /// Taken off, the search does not connect (the PC can give its desktop back to the
@@ -377,10 +624,12 @@ fn off_the_head_nothing_connects() {
     sim.after(MS);
     let (s, _) = sim.step();
     sim.s.set_worn(false);
-    // The step under way goes on; its end does not start another.
+    // The step under way goes on; its end does not start another, and nothing is
+    // asked.
     sim.missed(s);
     sim.after(Duration::from_secs(5));
     assert!(sim.cmds().is_empty());
+    assert_eq!(sim.s.search().hint, None, "no hint off the head");
 }
 
 /// The menu's requests belong to the PC asked: without one nothing is sent; a
@@ -439,15 +688,19 @@ fn requests_time_out_without_frames() {
 #[test]
 fn two_links_keep_apart() {
     let mut sim = Sim::new(2);
+    sim.paired(&[1, 2]);
     sim.after(MS);
     let (s1, _) = sim.step();
     sim.reach(s1, 1, usb());
     assert_eq!(sim.cmds(), [NetCmd::MediaTo(Some(pc(1)))]);
-    // The search goes on for a second PC.
+    // The search goes on for a second PC: it answers.
     sim.after(RETRY_PAUSE);
     let (s, _) = sim.step();
     sim.missed(s);
-    let (s2, _) = sim.step();
+    let (_, _) = sim.asked(None);
+    sim.answer(Some(2), addr(7));
+    let (s2, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
     assert_ne!(s1, s2);
     sim.reach(s2, 2, addr(7));
     assert!(sim.cmds().is_empty(), "the media stay with the first");
@@ -479,14 +732,13 @@ fn two_links_keep_apart() {
     sim.after(MS);
     let (s, _) = sim.step();
     sim.reach(s, 1, usb());
-    sim.s.hosts(vec![FoundHost {
-        name: "Other".into(),
-        addr: addr(8),
-    }]);
+    sim.answer(Some(2), addr(8));
     let _ = sim.cmds();
-    sim.after(Duration::from_secs(30));
+    sim.after(Duration::from_secs(1));
     assert!(sim.cmds().is_empty(), "the other PC only listed");
     assert_eq!(sim.s.search().found.len(), 1);
+    sim.after(Duration::from_secs(30));
+    assert!(sim.cmds().is_empty(), "and nothing asked");
 }
 
 /// The PC forgot the headset: it asks to pair again when the session opens, inside the
@@ -517,4 +769,136 @@ fn pairing_again_inside_the_link() {
     sim.s.connected_to(pc(1), usb(), &sim.texts);
     assert!(sim.s.search().attempt.is_none(), "the pairing is over");
     assert!(sim.s.connected(pc(1)));
+}
+
+/// With a trusted PC, one that answers everyone is listed but not dialed on its own;
+/// "Not now" to an unknown PC leaves that one alone, and the trusted PC is still
+/// connected to by itself.
+#[test]
+fn trusted_pcs_go_on_after_not_now() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.missed(s);
+    let (s, _) = sim.asked(None);
+    sim.answer(None, addr(7));
+    sim.missed(s);
+    for cmd in miss_all(&mut sim) {
+        assert!(
+            !matches!(cmd, NetCmd::Dial { to: Dest::Addr(a), .. } if a == addr(7)),
+            "not dialed: a trusted PC is waited for"
+        );
+    }
+    assert_eq!(sim.s.search().found.len(), 1, "listed");
+    // An unknown PC over USB: offered, and "Not now".
+    sim.after(ASK_FAST);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    sim.s.dialed(s, usb());
+    sim.s.offered(key(5), usb(), OfferWhy::New, &sim.texts);
+    sim.end(s, None, &Ended::default(), MS);
+    sim.s.answer_offer(false, sim.now);
+    sim.after(ASK_FAST);
+    // USB is not dialed again; the query goes, and the trusted PC's answer is taken.
+    let (_, pairing) = sim.asked(None);
+    assert!(!pairing, "not looking for a new PC");
+    sim.answer(Some(1), addr(5));
+    let (_, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(5)));
+}
+
+/// A PC that answers again keeps its place in the list (a press picks the PC shown),
+/// and the list says what it shows once, when the answer comes; the time alone
+/// changing the list or the hint is told.
+#[test]
+fn the_list_keeps_its_order() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.after(MS);
+    let mut pairing = found("Desk".into(), addr(7), None, sim.now);
+    pairing.pairing = true;
+    sim.s.heard(pairing, sim.now, &sim.texts);
+    sim.answer(None, addr(8));
+    sim.now += Duration::from_secs(2);
+    sim.answer(None, addr(7));
+    let listed: Vec<_> = sim
+        .s
+        .search()
+        .found
+        .iter()
+        .map(|h| (h.addr, h.label.as_str(), h.ip.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (addr(7), "Desk", "192.168.1.7"),
+            (addr(8), "Desk", "192.168.1.8")
+        ]
+    );
+    let mut open = found("Desk".into(), addr(8), None, sim.now);
+    open.pairing = true;
+    sim.s.heard(open, sim.now, &sim.texts);
+    assert_eq!(sim.s.search().found[1].label, "Desk · pairing open");
+    // While the answers are fresh, nothing changes with the time.
+    assert!(!sim.s.tick(sim.now), "nothing changed");
+    sim.now += HEARD_WITHIN;
+    assert!(sim.s.tick(sim.now), "the answers went: the menu changes");
+    assert!(sim.s.search().found.is_empty());
+}
+
+/// A decline is the PC's, not its address's: a trusted PC's answer from the address of
+/// a PC declined is taken; the declined PC offered again is let go without asking.
+/// A trusted PC's answer from its last address stays before a copy from elsewhere.
+#[test]
+fn a_decline_is_the_pcs_and_the_last_address_wins() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.s.dialed(s, usb());
+    sim.s.offered(key(5), usb(), OfferWhy::New, &sim.texts);
+    sim.end(s, None, &Ended::default(), MS);
+    sim.s.answer_offer(false, sim.now);
+    // The declined PC comes again (another way): let go, nothing asked.
+    sim.s.offered(key(5), addr(9), OfferWhy::New, &sim.texts);
+    assert!(sim.s.search().attempt.is_none());
+    assert_eq!(sim.cmds(), [NetCmd::Hangup]);
+    // The trusted PC answers.
+    sim.after(ASK_FAST);
+    let (_, _) = sim.asked(None);
+    let mut at_last = found("PC 1".into(), addr(5), Some(pc(1)), sim.now);
+    at_last.at_last = true;
+    // First a copy of its answer from elsewhere, then from its last address.
+    sim.s.heard(
+        found("PC 1".into(), addr(6), Some(pc(1)), sim.now),
+        sim.now,
+        &sim.texts,
+    );
+    let (_, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(6)), "the only one so far");
+    sim.s.heard(at_last, sim.now, &sim.texts);
+    sim.s.heard(
+        found("PC 1".into(), addr(6), Some(pc(1)), sim.now),
+        sim.now,
+        &sim.texts,
+    );
+    let listed: Vec<_> = sim.s.search().found.iter().map(|h| h.addr).collect();
+    assert_eq!(listed, [addr(5)], "its last address kept");
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.s.dialed(s, usb());
+    sim.s.offered(key(5), usb(), OfferWhy::New, &sim.texts);
+    sim.end(s, None, &Ended::default(), MS);
+    sim.s.answer_offer(false, sim.now);
+    sim.after(ASK_FAST);
+    let (_, _) = sim.asked(None);
+    sim.answer(Some(1), usb());
+    let (_, cmd) = sim.step();
+    assert_eq!(
+        dest(&cmd),
+        Dest::Addr(usb()),
+        "a trusted PC at the declined address"
+    );
 }

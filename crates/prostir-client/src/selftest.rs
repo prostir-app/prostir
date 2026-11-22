@@ -217,6 +217,9 @@ pub struct Measured {
     pub keyframe_asked_ms: Option<f64>,
     pub decoder_recovered_ms: Option<f64>,
     pub reconnect_ms: Option<f64>,
+    /// The fake PC's answers to the headset's queries (with its tag): once the first
+    /// session gave its find secret, the headset finds it by asking.
+    pub queries_answered: u32,
     /// A stream started over without its keyframe, the PC ignoring the first ask for
     /// one: until its first picture.
     pub unfreeze_ms: Option<f64>,
@@ -228,9 +231,9 @@ pub struct Measured {
 
 /// The limits (step 7 note, 10.3 and 7): first pictures, asking for a keyframe, the
 /// decoder's recovery and a picture after a lost ask for a keyframe within 1 s (the
-/// clips come round to their keyframe only every 2 s), reconnecting within 3 s, a
-/// frame's work p95 within 0.15 and p99 within 0.3 of the display period. The menu's
-/// redraw is only recorded. What failed, in words.
+/// clips come round to their keyframe only every 2 s), reconnecting within 3 s (and
+/// by asking: a query answered), a frame's work p95 within 0.15 and p99 within 0.3 of
+/// the display period. The menu's redraw is only recorded. What failed, in words.
 pub fn check(m: &Measured) -> Vec<String> {
     let mut fails = Vec::new();
     let mut within = |what: &str, value: Option<f64>, limit: f64| match value {
@@ -250,6 +253,9 @@ pub fn check(m: &Measured) -> Vec<String> {
     within("stream_unfreeze_ms", m.unfreeze_ms, 1000.0);
     within("frame_cpu_share.p95", m.frame_share_p95, 0.15);
     within("frame_cpu_share.p99", m.frame_share_p99, 0.3);
+    if m.queries_answered == 0 {
+        fails.push("queries_answered 0: the fake PC was not found by asking".to_owned());
+    }
     fails
 }
 
@@ -582,6 +588,7 @@ mod tests {
             keyframe_asked_ms: Some(20.0),
             decoder_recovered_ms: Some(95.0),
             reconnect_ms: Some(1300.0),
+            queries_answered: 1,
             unfreeze_ms: Some(450.0),
             frame_share_p95: Some(0.12),
             frame_share_p99: Some(0.2),
@@ -599,7 +606,7 @@ mod tests {
                 "reconnect_ms 3500.00 over 3000"
             ]
         );
-        assert_eq!(check(&Measured::default()).len(), 7);
+        assert_eq!(check(&Measured::default()).len(), 8);
     }
 
     /// Against a real PC only the first pictures and the frame's work are checked.

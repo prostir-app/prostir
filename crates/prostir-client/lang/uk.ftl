@@ -52,6 +52,14 @@ connect-found = Знайдено
 connect-blocked = видно в мережі, але з'єднання блокується.
 connect-allow-port = Дозвольте в брандмауері ПК порт TCP 47830.
 connect-type-ip = Ввести IP вручну
+connect-new-title = Не бачу ПК з Prostir
+connect-new-pair = На ПК відкрийте меню Prostir і натисніть «Сполучити новий шолом».
+connect-or-type = Або введіть адресу ПК: її видно у вікні Prostir на ПК.
+connect-or-usb = Або під'єднайте шолом до ПК кабелем USB.
+connect-silent-title = ПК не відповідає
+connect-silent-check = Перевірте, що Prostir працює на ПК і ПК у тій самій мережі.
+# Після назви ПК у списку знайдених
+connect-pairing-open = сполучення відкрите
 key-delete = Стерти
 key-done = Готово
 

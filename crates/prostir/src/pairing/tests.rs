@@ -140,7 +140,10 @@ impl TestPc {
         let security = Security {
             identity: Identity::load_or_create(&dir.join("key")).unwrap(),
             trusted: Mutex::new(TrustStore::load(&dir.join("trusted"))),
-            find: Mutex::new([5; 32]),
+            find: Mutex::new(FindSecrets {
+                current: [5; 32],
+                ..FindSecrets::default()
+            }),
             find_file: find_secret_file(&dir),
         };
         Self { dir, security }
@@ -158,16 +161,85 @@ fn the_find_secret_is_kept_and_made_anew_on_purpose_only() {
     let security = Security {
         identity: Identity::load_or_create(&pc.dir.join("key")).unwrap(),
         trusted: Mutex::new(TrustStore::load(&pc.dir.join("trusted"))),
-        find: Mutex::new(first),
+        find: Mutex::new(load_find_secrets(&path).unwrap()),
         find_file: path.clone(),
     };
-    let second = security.new_find_secret();
+    let second = security.new_find_secret(&[], |_| false);
     assert_ne!(second, first);
     assert_eq!(security.find_secret(), second);
     assert_eq!(load_find_secret(&path).unwrap(), second, "written");
     std::fs::write(&path, "not hex\n").unwrap();
     assert!(load_find_secret(&path).is_err(), "not replaced silently");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "not hex\n");
+}
+
+/// Forgetting a headset makes a new secret; the old one stays valid for each trusted
+/// headset that was not in a session then, until it gets the new one or is forgotten
+/// too, and that is kept across a restart (in a file of its own, so `find_secret`
+/// reads as before).
+#[test]
+fn an_old_find_secret_stays_valid_for_headsets_that_were_off() {
+    let pc = TestPc::new("find-owed");
+    let path = find_secret_file(&pc.dir);
+    let (on, off, other_off, gone) = ([1; 32], [2; 32], [3; 32], [4; 32]);
+    let first = load_find_secret(&path).unwrap();
+    let security = Security {
+        identity: Identity::load_or_create(&pc.dir.join("key")).unwrap(),
+        trusted: Mutex::new(TrustStore::load(&pc.dir.join("trusted"))),
+        find: Mutex::new(load_find_secrets(&path).unwrap()),
+        find_file: path.clone(),
+    };
+    for key in [on, off, other_off] {
+        security.trusted.lock().unwrap().add(key, "h").unwrap();
+    }
+    // `gone` was forgotten (no longer trusted); `on` is in a session.
+    let second = security.new_find_secret(&[gone], |k| *k == on);
+    let valid = security.find_secrets();
+    assert_eq!(valid.current, second);
+    assert_eq!(
+        valid.stale(),
+        [first],
+        "still valid for the headsets that were off"
+    );
+    let kept = load_find_secrets(&path).unwrap();
+    assert_eq!(kept.current, second);
+    assert_eq!(
+        kept.owed.keys().copied().collect::<Vec<_>>(),
+        [off, other_off]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap().trim().len(),
+        64,
+        "find_secret holds the current one alone"
+    );
+    // Forgetting another while `off` is still away: `off` keeps the first one valid,
+    // `other_off` (forgotten now) does not.
+    security.trusted.lock().unwrap().remove(&other_off).unwrap();
+    let third = security.new_find_secret(&[other_off], |k| *k == on);
+    let kept = load_find_secrets(&path).unwrap();
+    assert_eq!(kept.current, third);
+    assert_eq!(kept.owed.get(&off).map(|(s, _)| *s), Some(first));
+    assert!(!kept.owed.contains_key(&other_off));
+    assert_eq!(security.find_secrets().stale(), [first]);
+    // Should more old secrets be owed than are kept, the newest are.
+    let mut many = FindSecrets {
+        current: [0; 32],
+        ..FindSecrets::default()
+    };
+    for i in 1..=6u8 {
+        many.renew([i; 32], [[i; 32]]);
+    }
+    let newest = many.valid();
+    assert_eq!(newest.current, [6; 32]);
+    assert_eq!(
+        newest.stale(),
+        [[5; 32], [4; 32], [3; 32], [2; 32]],
+        "the newest four"
+    );
+    // `off` connects and gets the current one: no old secret is valid any more.
+    security.gave_find_secret(&off);
+    assert!(security.find_secrets().stale().is_empty());
+    assert!(!owed_file(&path).exists(), "nothing owed, no file");
 }
 
 impl Drop for TestPc {

@@ -94,7 +94,13 @@ struct Sim {
 }
 
 impl Sim {
+    /// The model of a selftest: its fake PC is the only address asked and dialed.
     fn new() -> Self {
+        Self::with(Some(addr()))
+    }
+
+    /// The model, with `only` its fake PC or (`None`) searching the network.
+    fn with(only: Option<SocketAddr>) -> Self {
         let now = Instant::now();
         let m = Model::new(Start {
             now,
@@ -115,7 +121,7 @@ impl Sim {
                 update_from: crate::store::NoStore.update_hint(),
             },
             mic_permission: permission::UNKNOWN,
-            only: Some(addr()),
+            only,
         });
         let mut sim = Self {
             m,
@@ -197,14 +203,20 @@ impl Sim {
     /// `monitors` listed and streaming; the effects so far are taken.
     fn connect(&mut self, monitors: &[u32]) {
         self.after(MS);
-        let step = self
-            .take()
-            .into_iter()
-            .find_map(|e| match e {
-                Effect::Net(NetCmd::Dial { step, .. }) => Some(step),
-                _ => None,
-            })
-            .expect("the round dials the only address");
+        // The fake PC is asked first; no answer (it gave no find secret yet): dialed.
+        let mut step = None;
+        for _ in 0..2 {
+            for e in self.take() {
+                match e {
+                    Effect::Net(NetCmd::Ask { step: s, .. }) => {
+                        self.net(NetEvent::Missed { step: s });
+                    }
+                    Effect::Net(NetCmd::Dial { step: s, .. }) => step = Some(s),
+                    _ => {}
+                }
+            }
+        }
+        let step = step.expect("the round dials the only address");
         self.net(NetEvent::Dialed { step, addr: addr() });
         self.net(NetEvent::Reached {
             step,
@@ -700,4 +712,73 @@ fn a_drag_tells_the_menu_only_what_it_shows() {
     // Let go: the map shows the desktop anew.
     assert!(step(&mut sim, &mut hands, 0.0, left) > 0);
     assert!(!sim.m.world().holding());
+}
+
+/// The connection screen follows the time alone: with no trusted PC and no answer, the
+/// hint for a new PC after 5 s; a PC that answered leaves the list 6 s after its answer;
+/// with a trusted PC silent for 30 s, the hint that it does not answer. Each time the
+/// model says so (the view check of every step guards it).
+#[test]
+fn the_search_screen_follows_the_time() {
+    use crate::session::{FoundHost, Hint, PairedPc};
+    let mut sim = Sim::with(None);
+    let miss_all = |sim: &mut Sim| {
+        for e in sim.take() {
+            if let Effect::Net(NetCmd::Ask { step, .. } | NetCmd::Dial { step, .. }) = e {
+                sim.net(NetEvent::Missed { step });
+            }
+        }
+    };
+    let hint = |sim: &Sim| crate::view::build(&sim.m).hint;
+    for _ in 0..48 {
+        sim.after(100 * MS);
+        miss_all(&mut sim);
+    }
+    assert_eq!(hint(&sim), None);
+    for _ in 0..4 {
+        sim.after(100 * MS);
+        miss_all(&mut sim);
+    }
+    assert_eq!(hint(&sim), Some(Hint::NewPc));
+    // A PC answers everyone: listed, the hint gone; 6 s later it is gone again.
+    sim.net(NetEvent::Heard(FoundHost {
+        name: "Desk".into(),
+        addr: addr(),
+        pc: None,
+        pairing: true,
+        heard: sim.now,
+        at_last: false,
+        label: String::new(),
+        ip: String::new(),
+    }));
+    let view = crate::view::build(&sim.m);
+    assert_eq!(view.hint, None);
+    assert_eq!(
+        view.found,
+        [("Desk · pairing open".to_owned(), "192.168.1.20".to_owned())]
+    );
+    miss_all(&mut sim);
+    for _ in 0..61 {
+        sim.after(100 * MS);
+        miss_all(&mut sim);
+    }
+    let view = crate::view::build(&sim.m);
+    assert!(view.found.is_empty(), "6 s after its answer");
+    assert_eq!(view.hint, Some(Hint::NewPc));
+    // A trusted PC that does not answer: after 30 s, the hint says so.
+    let mut sim = Sim::with(None);
+    sim.net(NetEvent::Paired(vec![PairedPc {
+        pc: PC,
+        name: "Desk".into(),
+    }]));
+    for _ in 0..290 {
+        sim.after(100 * MS);
+        miss_all(&mut sim);
+    }
+    assert_eq!(hint(&sim), None);
+    for _ in 0..20 {
+        sim.after(100 * MS);
+        miss_all(&mut sim);
+    }
+    assert_eq!(hint(&sim), Some(Hint::Silent));
 }

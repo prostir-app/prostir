@@ -949,9 +949,6 @@ fn full_with(
             pairing_open.clone(),
             events.clone(),
         )?;
-        if !args.no_beacon {
-            find::spawn_beacon(port)?;
-        }
     }
     let tray = tray::spawn(events.clone());
     // The local API: requests come in as events, what the control loop says goes out.

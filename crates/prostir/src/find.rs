@@ -1,29 +1,149 @@
-//! Answering the headsets that ask for this PC (see `prostir_proto::discovery`), and
-//! the PC's beacon until the headset asks instead (step 7 of 0.2.0).
+//! Answering the headsets that ask for this PC (see `prostir_proto::discovery`). The
+//! PC sends nothing on its own: no beacon, so nothing of it wakes while nobody asks.
 //!
 //! The PC answers every query while it has no paired headset or while its pairing
 //! window is open, and otherwise only a query with its own tag. The same rules hold in
 //! the full program (the `find` thread here), in the light phase it starts with under
 //! systemd and in the sockets' watcher (`crate::wake`): [`Responder`] is all of them.
+//!
+//! # What a stranger on the network gets (the threat model)
+//!
+//! Someone on the network (or anywhere a datagram reaches the PC from, a VPN too) may
+//! send anything to the discovery port, from any address, as often as they like.
+//!
+//! - **Whether this PC is there.** A paired PC with its pairing window closed answers
+//!   only a query carrying a tag made with its find secret, which it gives only to the
+//!   headsets it trusts, inside the encrypted session. Its public key (which anyone who
+//!   connects over TCP sees) does not make a tag. So a stranger's query gets silence,
+//!   as from an address where nothing runs. Not hidden: the TCP port itself (a port
+//!   scan finds it), and everything while the PC answers everyone (unpaired, or its
+//!   pairing window open: then being found is the point).
+//! - **Following a headset.** Each query has a new random nonce, so its tags change
+//!   every time, and it carries at least eight of them, random ones among them, in a
+//!   random order: two queries of one headset look like two of different ones, and
+//!   the PC learns nothing of the other PCs a headset knows. The headset's name goes
+//!   out only while it looks for a PC to pair with. Not hidden: that a headset asks,
+//!   and from which address.
+//! - **Replay.** A query is not bound to a time: one captured and sent again within
+//!   [`NONCES_KEPT_FOR`] gets nothing (each nonce is answered once), but later it gets
+//!   the same PC's answer again, which says that PC is still there (and nothing more:
+//!   the answer is a hint where to connect, trust comes from the handshake).
+//! - **Flooding.** The kernel drops what is not a whole query (a socket filter, see
+//!   `platform::sockets::filter_queries`). A query with this PC's tag is always looked
+//!   at, and answered once for each nonce, [`OWN_ANSWERS_PER_SECOND`] a second at most
+//!   (a budget of their own: a flood of them needs the secret, and replays are answered
+//!   once). Of the rest, at most [`READ_PER_SOURCE`] a second from one address and
+//!   [`READ_PER_SECOND`] in all are looked at, and [`ANSWERS_PER_SECOND`] answered; the
+//!   rest are dropped. A nonce answered is remembered for [`NONCES_KEPT_FOR`] whatever
+//!   comes: with no room left to remember one, the query gets no answer. Nothing is allocated for a datagram. An answer is
+//!   always smaller than the query, so a forged sender address gets less than was sent:
+//!   no amplification.
+//! - **Changing state.** Nothing a query says changes anything kept: who is trusted,
+//!   the find secrets and the pairing window change only through the person at the PC
+//!   or an encrypted session. A stranger's query that looks for a PC to pair with (it
+//!   gives a name) only brings the notice of a new headset nearby (at most once a
+//!   minute) and the local API's `nearby` list.
+//!
+//! # The find secret after forgetting a headset
+//!
+//! Forgetting a headset makes a new find secret: the forgotten one can no longer make a
+//! tag. A trusted headset that was off then still asks with the old secret, so the old
+//! one stays valid for it (see `pairing::FindSecrets`) until its next session gives it
+//! the new one, or until it is forgotten too. A forgotten headset gains nothing from
+//! that: its tags may get an answer while the old secret lives, but the PC no longer
+//! trusts its key in the handshake.
 
 use std::collections::VecDeque;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use log::{debug, info, warn};
-use prostir_proto::discovery::{Answer, FindSecret, MAX_QUERY, Query, flags};
+use prostir_proto::discovery::{
+    Answer, FindSecret, MAX_ANSWER, MAX_HEADSET_NAME, MAX_QUERY, NONCE, QueryRef, flags,
+};
 
 use crate::events::{Event, EventSink};
 use crate::pairing::Security;
-use crate::platform;
 
-/// Answers sent in a second, at most, whoever asks.
+/// Answers to queries without this PC's tag sent in a second, at most.
 const ANSWERS_PER_SECOND: usize = 20;
+/// Answers to queries with its tag (its own headsets) sent in a second, at most.
+const OWN_ANSWERS_PER_SECOND: usize = 100;
+/// Queries without this PC's tag looked at in a second, at most: the rest are dropped.
+const READ_PER_SECOND: usize = 200;
+/// The same, from one address.
+const READ_PER_SOURCE: u16 = 20;
+/// The addresses counted for [`READ_PER_SOURCE`] at once (a fixed table: made-up
+/// addresses only push each other out, and the limit in all still holds).
+const SOURCES_KEPT: usize = 32;
+/// How long a nonce answered is remembered: the same query again (a headset sends one
+/// as a broadcast and straight to the PC, or someone sends a captured one again) gets
+/// no second answer within it.
+pub const NONCES_KEPT_FOR: Duration = Duration::from_secs(10);
+/// The most nonces remembered: every answer of [`NONCES_KEPT_FOR`] at the most there
+/// can be.
+const NONCES_KEPT: usize = (ANSWERS_PER_SECOND + OWN_ANSWERS_PER_SECOND) * 10;
+/// The most old find secrets that stay valid besides the current one (see the module):
+/// each is one more forgetting while some trusted headset was off. Beyond them, such a
+/// headset finds the PC by its last address.
+pub const STALE_KEPT: usize = 4;
 
-/// Who may get an answer now, and the find secret the PC's own headsets make their
+/// The find secrets a headset's tag may be made with: the current one, and older ones
+/// still valid for headsets that have not got the current one yet. Plain data, copied
+/// for each query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Secrets {
+    pub current: FindSecret,
+    stale: [FindSecret; STALE_KEPT],
+    stale_len: usize,
+}
+
+impl Secrets {
+    /// Only `current`.
+    pub fn new(current: FindSecret) -> Self {
+        Self {
+            current,
+            stale: [[0; 32]; STALE_KEPT],
+            stale_len: 0,
+        }
+    }
+
+    /// `current`, and the different ones among `stale`, the newest first (the first
+    /// [`STALE_KEPT`]).
+    pub fn with_stale<'a>(
+        current: FindSecret,
+        stale: impl IntoIterator<Item = &'a FindSecret>,
+    ) -> Self {
+        let mut s = Self::new(current);
+        for old in stale {
+            if s.stale_len == STALE_KEPT {
+                break;
+            }
+            if *old != current && !s.stale().contains(old) {
+                s.stale[s.stale_len] = *old;
+                s.stale_len += 1;
+            }
+        }
+        s
+    }
+
+    /// The old secrets still valid.
+    pub fn stale(&self) -> &[FindSecret] {
+        &self.stale[..self.stale_len]
+    }
+
+    /// The secret `query` looks for this PC with, if it does.
+    fn found_by(&self, query: &QueryRef<'_>) -> Option<&FindSecret> {
+        std::iter::once(&self.current)
+            .chain(self.stale())
+            .find(|s| query.looks_for(s))
+    }
+}
+
+/// Who may get an answer now, and the find secrets the PC's own headsets make their
 /// tags with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Open {
@@ -31,7 +151,7 @@ pub struct Open {
     pub paired: bool,
     /// The pairing window is open.
     pub pairing: bool,
-    pub secret: FindSecret,
+    pub secrets: Secrets,
 }
 
 impl Open {
@@ -41,26 +161,119 @@ impl Open {
     }
 }
 
+/// The name a headset gave in its query, kept in place (no allocation for a datagram).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct HeadsetName {
+    bytes: [u8; MAX_HEADSET_NAME],
+    len: u8,
+}
+
+impl HeadsetName {
+    /// `name`, cut at a character's edge to [`MAX_HEADSET_NAME`] bytes.
+    pub fn new(name: &str) -> Self {
+        let mut end = name.len().min(MAX_HEADSET_NAME);
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut bytes = [0; MAX_HEADSET_NAME];
+        bytes[..end].copy_from_slice(&name.as_bytes()[..end]);
+        Self {
+            bytes,
+            len: end as u8,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for HeadsetName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_str().fmt(f)
+    }
+}
+
 /// A headset that asked.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Asker {
     pub from: SocketAddr,
     /// Its query carries this PC's tag: one of its own headsets (it has the PC's find
     /// secret).
     pub ours: bool,
     /// The name it gave (only while it looks for a PC to pair with).
-    pub name: String,
-    /// It got an answer.
+    pub name: HeadsetName,
+    /// It got an answer (not a repeat of a query answered lately).
     pub answered: bool,
 }
 
-/// What the PC answers with: its port and name, and a limit on how many answers go
-/// out a second.
+/// What came from one address lately, for [`READ_PER_SOURCE`].
+#[derive(Clone, Copy)]
+struct Source {
+    ip: IpAddr,
+    since: Instant,
+    count: u16,
+}
+
+/// What the PC answers with: its port and name, and the limits on how much it reads
+/// and answers. Its memory is made once.
 pub struct Responder {
     port: u16,
     name: String,
-    /// When the last answers went, at most [`ANSWERS_PER_SECOND`] of them.
+    /// When the last answers without a tag went, at most [`ANSWERS_PER_SECOND`].
     sent: VecDeque<Instant>,
+    /// When the last answers with its tag went, at most [`OWN_ANSWERS_PER_SECOND`].
+    sent_own: VecDeque<Instant>,
+    /// When the last queries without a tag were looked at, [`READ_PER_SECOND`] at most.
+    read: VecDeque<Instant>,
+    /// The addresses that sent them lately.
+    sources: Vec<Source>,
+    /// The nonces answered lately, and when (see [`NONCES_KEPT_FOR`]).
+    nonces: VecDeque<([u8; NONCE], Instant)>,
+    /// The answer being sent.
+    out: Vec<u8>,
+}
+
+/// Whether `ip` may have another query looked at `now` (it is then counted).
+fn source_room(sources: &mut Vec<Source>, ip: IpAddr, now: Instant) -> bool {
+    let fresh = Source {
+        ip,
+        since: now,
+        count: 1,
+    };
+    if let Some(s) = sources.iter_mut().find(|s| s.ip == ip) {
+        if now.saturating_duration_since(s.since) >= Duration::from_secs(1) {
+            *s = fresh;
+            return true;
+        }
+        if s.count >= READ_PER_SOURCE {
+            return false;
+        }
+        s.count += 1;
+        return true;
+    }
+    if sources.len() < SOURCES_KEPT {
+        sources.push(fresh);
+    } else if let Some(oldest) = sources.iter_mut().min_by_key(|s| s.since) {
+        *oldest = fresh;
+    }
+    true
+}
+
+/// Drops what in `times` is a second old at `now`; whether there is room for one more
+/// (`most` in a second), which is then counted.
+fn room(times: &mut VecDeque<Instant>, most: usize, now: Instant) -> bool {
+    while times
+        .front()
+        .is_some_and(|t| now.saturating_duration_since(*t) >= Duration::from_secs(1))
+    {
+        times.pop_front();
+    }
+    if times.len() >= most {
+        return false;
+    }
+    times.push_back(now);
+    true
 }
 
 impl Responder {
@@ -69,22 +282,48 @@ impl Responder {
             port,
             name,
             sent: VecDeque::with_capacity(ANSWERS_PER_SECOND),
+            sent_own: VecDeque::with_capacity(OWN_ANSWERS_PER_SECOND),
+            read: VecDeque::with_capacity(READ_PER_SECOND),
+            sources: Vec::with_capacity(SOURCES_KEPT),
+            nonces: VecDeque::with_capacity(NONCES_KEPT),
+            out: Vec::with_capacity(MAX_ANSWER),
         }
     }
 
-    /// Looks at `datagram` from `from` at `now`: `None` when it is no query (a beacon,
-    /// too short or too long, broken); else who asked, and the answer to send back to
-    /// `from` if it gets one.
+    /// Looks at `datagram` from `from` at `now`, with `open` (asked for only once the
+    /// datagram reads as a query): `None` when it is no query (too short or too long,
+    /// broken), or one without this PC's tag beyond what is looked at (see the module);
+    /// else who asked, and the answer to send back to `from` if it gets one.
     pub fn consider(
         &mut self,
         datagram: &[u8],
         from: SocketAddr,
-        open: Open,
+        open: impl FnOnce() -> Open,
         now: Instant,
-    ) -> Option<(Asker, Option<Vec<u8>>)> {
-        let query = Query::decode(datagram)?;
-        let ours = query.looks_for(&open.secret);
-        let answer = if (ours || open.answers_all()) && self.may_send(now) {
+    ) -> Option<(Asker, Option<&[u8]>)> {
+        let query = QueryRef::read(datagram)?;
+        let open = open();
+        let found_by = open.secrets.found_by(&query).copied();
+        let ours = found_by.is_some();
+        // The PC's own headsets are never held back by anyone else's flood.
+        if !ours
+            && !(source_room(&mut self.sources, from.ip(), now)
+                && room(&mut self.read, READ_PER_SECOND, now))
+        {
+            return None;
+        }
+        let again = self.seen(&query.nonce, now);
+        // Never a nonce forgotten before its time: no room to remember one, no answer.
+        let full = self.nonces.len() >= NONCES_KEPT;
+        let answered = (ours || open.answers_all())
+            && !again
+            && !full
+            && if ours {
+                room(&mut self.sent_own, OWN_ANSWERS_PER_SECOND, now)
+            } else {
+                room(&mut self.sent, ANSWERS_PER_SECOND, now)
+            };
+        if answered {
             let mut bits = 0;
             if open.pairing {
                 bits |= flags::PAIRING;
@@ -92,35 +331,38 @@ impl Responder {
             if open.answers_all() {
                 bits |= flags::ANSWERS_ALL;
             }
-            let bytes = Answer::to(&query, &open.secret, self.port, bits, &self.name).encode();
-            debug_assert!(bytes.len() < datagram.len());
-            Some(bytes)
-        } else {
-            None
-        };
+            // The tag of the secret the headset asked with: it may hold an older one.
+            let secret = found_by.unwrap_or(open.secrets.current);
+            Answer::write_to(
+                &query.nonce,
+                &secret,
+                self.port,
+                bits,
+                &self.name,
+                &mut self.out,
+            );
+            debug_assert!(self.out.len() < datagram.len());
+            self.nonces.push_back((query.nonce, now));
+        }
         let asker = Asker {
             from,
             ours,
-            name: query.name,
-            answered: answer.is_some(),
+            name: HeadsetName::new(query.name),
+            answered,
         };
-        Some((asker, answer))
+        Some((asker, answered.then_some(self.out.as_slice())))
     }
 
-    /// Whether another answer may go at `now` (it is then counted).
-    fn may_send(&mut self, now: Instant) -> bool {
+    /// Whether the query with `nonce` was answered within [`NONCES_KEPT_FOR`] of `now`.
+    fn seen(&mut self, nonce: &[u8; NONCE], now: Instant) -> bool {
         while self
-            .sent
+            .nonces
             .front()
-            .is_some_and(|t| now.saturating_duration_since(*t) >= Duration::from_secs(1))
+            .is_some_and(|(_, t)| now.saturating_duration_since(*t) >= NONCES_KEPT_FOR)
         {
-            self.sent.pop_front();
+            self.nonces.pop_front();
         }
-        if self.sent.len() >= ANSWERS_PER_SECOND {
-            return false;
-        }
-        self.sent.push_back(now);
-        true
+        self.nonces.iter().any(|(n, _)| n == nonce)
     }
 }
 
@@ -133,11 +375,11 @@ pub fn answer_one(
 ) -> std::io::Result<Option<Asker>> {
     let mut buf = [0u8; MAX_QUERY + 1];
     let (n, from) = socket.recv_from(&mut buf)?;
-    let Some((asker, answer)) = responder.consider(&buf[..n], from, open(), Instant::now()) else {
+    let Some((asker, answer)) = responder.consider(&buf[..n], from, open, Instant::now()) else {
         return Ok(None);
     };
     if let Some(answer) = answer
-        && let Err(e) = socket.send_to(&answer, from)
+        && let Err(e) = socket.send_to(answer, from)
     {
         debug!("cannot answer {from}: {e}");
     }
@@ -182,12 +424,12 @@ pub fn spawn(
         .name("find".into())
         .spawn(move || {
             // The addresses told to the control loop lately, and when.
-            let mut told: VecDeque<(SocketAddr, Instant)> = VecDeque::new();
+            let mut told: VecDeque<(SocketAddr, Instant)> = VecDeque::with_capacity(16);
             loop {
                 let open = || Open {
                     paired: !security.trusted.lock().unwrap().is_empty(),
                     pairing: pairing.get(),
-                    secret: security.find_secret(),
+                    secrets: security.find_secrets(),
                 };
 
                 let asker = match answer_one(&socket, &mut responder, open) {
@@ -216,44 +458,6 @@ pub fn spawn(
     Ok(())
 }
 
-/// Sends the beacon every second on a thread of its own: headsets that do not ask yet
-/// (before step 7 of 0.2.0) listen for it.
-pub fn spawn_beacon(port: u16) -> Result<()> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-    socket.set_broadcast(true)?;
-    let beacon = prostir_proto::encode_beacon(port, &platform::hostname());
-    // A build for the end-to-end tests sends it to the test only, never to the network.
-    #[cfg(feature = "fake-desktop")]
-    let to_test: Option<SocketAddr> = std::env::var("PROSTIR_TEST_BEACON_TO")
-        .ok()
-        .and_then(|a| a.parse().ok());
-    #[cfg(not(feature = "fake-desktop"))]
-    let to_test: Option<SocketAddr> = None;
-    // It wakes the program once a second while it runs (not while it sleeps): until
-    // the headset asks instead (step 7 of 0.2.0), the price of being found.
-    std::thread::Builder::new()
-        .name("beacon".into())
-        .spawn(move || {
-            loop {
-                // 255.255.255.255 only leaves through the default route, so also send to
-                // the broadcast address of every interface (Wi-Fi, Ethernet, hotspot).
-                let targets: Vec<SocketAddr> = match to_test {
-                    Some(to) => vec![to],
-                    None => platform::broadcast_addresses()
-                        .into_iter()
-                        .chain([Ipv4Addr::BROADCAST])
-                        .map(|ip| SocketAddr::from((ip, prostir_proto::DISCOVERY_PORT)))
-                        .collect(),
-                };
-                for to in targets {
-                    let _ = socket.send_to(&beacon, to);
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        })?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +465,7 @@ mod tests {
 
     const PC: [u8; 32] = [3; 32];
     const OTHER_PC: [u8; 32] = [4; 32];
+    const OLD: [u8; 32] = [5; 32];
 
     fn from() -> SocketAddr {
         "192.168.1.20:40000".parse().unwrap()
@@ -273,19 +478,24 @@ mod tests {
     const PAIRED: Open = Open {
         paired: true,
         pairing: false,
-        secret: PC,
+        secrets: Secrets {
+            current: PC,
+            stale: [[0; 32]; STALE_KEPT],
+            stale_len: 0,
+        },
     };
 
     fn ask(r: &mut Responder, q: &Query, open: Open, now: Instant) -> (Asker, Option<Answer>) {
         let bytes = q.encode();
-        let (asker, back) = r.consider(&bytes, from(), open, now).expect("a query");
+        let (asker, back) = r.consider(&bytes, from(), || open, now).expect("a query");
         if let Some(b) = &back {
             assert!(
                 b.len() < bytes.len(),
                 "the answer is smaller than the query"
             );
         }
-        (asker, back.map(|b| Answer::decode(&b).unwrap()))
+        let back = back.map(|b| Answer::decode(b).unwrap());
+        (asker, back)
     }
 
     /// Paired: only a query with this PC's tag gets an answer, and the answer says
@@ -306,7 +516,7 @@ mod tests {
         let stranger = Query::new([&OTHER_PC], "Quest 3S");
         let (asker, answer) = ask(&mut r, &stranger, PAIRED, now);
         assert!(!asker.ours && !asker.answered);
-        assert_eq!(asker.name, "Quest 3S");
+        assert_eq!(asker.name.as_str(), "Quest 3S");
         assert!(answer.is_none());
         let none = Query::new([], "");
         assert!(ask(&mut r, &none, PAIRED, now).1.is_none());
@@ -318,52 +528,106 @@ mod tests {
     fn unpaired_or_pairing_answers_everyone() {
         let mut r = responder();
         let now = Instant::now();
-        let stranger = Query::new([&OTHER_PC], "");
         let unpaired = Open {
             paired: false,
-            pairing: false,
-            secret: PC,
+            ..PAIRED
         };
-        let a = ask(&mut r, &stranger, unpaired, now).1.unwrap();
+        let a = ask(&mut r, &Query::new([&OTHER_PC], ""), unpaired, now)
+            .1
+            .unwrap();
         assert_eq!(a.flags, flags::ANSWERS_ALL);
         let pairing = Open {
-            paired: true,
             pairing: true,
-            secret: PC,
+            ..PAIRED
         };
-        let a = ask(&mut r, &stranger, pairing, now).1.unwrap();
+        let a = ask(&mut r, &Query::new([&OTHER_PC], ""), pairing, now)
+            .1
+            .unwrap();
         assert_eq!(a.flags, flags::ANSWERS_ALL | flags::PAIRING);
         // The window closed: silence again.
-        assert!(ask(&mut r, &stranger, PAIRED, now).1.is_none());
+        assert!(
+            ask(&mut r, &Query::new([&OTHER_PC], ""), PAIRED, now)
+                .1
+                .is_none()
+        );
     }
 
-    /// A short query, a beacon or anything else is not read at all.
+    /// A headset that was off when the PC forgot another one asks with the old secret:
+    /// it is answered with the old secret's tag (the one it can check), while the old
+    /// secret is still valid; once it is not, silence.
+    #[test]
+    fn an_old_secret_still_valid_is_answered_with_its_own_tag() {
+        let mut r = responder();
+        let now = Instant::now();
+        let open = Open {
+            secrets: Secrets::with_stale(PC, [&OLD, &PC, &OLD]),
+            ..PAIRED
+        };
+        assert_eq!(
+            open.secrets.stale(),
+            [OLD],
+            "each old secret once, never the current"
+        );
+        let (asker, answer) = ask(&mut r, &Query::new([&OLD], ""), open, now);
+        assert!(asker.ours);
+        let answer = answer.unwrap();
+        assert!(answer.from_pc(&OLD) && !answer.from_pc(&PC));
+        let (asker, answer) = ask(&mut r, &Query::new([&OLD], ""), PAIRED, now);
+        assert!(!asker.ours && answer.is_none());
+        // Never more old secrets than kept.
+        let many: Vec<[u8; 32]> = (10..30u8).map(|i| [i; 32]).collect();
+        assert_eq!(Secrets::with_stale(PC, &many).stale().len(), STALE_KEPT);
+    }
+
+    /// A short query or anything else is not read at all, nor asks who may be answered.
     #[test]
     fn what_is_no_query_is_not_answered() {
         let mut r = responder();
         let now = Instant::now();
-        let open = Open {
-            paired: false,
-            pairing: true,
-            secret: PC,
-        };
         let bytes = Query::new([&PC], "").encode();
+        let never = || -> Open { panic!("asked for who may be answered") };
         assert!(
-            r.consider(&bytes[..MIN_QUERY - 1], from(), open, now)
+            r.consider(&bytes[..MIN_QUERY - 1], from(), never, now)
                 .is_none()
         );
-        let beacon = prostir_proto::encode_beacon(47830, "desk");
-        assert!(r.consider(&beacon, from(), open, now).is_none());
-        assert!(r.consider(&[0; 200], from(), open, now).is_none());
+        let mut beacon = b"PROSTIR1\xd6\xbadesk".to_vec();
+        beacon.resize(MIN_QUERY, 0);
+        assert!(r.consider(&beacon, from(), never, now).is_none());
+        assert!(r.consider(&[0; 200], from(), never, now).is_none());
     }
 
-    /// At most 20 answers a second in all, then again as the second moves on.
+    /// The same query again (its broadcast and its direct copy, or one captured and
+    /// sent again) is answered once, until its nonce is forgotten.
+    #[test]
+    fn a_query_is_answered_once() {
+        let mut r = responder();
+        let now = Instant::now();
+        let own = Query::new([&PC], "");
+        assert!(ask(&mut r, &own, PAIRED, now).1.is_some());
+        let (asker, answer) = ask(&mut r, &own, PAIRED, now + Duration::from_millis(5));
+        assert!(asker.ours && !asker.answered && answer.is_none());
+        assert!(ask(&mut r, &own, PAIRED, now + NONCES_KEPT_FOR).1.is_some());
+    }
+
+    /// At most 20 answers a second in all to queries without the PC's tag (the
+    /// pairing window open), then again as the second moves on; its own headsets are
+    /// answered all the same.
     #[test]
     fn answers_are_limited_to_twenty_a_second() {
         let mut r = responder();
         let start = Instant::now();
-        let own = Query::new([&PC], "");
-        let answered = |r: &mut Responder, at| ask(r, &own, PAIRED, at).1.is_some();
+        let open = Open {
+            pairing: true,
+            ..PAIRED
+        };
+        let at = |i: u8| SocketAddr::from(([10, 0, 1, i], 4000));
+        let answered = |r: &mut Responder, t: Instant| {
+            // From addresses of their own: the limit for each address is not the one.
+            let i = (t - start).as_millis() as u8;
+            let bytes = Query::new([&OTHER_PC], "").encode();
+            r.consider(&bytes, at(i), || open, t)
+                .is_some_and(|(a, _)| a.answered)
+        };
         for i in 0..20 {
             assert!(
                 answered(&mut r, start + Duration::from_millis(i * 10)),
@@ -376,5 +640,92 @@ mod tests {
         assert!(answered(&mut r, start + Duration::from_millis(1000)));
         assert!(!answered(&mut r, start + Duration::from_millis(1001)));
         assert!(answered(&mut r, start + Duration::from_millis(2500)));
+        let own = Query::new([&PC], "").encode();
+        assert!(
+            r.consider(&own, from(), || PAIRED, start + Duration::from_millis(1001))
+                .is_some_and(|(a, _)| a.answered),
+            "its own headset, beyond the limit"
+        );
+    }
+
+    /// A flood: from one address, 20 queries a second are looked at; from many, 200
+    /// in all. The PC's own headset gets through all the same.
+    #[test]
+    fn a_flood_is_dropped_but_not_the_pcs_own_headsets() {
+        let mut r = responder();
+        let now = Instant::now();
+        let bytes = Query::new([&OTHER_PC], "").encode();
+        let read = (0..100)
+            .filter(|_| r.consider(&bytes, from(), || PAIRED, now).is_some())
+            .count();
+        assert_eq!(read, usize::from(READ_PER_SOURCE), "from one address");
+        let many = (0..=255u8)
+            .flat_map(|a| (0..4u8).map(move |b| SocketAddr::from(([10, 9, a, b], 4000))))
+            .filter(|f| r.consider(&bytes, *f, || PAIRED, now).is_some())
+            .count();
+        assert_eq!(
+            many,
+            READ_PER_SECOND - usize::from(READ_PER_SOURCE),
+            "in all"
+        );
+        let own = Query::new([&PC], "").encode();
+        let (asker, answer) = r.consider(&own, from(), || PAIRED, now).expect("read");
+        assert!(asker.ours && answer.is_some(), "its own headset");
+        assert!(
+            r.consider(&bytes, from(), || PAIRED, now + Duration::from_secs(1))
+                .is_some()
+        );
+    }
+
+    /// Its own headsets have their own budget, and a nonce is never forgotten within
+    /// its time: past what the budgets allow there is always room.
+    #[test]
+    fn its_own_headsets_have_a_budget_of_their_own() {
+        let mut r = responder();
+        let now = Instant::now();
+        let answered = (0..150)
+            .filter(|_| {
+                let own = Query::new([&PC], "").encode();
+                r.consider(&own, from(), || PAIRED, now)
+                    .is_some_and(|(a, _)| a.answered)
+            })
+            .count();
+        assert_eq!(answered, OWN_ANSWERS_PER_SECOND);
+        // Answers every second for ten seconds: the nonces of all of them are kept.
+        let mut r = responder();
+        let open = Open {
+            pairing: true,
+            ..PAIRED
+        };
+        let mut first = None;
+        for s in 0..10u64 {
+            let at = now + Duration::from_secs(s);
+            for i in 0..200u8 {
+                let q = Query::new([&PC], "");
+                first.get_or_insert_with(|| q.encode());
+                let from = SocketAddr::from(([10, 2, 0, i], 4000));
+                let mine = if i % 2 == 0 {
+                    q.encode()
+                } else {
+                    Query::new([&OTHER_PC], "").encode()
+                };
+                let _ = r.consider(&mine, from, || open, at);
+            }
+        }
+        assert!(r.nonces.len() <= NONCES_KEPT);
+        let first = first.unwrap();
+        let (_, again) = r
+            .consider(&first, from(), || open, now + Duration::from_secs(9))
+            .unwrap();
+        assert!(again.is_none(), "the first nonce is still remembered");
+    }
+
+    /// A name is kept in place, cut at a character's edge.
+    #[test]
+    fn a_headsets_name_is_kept_in_place() {
+        assert_eq!(HeadsetName::new("Quest 3S").as_str(), "Quest 3S");
+        let long = "я".repeat(40);
+        assert_eq!(HeadsetName::new(&long).as_str().len(), MAX_HEADSET_NAME);
+        assert_eq!(HeadsetName::new("").as_str(), "");
     }
 }

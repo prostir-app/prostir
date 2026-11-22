@@ -119,7 +119,7 @@ const NOT_MESSAGES: &[&str] = &[
     // Threads.
     "net-writer",
     "net-dial",
-    "net-listen",
+    "net-find",
     "selftest-exit",
     // Names and codes in tests.
     "a-much-longer-laptop-name",

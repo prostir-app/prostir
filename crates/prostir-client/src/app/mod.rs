@@ -732,7 +732,11 @@ impl Model {
     /// it stood, the search goes on), and with a frame the head is followed.
     pub fn tick(&mut self, now: Instant, input: &FrameInput) {
         self.presence_due(now);
-        self.session.tick(now);
+        // The time alone changes what the connection screen shows: an answer gone
+        // stale, the hint (both in `Search`).
+        if self.session.tick(now) {
+            self.rev += 1;
+        }
         // A step of the search may change what the connection screen shows.
         let before = self.effects.len();
         self.effects

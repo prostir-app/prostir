@@ -240,13 +240,11 @@ pub struct Options {
     /// Asleep in its sockets' watcher until a headset comes, as `prostir serve`
     /// runs; without it, `--stay`: the full program all along.
     pub watcher: bool,
-    /// Answers headsets that ask for it, on a UDP port the system picks (no beacon:
-    /// nothing goes out to the network); without it, `--no-discovery`.
+    /// Answers headsets that ask for it, on a UDP port the system picks (it sends
+    /// nothing on its own); without it, `--no-discovery`.
     pub discovery: bool,
     /// Started as systemd starts it, by `systemd-socket-activate` holding its sockets.
     pub activate: Option<Activate>,
-    /// With `discovery`: the beacon goes to this address only (never the network).
-    pub beacon_to: Option<SocketAddr>,
 }
 
 /// The PC app started by `systemd-socket-activate`, as `prostir.socket` starts it: it
@@ -348,7 +346,6 @@ impl Default for Options {
             watcher: false,
             discovery: false,
             activate: None,
-            beacon_to: None,
         }
     }
 }
@@ -557,10 +554,10 @@ impl Pc {
         let bus = Bus::start(&root.join("run"));
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_prostir"));
         cmd.args(["serve", "--port", "0", "--no-adb"])
-            .args(match (options.discovery, options.beacon_to) {
-                (true, None) => ["--discovery-port", "0", "--no-beacon"].as_slice(),
-                (true, Some(_)) => ["--discovery-port", "0"].as_slice(),
-                (false, _) => ["--no-discovery"].as_slice(),
+            .args(if options.discovery {
+                ["--discovery-port", "0"].as_slice()
+            } else {
+                ["--no-discovery"].as_slice()
             })
             .args((!options.watcher).then_some("--stay"))
             .args(options.software.then_some("--software"))
@@ -632,9 +629,6 @@ impl Pc {
             Some(code) => cmd.env("PROSTIR_FAKE_TYPED_CODE", code),
             None => cmd.env_remove("PROSTIR_FAKE_TYPED_CODE"),
         };
-        if let Some(to) = options.beacon_to {
-            cmd.env("PROSTIR_TEST_BEACON_TO", to.to_string());
-        }
         cmd.envs(options.env.iter().map(|(k, v)| (k, v)));
         let env = cmd
             .get_envs()

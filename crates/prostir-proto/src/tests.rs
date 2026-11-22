@@ -441,9 +441,6 @@ fn every_message_round_trips() {
     for m in &clients {
         assert_eq!(&read_client(&client_bytes(m)).unwrap(), m);
     }
-
-    let b = encode_beacon(47830, "desk");
-    assert_eq!(decode_beacon(&b), Some((47830, "desk".into())));
 }
 
 /// The media messages are read and written by hand: the bytes are those the

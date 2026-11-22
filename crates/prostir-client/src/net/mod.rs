@@ -1,12 +1,14 @@
 //! The network thread (step 7 note, 4.5 and 6): it does what the headset's core asks
 //! ([`NetCmd`], from [`crate::session`]) and tells what happened ([`NetEvent`]); whom to
 //! reach and when is never its own choice. It keeps the files of the trusted PCs
-//! ([`TrustStore`], read and written here only) and says the list of them in
+//! ([`TrustStore`], and each one's find secret and last address, see
+//! [`discovery::Known`]: read and written here only) and says the list of them in
 //! [`NetEvent::Paired`].
 //!
 //! Each connection has its threads: `net-dial` connects and, before trust, pairs as the
 //! user agreed; a trusted PC's session runs in `link-<pc>` with its writer
-//! `net-writer` (see [`link`]). The PC's sound and the microphone go through [`Media`]
+//! `net-writer` (see [`link`]). Queries for PCs go from `net-find` (see
+//! [`discovery`]). The PC's sound and the microphone go through [`Media`]
 //! (AAudio on the headset, a fake in tests), so this code builds and is tested on any
 //! system, against the testkit's fake PC and the PC app with its fake desktop.
 
@@ -167,10 +169,10 @@ pub trait MediaSource: Send + Sync {
 pub enum NetEvent {
     /// The connection of step `step` is open (TCP); whose it is shows later.
     Dialed { step: StepId, addr: SocketAddr },
-    /// Nothing answered at step `step` (or its listening is over).
+    /// Nothing answered at step `step` (or the wait for answers to its query is over).
     Missed { step: StepId },
-    /// PCs currently heard on the network (sent when the list changes).
-    Hosts(Vec<FoundHost>),
+    /// A PC answered a query.
+    Heard(FoundHost),
     /// The PC of step `step` is trusted (or was just paired with): its session opens.
     Reached {
         step: StepId,
@@ -277,8 +279,20 @@ pub struct Config {
     pub trust_file: PathBuf,
     /// The user's `IP` or `IP:PORT`, if they wrote one.
     pub host_file: Option<PathBuf>,
-    /// The address of the last PC that worked over the network.
-    pub last_host_file: PathBuf,
+    /// Each trusted PC's find secret, as its sessions gave it.
+    pub find_secrets_file: PathBuf,
+    /// Each trusted PC's last address on the network.
+    pub last_hosts_file: PathBuf,
+    /// The one last address earlier builds kept: read once into `last_hosts_file`, then
+    /// removed.
+    pub old_last_host_file: Option<PathBuf>,
+    /// The PCs' discovery port, where queries go (as a broadcast, and to the addresses
+    /// known); none: no query goes but to an exact address (the selftest's fake PC).
+    /// Only the headset asks the network by itself: on other systems (the tests) this
+    /// is set by hand, so nothing reaches a real PC on the machine.
+    pub discovery_port: Option<u16>,
+    /// Queries also go as a broadcast (the headset; never in tests).
+    pub broadcast: bool,
     /// This headset's name for pairing (its model, as the system names it).
     pub name: String,
     /// The code the headset shows when it pairs: a new random one each time, but in
@@ -288,13 +302,20 @@ pub struct Config {
 
 impl Config {
     /// The files in `dir`, as the headset app keeps them (`identity`, `paired_hosts`,
-    /// `last_host`), `host.txt` in `outside` if given, and the headset's `name`.
+    /// `find_secrets`, `last_hosts`), `host.txt` in `outside` if given, and the
+    /// headset's `name`. Queries go to the network on the headset only (see
+    /// [`Config::discovery_port`]).
     pub fn in_dir(dir: &std::path::Path, outside: Option<&std::path::Path>, name: &str) -> Self {
+        let headset = cfg!(target_os = "android");
         Self {
             identity_file: dir.join("identity"),
             trust_file: dir.join("paired_hosts"),
             host_file: outside.map(|o| o.join("host.txt")),
-            last_host_file: dir.join("last_host"),
+            find_secrets_file: dir.join("find_secrets"),
+            last_hosts_file: dir.join("last_hosts"),
+            old_last_host_file: Some(dir.join("last_host")),
+            discovery_port: headset.then_some(prostir_proto::DISCOVERY_PORT),
+            broadcast: headset,
             name: name.to_owned(),
             pairing_code: secure::pairing_code,
         }
@@ -410,12 +431,23 @@ enum Inbox {
     Gone {
         step: StepId,
     },
+    /// PC `key` gave its find secret in its session.
+    Secret {
+        key: [u8; 32],
+        secret: prostir_proto::discovery::FindSecret,
+    },
+    /// PC `key`'s session opened at `addr` on the network.
+    Seen {
+        key: [u8; 32],
+        addr: SocketAddr,
+    },
 }
 
 /// What every connection shares with the network thread.
 pub(crate) struct Shared {
     identity: Identity,
-    /// What the PC calls this headset when they pair.
+    /// This headset's name, as the PC shows it when they pair (and in a query while
+    /// it looks for a PC to pair with).
     name: String,
     pairing_code: fn() -> String,
     /// What the next `Open` says.
@@ -555,7 +587,20 @@ fn run(config: &Config, shared: &Arc<Shared>, inbox: &Receiver<Inbox>) {
     shared.tell(NetEvent::Paired(paired(&trusted)));
     let mut conns: Vec<Conn> = Vec::new();
     let mut threads: Vec<JoinHandle<()>> = Vec::new();
-    let mut beacon = discovery::Beacon::default();
+    let known = Arc::new(Mutex::new(discovery::Known::load(config, &trusted)));
+    let targets = discovery::Targets {
+        port: config.discovery_port,
+        broadcast: config.broadcast,
+        broadcasts: discovery::interface_broadcasts,
+        host_file: config.host_file.clone(),
+    };
+    let mut finder = discovery::Finder::start(targets, shared.clone(), known.clone(), &mut threads);
+    let net = Here {
+        config,
+        shared,
+        known: &known,
+        finder: &finder,
+    };
     loop {
         let news = match inbox.recv_timeout(Duration::from_secs(1)) {
             Ok(news) => news,
@@ -567,15 +612,7 @@ fn run(config: &Config, shared: &Arc<Shared>, inbox: &Receiver<Inbox>) {
         };
         match news {
             Inbox::Cmd(NetCmd::Quit) => break,
-            Inbox::Cmd(cmd) => command(
-                cmd,
-                config,
-                shared,
-                &mut trusted,
-                &conns,
-                &mut threads,
-                &mut beacon,
-            ),
+            Inbox::Cmd(cmd) => net.command(cmd, &mut trusted, &conns, &mut threads),
             Inbox::Opened {
                 step,
                 addr,
@@ -599,6 +636,11 @@ fn run(config: &Config, shared: &Arc<Shared>, inbox: &Receiver<Inbox>) {
             }
             Inbox::Thread(t) => threads.push(t),
             Inbox::Gone { step } => conns.retain(|c| c.step != step),
+            Inbox::Secret { key, secret } if trusted.contains(&key) => {
+                lock(&known).set_secret(key, secret);
+            }
+            Inbox::Seen { key, addr } if trusted.contains(&key) => lock(&known).seen(key, addr),
+            Inbox::Secret { .. } | Inbox::Seen { .. } => {}
         }
     }
     // Closing: every connection is left (sessions with a goodbye), and their threads
@@ -606,7 +648,7 @@ fn run(config: &Config, shared: &Arc<Shared>, inbox: &Receiver<Inbox>) {
     shared
         .quitting
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    beacon.quit();
+    finder.stop();
     for c in &conns {
         c.current.leave(HeadsetGoodbye::Quit);
     }
@@ -661,118 +703,108 @@ fn paired(trusted: &TrustStore) -> Vec<PairedPc> {
         .collect()
 }
 
-/// Does one command of the core.
-fn command(
-    cmd: NetCmd,
-    config: &Config,
-    shared: &Arc<Shared>,
-    trusted: &mut TrustStore,
-    conns: &[Conn],
-    threads: &mut Vec<JoinHandle<()>>,
-    beacon: &mut discovery::Beacon,
-) {
-    match cmd {
-        NetCmd::Dial {
-            step,
-            to,
-            pair,
-            pc_shows_code,
-        } => {
-            let dial = link::Dial {
+/// What a command of the core works with.
+struct Here<'a> {
+    config: &'a Config,
+    shared: &'a Arc<Shared>,
+    known: &'a Mutex<discovery::Known>,
+    finder: &'a discovery::Finder,
+}
+
+impl Here<'_> {
+    /// Does one command of the core.
+    fn command(
+        &self,
+        cmd: NetCmd,
+        trusted: &mut TrustStore,
+        conns: &[Conn],
+        threads: &mut Vec<JoinHandle<()>>,
+    ) {
+        let (config, shared) = (self.config, self.shared);
+        match cmd {
+            NetCmd::Dial {
                 step,
                 to,
                 pair,
                 pc_shows_code,
-                host_file: config.host_file.clone(),
-                last_host_file: config.last_host_file.clone(),
-                trusted: trusted.entries().iter().map(|(k, _)| *k).collect(),
-                busy: conns.iter().map(|c| c.addr).collect(),
-                shared: shared.clone(),
-            };
-            spawn(threads, "net-dial", move || link::dial(dial));
-        }
-        NetCmd::Scan { step } => {
-            let dial = link::Dial {
-                step,
-                to: crate::session::Dest::Usb,
-                pair: None,
-                pc_shows_code: false,
-                host_file: None,
-                last_host_file: config.last_host_file.clone(),
-                trusted: trusted.entries().iter().map(|(k, _)| *k).collect(),
-                busy: conns.iter().map(|c| c.addr).collect(),
-                shared: shared.clone(),
-            };
-            spawn(threads, "net-dial", move || link::scan(dial));
-        }
-        NetCmd::Listen { step } => {
-            let listen = beacon.listener();
-            let shared = shared.clone();
-            spawn(threads, "net-listen", move || {
-                if let Some(listen) = listen {
-                    listen.run(&shared);
+            } => {
+                let last = match to {
+                    crate::session::Dest::LastOf(pc) => lock(self.known).last_of(pc),
+                    _ => None,
+                };
+                let dial = link::Dial {
+                    step,
+                    to,
+                    last,
+                    pair,
+                    pc_shows_code,
+                    host_file: config.host_file.clone(),
+                    trusted: trusted.entries().iter().map(|(k, _)| *k).collect(),
+                    busy: conns.iter().map(|c| c.addr).collect(),
+                    shared: shared.clone(),
+                };
+                spawn(threads, "net-dial", move || link::dial(dial));
+            }
+            NetCmd::Ask { step, to, pairing } => {
+                self.finder
+                    .ask(discovery::Ask { step, to, pairing }, shared);
+            }
+            // Before trust, or pairing again inside a trusted PC's link (the PC had
+            // forgotten the headset): the connections whose session has not opened.
+            NetCmd::Hangup => {
+                for c in conns.iter().filter(|c| !c.current.is_open()) {
+                    c.current.leave(HeadsetGoodbye::OtherPc);
                 }
-                shared.tell(NetEvent::Missed { step });
-            });
-        }
-        // Before trust, or pairing again inside a trusted PC's link (the PC had
-        // forgotten the headset): the connections whose session has not opened.
-        NetCmd::Hangup => {
-            for c in conns.iter().filter(|c| !c.current.is_open()) {
-                c.current.leave(HeadsetGoodbye::OtherPc);
             }
-        }
-        NetCmd::Leave(pc, why) => {
-            for c in conns.iter().filter(|c| c.pc == Some(pc)) {
-                c.current.leave(why);
+            NetCmd::Leave(pc, why) => {
+                for c in conns.iter().filter(|c| c.pc == Some(pc)) {
+                    c.current.leave(why);
+                }
             }
-        }
-        NetCmd::SubmitCode(code) => {
-            if let Some(c) = conns.iter().find(|c| !c.current.is_open()) {
-                c.current.submit(code);
+            NetCmd::SubmitCode(code) => {
+                if let Some(c) = conns.iter().find(|c| !c.current.is_open()) {
+                    c.current.submit(code);
+                }
             }
-        }
-        NetCmd::Forget(pc) => {
-            let keys: Vec<[u8; 32]> = trusted
-                .entries()
-                .iter()
-                .map(|(k, _)| *k)
-                .filter(|k| PcId::of(k) == pc)
-                .collect();
-            let mut failed = None;
-            for key in keys {
-                match trusted.remove(&key) {
-                    Ok(()) => info!("forgot PC {pc}"),
-                    Err(e) => {
-                        warn!("cannot forget PC {pc}: {e}");
-                        failed = Some(e.to_string());
+            NetCmd::Forget(pc) => {
+                let keys: Vec<[u8; 32]> = trusted
+                    .entries()
+                    .iter()
+                    .map(|(k, _)| *k)
+                    .filter(|k| PcId::of(k) == pc)
+                    .collect();
+                let mut failed = None;
+                for key in &keys {
+                    match trusted.remove(key) {
+                        Ok(()) => info!("forgot PC {pc}"),
+                        Err(e) => {
+                            warn!("cannot forget PC {pc}: {e}");
+                            failed = Some(e.to_string());
+                        }
                     }
                 }
+                shared.tell(NetEvent::Paired(paired(trusted)));
+                if let Some(why) = failed {
+                    // Still trusted: its session goes on, and the menu says why.
+                    shared.tell(NetEvent::ForgetFailed { pc, why });
+                    return;
+                }
+                // Its find secret and last address: not asked for, nor dialed, again.
+                let mut known = lock(self.known);
+                for key in &keys {
+                    known.forget(key);
+                }
+                drop(known);
+                // Connected to it (by its key, not its name: two PCs may share one):
+                // left, telling it so (after the new list, which the core hears first).
+                for c in conns.iter().filter(|c| c.pc == Some(pc)) {
+                    c.current.leave(HeadsetGoodbye::Forgotten);
+                }
             }
-            shared.tell(NetEvent::Paired(paired(trusted)));
-            if let Some(why) = failed {
-                // Still trusted: its session goes on, and the menu says why.
-                shared.tell(NetEvent::ForgetFailed { pc, why });
-                return;
-            }
-            // Its address as the last PC's: not tried again on the next start.
-            let addrs: Vec<SocketAddr> = conns
-                .iter()
-                .filter(|c| c.pc == Some(pc))
-                .map(|c| c.addr)
-                .collect();
-            if let Err(e) = discovery::forget_last_of(&config.last_host_file, pc, &addrs) {
-                warn!("cannot forget the last PC's address: {e}");
-            }
-            // Connected to it (by its key, not its name: two PCs may share one): left,
-            // telling it so (after the new list, which the core hears first).
-            for c in conns.iter().filter(|c| c.pc == Some(pc)) {
-                c.current.leave(HeadsetGoodbye::Forgotten);
-            }
+            NetCmd::SetHeadset(state) => *lock(&shared.headset) = state,
+            NetCmd::MediaTo(pc) => *lock(&shared.media_to) = pc,
+            NetCmd::Quit => {}
         }
-        NetCmd::SetHeadset(state) => *lock(&shared.headset) = state,
-        NetCmd::MediaTo(pc) => *lock(&shared.media_to) = pc,
-        NetCmd::Quit => {}
     }
 }
 

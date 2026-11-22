@@ -216,33 +216,51 @@ pub fn hostname() -> String {
         .map_or_else(|_| "linux".into(), |s| s.trim().to_string())
 }
 
-/// IPv4 broadcast addresses of all interfaces that are up.
-pub fn broadcast_addresses() -> Vec<Ipv4Addr> {
+/// Interfaces of containers and virtual machines (Docker, libvirt, LXC, Podman,
+/// VirtualBox, VMware): their addresses are of no use to a headset. A VPN's
+/// (`tailscale0`, `wg0`) are kept: a headset may reach the PC through it.
+const NOT_FOR_HEADSETS: [&str; 9] = [
+    "docker", "br-", "veth", "virbr", "lxc", "lxd", "podman", "vboxnet", "vmnet",
+];
+
+/// The PC's own IPv4 addresses, as a person types one into the headset: of every
+/// interface that is up, not loopback, link-local or a container's.
+pub fn local_addresses() -> Vec<Ipv4Addr> {
     let mut out = Vec::new();
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: getifaddrs fills `list`, which is walked read-only and freed once.
-    unsafe {
-        if libc::getifaddrs(&raw mut list) != 0 {
-            return out;
-        }
-        let mut cur = list;
-        while let Some(ifa) = cur.as_ref() {
-            let flags = ifa.ifa_flags;
-            let up = flags & libc::IFF_UP as u32 != 0
-                && flags & libc::IFF_BROADCAST as u32 != 0
-                && flags & libc::IFF_LOOPBACK as u32 == 0;
-            let addr = ifa.ifa_ifu; // broadcast address when IFF_BROADCAST is set
-            if up && !addr.is_null() && i32::from((*addr).sa_family) == libc::AF_INET {
-                let sin = &*(addr as *const libc::sockaddr_in);
-                let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-                if !out.contains(&ip) {
-                    out.push(ip);
-                }
-            }
-            cur = ifa.ifa_next;
-        }
-        libc::freeifaddrs(list);
+    // SAFETY: getifaddrs fills `list`, freed once below.
+    if unsafe { libc::getifaddrs(&raw mut list) } != 0 {
+        return out;
     }
+    let mut cur = list;
+    // SAFETY: `cur` is null or a node of `list`, alive until it is freed below.
+    while let Some(ifa) = unsafe { cur.as_ref() } {
+        let flags = ifa.ifa_flags;
+        let up = flags & libc::IFF_UP as u32 != 0 && flags & libc::IFF_LOOPBACK as u32 == 0;
+        let name = if ifa.ifa_name.is_null() {
+            &[][..]
+        } else {
+            // SAFETY: a NUL-terminated name the list owns, alive until it is freed.
+            unsafe { std::ffi::CStr::from_ptr(ifa.ifa_name) }.to_bytes()
+        };
+        let virtual_ = NOT_FOR_HEADSETS
+            .iter()
+            .any(|p| name.starts_with(p.as_bytes()));
+        let addr = ifa.ifa_addr;
+        // SAFETY: a non-null address the list owns.
+        let inet = !addr.is_null() && i32::from(unsafe { (*addr).sa_family }) == libc::AF_INET;
+        if up && !virtual_ && inet {
+            // SAFETY: an AF_INET address is a `sockaddr_in`.
+            let sin = unsafe { &*addr.cast::<libc::sockaddr_in>() };
+            let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+            if !ip.is_loopback() && !ip.is_link_local() && !out.contains(&ip) {
+                out.push(ip);
+            }
+        }
+        cur = ifa.ifa_next;
+    }
+    // SAFETY: the list getifaddrs made, freed once; nothing of it is used after.
+    unsafe { libc::freeifaddrs(list) };
     out
 }
 

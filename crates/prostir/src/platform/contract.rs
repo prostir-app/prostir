@@ -84,8 +84,10 @@
 //!     never waits for one; one that hangs shows as the worker stuck (the PC says the
 //!     desktop does not respond after 15 s, and starts again after 2 min). Programs
 //!     run with a time limit (`process::run`); the contract asks nothing more.
-//! 15. `broadcast_addresses` and virtual network adapters: goes with the beacon (step
-//!     7), not the desktop.
+//! 15. `broadcast_addresses` and virtual network adapters: gone with the beacon (step
+//!     7.9); the PC answers whoever asked. `local_addresses` (shown where a person
+//!     pairs, so they can type one into the headset) leaves out the adapters of
+//!     containers and virtual machines; not the desktop's.
 //!
 //! Also from the prototype:
 //! - Our monitors' frames come straight from the driver's swap chain, real displays
@@ -593,8 +595,9 @@ pub struct PhysicalDisplay {
     /// Its key, to tell it from the others and to save; nothing to show to people.
     /// On Linux its connector (`eDP-1`, `HDMI-A-1`).
     pub key: OutputKey,
-    /// What people see it called: on Linux its connector, on Windows the name the
-    /// system gives it.
+    /// What people see it called: its maker and model as the display says them
+    /// (`DELL U2720Q`), else its connector on Linux, the name the system gives it on
+    /// Windows. The headset shows it (`Display.name`).
     pub label: String,
     /// Maker, model and serial number as the display says them (its EDID), as far as
     /// the desktop tells; none when it says nothing.

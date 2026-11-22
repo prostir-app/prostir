@@ -133,6 +133,7 @@ const KEYS: &[&str] = &[
     "keyframe_asks_ignored",
     "reconnect_ms",
     "reconnect_picture_ms",
+    "queries_answered",
     "pc",
     "clock_offset_ms",
     "clock_offset_round_ms",
@@ -278,6 +279,8 @@ pub struct Selftest {
     dropped_at: Option<Instant>,
     reconnect_ms: Option<f64>,
     reconnect_picture_ms: Option<f64>,
+    /// The fake PC's answers to the headset's queries with its tag.
+    queries_answered: u32,
     /// The display period of the frame before, and of the first calm one.
     period: Option<Duration>,
     steady_period: Option<Duration>,
@@ -599,6 +602,7 @@ impl Selftest {
             dropped_at: None,
             reconnect_ms: None,
             reconnect_picture_ms: None,
+            queries_answered: 0,
             period: None,
             steady_period: None,
             last_display_ns: None,
@@ -759,6 +763,9 @@ impl Selftest {
             clips,
             monitors: MONITORS,
             name: "Prostir selftest".into(),
+            // Given in its first session: from the next one on, the headset finds it
+            // by asking.
+            find_secret: [7; 32],
         });
         match pc {
             Ok(pc) => {
@@ -1315,6 +1322,10 @@ impl Selftest {
                 seq,
             } => self.broken = Some((id, generation, seq, at)),
             Happened::KeyframeIgnored { .. } => self.asks_ignored += 1,
+            Happened::Asked {
+                ours: true,
+                answered: true,
+            } => self.queries_answered += 1,
             Happened::KeyframeAsked { id, generation } => {
                 if let Some((b, g, _, since)) = self.broken
                     && (b, g) == (id, generation)
@@ -1405,6 +1416,7 @@ impl Selftest {
             keyframe_asked_ms: self.keyframe_asked_ms,
             decoder_recovered_ms: self.recovered_ms,
             reconnect_ms: self.reconnect_ms,
+            queries_answered: self.queries_answered,
             unfreeze_ms: self.unfreeze_ms,
             frame_share_p95: self.frame_share.percentile(0.95),
             frame_share_p99: self.frame_share.percentile(0.99),
@@ -1448,6 +1460,7 @@ impl Selftest {
         r.set("keyframe_asks_ignored", self.asks_ignored);
         r.set_ms("reconnect_ms", self.reconnect_ms);
         r.set_ms("reconnect_picture_ms", self.reconnect_picture_ms);
+        r.set("queries_answered", self.queries_answered);
         r.set_ms("added_first_frame_ms", self.added_first_ms);
         r.set_ms("removed_ms", self.removed_ms);
         r.set_ms("command_ms", self.command_ms);

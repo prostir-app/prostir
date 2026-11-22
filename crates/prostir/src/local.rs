@@ -126,6 +126,29 @@ fn hostname() -> &'static str {
     NAME.get_or_init(platform::hostname)
 }
 
+/// The PC's addresses, as a person types one into the headset: looked up again at
+/// most every few seconds (they change with the network), not each time the state is
+/// made.
+fn addresses() -> Vec<String> {
+    const AGAIN_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+    static KEPT: std::sync::Mutex<Option<(Instant, Vec<String>)>> = std::sync::Mutex::new(None);
+    let mut kept = KEPT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = Instant::now();
+    match &*kept {
+        Some((at, list)) if now.saturating_duration_since(*at) < AGAIN_AFTER => list.clone(),
+        _ => {
+            let list: Vec<String> = platform::local_addresses()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            *kept = Some((now, list.clone()));
+            list
+        }
+    }
+}
+
 /// Screenshots asked for on the local API, waiting for the desktop's worker: each by
 /// the worker's generation and its job (job numbers start again with each worker), with
 /// its reply and until when it waits.
@@ -760,8 +783,12 @@ impl Brain {
         );
         self.keep_seen_of_paired();
         // It can no longer find the PC; the headsets still trusted get the new secret
-        // now, in their sessions, or at their next.
-        let secret = self.security.new_find_secret();
+        // now, in their sessions, or at their next (the one they have stays valid for
+        // them until then).
+        let sessions = &self.sessions;
+        let secret = self
+            .security
+            .new_find_secret(&[key], |k| *k != key && sessions.contains_key(k));
         for (other, session) in &self.sessions {
             if *other != key {
                 session.send(prostir_proto::HostMsg::FindSecret { secret });
@@ -1019,6 +1046,7 @@ impl Brain {
                     brain::Phase::Live(_) => api::Phase::Live,
                     brain::Phase::Lingering { .. } => api::Phase::Lingering,
                 },
+                addresses: addresses(),
             },
             window: wanted.window.clone(),
             autostart: platform::autostart::available().then(platform::autostart::enabled),

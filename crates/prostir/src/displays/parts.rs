@@ -132,13 +132,13 @@ impl Displays {
                         title: String::new(),
                     },
                     ScreenKind::Physical {
-                        label,
+                        key,
                         builtin,
                         shown,
                         ..
                     } => DisplayKind::Physical {
                         builtin: *builtin,
-                        connector: clip(label, state::MAX_CONNECTOR),
+                        connector: clip(&key.connector, state::MAX_CONNECTOR),
                         shown: *shown,
                     },
                 };
@@ -210,7 +210,7 @@ impl Displays {
                 Display {
                     id: s.id.wire(),
                     kind,
-                    name: clip(&s.name(), state::MAX_DISPLAY_NAME),
+                    name: clip(&self.shown_name(s), state::MAX_DISPLAY_NAME),
                     mode: Mode {
                         w,
                         h,

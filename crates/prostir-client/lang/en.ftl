@@ -64,6 +64,14 @@ connect-found = Found
 connect-blocked = is on the network, but the connection is blocked.
 connect-allow-port = Allow TCP port 47830 in the PC's firewall.
 connect-type-ip = Type an IP address
+connect-new-title = No PC with Prostir found
+connect-new-pair = On the PC, open the Prostir menu and choose "Pair a new headset".
+connect-or-type = Or type the PC's address: the Prostir window on the PC shows it.
+connect-or-usb = Or connect the headset to the PC with a USB cable.
+connect-silent-title = The PC does not answer
+connect-silent-check = Check that Prostir runs on the PC and that the PC is on the same network.
+# Shown after a PC's name in the list of PCs found
+connect-pairing-open = pairing open
 key-delete = Delete
 key-done = Done
 

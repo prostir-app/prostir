@@ -52,7 +52,7 @@ Contents:
 |---|---|
 | Connection | TCP, client connects to host |
 | Host TCP port | `47830` (`TCP_PORT`; the host's `--port` option changes it) |
-| Discovery | UDP port `47831` (`DISCOVERY_PORT`): the headset asks, the PC answers; the PC's beacon until step 7 |
+| Discovery | UDP port `47831` (`DISCOVERY_PORT`): the headset asks, the PC answers |
 | Sessions | One at a time |
 
 The connection is plain TCP carrying encrypted records (see [Security](#2-security)
@@ -66,9 +66,10 @@ and [Framing](#3-framing)). There are two ways to reach the host:
 
 ### Discovery
 
-A headset finds PCs in two ways: the PC's **beacon** (until the headset asks instead,
-step 7 of 0.2.0) and **asking** (the query below). Both use UDP port `47831`
-(`DISCOVERY_PORT`).
+A headset finds PCs by **asking** (the query below) on UDP port `47831`
+(`DISCOVERY_PORT`). A PC sends nothing on its own: the beacon of earlier development
+builds (`PROSTIR1`, its port and name, every second) is gone since step 7.9 of 0.2.0,
+and a PC drops one from an older PC unread.
 
 #### Asking
 
@@ -99,6 +100,14 @@ static key: Noise `XX` shows that key to anyone who connects, so it would let an
 make tags. A headset makes a tag for each PC it trusts and keeps each PC's secret with
 its key. A query of a newer version is read by the fields of version 1 (a newer
 version only adds after them).
+
+A trusted headset that was not in a session when the PC made a new secret still asks
+with the one it has. The PC keeps that one valid for it (answering its tags, with the
+same secret's tag in the answer) until a session of that headset gave it the current
+one, or the PC forgot that headset too; the PC keeps at most a few such older secrets
+(4, implementation-defined), a headset beyond them reaches the PC by its last address
+(below). A headset the PC forgot may still get answers while an older secret lives,
+but gains nothing by them: the handshake shows its key, which the PC no longer trusts.
 
 Answer, at most 97 bytes:
 
@@ -131,28 +140,37 @@ What the tags hide, and what they do not:
 - Someone listening does not learn which PC is looked for (the nonce changes every
   time), nor tell headsets apart by how many PCs they know (8 tags at least, random
   ones among them, in a random order); the PC does not learn which other PCs the
-  headset knows.
+  headset knows. A query that gives no name (a paired headset without this PC's tag,
+  say right after an update) brings no notice on a PC (see below).
 - Not hidden: that a headset asks, from which address, its name while it looks for a
   PC to pair with, and that a PC answers (with its name and port). A query is not
-  bound to a time: someone who captured a headset's query can send it again and get
-  the same PC's answer, which tells them that PC is still there.
-
+  bound to a time: a PC answers each nonce once within 10 s (the same query sent as a
+  broadcast and straight to it gets one answer), but someone who captured a headset's
+  query can send it again later and get the same PC's answer, which tells them that
+  PC is still there.
 
 Limits: a datagram that is not a whole query of 128 to 512 bytes is dropped unread
 (the host drops it in the kernel, with a socket filter); an answer is always smaller
 than the smallest query, so a forged sender address gets less than it sent and a PC
-cannot be used to amplify traffic; a PC sends at most 20 answers a second in all.
+cannot be used to amplify traffic. A query with the PC's own tag is always looked at
+and answered once for each nonce, 100 a second at most; of the rest, a PC looks at 20
+a second from one address and 200 in all at most and answers 20 a second at most
+(implementation-defined; the others are dropped). A nonce answered is remembered for
+10 s whatever comes: with no room left to remember one, a query gets no answer. Nothing a query says changes what a PC keeps: who is trusted, the find secrets and the pairing
+window change only by the person at the PC or inside an encrypted session.
 
 Neither is encrypted: an answer is a hint where to connect, and trust comes from the
 handshake. Typing the PC's address and USB work whether the PC answers or not
 (pairing is protected by its code).
 
-**Implementation-defined**, the host: a query from a headset that is not its own,
-while the host does not answer it (paired, pairing closed), shows a notification on
-the PC, "New headset nearby. Pair?", with a button that opens the pairing window, at
-most once a minute. The headsets that asked recently (by name, or by address without
-a name) are the local API's `nearby`. A query from one of its own headsets lets a
-sleeping PC start ahead of the connection that follows.
+**Implementation-defined**, the host: a query from a headset that is not its own and
+looks for a PC to pair with (it gives its name), while the host does not answer it
+(paired, pairing closed), shows a notification on the PC, "New headset nearby. Pair?",
+with a button that opens the pairing window, at most once a minute. A query without a
+name (a paired headset that has no tag of this PC yet, say right after an update)
+brings no notice. The headsets that asked with a name recently are the local API's
+`nearby`. A query from one of its own headsets, answered, lets a sleeping PC start
+ahead of the connection that follows.
 
 **Implementation-defined**, a sleeping host: nothing of it wakes while nobody on the
 network talks to it. Queries that get no answer wake only a light part of it (the
@@ -162,34 +180,55 @@ connection to port 47830, though, wakes the whole program: under systemd it firs
 waits 3 s for the peer to say something and lets a silent one go (a port scan); the
 sockets' watcher starts the program for any connection.
 
-#### The beacon (until step 7)
+#### How the current client picks a host (implementation-defined)
 
-Every second while the PC program runs (not while it sleeps waiting for a headset), the
-host sends a UDP datagram (the *beacon*) from an ephemeral port to port `47831` at
-`255.255.255.255` and at the broadcast address of every IPv4 interface that is up and
-not loopback. The `--no-discovery` option turns the beacon and the answers off. So
-the running program wakes once a second for it (with `--stay`, all along); it goes
-when the headset asks instead.
+Source: `crates/prostir-client/src/session/mod.rs` (whom and when) and
+`crates/prostir-client/src/net/discovery.rs` (the queries). The headset keeps, for each
+PC it trusts, the find secret its sessions gave and the last address it had a session
+at (written only once that PC proved its key in the handshake and its session
+opened; never from an answer). A round of its search goes:
 
-Beacon layout:
+1. `127.0.0.1:47830` (USB);
+2. a PC picked in the menu (or its address typed there);
+3. a query, as a broadcast (to `255.255.255.255` and to the broadcast address of each
+   interface) and straight to the last address of each trusted PC, the address in
+   `host.txt` and the one picked in the menu, all on port `47831`; the answers that
+   come within 300 ms count. An answer with the tag of a trusted PC leads to its
+   connection at once;
+4. a trusted PC that answered;
+5. the address in `host.txt`;
+6. a trusted PC's last address by TCP, at most every 10 s for each PC while it does
+   not answer (a TCP connection wakes a sleeping PC whole, so not more often). This is
+   how the first connection works after an update, before the headset has a find
+   secret, and with a secret gone stale beyond what the PC keeps;
+7. while it trusts no PC, the one PC that answered every query (unpaired, or its
+   pairing window open), if exactly one did: a PC the headset does not trust is
+   offered to the user, never paired on its own. With trusted PCs, such answers are
+   only listed for the user to pick.
 
-| Offset | Size | Field |
-|---|---|---|
-| 0 | 8 | `PROSTIR1` in ASCII (`BEACON_MAGIC`) |
-| 8 | 2 | TCP port of the host, `u16` little-endian |
-| 10 | rest | Host name, UTF-8, no terminator and no length prefix |
+"Not now" to a PC offered leaves that PC alone (it is not dialed on its own until the
+user picks something, and should it come again another way it is let go without
+asking), while trusted PCs are still connected to by themselves: a trusted PC's answer
+is matched to the PC declined by its tag, never by its address. Of the answers with
+one trusted PC's tag, a query takes 4 at most, and one from the address the PC had its
+last session at stays before one from elsewhere. Each
+query goes from a new UDP port, so the port does not tie one query to the next.
 
-The host name comes from `/proc/sys/kernel/hostname`. A receiver takes the TCP address
-as the beacon's source IP plus the port in the beacon. Datagrams that do not start with
-the magic are ignored. Beacons are neither encrypted nor authenticated: they are only a
-hint where to connect, and trust comes from the handshake.
+A round goes once a second for the first 30 s of a search, then every 3 s. Nothing is
+asked while the headset is off the head or while it is in a session with as many PCs as
+it takes (one): a PC in use and the other PCs around are left alone. While no PC
+answers, the search screen says what to do: with no trusted PC (or while the user picks
+another), after 5 s, how to open pairing on the PC, to type its address (the PC's
+settings window shows it where it pairs) or to use a USB cable; with trusted PCs, after
+30 s without an answer or a connection, that the PC does not answer, to check that
+Prostir runs there and is on the same network.
 
-How the current client picks a host (implementation-defined): `127.0.0.1:47830` (USB)
-first; then a PC picked in the menu; it listens for beacons for 1.2 s (a PC counts as
-present for 6 s after its last beacon); then an address from a user-provided file, then
-the last host that completed a session; then the only PC heard, if exactly one; and
-every fifth round it probes port 47830 on every address of its own `/24` network,
-because some networks drop broadcasts.
+There is no probe of the local network: a home network carries the broadcast; a VPN
+and separate subnets carry neither a broadcast nor a probe, but the direct query to
+the last (or typed) address works there; client isolation on an access point blocks
+all of them (a cable or another network helps); an access point that drops only
+broadcasts is covered by an address typed once, kept as that PC's last address after
+its first session.
 
 ### One session at a time
 
@@ -243,8 +282,9 @@ key from the handshake is in the store.
 
 - Host: `~/.config/prostir/paired_headsets`. The label is the `name` from `PairBegin`
   (or `headset` if empty). The tray item "Forget paired headsets" clears the file.
-- Headset: a file inside the app. The label is the host's name (from the beacon), its
-  IP address, or "PC (USB)". Settings → PC lists and forgets entries.
+- Headset: a file inside the app. The label is the name the PC gives itself in its
+  session (`PcInfo`), its IP address until then, or "PC (USB)". Settings → PC lists and
+  forgets entries; forgetting a PC also drops its find secret and last address.
 
 The host serves only trusted headsets. Before trust it sends nothing but `Welcome`
 (its protocol version and interface language), `PairingRequired`, `PairMsg`,
@@ -338,7 +378,7 @@ off. When the headset shows the code and the host has none, the host reads and d
 headset's `PairMsg` (sent right after `PairBegin`), so the next `PairBegin` can follow on
 the same connection.
 
-Client (implementation-defined, `crates/prostir-client/src/net.rs`): read timeout 10 s, 300 s while
+Client (implementation-defined, `crates/prostir-client/src/net/link.rs`): read timeout 10 s, 300 s while
 pairing; each write at most 5 s; at most 3 attempts per connection, after which it
 stops and asks the user again; it waits up to 300 s for the user to type a code shown
 by the host, looking at the connection every half second meanwhile.
@@ -349,8 +389,7 @@ For the timeouts in the session see [End of session](#end-of-session).
 
 Everything after the Noise handshake: every protocol message in both directions,
 including `Hello`, pairing, video, PC sound and the microphone. Not encrypted: the
-discovery beacon (magic, port, host name), the discovery queries and answers, and the
-Noise handshake messages themselves (which carry ephemeral keys in the clear and static
+discovery queries and answers, and the Noise handshake messages themselves (which carry ephemeral keys in the clear and static
 keys encrypted, as Noise `XX` does).
 
 ## 3. Framing
@@ -981,7 +1020,10 @@ more, absent displays of the PC are left out first.
 A display of the PC keeps its number by its EDID (make and model as the desktop says
 them), else by its connector: another screen in the same connector gets a new number
 and a new place. One known by its connector that says its EDID later keeps its number,
-and is known by the EDID from then on.
+and is known by the EDID from then on. Its `name` is what people call it: its maker and
+model as it says them (`DELL U2720Q`, from step 7.9; the model alone when it starts
+with the maker), else its connector, which `Physical.connector` always holds. A
+headset shows the laptop's own panel (`builtin`) by its own words for it.
 
 ### Requests
 

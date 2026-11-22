@@ -480,7 +480,7 @@ impl Screencast {
                     .collect();
                 Some(PhysicalDisplay {
                     key: OutputKey::new(name.clone()),
-                    label: name.clone(),
+                    label: crate::platform::display_label(&info.make, &info.model, name),
                     edid: (!said.is_empty()).then(|| said.join(" ")),
                     builtin: is_panel(name),
                     size: info.mode,

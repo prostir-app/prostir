@@ -8,9 +8,16 @@ fn countdown(left: f64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// The pairing window's content: the code to type here or there, or what to do first.
+/// The pairing window's content: the code to type here or there, or what to do first
+/// (with the PC's `addresses`, for a headset that does not find the PC by itself).
 /// Shared by the Headsets page and the first run.
-pub(super) fn pair_body(ui: &mut Ui, v: &mut View<'_, '_>, pr: &Pairing, revision: u32) {
+pub(super) fn pair_body(
+    ui: &mut Ui,
+    v: &mut View<'_, '_>,
+    pr: &Pairing,
+    addresses: &[String],
+    revision: u32,
+) {
     let tk = v.tk;
     let p = tk.p;
     if let Some(code) = &pr.pc_code {
@@ -64,12 +71,28 @@ pub(super) fn pair_body(ui: &mut Ui, v: &mut View<'_, '_>, pr: &Pairing, revisio
             w::spinner(ui, tk, 22.0);
             text(ui, tk.t("pair-waiting"), tk.body(), p.text);
         });
+        if !addresses.is_empty() {
+            ui.add_space(tk.th.shape.spacing);
+            let list = addresses.join(", ");
+            text(
+                ui,
+                tk.f("pair-address", &[("address", list.into())]),
+                tk.small(),
+                p.text_muted,
+            );
+        }
         ui.add_space(tk.th.shape.spacing);
         text(ui, tk.t("pair-firewall"), tk.small(), p.text_muted);
     }
 }
 
-fn pairing_card(ui: &mut Ui, v: &mut View<'_, '_>, pr: &Pairing, revision: u32) {
+fn pairing_card(
+    ui: &mut Ui,
+    v: &mut View<'_, '_>,
+    pr: &Pairing,
+    addresses: &[String],
+    revision: u32,
+) {
     let tk = v.tk;
     let p = tk.p;
     let left = (v.ui.pair.ends - v.now).max(0.0);
@@ -102,7 +125,7 @@ fn pairing_card(ui: &mut Ui, v: &mut View<'_, '_>, pr: &Pairing, revision: u32) 
                 .rect_filled(f, CornerRadius::same(2), p.accent_ink);
         }
         ui.add_space(tk.th.shape.padding);
-        pair_body(ui, v, pr, revision);
+        pair_body(ui, v, pr, addresses, revision);
         if !v.ui.unsupported.contains("stop_pairing") {
             ui.add_space(tk.th.shape.spacing);
             if w::button(ui, tk, &tk.t("pair-stop"), Kind::Quiet, true).clicked() {
@@ -185,13 +208,25 @@ pub(super) fn headsets(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
     header(ui, v, Page::Headsets);
+    // Where a headset that does not find the PC by itself reaches it (the pairing card
+    // says it there).
+    if s.pairing.is_none() && !s.pc.addresses.is_empty() {
+        let list = s.pc.addresses.join(", ");
+        text(
+            ui,
+            tk.f("hs-address", &[("address", list.into())]),
+            tk.small(),
+            p.text_muted,
+        );
+        ui.add_space(tk.th.shape.spacing);
+    }
     let revision = match v.conn {
         Conn::Live { snap, .. } => snap.revision,
         _ => 0,
     };
     let gap = tk.th.shape.section_gap;
     if let Some(pr) = &s.pairing {
-        pairing_card(ui, v, pr, revision);
+        pairing_card(ui, v, pr, &s.pc.addresses, revision);
         ui.add_space(gap);
     } else if let Some(o) = v.ui.pair.outcome.clone() {
         outcome_card(ui, v, &o);

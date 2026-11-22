@@ -322,8 +322,8 @@ adb install prostir-*.apk
 
 ### Firewall
 
-The PC listens on TCP port 47830 and announces itself with UDP broadcasts on port
-47831. If a firewall runs on the PC, allow both:
+The PC listens on TCP port 47830, and answers the headset that asks for it on UDP
+port 47831 (it sends nothing on its own). If a firewall runs on the PC, allow both:
 
 ```sh
 sudo ufw allow 47830/tcp && sudo ufw allow 47831/udp            # ufw (Ubuntu)
@@ -381,9 +381,13 @@ rustup target add aarch64-linux-android
    count this PC among Prostir's users (see [Security](#security)); nothing is sent
    unless you answer yes.
 2. On the headset, open Prostir from Library → Unknown sources.
-3. The headset tries the USB cable first (developer mode only), then Wi-Fi. When it
-   finds exactly one PC, it connects to it by itself. If it finds several, pick yours,
-   or type the PC's IP address on the keypad.
+3. The headset tries the USB cable first (developer mode only), then asks on Wi-Fi
+   which PCs are there. A new headset is answered by a PC that has no paired headset
+   yet, or one where "Pair a new headset" is open (in the tray or the settings window);
+   when exactly one answers, the headset connects to it by itself. If several answer,
+   pick yours, or type the PC's IP address on the keypad (the settings window shows it
+   where you pair). A paired headset finds its own PC by itself from then on, also
+   at a VPN address where it connected before, and wakes a sleeping PC by asking.
 4. The first time, the headset shows "A new PC" with the PC's name and address. Press
    "Pair" (or "Not now" if it is not your PC), and the headset shows a 6-digit code;
    type it into the small dialog that opens on the PC. If you would rather do it the
@@ -703,7 +707,17 @@ window then never asks. The key for counting is in the source
 only add counts, so the worst anyone can do with it is inflate the numbers. See the
 [privacy policy](https://prostir.ishawyha.dev/privacy.html).
 
-The discovery broadcast contains only the PC's host name. Ports are listed under
+Asking for the PC does not tell a stranger it is there. The headset asks with tags
+made from a secret that the PC gives only to its paired headsets, inside the
+encrypted session, and a paired PC answers only those (or everyone while its pairing
+window is open). Its TCP port can still be found by a port scan. Each query looks
+different (a new random value, extra random tags, a new port, the headset's name only
+while it looks for a PC to pair with), so it does not tell headsets apart either. The
+PC answers its own headsets and at most 20 other queries a second, always with less
+than it received, and nothing in a query changes anything kept. Forgetting a headset
+makes a new secret. The old one stays valid until every paired headset that was off
+then has connected again: until then whoever holds it gets an answer, the forgotten
+headset too, though the PC no longer lets that one connect. Ports are listed under
 [Firewall](#firewall).
 
 To report a security problem privately, use
@@ -719,8 +733,12 @@ TCP port 47830. Allow it, see [Firewall](#firewall).
 
 **The headset does not find the PC.** Both must be on the same network, and the
 network must not isolate clients (guest networks often do). A firewall can also block
-the UDP broadcast on port 47831. Type the PC's IP on the keypad, or use a cable
-(developer mode).
+UDP port 47831. A new headset is answered only while the PC has no paired headset or
+"Pair a new headset" is open on the PC; the headset says so after a few seconds. Type
+the PC's IP on the keypad (the settings window shows it on the Headsets page: once
+connected, the headset keeps it and asks there next time, also through a VPN), or use
+a cable (developer mode). A paired PC that does not answer for 30 s: check that
+Prostir runs on it.
 
 **No picture, or the headset says an encoder is missing.** Check what GStreamer has:
 `gst-inspect-1.0 vah265enc vah264enc x264enc`. Install the VA plugin and driver for your

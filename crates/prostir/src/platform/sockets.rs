@@ -134,8 +134,8 @@ pub fn open(port: u16, discovery: Option<u16>) -> Result<Sockets> {
 
 /// Lets only discovery queries into `socket`: datagrams of [`MIN_QUERY`] to
 /// [`MAX_QUERY`] bytes that start with `PRSQ`. The kernel drops the rest before
-/// anyone wakes: beacons of the PCs around (they go to the same port), short queries,
-/// noise.
+/// anyone wakes: beacons of older PCs around (they went to the same port), short
+/// queries, noise.
 pub fn filter_queries(socket: &UdpSocket) -> io::Result<()> {
     // A filter on a UDP socket sees the datagram from its UDP header (8 bytes) on.
     const HEADER: u32 = 8;
@@ -335,7 +335,8 @@ mod tests {
             q.resize(len, 0);
             q
         };
-        let beacon = prostir_proto::encode_beacon(47830, "desk");
+        // An older PC's beacon: `PROSTIR1`, its port and name.
+        let beacon = b"PROSTIR1\xd6\xbadesk".to_vec();
         let mut long_beacon = beacon.clone();
         long_beacon.resize(200, 0);
         let mut other = b"PRSA".to_vec();

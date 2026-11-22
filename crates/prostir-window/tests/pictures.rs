@@ -186,6 +186,13 @@ fn each_state_of_the_other_pages() {
     let (mut h, _) = window(dark(Mock::connected().pc_code("482913")), shot());
     open(&mut h, Page::Headsets);
     picture(&mut h, &mut all, "headsets-pc-code");
+    // The PC's address, for a headset that does not find it by itself.
+    let addresses = |s: &mut prostir_window::api::State| {
+        s.pc.addresses = vec!["192.168.1.10".into(), "100.64.0.7".into()];
+    };
+    let (mut h, _) = window(dark(Mock::connected().edit(addresses)), shot());
+    open(&mut h, Page::Headsets);
+    picture(&mut h, &mut all, "headsets-address");
     // Pairing from the window (step 6.8), open and waiting for a headset.
     let waiting = |s: &mut prostir_window::api::State| {
         s.pairing = Some(Pairing {
@@ -194,6 +201,7 @@ fn each_state_of_the_other_pages() {
             ..Default::default()
         });
         s.nearby.clear();
+        s.pc.addresses = vec!["192.168.1.10".into()];
     };
     let (mut h, _) = window(dark(Mock::connected().pairing().edit(waiting)), shot());
     open(&mut h, Page::Headsets);

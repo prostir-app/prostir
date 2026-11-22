@@ -628,6 +628,10 @@ pub struct Pc {
     /// `KDE Plasma`, `Hyprland`; empty while there are no monitors.
     pub desktop: String,
     pub phase: Phase,
+    /// The PC's addresses on its networks (`192.168.1.10`; a VPN's too), as a person
+    /// types one into a headset that does not find the PC by itself (from step 7.9;
+    /// empty before).
+    pub addresses: Vec<String>,
 }
 
 /// Where Prostir is between headsets.
@@ -1220,6 +1224,7 @@ mod tests {
                 app: "0.2.0".into(),
                 desktop: "KDE Plasma".into(),
                 phase: Phase::Live,
+                addresses: vec!["192.168.1.10".into()],
             },
             window: WindowLook::default(),
             autostart: Some(true),
@@ -1342,7 +1347,7 @@ mod tests {
         let state = sample();
         let json = state.to_json();
         let expected = concat!(
-            r#"{"v":1,"pc":{"name":"desk","app":"0.2.0","desktop":"KDE Plasma","phase":"live"},"#,
+            r#"{"v":1,"pc":{"name":"desk","app":"0.2.0","desktop":"KDE Plasma","phase":"live","addresses":["192.168.1.10"]},"#,
             r#""window":{"theme":"system","palette":"ink","language":null},"autostart":true,"#,
             r#""headsets":[{"key":"a1b2c3d4e5f6","name":"Quest 3","model":"Quest 3","#,
             r#""app":"0.2.0","last_seen":1795000000,"role":"main","rights":["input","mic"],"#,

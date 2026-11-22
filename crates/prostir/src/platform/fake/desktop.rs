@@ -92,7 +92,8 @@ fn parse_physical(text: &str) -> Result<Vec<FakePhysical>> {
             Ok(FakePhysical {
                 display: PhysicalDisplay {
                     key: OutputKey::new(connector),
-                    label: connector.to_owned(),
+                    // Its EDID's words as its maker and model, as a desktop says them.
+                    label: crate::platform::display_label(edid, "", connector),
                     edid: (!edid.is_empty()).then(|| edid.to_owned()),
                     // A laptop's panel, by its connector, as on Linux.
                     builtin: ["eDP", "LVDS", "DSI"]

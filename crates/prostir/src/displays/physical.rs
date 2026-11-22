@@ -4,6 +4,19 @@
 use super::*;
 
 impl Displays {
+    /// What screen `s` is called where people see it (`Display.name`): a display of the
+    /// PC by its label, with its connector added when another display of the PC has
+    /// the same label (two monitors of one model); any other by its name.
+    pub(super) fn shown_name(&self, s: &Screen) -> String {
+        let ScreenKind::Physical { key, label, .. } = &s.kind else {
+            return s.name();
+        };
+        let clash = self.physical().any(|o| {
+            o.id != s.id && matches!(&o.kind, ScreenKind::Physical { label: l, .. } if l == label)
+        });
+        name_apart(label, &key.connector, clash)
+    }
+
     /// Follows the PC's own displays (`seen`, as the desktop listed them): each
     /// connected one is matched to one known (see [`match_physical`]); one seen for the
     /// first time gets a number from `new_id` and is shown if it is the one the desktop
@@ -310,4 +323,14 @@ pub(super) fn least_recently_seen(mut absent: Vec<(ScreenId, u64)>, keep: usize)
     // The most recent first; of the same moment, the newer number.
     absent.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
     absent.into_iter().skip(keep).map(|(id, _)| id).collect()
+}
+
+/// A display of the PC's `label`, with its `connector` when it `clash`es with another's
+/// (`DELL U2720Q (DP-1)`); as it is when the label is the connector already.
+pub(super) fn name_apart(label: &str, connector: &str, clash: bool) -> String {
+    if clash && label != connector && !connector.is_empty() {
+        format!("{label} ({connector})")
+    } else {
+        label.to_owned()
+    }
 }

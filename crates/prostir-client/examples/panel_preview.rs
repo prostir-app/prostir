@@ -181,11 +181,23 @@ fn main() {
         host: std::env::var("OFFLINE")
             .is_err()
             .then(|| "workstation".into()),
-        found: vec![
-            ("workstation".into(), "192.168.1.10".into()),
-            ("media-pc".into(), "192.168.1.20".into()),
-        ],
+        // With a hint (below), no PC answered.
+        found: if std::env::var("HINT").is_ok() {
+            Vec::new()
+        } else {
+            vec![
+                ("workstation".into(), "192.168.1.10".into()),
+                ("media-pc".into(), "192.168.1.20".into()),
+            ]
+        },
         ip_input: std::env::var("KEYPAD").ok(),
+        // HINT=new or HINT=silent (with OFFLINE): what the search screen says while
+        // no PC answers.
+        hint: match std::env::var("HINT").as_deref() {
+            Ok("new") => Some(prostir::session::Hint::NewPc),
+            Ok("silent") => Some(prostir::session::Hint::Silent),
+            _ => None,
+        },
         monitors: vec![
             MonitorEntry {
                 id: k(0),

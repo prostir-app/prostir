@@ -1,6 +1,18 @@
 use super::parts::within_limit;
-use super::physical::{least_recently_seen, match_physical, unique_edid};
+use super::physical::{least_recently_seen, match_physical, name_apart, unique_edid};
 use super::*;
+
+/// Two displays of the PC of one model are told apart by their connectors; one alone
+/// goes by its model, one known by its connector by that.
+#[test]
+fn displays_of_one_model_are_told_apart() {
+    assert_eq!(
+        name_apart("DELL U2720Q", "DP-1", true),
+        "DELL U2720Q (DP-1)"
+    );
+    assert_eq!(name_apart("DELL U2720Q", "DP-1", false), "DELL U2720Q");
+    assert_eq!(name_apart("HDMI-A-1", "HDMI-A-1", true), "HDMI-A-1");
+}
 
 /// The streams go in the codec chosen only where every headset decodes it, and in
 /// H.264 otherwise; without a headset, as chosen.

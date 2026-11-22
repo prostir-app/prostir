@@ -24,7 +24,10 @@ impl Model {
         match event {
             NetEvent::Dialed { step, addr } => self.session.dialed(step, addr),
             NetEvent::Missed { step } => self.session.missed(step, now),
-            NetEvent::Hosts(hosts) => self.session.hosts(hosts),
+            NetEvent::Heard(host) => {
+                let texts = self.texts().clone();
+                self.session.heard(host, now, &texts);
+            }
             NetEvent::Reached { step, pc, addr } => {
                 // Reached through pairing: said once.
                 let paired = match &self.session.search().attempt {

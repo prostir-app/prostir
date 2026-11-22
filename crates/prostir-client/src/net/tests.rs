@@ -2,7 +2,9 @@
 //! note, 10.2): a session from the dial to its parts and streams, a dropped
 //! connection and the next one, leaving and forgetting with the right goodbye, an
 //! unknown PC offered to the user, a PC that no longer trusts the headset, nothing at
-//! an address.
+//! an address; finding the PC by asking once its session gave the find secret, by its
+//! last address before, and neither once it is forgotten; the last address of earlier
+//! builds kept as its PC's.
 
 #![expect(
     clippy::disallowed_methods,
@@ -21,7 +23,7 @@ use prostir_proto::{HeadsetGoodbye, HostMsg};
 use prostir_testkit::pc::{Clip, FakePc, Happened, PcConfig, trust_each_other};
 
 use super::*;
-use crate::session::Dest;
+use crate::session::{AskTo, Dest};
 
 /// What the fake media did, for the checks.
 #[derive(Default)]
@@ -101,12 +103,19 @@ fn start(
         clips: clips(),
         monitors: 1,
         name: "Fake".into(),
+        find_secret: SECRET,
     })
     .unwrap();
     let (tx, rx) = mpsc::channel();
     let played = Arc::new(Played::default());
     let net = Net::start(
-        Config::in_dir(&headset_dir, None, "Test headset"),
+        Config {
+            // The fake PC answers queries on the UDP port of its TCP port's number;
+            // nothing goes as a broadcast, nor to any other PC on this machine.
+            discovery_port: Some(pc.addr().port()),
+            broadcast: false,
+            ..Config::in_dir(&headset_dir, None, "Test headset")
+        },
         tx,
         Arc::new(FakeSource(played.clone())),
         HeadsetState {
@@ -117,6 +126,9 @@ fn start(
     .unwrap();
     (pc, net, rx, played)
 }
+
+/// The fake PC's find secret.
+const SECRET: [u8; 32] = [7; 32];
 
 /// The next event that `what` picks, within 10 s (the others are passed over).
 fn wait<T>(rx: &Receiver<NetEvent>, what: impl Fn(NetEvent) -> Option<T>) -> T {
@@ -367,6 +379,162 @@ fn nothing_there_is_missed() {
             reason: HeadsetGoodbye::Quit.code(),
         }
     });
+    pc.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn ask(net: &Net, step: u32, to: AskTo, pairing: bool) {
+    net.send(NetCmd::Ask {
+        step: StepId(step),
+        to,
+        pairing,
+    });
+}
+
+/// What the answers to the query of step `step` were, once its wait is over.
+fn answers(rx: &Receiver<NetEvent>, step: u32) -> Vec<FoundHost> {
+    let mut heard = Vec::new();
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left).expect("the query did not end") {
+            NetEvent::Heard(h) => heard.push(h),
+            NetEvent::Missed { step: s } if s == StepId(step) => return heard,
+            _ => {}
+        }
+    }
+}
+
+/// `file` in `dir`, once it holds `what` (it is written by the network thread).
+fn wait_file(dir: &Path, file: &str, what: &str) -> String {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = std::fs::read_to_string(dir.join(file)).unwrap_or_default();
+        if text.contains(what) {
+            return text;
+        }
+        assert!(Instant::now() < until, "{file}: {text:?}, not {what:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A trusted PC that gave no find secret yet is not found by asking (it answers its
+/// own headsets only), but by its last address once its session opened there; its
+/// session gives the secret, and from then on a query finds it, with its tag. Forgotten,
+/// neither: its secret and address are gone from the files.
+#[test]
+fn the_pc_is_found_by_asking_once_it_gave_its_secret() {
+    let dir = temp_dir("asking");
+    let (pc, mut net, rx, _) = start(&dir, false, false);
+    let id = PcId::of(&pc.key());
+    let headset = dir.join("headset");
+    // Nothing known: a query around goes nowhere (no broadcast in tests); straight to
+    // the PC it carries no tag of it, and gets no answer.
+    ask(&net, 1, AskTo::Around { also: None }, false);
+    assert!(answers(&rx, 1).is_empty());
+    ask(&net, 2, AskTo::Exactly(pc.addr()), false);
+    assert!(answers(&rx, 2).is_empty());
+    wait_pc(&pc, |h| {
+        *h == Happened::Asked {
+            ours: false,
+            answered: false,
+        }
+    });
+    // The first session: its secret and its address are kept.
+    dial(&net, 3, pc.addr());
+    wait(&rx, |e| {
+        matches!(e, NetEvent::Connected { .. }).then_some(())
+    });
+    let secrets = wait_file(&headset, "find_secrets", &secure::to_hex(&SECRET));
+    assert!(secrets.starts_with("format 2\n"), "{secrets:?}");
+    let pc_hex = secure::to_hex(&pc.key());
+    wait_file(&headset, "last_hosts", &format!("{pc_hex} {}", pc.addr()));
+    assert!(pc.drop_connection());
+    wait(&rx, |e| matches!(e, NetEvent::Ended { .. }).then_some(()));
+    // Now a query to the addresses known finds it, by its tag, and says where.
+    ask(&net, 4, AskTo::Around { also: None }, false);
+    let heard = answers(&rx, 4);
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert_eq!(
+        (
+            heard[0].pc,
+            heard[0].addr,
+            heard[0].name.as_str(),
+            heard[0].pairing
+        ),
+        (Some(id), pc.addr(), "Fake", false)
+    );
+    assert!(heard[0].at_last, "from the address it was kept at");
+    wait_pc(&pc, |h| {
+        *h == Happened::Asked {
+            ours: true,
+            answered: true,
+        }
+    });
+    // Its last address by TCP (what the search does while it does not answer).
+    net.send(NetCmd::Dial {
+        step: StepId(5),
+        to: Dest::LastOf(id),
+        pair: None,
+        pc_shows_code: false,
+    });
+    wait(&rx, |e| {
+        matches!(e, NetEvent::Connected { pc: p, .. } if p == id).then_some(())
+    });
+    // Forgotten: its secret and address go; asked again, nothing answers for it.
+    net.send(NetCmd::Forget(id));
+    wait(&rx, |e| {
+        matches!(
+            e,
+            NetEvent::Ended {
+                step: StepId(5),
+                ..
+            }
+        )
+        .then_some(())
+    });
+    assert!(!wait_file(&headset, "find_secrets", "format 2").contains(&pc_hex));
+    assert!(!wait_file(&headset, "last_hosts", "format 2").contains(&pc_hex));
+    ask(&net, 6, AskTo::Around { also: None }, false);
+    assert!(answers(&rx, 6).is_empty(), "nowhere to ask, nothing to tag");
+    ask(&net, 7, AskTo::Exactly(pc.addr()), true);
+    assert!(answers(&rx, 7).is_empty());
+    net.send(NetCmd::Dial {
+        step: StepId(8),
+        to: Dest::LastOf(id),
+        pair: None,
+        pc_shows_code: false,
+    });
+    wait(&rx, |e| {
+        matches!(e, NetEvent::Missed { step: StepId(8) }).then_some(())
+    });
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The one last address earlier builds kept (`last_host`: the PC's number and address)
+/// becomes that PC's in `last_hosts`, and the old file goes; the PC is then found by
+/// it.
+#[test]
+fn the_last_address_of_earlier_builds_is_kept() {
+    let dir = temp_dir("old-last");
+    let headset = dir.join("headset");
+    let pc_key = dir.join("pc-identity");
+    let (_, key) = trust_each_other(&headset, &pc_key, "Fake").unwrap();
+    let id = PcId::of(&key);
+    std::fs::write(headset.join("last_host"), format!("{id} 127.0.0.1:1\n")).unwrap();
+    let (pc, mut net, rx, _) = start(&dir, false, false);
+    let pc_hex = secure::to_hex(&pc.key());
+    wait_file(&headset, "last_hosts", &format!("{pc_hex} 127.0.0.1:1"));
+    assert!(!headset.join("last_host").exists());
+    // Its session at its real address replaces it.
+    dial(&net, 1, pc.addr());
+    wait(&rx, |e| {
+        matches!(e, NetEvent::Connected { .. }).then_some(())
+    });
+    wait_file(&headset, "last_hosts", &format!("{pc_hex} {}", pc.addr()));
+    assert!(net.stop(Duration::from_secs(2)));
     pc.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }

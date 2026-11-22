@@ -128,6 +128,8 @@ pub struct UiState {
     pub found: Vec<(String, String)>,
     /// IP being typed on the keypad.
     pub ip_input: Option<String>,
+    /// What the search screen says while no PC answers.
+    pub hint: Option<crate::session::Hint>,
     /// Quest monitors, sorted by id.
     pub monitors: Vec<MonitorEntry>,
     /// The monitor picked on the map (its actions show under it).
@@ -1660,6 +1662,23 @@ impl Panel {
                 l.t("connect-searching"),
             ));
             y += 48.0;
+            if let Some(hint) = s.hint {
+                let (title, body) = match hint {
+                    crate::session::Hint::NewPc => ("connect-new-title", "connect-new-pair"),
+                    crate::session::Hint::Silent => {
+                        ("connect-silent-title", "connect-silent-check")
+                    }
+                };
+                items.push(text(lx, y + 16.0, 21.0, true, TEXT, l.t(title)));
+                y += 32.0;
+                for body in [body, "connect-or-type"] {
+                    for line in self.wrapped(l.t(body), 19.0, false, lw) {
+                        items.push(text(lx, y + 16.0, 19.0, false, MUTED, &line));
+                        y += 27.0;
+                    }
+                    y += 6.0;
+                }
+            }
         } else {
             items.push(text(lx, y + 14.0, 21.0, false, MUTED, l.t("connect-found")));
             y += 30.0;
@@ -1693,7 +1712,38 @@ impl Panel {
             Style::Normal,
             Some(Action::ShowKeypad),
         ));
-        y + 66.0
+        y += 66.0;
+        // A cable needs developer mode and adb: not something a store install has.
+        if s.found.is_empty() && s.hint.is_some() && !cfg!(feature = "store") {
+            for line in self.wrapped(l.t("connect-or-usb"), 19.0, false, lw) {
+                items.push(text(lx, y + 16.0, 19.0, false, MUTED, &line));
+                y += 27.0;
+            }
+        }
+        y
+    }
+
+    /// `text` at `size` broken into lines at most `room` wide, between words (a word
+    /// wider than `room` is a line of its own).
+    fn wrapped(&self, text: &str, size: f32, medium: bool, room: f32) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        let mut line = String::new();
+        for word in text.split_whitespace() {
+            let was = line.len();
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+            if was > 0 && self.measured(&line, size, medium) > room {
+                line.truncate(was);
+                lines.push(std::mem::take(&mut line));
+                line.push_str(word);
+            }
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+        lines
     }
 
     fn glyph(&mut self, medium: bool, c: char, size: f32) -> &(Metrics, Vec<u8>) {
@@ -4056,6 +4106,7 @@ mod tests {
             host: Some("workstation".into()),
             found: Vec::new(),
             ip_input: None,
+            hint: None,
             monitors: vec![
                 MonitorEntry {
                     id: k(101),
@@ -4583,6 +4634,11 @@ mod tests {
             let mut offline = sample_state();
             offline.texts = lang.clone();
             offline.host = None;
+            for hint in [crate::session::Hint::NewPc, crate::session::Hint::Silent] {
+                let mut hinted = offline.clone();
+                hinted.hint = Some(hint);
+                states.push(hinted);
+            }
             offline.found = vec![("workstation".into(), "192.168.1.10".into())];
             states.push(offline.clone());
             offline.ip_input = Some("192.168.100.200".into());
