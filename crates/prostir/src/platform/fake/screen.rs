@@ -77,6 +77,8 @@ pub struct Screen {
     /// The size another program gave the output, and whether it stays when the stream
     /// starts over.
     resized: Mutex<Option<((u32, u32), bool)>>,
+    /// The desktop closed its output (a test's `close`).
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl Screen {
@@ -96,6 +98,7 @@ impl Screen {
             changes: Mutex::new(0),
             changed: Condvar::new(),
             resized: Mutex::new(None),
+            closed: std::sync::atomic::AtomicBool::new(false),
         });
         SCREENS
             .lock()
@@ -129,6 +132,21 @@ impl Screen {
     /// the made size back, unless `sticky`.
     pub fn resize(&self, size: (u32, u32), sticky: bool) {
         *self.resized.lock().unwrap() = (size != self.size()).then_some((size, sticky));
+    }
+
+    /// The desktop closes the output, as KWin may (a crash of its own, a display
+    /// configuration that lost it): it stays closed.
+    pub fn close(&self) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // Its source, waiting for a picture, hears it now.
+        let _changes = self.changes.lock().unwrap();
+        self.changed.notify_all();
+    }
+
+    /// Whether the desktop closed it.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The size another program gave the output, while it has it.
@@ -399,6 +417,15 @@ mod imp {
                 .ok_or(gst::FlowError::Flushing)?;
             let mut changes = screen.changes.lock().unwrap();
             loop {
+                // Closed by the desktop: its stream is gone, as KWin's PipeWire node.
+                if screen.is_closed() {
+                    gst::element_imp_error!(
+                        self,
+                        gst::ResourceError::NotFound,
+                        ["the output {} is closed", screen.name]
+                    );
+                    return Err(gst::FlowError::Error);
+                }
                 {
                     let mut state = self.state.lock().unwrap();
                     if state.flushing {

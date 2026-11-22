@@ -197,6 +197,9 @@ pub enum EncoderEvent {
         timing: Option<FrameTiming>,
     },
     Failed(String),
+    /// Its source lost what it read (the desktop's stream of the output is gone, or
+    /// it ended): not the encoder's doing, and no other encoder would fare better.
+    SourceLost(String),
     /// The encoder itself failed before its first frame: it did not open (no more
     /// sessions, a size or format its driver does not take). Another encoder may.
     Unopened(NotOpened),
@@ -648,6 +651,14 @@ impl Encoder {
             let on_event = on_event.clone();
             let node = node.clone();
             let encoded = encoded.clone();
+            // An encoder a test asked to break: once it sent a frame, it fails as a
+            // driver can in the middle of a stream.
+            #[cfg(feature = "fake-desktop")]
+            let breaker = pipeline.by_name("enc").map(|e| e.downgrade());
+            #[cfg(feature = "fake-desktop")]
+            let fake = cfg.backend == Backend::Fake;
+            #[cfg(feature = "fake-desktop")]
+            let broke = AtomicBool::new(false);
             sink.set_callbacks(
                 gst_app::AppSinkCallbacks::builder()
                     .new_sample(move |sink| {
@@ -684,6 +695,18 @@ impl Encoder {
                             timing,
                         }) {
                             request_keyframe(sink);
+                        }
+                        #[cfg(feature = "fake-desktop")]
+                        if let Some(enc) = breaker.as_ref().and_then(gst::glib::WeakRef::upgrade)
+                            && !broke.load(Ordering::Relaxed)
+                            && crate::platform::encoder_breaks(&node, fake)
+                        {
+                            broke.store(true, Ordering::Relaxed);
+                            gst::element_error!(
+                                enc,
+                                gst::StreamError::Encode,
+                                ("broken on purpose (break-encoder)")
+                            );
                         }
                         Ok(gst::FlowSuccess::Ok)
                     })
@@ -733,6 +756,16 @@ impl Encoder {
                                         gate.came.notify_all();
                                         break;
                                     }
+                                    // After the start, once the stream flowed: its stream
+                                    // is gone. Before its first frame it may as well be
+                                    // the encoder that the source could not agree with
+                                    // (a format, a modifier): that goes on as a failure.
+                                    drop(state);
+                                    if encoded.load(Ordering::Relaxed) {
+                                        warn!("encoder for {node}: its source is gone: {text}");
+                                        on_event(EncoderEvent::SourceLost(text));
+                                        break;
+                                    }
                                 }
                                 // The encoder (or its converter) before its first frame:
                                 // it did not open, and another encoder may.
@@ -756,8 +789,15 @@ impl Encoder {
                             gst::MessageView::Warning(w) => {
                                 warn!("encoder for {node}: {}", w.error());
                             }
+                            // Only a source ends the stream (the desktop's stream of
+                            // the output ended); before the first frame, as above.
                             gst::MessageView::Eos(_) => {
-                                on_event(EncoderEvent::Failed("stream ended".into()));
+                                let why = "stream ended".to_owned();
+                                on_event(if encoded.load(Ordering::Relaxed) {
+                                    EncoderEvent::SourceLost(why)
+                                } else {
+                                    EncoderEvent::Failed(why)
+                                });
                                 break;
                             }
                             _ => {}
@@ -1289,7 +1329,10 @@ mod tests {
         let kept = told.clone();
         let started = Instant::now();
         let result = Encoder::start(&input, &cfg, None, &GpuDevices::default(), move |e| {
-            if matches!(e, EncoderEvent::Failed(_) | EncoderEvent::Unopened(_)) {
+            if matches!(
+                e,
+                EncoderEvent::Failed(_) | EncoderEvent::SourceLost(_) | EncoderEvent::Unopened(_)
+            ) {
                 *kept.lock().unwrap() += 1;
             }
             false

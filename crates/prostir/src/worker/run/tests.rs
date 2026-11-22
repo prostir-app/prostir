@@ -21,6 +21,8 @@ struct Stub {
     /// The scale the desktop lists its outputs at: the one an output is made with,
     /// until a test gives another, as a person in the desktop's settings.
     scale: DeskScale,
+    /// Making a monitor fails while set.
+    refuse: Arc<AtomicBool>,
 }
 
 type DeskScale = Arc<Mutex<Option<u16>>>;
@@ -91,6 +93,9 @@ impl Desktop for Stub {
     fn make(&mut self, spec: &VirtualSpec) -> Result<Box<dyn Output>> {
         let key = OutputKey::new(format!("Prostir-{}", spec.number));
         self.calls.lock().unwrap().push(format!("make {key}"));
+        if self.refuse.load(Ordering::Relaxed) {
+            bail!("the stub desktop makes no {key} now");
+        }
         let (shut, ring) = &*self.gate;
         let _open = ring.wait_while(shut.lock().unwrap(), |shut| *shut);
         let geometry = Geometry {
@@ -194,6 +199,7 @@ fn the_newest_wanted_state_wins_and_the_desktop_is_placed_once() {
         gate: gate.clone(),
         outputs: Arc::default(),
         scale: Arc::default(),
+        refuse: Arc::default(),
     };
     let (events, received) = crate::events::channel();
     let inbox: Arc<Inbox<Wanted, Job>> = Arc::default();
@@ -316,6 +322,92 @@ fn the_headsets_plan_is_recognised() {
     assert!(!is_the_headsets(&moved, &boxes));
     assert!(!is_the_headsets(&moved, &desk::Boxes::new(Vec::new())));
 }
+
+/// A monitor made anew (its size did not come back) that cannot be made again leaves
+/// no stream behind: the headsets that had it hear that it ended.
+#[test]
+fn a_monitor_that_cannot_be_made_again_ends_its_stream() {
+    let refuse = Arc::new(AtomicBool::new(false));
+    let stub = Stub {
+        caps: DesktopCaps {
+            name: "stub",
+            virtual_monitors: Ok(AddModel::OneByOne),
+            has_primary: false,
+            origin_is_primary: false,
+            scales: Scales::Any { min: 50, max: 400 },
+            refresh: vec![60],
+            screenshot_one_output: true,
+            moves_pointer: false,
+            cleans_up_after_crash: true,
+        },
+        calls: Calls::default(),
+        gate: Arc::new((Mutex::new(false), Condvar::new())),
+        outputs: Arc::default(),
+        scale: DeskScale::default(),
+        refuse: refuse.clone(),
+    };
+    let (events, _received) = crate::events::channel();
+    let router = Arc::new(Router::new());
+    let shared = Shared {
+        inbox: Arc::default(),
+        steps: Arc::default(),
+        router: router.clone(),
+        events,
+        generation: 1,
+    };
+    let mut worker = Worker::with(shared, Box::new(stub), GpuDevices::default());
+    worker.take(wanted(&[(1, 1, 640)]));
+    let id = ScreenId::saved(1);
+    worker.make(id);
+    assert!(worker.slots[&id].output.is_some());
+    // Its stream, as a headset has it.
+    let outbox = Arc::new(crate::outbox::Outbox::default());
+    let headset = state::HeadsetCaps {
+        decoders: vec![state::Decoder {
+            codec: 0,
+            max_w: 7680,
+            max_h: 4320,
+        }],
+        ..state::HeadsetCaps::default()
+    };
+    router.attach(1, outbox.clone(), headset, true);
+    router.publish(1, &std::collections::BTreeSet::from([id]));
+    router.add_stream(id, Codec::H264, "Prostir-1".into());
+    router.on_event(
+        id,
+        crate::encoder::EncoderEvent::Size {
+            width: 64,
+            height: 32,
+        },
+    );
+    router.on_event(
+        id,
+        crate::encoder::EncoderEvent::Frame {
+            pts_us: 0,
+            keyframe: true,
+            data: vec![0],
+            timing: None,
+        },
+    );
+    assert!(
+        outbox
+            .sent()
+            .iter()
+            .any(|m| matches!(m, HostMsg::StreamStart { .. }))
+    );
+
+    refuse.store(true, Ordering::Relaxed);
+    worker.recreate(id);
+    assert!(worker.slots[&id].output.is_none(), "not made again");
+    assert!(
+        outbox
+            .sent()
+            .iter()
+            .any(|m| matches!(m, HostMsg::StreamEnd { .. })),
+        "the stream it had stays"
+    );
+}
+
 /// A worker of a stub desktop that never waits, on a thread of its own.
 struct Harness {
     calls: Calls,
@@ -345,6 +437,7 @@ impl Harness {
             gate: Arc::new((Mutex::new(false), Condvar::new())),
             outputs: Arc::default(),
             scale: scale.clone(),
+            refuse: Arc::default(),
         };
         let (events, received) = crate::events::channel();
         let inbox: Arc<Inbox<Wanted, Job>> = Arc::default();

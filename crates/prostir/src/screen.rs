@@ -84,8 +84,9 @@ pub enum ScreenState {
     /// Being made: no output or encoder yet.
     Starting,
     Running,
-    /// Its output or encoder could not start: it keeps its place in the set and the
-    /// rows, and is tried again at the next session.
+    /// Its output or encoder could not start, or broke: it keeps its place in the set
+    /// and the rows, and a monitor is tried again by itself after a pause (see
+    /// [`retry_pause`]), at the next session, or when asked.
     Failed {
         error: prostir_proto::state::ErrorCode,
         why: String,
@@ -111,8 +112,11 @@ pub struct Screen {
     pub encoding: Option<Encoding>,
     /// Raised to have the worker try it again after a failure.
     pub attempt: u32,
-    /// The desktop closed its output (the monitors are made anew for the next session).
-    pub closed: bool,
+    /// A monitor that failed: how many times in a row, and when it is tried again.
+    pub failures: u32,
+    pub retry_at: Option<Instant>,
+    /// Since when it streams, as the worker last said.
+    pub running_since: Option<Instant>,
     /// A display of the PC streams (it is shown and connected).
     pub streaming: bool,
 }
@@ -128,9 +132,25 @@ impl Screen {
             output: None,
             encoding: None,
             attempt: 0,
-            closed: false,
+            failures: 0,
+            retry_at: None,
+            running_since: None,
             streaming: false,
         }
+    }
+
+    /// It failed at `now`: tried again after a pause that grows with each failure in
+    /// a row (one after it streamed a good while starts the count again).
+    pub fn failed_at(&mut self, now: Instant) {
+        if self
+            .running_since
+            .is_some_and(|t| now.duration_since(t) >= STREAMED_WELL)
+        {
+            self.failures = 0;
+        }
+        self.running_since = None;
+        self.failures += 1;
+        self.retry_at = Some(now + retry_pause(self.failures));
     }
 
     pub fn running(&self) -> bool {
@@ -167,6 +187,21 @@ impl Screen {
             _ => format!("Prostir-{}", self.number),
         }
     }
+}
+
+/// The pause before a monitor that failed is tried again: 1 s, then twice as long
+/// with each failure in a row, up to 30 s (each screen on its own: the others do not
+/// wait).
+pub const RETRY_FIRST: Duration = Duration::from_secs(1);
+pub const RETRY_LONGEST: Duration = Duration::from_secs(30);
+/// Streaming this long, a monitor that fails again is counted from its first failure.
+const STREAMED_WELL: Duration = Duration::from_secs(60);
+
+/// The pause after the `failures`-th failure in a row (from 1).
+pub fn retry_pause(failures: u32) -> Duration {
+    RETRY_FIRST
+        .saturating_mul(1 << failures.saturating_sub(1).min(5))
+        .min(RETRY_LONGEST)
 }
 
 /// Restores of one monitor's size allowed in [`RESTORE_WINDOW`].
@@ -245,6 +280,34 @@ impl SizeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A monitor that keeps failing is tried again after 1, 2, 4… up to 30 s; one that
+    /// streamed a good while before it failed starts at 1 s again.
+    #[test]
+    fn a_failed_monitor_waits_longer_each_time() {
+        let pauses: Vec<u64> = (1..=8).map(|n| retry_pause(n).as_secs()).collect();
+        assert_eq!(pauses, [1, 2, 4, 8, 16, 30, 30, 30]);
+        assert_eq!(retry_pause(u32::MAX), RETRY_LONGEST);
+        let t0 = Instant::now();
+        let kind = ScreenKind::Virtual {
+            spec: MonitorSpec {
+                width: 640,
+                height: 360,
+                scale: 1.0,
+            },
+        };
+        let mut s = Screen::starting(ScreenId::saved(1), 1, kind);
+        s.failed_at(t0);
+        s.failed_at(t0);
+        assert_eq!(s.retry_at, Some(t0 + Duration::from_secs(2)));
+        s.running_since = Some(t0);
+        s.failed_at(t0 + Duration::from_secs(5));
+        assert_eq!(s.failures, 3, "it streamed only a moment");
+        s.running_since = Some(t0);
+        s.failed_at(t0 + STREAMED_WELL);
+        assert_eq!(s.failures, 1);
+        assert_eq!(s.retry_at, Some(t0 + STREAMED_WELL + RETRY_FIRST));
+    }
 
     /// The numbers are the protocol's.
     #[test]

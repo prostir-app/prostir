@@ -12,7 +12,8 @@
 //!   `PROSTIR_FAKE_SLOW_MONITORS_MS` makes each monitor take that long to make, and
 //!   `PROSTIR_FAKE_BROKEN_MONITORS=2,3` makes those monitors (by number, from 1)
 //!   impossible to make. `PROSTIR_FAKE_SLOW_CONNECT_MS` makes connecting to the
-//!   desktop take that long.
+//!   desktop take that long, and `PROSTIR_FAKE_ENCODER_STOP_MS` stopping each
+//!   encoder.
 //! - Sound is silence, 10 ms at a time, each slice starting with the time it was
 //!   made (see [`audio`]), so a fake headset can tell how late it arrives; the
 //!   microphone goes nowhere. The sound system says its changes as `pactl subscribe`
@@ -121,6 +122,50 @@ pub fn hang(point: &str) {
         std::thread::sleep(long);
         log::info!("fake desktop: {point} is back");
     }
+}
+
+/// How many of the encoders of each output still break once they sent a frame, and
+/// whether any encoder does or only the fake hardware one (`break-encoder Fake-2 3`,
+/// `break-encoder Fake-2 3 any`, see `desktop.rs`), by output name.
+static BREAK_ENCODERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (u32, bool)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// The next `n` encoders of output `name` break (any encoder with `any`, else only
+/// the fake hardware one).
+fn break_encoders(name: &str, n: u32, any: bool) {
+    BREAK_ENCODERS
+        .lock()
+        .unwrap()
+        .insert(name.to_owned(), (n, any));
+}
+
+/// Whether an encoder of output `name` (the fake hardware one with `fake`) that sent
+/// a frame breaks now (one of those a test asked for).
+pub fn encoder_breaks(name: &str, fake: bool) -> bool {
+    BREAK_ENCODERS
+        .lock()
+        .unwrap()
+        .get_mut(name)
+        .is_some_and(|(left, any)| {
+            let breaks = *left > 0 && (fake || *any);
+            if breaks {
+                *left -= 1;
+            }
+            breaks
+        })
+}
+
+/// An encoder stops: it hangs, if a test said so (`hang encoder-stop 20`), and takes
+/// `PROSTIR_FAKE_ENCODER_STOP_MS` in any case, as a graphics driver letting its
+/// encoder go does.
+pub fn encoder_stops() {
+    hang("encoder-stop");
+    let ms = std::env::var("PROSTIR_FAKE_ENCODER_STOP_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    std::thread::sleep(std::time::Duration::from_millis(ms));
 }
 
 /// Where caches go: `$XDG_CACHE_HOME` and nowhere else, and only when the fake desktop
@@ -318,6 +363,8 @@ pub mod audio {
 
     pub struct AudioOut {
         stop: Arc<AtomicBool>,
+        /// Its device's number.
+        sink: u32,
     }
 
     impl AudioOut {
@@ -355,7 +402,25 @@ pub mod audio {
             // The sink, and its monitor with the same number.
             sys.say("new", "sink", sink);
             sys.say("new", "source", sink);
-            Ok(Self { stop })
+            Ok(Self { stop, sink })
+        }
+
+        /// Whether its device is still there (`sound-gone` removes it).
+        pub fn alive(&self) -> bool {
+            system().sink == Some(self.sink)
+        }
+    }
+
+    /// The sound system went away and came back (a test's command, as when PipeWire
+    /// restarts): Prostir's devices are gone, and nothing says so but their removal.
+    pub fn gone() {
+        let mut sys = system();
+        if let Some(sink) = sys.sink.take() {
+            sys.level = None;
+            sys.say_together(&[("remove", "source", sink), ("remove", "sink", sink)]);
+        }
+        if let Some(mic) = sys.mic.take() {
+            sys.say("remove", "source", mic);
         }
     }
 
@@ -374,7 +439,8 @@ pub mod audio {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
             let mut sys = system();
-            if let Some(sink) = sys.sink.take() {
+            // Only its own: one made since stays.
+            if let Some(sink) = sys.sink.take_if(|s| *s == self.sink) {
                 sys.level = None;
                 log::info!("fake desktop: the headset's sound device removed (#{sink})");
                 sys.say("remove", "source", sink);
@@ -505,6 +571,8 @@ pub mod audio {
     /// the log now and then; a program records while a test says so (`record on`).
     pub struct MicIn {
         got: std::sync::atomic::AtomicUsize,
+        /// Its device's number.
+        mic: u32,
     }
 
     impl MicIn {
@@ -512,10 +580,25 @@ pub mod audio {
             let mut sys = system();
             let mic = sys.number();
             sys.mic = Some(mic);
+            log::info!("fake desktop: the headset microphone made (#{mic})");
             sys.say("new", "source", mic);
             Ok(Self {
                 got: std::sync::atomic::AtomicUsize::new(0),
+                mic,
             })
+        }
+
+        /// Whether its device is still there (`sound-gone` removes it).
+        pub fn alive(&self) -> bool {
+            system().mic == Some(self.mic)
+        }
+
+        /// Its device goes, for every share of it.
+        pub fn close(&self) {
+            let mut sys = system();
+            if let Some(mic) = sys.mic.take_if(|m| *m == self.mic) {
+                sys.say("remove", "source", mic);
+            }
         }
 
         pub fn push(&self, pcm: &[u8]) {
@@ -535,10 +618,7 @@ pub mod audio {
 
     impl Drop for MicIn {
         fn drop(&mut self) {
-            let mut sys = system();
-            if let Some(mic) = sys.mic.take() {
-                sys.say("remove", "source", mic);
-            }
+            self.close();
         }
     }
 

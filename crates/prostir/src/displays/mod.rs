@@ -8,7 +8,6 @@
 use crate::i18n::t;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -194,6 +193,9 @@ pub struct Displays {
     /// The streams go in H.264 because a headset did not decode the codec chosen:
     /// they go back to it once every headset with a session does.
     fitted_down: bool,
+    /// When a screen last streamed (or the session began): nothing streaming for
+    /// `encoding::NOTHING_STREAMS` ends the sessions (see [`Displays::healthy`]).
+    streamed_at: Instant,
     pub router: Arc<Router>,
     cfg: EncoderConfig,
     primary: Option<ScreenId>,
@@ -256,6 +258,7 @@ impl Displays {
             choices: Vec::new(),
             streaming: true,
             fitted_down: false,
+            streamed_at: Instant::now(),
             router,
             cfg: EncoderConfig {
                 codec: settings.codec,
@@ -501,7 +504,8 @@ impl Displays {
                         info!("{}: streams, as tried before", s.name());
                     }
                     s.encoding = Some(encoding);
-                    s.closed = false;
+                    s.retry_at = None;
+                    s.running_since = Some(Instant::now());
                     if !matches!(s.state, ScreenState::Absent) {
                         s.state = ScreenState::Running;
                     }
@@ -525,6 +529,10 @@ impl Displays {
                     if s.is_physical() {
                         warn!("cannot show {}: {why}", s.name());
                     }
+                    // A monitor is tried again by itself, after its pause.
+                    if s.is_virtual() {
+                        s.failed_at(Instant::now());
+                    }
                     s.state = ScreenState::Failed { error, why };
                 }
             }
@@ -540,11 +548,6 @@ impl Displays {
                     if s.streaming {
                         s.state = ScreenState::Starting;
                     }
-                }
-            }
-            Done::Closed { id } => {
-                if let Some(s) = self.screens.get_mut(&id) {
-                    s.closed = true;
                 }
             }
             Done::PanelGone { id } => {
@@ -644,6 +647,12 @@ impl Displays {
             self.sync_audio();
         }
         self.stop_too_big();
+        if self.some_stream() {
+            self.streamed_at = Instant::now();
+        }
+        if self.retry_due(Instant::now()) {
+            self.push();
+        }
         // A fresh picture asked of a stream that then stood still never came.
         let starved = self.router.starved(STARVED);
         if self.streaming && !starved.is_empty() {
@@ -708,6 +717,10 @@ impl Displays {
     /// session too (the other headsets get a keyframe of it). The encoders run from
     /// here; [`Displays::worn`] pauses them again if no headset is worn.
     pub fn headset_connected(&mut self) {
+        // A new session tries every encoder again for each monitor.
+        let monitors = self.monitors().map(|s| s.id).collect();
+        self.desk.ask(Job::Forgive(monitors));
+        self.streamed_at = Instant::now();
         self.retry_too_big();
         self.retry_failed();
         // Paused ones (kept from before) start over as the worker resumes them;

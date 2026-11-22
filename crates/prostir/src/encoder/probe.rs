@@ -400,6 +400,12 @@ impl Catalog {
         Next::Another
     }
 
+    /// What failed on `output` counts no more: every encoder is tried for it again (a
+    /// new session, or the person asked for it to be tried again).
+    pub fn forget_output(&mut self, output: ScreenId) {
+        self.failures.retain(|f| f.output != output);
+    }
+
     /// `open` sessions of encoder `kind` opened at once: a limit lower than that
     /// rises to it.
     pub fn seen_open(&mut self, kind: Kind, open: u32) {
