@@ -335,8 +335,8 @@ pub struct Assembler {
     /// For a tag, how many first bytes of the payload to keep apart from the body.
     head: fn(u8) -> usize,
     /// Bodies handed back once their messages were used (see [`Assembler::recycle`]),
-    /// taken for the next messages that fit in them.
-    spare: Vec<Vec<u8>>,
+    /// with their messages' tag: taken for the next messages of that tag that fit.
+    spare: Vec<(u8, Vec<u8>)>,
 }
 
 /// How many bodies handed back an assembler keeps at most.
@@ -357,21 +357,27 @@ impl Assembler {
         }
     }
 
-    /// Hands back the body of a message used up (a slice of sound played): a next
-    /// message it is large enough for is put together in it, so a steady stream of
-    /// messages of one size needs no new memory for each. Kept only while there are
-    /// few, and only a body no larger than the largest message allowed.
-    pub fn recycle(&mut self, mut body: Vec<u8>) {
+    /// Hands back the body of a message with `tag` used up (a slice of sound played):
+    /// a next message of that tag it is large enough for is put together in it, so a
+    /// steady stream of messages of one size needs no new memory for each (and other
+    /// messages, a small frame, a ping, never take it). Kept only while there are few,
+    /// and only a body no larger than the largest message allowed.
+    pub fn recycle(&mut self, tag: u8, mut body: Vec<u8>) {
         if self.spare.len() < SPARE_BODIES && body.capacity() <= self.limits.message as usize {
             body.clear();
-            self.spare.push(body);
+            self.spare.push((tag, body));
         }
     }
 
-    /// A body for `len` bytes: a spare one it fits in, else a new one of that size.
-    fn body_for(&mut self, len: usize) -> Vec<u8> {
-        match self.spare.iter().position(|b| b.capacity() >= len) {
-            Some(i) => self.spare.swap_remove(i),
+    /// A body for `len` bytes of a message with `tag`: a spare one of that tag it fits
+    /// in, else a new one of that size.
+    fn body_for(&mut self, tag: u8, len: usize) -> Vec<u8> {
+        match self
+            .spare
+            .iter()
+            .position(|(t, b)| *t == tag && b.capacity() >= len)
+        {
+            Some(i) => self.spare.swap_remove(i).1,
             None => Vec::with_capacity(len),
         }
     }
@@ -438,7 +444,7 @@ impl Assembler {
             let head_want = (self.head)(tag).min(MAX_HEAD - MESSAGE_HEADER).min(len);
             // Once, at the length the header says (checked against the limit), or a
             // body handed back that it fits in.
-            let body = self.body_for(len - head_want);
+            let body = self.body_for(tag, len - head_want);
             let mut partial = Partial {
                 msg: Message {
                     tag,

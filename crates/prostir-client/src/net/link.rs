@@ -688,10 +688,10 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 if shared.has_media(pc) {
                     media.play(pcm);
                 } else {
-                    wire.packets.recycle(pcm);
+                    wire.packets.recycle(HostMsg::AUDIO_TAG, pcm);
                 }
                 while let Some(played) = media.played() {
-                    wire.packets.recycle(played);
+                    wire.packets.recycle(HostMsg::AUDIO_TAG, played);
                 }
             }
             HostMsg::Command { req, asked } => {

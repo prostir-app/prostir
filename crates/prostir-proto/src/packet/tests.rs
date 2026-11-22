@@ -481,9 +481,11 @@ fn bodies_handed_back_are_filled_again() {
     let records = packets(3, Encoded::new(12, &[], slice.clone()).unwrap(), FRAGMENT);
     let first = assemble(&mut asm, &records).unwrap().remove(0);
     let at = first.body.as_ptr();
-    asm.recycle(first.body);
+    // One of another tag first, large enough: never taken for this one.
+    asm.recycle(13, Vec::with_capacity(4096));
+    asm.recycle(12, first.body);
     // A small spare body too, which the next slice does not fit in.
-    asm.recycle(Vec::with_capacity(16));
+    asm.recycle(12, Vec::with_capacity(16));
     let again = assemble(&mut asm, &records).unwrap().remove(0);
     assert_eq!(again.body, slice);
     assert_eq!(again.body.as_ptr(), at, "the same memory");
@@ -492,9 +494,15 @@ fn bodies_handed_back_are_filled_again() {
     let got = assemble(&mut asm, &small).unwrap().remove(0);
     assert_eq!(got.body, [1, 2, 3]);
     assert!(got.body.capacity() >= 16);
+    // The other tag's stays for its own.
+    assert!(
+        asm.spare
+            .iter()
+            .any(|(t, b)| *t == 13 && b.capacity() >= 4096)
+    );
     // Too many handed back: the rest are let go.
     for _ in 0..20 {
-        asm.recycle(Vec::with_capacity(8));
+        asm.recycle(12, Vec::with_capacity(8));
     }
     assert_eq!(asm.spare.len(), SPARE_BODIES);
     // What was sent comes back as it went.

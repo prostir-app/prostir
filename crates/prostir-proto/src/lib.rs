@@ -541,6 +541,10 @@ fn skip(r: &mut impl Read, len: usize) -> io::Result<()> {
 }
 
 impl HostMsg {
+    /// The tag of [`HostMsg::Audio`] as encoded: a played slice's body is handed back
+    /// with it (see [`Assembler::recycle`]).
+    pub const AUDIO_TAG: u8 = tag::AUDIO;
+
     /// What a headset accepts from the PC: before the session (when the PC may not
     /// be trusted yet), or in it (`opened`, from the moment the headset sends `Open`
     /// to a PC it trusts, so the snapshot of the PC's state has no ceiling of its own).
