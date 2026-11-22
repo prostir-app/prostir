@@ -190,7 +190,10 @@ impl FakeDesktop {
                 origin_is_primary: false,
                 scales: Scales::Any { min: 50, max: 400 },
                 refresh: vec![60],
-                screenshot_one_output: true,
+                // With `PROSTIR_FAKE_SCREENSHOT=stream`, as on KDE: the picture of
+                // one monitor comes from its own stream.
+                screenshot_one_output: std::env::var_os("PROSTIR_FAKE_SCREENSHOT")
+                    .is_none_or(|v| v != "stream"),
                 moves_pointer: false,
                 cleans_up_after_crash: true,
             },

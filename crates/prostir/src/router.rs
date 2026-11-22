@@ -573,6 +573,17 @@ impl Router {
             .collect()
     }
 
+    /// Whether stream `id` sends frames now (its picture moves), so a keyframe asked of
+    /// its encoder comes with the next one.
+    pub fn flowing(&self, id: ScreenId) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .streams
+            .get(&id)
+            .is_some_and(|s| s.flowing(Instant::now()))
+    }
+
     /// Whether stream `id` goes to a headset on the head already and sends frames now
     /// (its picture moves), so a keyframe asked of its encoder comes with the next
     /// one: starting it over would only make that headset miss a moment.

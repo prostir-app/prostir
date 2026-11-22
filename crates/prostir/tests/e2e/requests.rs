@@ -387,3 +387,39 @@ fn a_display_of_the_pc_shown_starts_at_once() {
         .wait(SOON, "its stream ended", |v| v.ended.contains(&id))
         .unwrap();
 }
+
+/// A picture of one monitor where it comes from its own stream (as on KDE), of a
+/// still screen: a keyframe asked of it would come with the source's next frame,
+/// which on a still screen is its keepalive (here never), so the stream starts over
+/// and sends its picture at once; it is that monitor's picture, not the whole
+/// desktop's.
+#[test]
+fn a_picture_of_a_still_monitor_comes_from_its_stream() {
+    let options = Options {
+        env: vec![("PROSTIR_FAKE_SCREENSHOT".into(), "stream".into())],
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("screenshot-still", &options);
+    let id = headset.view().order()[0];
+    // Still since it started.
+    headset.take_for(std::time::Duration::from_secs(1)).unwrap();
+    let outcome = headset.ask(Request::Screenshot { id }).unwrap();
+    let from_stream = pc.count_log("screenshot from the stream:");
+    assert_eq!(
+        pc.count_log("waiting on channel"),
+        0,
+        "no keyframe came: {:?}",
+        pc.lines("screenshot")
+    );
+    match outcome {
+        Outcome::Saved { path } => {
+            assert!(std::path::Path::new(&path).is_file(), "{path}");
+            assert_eq!(from_stream, 0, "{:?}", pc.lines("screenshot"));
+        }
+        // Without a decoder for H.264 here the keyframe came, but made no picture.
+        other => {
+            eprintln!("no picture made of the keyframe: {other:?}");
+            pc.wait_log(SOON, "screenshot from the stream:");
+        }
+    }
+}

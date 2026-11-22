@@ -170,28 +170,39 @@ impl Worker {
         let Some(slot) = self.slots.get(&id).filter(|s| !s.is_physical()) else {
             bail!(UserError::UnknownDisplay);
         };
+        let key = slot.key().cloned();
+        let codec = slot.encoder.as_ref().map(|e| e.codec());
         let streaming = self.wanted.as_ref().is_some_and(|w| w.streaming);
         // Where the desktop's screenshot tool cannot take one output by name, the
         // monitor's own stream can. A fresh keyframe, decoded into a PNG; the whole
         // desktop if not.
         if !self.desktop.caps().screenshot_one_output
-            && let Some(encoder) = slot.encoder.as_ref()
+            && let Some(codec) = codec
             && streaming
         {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             *self.shared.router.snapshot.lock().unwrap() = Some((id, tx));
-            encoder.force_keyframe();
+            if self.shared.router.flowing(id) {
+                if let Some(encoder) = self.slots.get(&id).and_then(|s| s.encoder.as_ref()) {
+                    encoder.force_keyframe();
+                }
+            } else {
+                // A still screen sends nothing until its keepalive (2 s on KDE, as long
+                // as the wait below): its stream starts over, as for a headset waiting
+                // for a fresh picture, and the source sends its picture at once.
+                info!("{id} is still: its stream starts over for the picture");
+                self.set_paused(id, false);
+            }
             let frame = rx.recv_timeout(Duration::from_secs(2));
             self.shared.router.snapshot.lock().unwrap().take();
             match frame
                 .map_err(anyhow::Error::from)
-                .and_then(|data| crate::encoder::keyframe_to_png(&data, encoder.codec()))
+                .and_then(|data| crate::encoder::keyframe_to_png(&data, codec))
             {
                 Ok(path) => return Ok(JobOk::Saved { path, whole: false }),
                 Err(e) => warn!("screenshot from the stream: {e:#}; taking the whole desktop"),
             }
         }
-        let key = slot.key().cloned();
         let caps = self.desktop.caps();
         let (name, whole) = (caps.name, !caps.screenshot_one_output || key.is_none());
         let Some(windows) = self.desktop.windows() else {
