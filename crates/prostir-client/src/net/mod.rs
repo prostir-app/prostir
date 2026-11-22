@@ -273,6 +273,24 @@ pub struct Config {
     pub last_host_file: PathBuf,
     /// This headset's name for pairing (its model, as the system names it).
     pub name: String,
+    /// The code the headset shows when it pairs: a new random one each time, but in
+    /// tests (against a PC whose person types a code given beforehand).
+    pub pairing_code: fn() -> String,
+}
+
+impl Config {
+    /// The files in `dir`, as the headset app keeps them (`identity`, `paired_hosts`,
+    /// `last_host`), `host.txt` in `outside` if given, and the headset's `name`.
+    pub fn in_dir(dir: &std::path::Path, outside: Option<&std::path::Path>, name: &str) -> Self {
+        Self {
+            identity_file: dir.join("identity"),
+            trust_file: dir.join("paired_hosts"),
+            host_file: outside.map(|o| o.join("host.txt")),
+            last_host_file: dir.join("last_host"),
+            name: name.to_owned(),
+            pairing_code: secure::pairing_code,
+        }
+    }
 }
 
 /// The running network thread, for the app.
@@ -297,6 +315,7 @@ impl Net {
         let shared = Arc::new(Shared {
             identity,
             name: config.name.clone(),
+            pairing_code: config.pairing_code,
             headset: Mutex::new(headset),
             media_to: Mutex::new(None),
             media,
@@ -388,6 +407,7 @@ pub(crate) struct Shared {
     identity: Identity,
     /// What the PC calls this headset when they pair.
     name: String,
+    pairing_code: fn() -> String,
     /// What the next `Open` says.
     headset: Mutex<HeadsetState>,
     /// The session the sound and the microphone go with.
@@ -451,6 +471,11 @@ impl Current {
     /// The session is open: leaving it from now on says goodbye.
     fn opened(&self, feedback: &Feedback) {
         lock(&self.state).feedback = Some(feedback.clone());
+    }
+
+    /// Its session is open (it pairs no more).
+    fn is_open(&self) -> bool {
+        lock(&self.state).feedback.is_some()
     }
 
     /// Leaves the PC: with a goodbye once the session is open, else by closing.
@@ -639,8 +664,10 @@ fn command(
                 shared.tell(NetEvent::Missed { step });
             });
         }
+        // Before trust, or pairing again inside a trusted PC's link (the PC had
+        // forgotten the headset): the connections whose session has not opened.
         NetCmd::Hangup => {
-            for c in conns.iter().filter(|c| c.pc.is_none()) {
+            for c in conns.iter().filter(|c| !c.current.is_open()) {
                 c.current.leave(HeadsetGoodbye::OtherPc);
             }
         }
@@ -650,7 +677,7 @@ fn command(
             }
         }
         NetCmd::SubmitCode(code) => {
-            if let Some(c) = conns.iter().find(|c| c.pc.is_none()) {
+            if let Some(c) = conns.iter().find(|c| !c.current.is_open()) {
                 c.current.submit(code);
             }
         }

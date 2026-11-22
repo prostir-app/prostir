@@ -106,13 +106,7 @@ fn start(
     let (tx, rx) = mpsc::channel();
     let played = Arc::new(Played::default());
     let net = Net::start(
-        Config {
-            identity_file: headset_dir.join("identity"),
-            trust_file: headset_dir.join("paired_hosts"),
-            host_file: None,
-            last_host_file: headset_dir.join("last_host"),
-            name: "Test headset".into(),
-        },
+        Config::in_dir(&headset_dir, None, "Test headset"),
         tx,
         Arc::new(FakeSource(played.clone())),
         HeadsetState {

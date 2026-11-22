@@ -357,7 +357,7 @@ fn pair(conn: &mut Conn, wire: &mut Wire) -> io::Result<bool> {
             });
             wait_code(conn, wire).ok_or_else(|| io::Error::other("pairing interrupted"))?
         } else {
-            let code = secure::pairing_code();
+            let code = (shared.pairing_code)();
             shared.tell(NetEvent::Pairing {
                 step,
                 key,

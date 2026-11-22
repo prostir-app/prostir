@@ -565,7 +565,15 @@ impl Session {
         ) {
             self.search.attempt = None;
         }
-        self.links.insert(pc, Link::Connecting { addr });
+        // A PC already on its way or in a session keeps that link (the network thread
+        // never makes a second connection to it).
+        if self
+            .links
+            .get(&pc)
+            .is_none_or(|l| matches!(l, Link::Lost { .. }))
+        {
+            self.links.insert(pc, Link::Connecting { addr });
+        }
         if matches!(self.search.round, Round::Open { step: s } | Round::Waiting { step: s, .. } if s == step)
         {
             self.search.round = Round::Resting(now + RETRY_PAUSE);
@@ -629,6 +637,16 @@ impl Session {
     /// The session with PC `pc` opened at `addr`: the link is connected, with its
     /// state from the parts that follow.
     pub fn connected_to(&mut self, pc: PcId, addr: SocketAddr, texts: &Texts) {
+        // Paired again inside the session's opening (the PC had forgotten the
+        // headset), or dialed there: that attempt is over.
+        let its = match &self.search.attempt {
+            Some(Attempt::Pairing { key, .. }) => PcId::of(key) == pc,
+            Some(Attempt::Dialing { addr: a, .. }) => *a == addr,
+            _ => false,
+        };
+        if its {
+            self.search.attempt = None;
+        }
         let label = self.label(addr, texts);
         self.links.insert(
             pc,
@@ -660,11 +678,14 @@ impl Session {
         if let Some(pc) = pc
             && let Some(link) = self.links.get_mut(&pc)
         {
+            let was_connected = matches!(link, Link::Connected(_));
             if let Link::Connected(p) = link {
                 out.waited = p.asks.disconnected();
             }
             *link = Link::Lost { since: now };
-            out.offline = self.main().is_none();
+            // Offline only after a session: a link that never opened (the PC asked to
+            // pair again, say) changes nothing the user had.
+            out.offline = was_connected && self.main().is_none();
             if out.offline {
                 self.offline_since = Some(now);
             }

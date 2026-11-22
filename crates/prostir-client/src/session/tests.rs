@@ -488,3 +488,33 @@ fn two_links_keep_apart() {
     assert!(sim.cmds().is_empty(), "the other PC only listed");
     assert_eq!(sim.s.search().found.len(), 1);
 }
+
+/// The PC forgot the headset: it asks to pair again when the session opens, inside the
+/// trusted link. Pairing then (with the user's approval), and the session after it
+/// ends the attempt; a second dial of the same PC changes nothing of its link.
+#[test]
+fn pairing_again_inside_the_link() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.s.dialed(s, usb());
+    sim.s.reached(s, pc(1), usb(), sim.now);
+    // Asked to pair: the user is asked, the link ends without a session.
+    sim.s.offered(key(1), usb(), OfferWhy::New, &sim.texts);
+    let ended = sim.end(s, Some(1), &Ended::default(), Duration::from_millis(50));
+    assert!(!ended.offline, "no session was had");
+    sim.s.answer_offer(true, sim.now);
+    sim.after(Duration::ZERO);
+    let (s, cmd) = sim.step();
+    assert!(matches!(cmd, NetCmd::Dial { pair: Some(k), .. } if k == key(1)));
+    sim.s.dialed(s, usb());
+    sim.s.reached(s, pc(1), usb(), sim.now);
+    sim.s.pairing(s, key(1), usb(), None, &sim.texts);
+    assert!(sim.s.pairing_mut().is_some());
+    // The same PC again, by another way: its link stays as it is.
+    sim.s.reached(StepId(99), pc(1), addr(7), sim.now);
+    assert!(matches!(sim.s.links()[&pc(1)], Link::Connecting { addr: a } if a == usb()));
+    sim.s.connected_to(pc(1), usb(), &sim.texts);
+    assert!(sim.s.search().attempt.is_none(), "the pairing is over");
+    assert!(sim.s.connected(pc(1)));
+}

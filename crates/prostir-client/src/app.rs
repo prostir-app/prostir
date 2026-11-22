@@ -1517,13 +1517,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     // the thread is waited for (up to a second, see `Net`'s `Drop`): a new start in the
     // same process must not find this one's still connected to the PC.
     let network = net::Net::start(
-        net::Config {
-            identity_file: data_dir.join("identity"),
-            trust_file: data_dir.join("paired_hosts"),
-            host_file: external_dir.as_ref().map(|p| p.join("host.txt")),
-            last_host_file: data_dir.join("last_host"),
-            name: model.clone(),
-        },
+        net::Config::in_dir(&data_dir, external_dir.as_deref(), &model),
         net_tx,
         Arc::new(crate::media::Sound {
             gains: gains.clone(),

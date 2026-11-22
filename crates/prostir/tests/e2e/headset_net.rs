@@ -17,7 +17,7 @@ use prostir_proto::state::HeadsetState;
 use prostir_proto::{HeadsetGoodbye, HostMsg, PcGoodbye};
 
 use crate::pc::{Options, Pc, TestDir};
-use crate::{START, TWO_MONITORS};
+use crate::{SOON, START, TWO_MONITORS};
 
 /// The PC's sound slices played, and the microphone switched on and off.
 #[derive(Default)]
@@ -56,6 +56,10 @@ impl MediaSource for FakeSource {
     }
 }
 
+/// The code the headset shows when it pairs in these tests, which the person at the
+/// fake PC types.
+const CODE: &str = "314159";
+
 /// The headset's network thread with its files in `dir` (as the headset app keeps
 /// them: `identity`, `paired_hosts`).
 fn headset(dir: &Path) -> (Net, Receiver<NetEvent>, Arc<Played>) {
@@ -63,11 +67,8 @@ fn headset(dir: &Path) -> (Net, Receiver<NetEvent>, Arc<Played>) {
     let played = Arc::new(Played::default());
     let net = Net::start(
         Config {
-            identity_file: dir.join("identity"),
-            trust_file: dir.join("paired_hosts"),
-            host_file: None,
-            last_host_file: dir.join("last_host"),
-            name: "e2e headset".into(),
+            pairing_code: || CODE.to_owned(),
+            ..Config::in_dir(dir, None, "e2e headset")
         },
         tx,
         Arc::new(FakeSource(played.clone())),
@@ -239,6 +240,149 @@ fn a_pc_that_does_not_trust_the_headset_is_offered() {
         _ => None,
     });
     assert!(!opened);
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.quit();
+}
+
+/// Dials `pc` again with the user's yes to pair with it, the PC or the headset showing
+/// the code.
+fn dial_to_pair(net: &Net, step: u32, pc: &Pc, key: [u8; 32], pc_shows_code: bool) {
+    net.send(NetCmd::Dial {
+        step: StepId(step),
+        to: Dest::Addr(pc.addr),
+        pair: Some(key),
+        pc_shows_code,
+    });
+}
+
+/// The code the PC shows now (its status through `prostir ctl`), once it shows one.
+fn pc_code(pc: &Pc) -> String {
+    let until = Instant::now() + SOON;
+    loop {
+        let status = pc
+            .ctl(&["status", "--json"])
+            .expect("a bus for prostir ctl");
+        if let Some(code) = status.json()["pairing"]["pc_code"].as_str() {
+            return code.to_owned();
+        }
+        assert!(
+            Instant::now() < until,
+            "the PC shows no code: {}",
+            status.out
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A new PC: offered, then paired as the user agreed, the headset showing the code
+/// (the person at the PC types it); both sides trust each other, and the session opens.
+#[test]
+fn the_headset_pairs_with_a_new_pc() {
+    let dir = TestDir::new("headset-net-pair");
+    dir.save_monitors(TWO_MONITORS);
+    let pc_key = dir.pc_key();
+    let id = headset::ids::PcId::of(&pc_key);
+    let (mut net, rx, _) = headset(&dir.path().join("headset"));
+    let pc = Pc::start(
+        &dir,
+        &Options {
+            typed_code: Some(CODE.into()),
+            ..Options::default()
+        },
+    );
+    dial(&net, 1, &pc);
+    let key = wait(&rx, START, |e| match e {
+        NetEvent::PairOffer {
+            key,
+            why: OfferWhy::New,
+            ..
+        } => Some(key),
+        _ => None,
+    });
+    assert_eq!(key, pc_key);
+    wait(&rx, START, |e| {
+        matches!(
+            e,
+            NetEvent::Ended {
+                step: StepId(1),
+                ..
+            }
+        )
+        .then_some(())
+    });
+    dial_to_pair(&net, 2, &pc, key, false);
+    let code = wait(&rx, START, |e| match e {
+        NetEvent::Pairing { code, .. } => Some(code),
+        _ => None,
+    });
+    assert_eq!(code.as_deref(), Some("314 159"));
+    let paired = wait(&rx, START, |e| match e {
+        NetEvent::Paired(list) if !list.is_empty() => Some(list),
+        _ => None,
+    });
+    assert_eq!(paired[0].pc, id);
+    wait(&rx, START, |e| {
+        matches!(e, NetEvent::Connected { pc, .. } if pc == id).then_some(())
+    });
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.quit();
+}
+
+/// The PC forgot the headset (the headset still trusts it): it asks to pair when the
+/// session opens, inside the trusted PC's link. With the user's yes the PC shows the
+/// code this time, the code typed reaches that link, and the session opens.
+#[test]
+fn the_headset_pairs_again_when_the_pc_forgot_it() {
+    let dir = TestDir::new("headset-net-pc-forgot");
+    dir.save_monitors(TWO_MONITORS);
+    let _keys = dir.pair();
+    dir.forget_headsets();
+    let pc_key = dir.pc_key();
+    let id = headset::ids::PcId::of(&pc_key);
+    let (mut net, rx, _) = headset(&dir.path().join("headset"));
+    let pc = Pc::start(&dir, &Options::default());
+    if pc.bus.is_none() {
+        eprintln!("no session bus: the PC's code cannot be read, skipped");
+        return;
+    }
+    dial(&net, 1, &pc);
+    wait(&rx, START, |e| {
+        matches!(e, NetEvent::Reached { .. }).then_some(())
+    });
+    let key = wait(&rx, START, |e| match e {
+        NetEvent::PairOffer { key, .. } => Some(key),
+        _ => None,
+    });
+    wait(&rx, START, |e| {
+        matches!(
+            e,
+            NetEvent::Ended {
+                step: StepId(1),
+                ..
+            }
+        )
+        .then_some(())
+    });
+    dial_to_pair(&net, 2, &pc, key, true);
+    wait(&rx, START, |e| {
+        matches!(
+            e,
+            NetEvent::Reached {
+                step: StepId(2),
+                ..
+            }
+        )
+        .then_some(())
+    });
+    let code = wait(&rx, START, |e| match e {
+        NetEvent::Pairing { step, code, .. } => Some((step, code)),
+        _ => None,
+    });
+    assert_eq!(code, (StepId(2), None), "the PC shows the code");
+    net.send(NetCmd::SubmitCode(pc_code(&pc)));
+    wait(&rx, START, |e| {
+        matches!(e, NetEvent::Connected { pc, .. } if pc == id).then_some(())
+    });
     assert!(net.stop(Duration::from_secs(2)));
     pc.quit();
 }
