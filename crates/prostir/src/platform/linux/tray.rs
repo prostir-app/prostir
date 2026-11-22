@@ -26,6 +26,25 @@ const QUALITIES: [(u32, &str, &str); 3] = [
     (50, "Висока: 50 Мбіт/с", "High: 50 Mbit/s"),
 ];
 
+/// The items of the quality menu, and the one checked: a quality none of them has
+/// (chosen in the headset, or with `prostir ctl`) is an item of its own, so the menu
+/// never shows another one; none is checked before the quality is known (0).
+fn qualities(bitrate: u32) -> (usize, Vec<String>) {
+    let mut labels: Vec<String> = QUALITIES
+        .iter()
+        .map(|(_, uk, en)| t(uk, en).into())
+        .collect();
+    let selected = match QUALITIES.iter().position(|(m, _, _)| *m == bitrate) {
+        Some(i) => i,
+        None if bitrate == 0 => labels.len(),
+        None => {
+            labels.push(crate::i18n::count("quality-custom", bitrate as usize));
+            labels.len() - 1
+        }
+    };
+    (selected, labels)
+}
+
 pub struct Tray {
     status: Status,
     /// Code to type in the headset, while pairing.
@@ -191,10 +210,7 @@ impl ksni::Tray for Tray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let selected = QUALITIES
-            .iter()
-            .position(|(m, _, _)| *m == self.bitrate)
-            .unwrap_or(1);
+        let (selected, qualities) = qualities(self.bitrate);
         let mut items: Vec<MenuItem<Self>> = Vec::new();
         if let Some(code) = &self.pairing_code {
             items.push(
@@ -321,13 +337,16 @@ impl ksni::Tray for Tray {
                 submenu: vec![
                     RadioGroup {
                         selected,
+                        // The item of a quality of its own changes nothing.
                         select: Box::new(|tray: &mut Self, i| {
-                            tray.commands.tray(Command::SetBitrate(QUALITIES[i].0));
+                            if let Some((mbps, _, _)) = QUALITIES.get(i) {
+                                tray.commands.tray(Command::SetBitrate(*mbps));
+                            }
                         }),
-                        options: QUALITIES
-                            .iter()
-                            .map(|(_, uk, en)| RadioItem {
-                                label: t(uk, en).into(),
+                        options: qualities
+                            .into_iter()
+                            .map(|label| RadioItem {
+                                label,
                                 ..Default::default()
                             })
                             .collect(),
@@ -434,5 +453,22 @@ impl ksni::Tray for Tray {
             .into(),
         ]);
         items
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A quality none of the items has (set from the local API or the headset's
+    /// menu) is checked as an item of its own, never as another quality.
+    #[test]
+    fn a_quality_of_no_item_has_its_own() {
+        let (selected, labels) = qualities(30);
+        assert_eq!((selected, labels.len()), (1, QUALITIES.len()));
+        let (selected, labels) = qualities(20);
+        assert_eq!(labels.len(), QUALITIES.len() + 1, "{labels:?}");
+        assert_eq!(selected, QUALITIES.len());
+        assert!(labels[selected].contains("20"), "{labels:?}");
     }
 }

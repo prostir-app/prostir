@@ -14,6 +14,7 @@ limit-physical = At most { $n } { $n ->
     [one] display of the PC
    *[other] displays of the PC
 }
+quality-custom = Custom: { $n } Mbit/s
 limit-streams = At most { $n } { $n ->
     [one] display
    *[other] displays
