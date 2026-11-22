@@ -1,5 +1,7 @@
 //! The floating menu panel. It is drawn on the CPU into an RGBA image and only
-//! re-uploaded when something changes (hover, a click, news from the host).
+//! re-uploaded when something changes (hover, a click, news from the host). Pointing at
+//! another button draws only that button's part of the picture again (see
+//! [`Panel::damage`]), from copies kept after the first time.
 
 #![forbid(unsafe_code)]
 
@@ -8,7 +10,7 @@ use std::collections::HashMap;
 use fontdue::{Font, FontSettings, Metrics};
 use prostir_proto::Codec;
 use prostir_proto::state::{Encoding, ErrorCode, Limits};
-use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, PixmapMut, Rect, Stroke, Transform};
 
 use crate::ids::DisplayKey;
 use crate::lang::{Language, Moment, Texts};
@@ -54,7 +56,27 @@ pub struct MonitorEntry {
     /// As seen from where the user sits, in radians: centre (right, up) and half
     /// size, for the map in the menu.
     pub seen: Option<[f32; 4]>,
+    /// Its scale, percent (100: one pixel of the picture is one of the desktop).
+    pub scale: u16,
 }
+
+/// A display of the PC itself, with its switch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhysicalEntry {
+    pub id: DisplayKey,
+    /// What the person calls it (see `physical::label`).
+    pub name: String,
+    /// Its connector (`HDMI-A-1`), shown smaller under a name of its own.
+    pub connector: Option<String>,
+    /// Shown in the headset (as asked, while the PC has not answered yet).
+    pub shown: bool,
+    /// Connected now: one that is not (a closed laptop's panel) shows nothing, and
+    /// counts for no limit.
+    pub connected: bool,
+}
+
+/// Profiles on one page of the Profiles tab.
+pub const PROFILES_PER_PAGE: usize = 10;
 
 /// What the user reads for a display named `name` by the PC: the number the PC's
 /// desktop gives its output (`Prostir-3` is monitor 3, as in the PC's display
@@ -134,12 +156,16 @@ pub struct UiState {
     pub monitors: Vec<MonitorEntry>,
     /// The monitor picked on the map (its actions show under it).
     pub selected: Option<DisplayKey>,
-    /// The laptop screen on the map: centre and half size as seen, in radians.
-    pub mirror_seen: Option<[f32; 4]>,
+    /// The PC's own displays shown, on the map: centre and half size as seen, in
+    /// radians, and what they are called.
+    pub physical_seen: Vec<([f32; 4], String)>,
+    /// The PC's own displays, each with its switch, those connected first.
+    pub physical: Vec<PhysicalEntry>,
+    /// Which of them the Monitors tab shows, when there are more than fit.
+    pub physical_page: u8,
     pub primary: Option<DisplayKey>,
     /// The screen picked for cinema (see `layout::cinema_choice`).
     pub cinema_screen: Option<DisplayKey>,
-    pub mirror_wanted: bool,
     /// PC sound goes to the headset.
     pub audio_wanted: bool,
     pub mic_wanted: bool,
@@ -149,6 +175,11 @@ pub struct UiState {
     pub pc: Option<Encoding>,
     /// The monitors the PC makes for this headset (while connected).
     pub limits: Option<Limits>,
+    /// The PC makes monitors at another scale (its capability 10): the menu offers its
+    /// scales.
+    pub can_scale: bool,
+    /// The scale a monitor added gets, percent.
+    pub add_scale: u16,
     /// Window panels shown (detached PC windows).
     pub windows: Vec<MonitorEntry>,
     /// The PC can move the mouse (for following the gaze).
@@ -162,9 +193,6 @@ pub struct UiState {
     pub date: std::sync::Arc<str>,
     /// The paired PC waiting for a second press to be forgotten.
     pub confirm_forget: Option<usize>,
-    /// What the display of the PC the switch shows or hides is called; none while no
-    /// display of the PC is connected (the lid closed, no monitor).
-    pub mirror_name: Option<String>,
     pub settings: Settings,
     pub room_available: bool,
     pub panorama_available: bool,
@@ -183,8 +211,10 @@ pub struct UiState {
     pub error: Option<String>,
     /// Monitor whose "×" was pressed once and now asks for confirmation.
     pub confirm_remove: Option<DisplayKey>,
-    /// A profile whose "Save current" was pressed once (press again to overwrite).
+    /// A profile whose "Save here" was pressed once (press again to overwrite).
     pub confirm_save: Option<usize>,
+    /// A profile whose "×" was pressed once (press again to delete it).
+    pub confirm_delete: Option<usize>,
     pub tab: Tab,
     /// The menu's language.
     pub texts: Texts,
@@ -198,8 +228,10 @@ pub struct UiState {
     pub update: Option<(bool, String)>,
     /// Where this build of the headset app is updated (from its store).
     pub update_from: UpdateHint,
-    /// Which profile slots hold a saved profile (the others are empty).
-    pub saved_profiles: [bool; crate::profiles::SLOTS],
+    /// The profiles saved, by the names the menu shows (the one given, or "Profile 2").
+    pub profiles: Vec<String>,
+    /// Which of them the Profiles tab shows (see [`PROFILES_PER_PAGE`]).
+    pub profile_page: u8,
     /// The profile last switched to (until something is changed by hand).
     pub active_profile: Option<usize>,
     /// What the menu says under the button pressed last: done, waiting for the PC, or
@@ -214,7 +246,10 @@ pub enum Asked {
     AddMonitor,
     Remove(DisplayKey),
     MakePrimary(DisplayKey),
-    Mirror,
+    /// A display of the PC itself shown or hidden.
+    Physical(DisplayKey),
+    /// A monitor's scale.
+    Scale(DisplayKey),
     Sound,
     Encoding,
     DetachWindow,
@@ -272,6 +307,8 @@ pub enum Tab {
     #[default]
     Quick,
     Monitors,
+    /// Every profile: switched to, saved, deleted, a new one.
+    Profiles,
     Settings(Section),
 }
 
@@ -285,6 +322,8 @@ pub enum Section {
     Sound,
     Language,
     Pc,
+    /// The PCs this headset is paired with.
+    Paired,
     Help,
 }
 
@@ -315,7 +354,14 @@ pub enum Action {
         id: DisplayKey,
         delta: i32,
     },
-    SetMirror(bool),
+    /// Show (`true`) or hide a display of the PC itself.
+    ShowPhysical(DisplayKey, bool),
+    /// The scale a monitor added gets, percent.
+    AddScale(u16),
+    /// Another scale for a monitor, percent.
+    SetScale(DisplayKey, u16),
+    /// "No limits": more monitors and displays than the PC advises.
+    NoLimits(bool),
     SetAudio(bool),
     SetMic(bool),
     Preset(Preset),
@@ -328,7 +374,17 @@ pub enum Action {
     /// Which monitor (position in the row) cinema mode shows.
     CinemaScreen(DisplayKey),
     ApplyProfile(usize),
+    /// Save the setup over profile `n` (second press confirms).
     SaveProfile(usize),
+    /// Save the setup as a new profile, at the end of the list.
+    NewProfile,
+    /// Delete profile `n` (second press confirms).
+    DeleteProfile(usize),
+    /// Show these profiles on the Profiles tab (see `UiState::profile_page`).
+    ProfilePage(u8),
+    /// Show these displays of the PC on the Monitors tab (see
+    /// `UiState::physical_page`).
+    PhysicalPage(u8),
     Tab(Tab),
     /// Lay everything out again in front of the user, where they look now.
     Recenter,
@@ -414,7 +470,8 @@ impl Action {
                 | Action::Remove(_)
                 | Action::MakePrimary(_)
                 | Action::Move { .. }
-                | Action::SetMirror(_)
+                | Action::ShowPhysical(..)
+                | Action::SetScale(..)
                 | Action::Preset(_)
         )
     }
@@ -523,6 +580,17 @@ enum Item {
 }
 
 impl Item {
+    /// Where a shape is drawn (`None` for a text and a note, which are drawn wherever
+    /// they reach).
+    fn bounds(&self) -> Option<Rect> {
+        match self {
+            Item::Panel(r) | Item::Box(r, _) | Item::Button { rect: r, .. } => Some(*r),
+            Item::Dot { x, y, r, .. } => Some(rect(x - r, y - r, 2.0 * r, 2.0 * r)),
+            Item::Wedge { cx, cy, r1, .. } => Some(rect(cx - r1, cy - r1, 2.0 * r1, 2.0 * r1)),
+            Item::Text { .. } | Item::Note { .. } => None,
+        }
+    }
+
     /// Whether (`x`, `y`) is on this wedge.
     fn wedge_contains(&self, x: f32, y: f32) -> bool {
         let Item::Wedge {
@@ -553,6 +621,20 @@ fn wedge_center(cx: f32, cy: f32, r0: f32, r1: f32, a0: f32, a1: f32) -> (f32, f
     }
     let (r, a) = ((r0 + r1) / 2.0, (a0 + a1) / 2.0);
     (cx + r * a.sin(), cy - r * a.cos())
+}
+
+/// The box around a ring sector (see [`Item::Wedge`]).
+fn sector_bounds(cx: f32, cy: f32, r0: f32, r1: f32, a0: f32, a1: f32) -> Rect {
+    let at = |r: f32, a: f32| (cx + r * a.sin(), cy - r * a.cos());
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for i in 0..=32 {
+        let a = a0 + (a1 - a0) * i as f32 / 32.0;
+        for r in [r0.max(0.0), r1] {
+            let (x, y) = at(r, a);
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+    }
+    rect(x0, y0, x1 - x0, y1 - y0)
 }
 
 /// A ring sector as a path (see [`Item::Wedge`]), `None` if degenerate.
@@ -590,6 +672,154 @@ const WAIT: [u8; 4] = [251, 191, 36, 255];
 const ACCENT: [u8; 4] = [61, 126, 255, 255];
 const DANGER: [u8; 4] = [255, 107, 107, 255];
 
+/// A part of the menu's picture, in whole pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Area {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Area {
+    pub const EMPTY: Area = Area {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+    };
+
+    /// `r` and `margin` around it, within a picture `pw`×`ph`; none outside it.
+    fn around(r: Rect, margin: f32, pw: u32, ph: u32) -> Option<Self> {
+        let clamp = |v: f32, max: u32| v.clamp(0.0, max as f32) as u32;
+        let (x0, y0) = (
+            clamp((r.left() - margin).floor(), pw),
+            clamp((r.top() - margin).floor(), ph),
+        );
+        let (x1, y1) = (
+            clamp((r.right() + margin).ceil(), pw),
+            clamp((r.bottom() + margin).ceil(), ph),
+        );
+        (x1 > x0 && y1 > y0).then_some(Self {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        })
+    }
+
+    /// Larger by `by` on each side, within a picture `pw`×`ph`.
+    fn grown(self, by: u32, pw: u32, ph: u32) -> Self {
+        let (x0, y0) = (self.x.saturating_sub(by), self.y.saturating_sub(by));
+        let (x1, y1) = (
+            (self.x + self.w + by).min(pw),
+            (self.y + self.h + by).min(ph),
+        );
+        Self {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        }
+    }
+
+    /// The smallest area holding both.
+    pub fn union(self, other: Self) -> Self {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+        let (x0, y0) = (self.x.min(other.x), self.y.min(other.y));
+        let x1 = (self.x + self.w).max(other.x + other.w);
+        let y1 = (self.y + self.h).max(other.y + other.h);
+        Self {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.w == 0 || self.h == 0
+    }
+
+    /// Its pixels' bytes.
+    fn len(&self) -> usize {
+        self.w as usize * self.h as usize * 4
+    }
+}
+
+/// An item's part of the picture, kept as not pointed at and as pointed at (see
+/// [`Panel::render_if_dirty`]).
+#[derive(Debug, Clone, Copy)]
+struct LitPart {
+    item: usize,
+    area: Area,
+    /// Where its two copies start in `Panel::lit_pixels`.
+    plain: usize,
+    lit: usize,
+}
+
+/// How far around an item pointed at its look changes (its outline, smoothing).
+const LIT_MARGIN: f32 = 3.0;
+/// How much larger than its area a part is drawn before it is cut: shapes cut at the
+/// edge of a part are smoothed a little differently there.
+const PART_PAD: u32 = 2;
+
+/// `area` of `pixmap`, row by row, added to `out`.
+fn copy_out(pixmap: &Pixmap, area: Area, out: &mut Vec<u8>) {
+    let row = pixmap.width() as usize * 4;
+    let (x, w) = (area.x as usize * 4, area.w as usize * 4);
+    for y in area.y as usize..(area.y + area.h) as usize {
+        let at = y * row + x;
+        out.extend_from_slice(&pixmap.data()[at..at + w]);
+    }
+}
+
+/// `area` of `pixmap` from `from`, its rows one after another.
+fn copy_in(pixmap: &mut Pixmap, area: Area, from: &[u8]) {
+    let row = pixmap.width() as usize * 4;
+    let (x, w) = (area.x as usize * 4, area.w as usize * 4);
+    let data = pixmap.data_mut();
+    for (k, y) in (area.y as usize..(area.y + area.h) as usize).enumerate() {
+        let at = y * row + x;
+        data[at..at + w].copy_from_slice(&from[k * w..k * w + w]);
+    }
+}
+
+/// Where shapes and texts are drawn: a whole picture, or a part of the menu's picture
+/// whose top left corner is `at` (each moved by it).
+struct Canvas<'a> {
+    pm: PixmapMut<'a>,
+    at: (i32, i32),
+}
+
+impl Canvas<'_> {
+    fn whole(pixmap: &mut Pixmap) -> Canvas<'_> {
+        Canvas {
+            pm: pixmap.as_mut(),
+            at: (0, 0),
+        }
+    }
+
+    fn transform(&self) -> Transform {
+        Transform::from_translate(-self.at.0 as f32, -self.at.1 as f32)
+    }
+
+    /// Whether `r` (in the whole picture) reaches into it.
+    fn meets(&self, r: Rect) -> bool {
+        let (x, y) = (self.at.0 as f32, self.at.1 as f32);
+        let (w, h) = (self.pm.width() as f32, self.pm.height() as f32);
+        r.right() + 2.0 >= x
+            && r.left() - 2.0 <= x + w
+            && r.bottom() + 2.0 >= y
+            && r.top() - 2.0 <= y + h
+    }
+}
+
 pub struct Panel {
     regular: Font,
     medium: Font,
@@ -598,7 +828,19 @@ pub struct Panel {
     state: Option<UiState>,
     hovered: Option<usize>,
     pixmap: Pixmap,
+    /// The items changed: the whole picture is drawn again.
     dirty: bool,
+    /// The item drawn pointed at in `pixmap` now (the rest is drawn as not pointed at).
+    lit: Option<usize>,
+    /// Each item pointed at since the picture was last drawn whole: its part of the
+    /// picture, as not pointed at and as pointed at, kept in `lit_pixels`; pointing at
+    /// it again copies them back without drawing (see [`Panel::render_if_dirty`]).
+    lit_parts: Vec<LitPart>,
+    lit_pixels: Vec<u8>,
+    /// Where a part is drawn before it is kept (its memory kept between parts).
+    scratch: Vec<u8>,
+    /// What the last [`Panel::render_if_dirty`] changed: `None` for all of it.
+    damage: Option<Area>,
     /// The wrist menu rather than the main one.
     wrist: bool,
     /// The page shown.
@@ -668,6 +910,11 @@ impl Panel {
             hovered: None,
             pixmap: Pixmap::new(WIDTH, HEIGHT).expect("panel size"),
             dirty: true,
+            lit: None,
+            lit_parts: Vec::new(),
+            lit_pixels: Vec::new(),
+            scratch: Vec::new(),
+            damage: None,
             wrist: false,
             page: Page::Welcome,
             pressed: None,
@@ -697,6 +944,18 @@ impl Panel {
         self.state = Some(state.clone());
         self.hovered = None;
         self.dirty = true;
+    }
+
+    /// The picture as last drawn (premultiplied RGBA, top row first).
+    pub fn pixels(&self) -> &[u8] {
+        self.pixmap.data()
+    }
+
+    /// The part of the picture the last [`Panel::render_if_dirty`] changed: `None` for
+    /// all of it (the items changed), else the parts of the button pointed at before and
+    /// of the one pointed at now (empty when neither changes how it looks).
+    pub fn damage(&self) -> Option<Area> {
+        self.damage
     }
 
     /// Updates the hovered button from a point in panel pixels (`None`: not pointing at the panel).
@@ -729,10 +988,7 @@ impl Panel {
                 _ => false,
             }))
         });
-        if hovered != self.hovered {
-            self.hovered = hovered;
-            self.dirty = true;
-        }
+        self.hovered = hovered;
     }
 
     pub fn hovered_action(&self) -> Option<Action> {
@@ -1128,14 +1384,133 @@ impl Panel {
         items
     }
 
-    /// Premultiplied RGBA, top row first, when it changed since the last call.
+    /// Premultiplied RGBA, top row first, when it changed since the last call; what
+    /// changed is [`Panel::damage`]. New items are drawn whole, nothing pointed at;
+    /// then only the button pointed at before and the one pointed at now are drawn
+    /// again, each from the copies of its part kept the first time it was pointed at
+    /// (see [`LitPart`]): a ray trembling on a button's edge copies a few kilobytes,
+    /// without drawing and without taking memory.
     pub fn render_if_dirty(&mut self) -> Option<&[u8]> {
-        if !self.dirty {
+        if !self.dirty && self.hovered == self.lit {
             return None;
         }
-        self.dirty = false;
-        self.render();
+        let mut damage = if self.dirty {
+            self.dirty = false;
+            self.render();
+            self.lit = None;
+            self.lit_parts.clear();
+            self.lit_pixels.clear();
+            None
+        } else {
+            Some(Area::EMPTY)
+        };
+        if self.hovered != self.lit {
+            if let Some(i) = self.lit
+                && let Some(part) = self.lit_parts.iter().find(|p| p.item == i)
+            {
+                let (area, at) = (part.area, part.plain);
+                copy_in(&mut self.pixmap, area, &self.lit_pixels[at..]);
+                damage = damage.map(|d| d.union(area));
+            }
+            if let Some(area) = self.hovered.and_then(|i| self.light(i)) {
+                damage = damage.map(|d| d.union(area));
+            }
+            self.lit = self.hovered;
+        }
+        self.damage = damage;
         Some(self.pixmap.data())
+    }
+
+    /// Item `i` drawn pointed at, over the picture drawn as not pointed at: its part
+    /// drawn the first time and kept, copied back after. Where, if anywhere.
+    fn light(&mut self, i: usize) -> Option<Area> {
+        if let Some(part) = self.lit_parts.iter().find(|p| p.item == i) {
+            let (area, at) = (part.area, part.lit);
+            copy_in(&mut self.pixmap, area, &self.lit_pixels[at..]);
+            return Some(area);
+        }
+        let area = self.lit_area(i)?;
+        let plain = self.lit_pixels.len();
+        copy_out(&self.pixmap, area, &mut self.lit_pixels);
+        let lit = self.lit_pixels.len();
+        self.draw_part(area, Some(i));
+        self.lit_pixels.extend_from_slice(&self.scratch);
+        self.lit_parts.push(LitPart {
+            item: i,
+            area,
+            plain,
+            lit,
+        });
+        copy_in(&mut self.pixmap, area, &self.lit_pixels[lit..]);
+        Some(area)
+    }
+
+    /// The part of the picture item `i` changes when pointed at: its own place, and the
+    /// whole name shown above a shortened one; none for what is not pointed at.
+    fn lit_area(&mut self, i: usize) -> Option<Area> {
+        let r = match self.items.get(i)? {
+            Item::Button {
+                rect: r,
+                label,
+                full: Some(full),
+                ..
+            } if full != label => {
+                let (r, full) = (*r, full.clone());
+                let (tip, _) = self.tip_rect(r, &full);
+                union(&r, &tip)
+            }
+            Item::Button { rect: r, .. } => *r,
+            Item::Wedge {
+                cx,
+                cy,
+                r0,
+                r1,
+                a0,
+                a1,
+                ..
+            } => sector_bounds(*cx, *cy, *r0, *r1, *a0, *a1),
+            Item::Note { rect: r, tip, .. } => match tip {
+                Some(_) => rect(
+                    r.left(),
+                    r.top() - NOTE_GAP,
+                    r.width(),
+                    r.height() + 2.0 * NOTE_GAP,
+                ),
+                None => *r,
+            },
+            _ => return None,
+        };
+        Area::around(r, LIT_MARGIN, self.pixmap.width(), self.pixmap.height())
+    }
+
+    /// `area` of the picture drawn anew into `scratch` (its rows one after another),
+    /// with item `lit` pointed at. Drawn a little larger and cut, so the edges of the
+    /// part are what drawing the whole picture makes there.
+    fn draw_part(&mut self, area: Area, lit: Option<usize>) {
+        let (pw, ph) = (self.pixmap.width(), self.pixmap.height());
+        let outer = area.grown(PART_PAD, pw, ph);
+        let mut scratch = std::mem::take(&mut self.scratch);
+        scratch.clear();
+        scratch.resize(outer.len(), 0);
+        let items = std::mem::take(&mut self.items);
+        if let Some(pm) = PixmapMut::from_bytes(&mut scratch, outer.w, outer.h) {
+            let mut c = Canvas {
+                pm,
+                at: (outer.x as i32, outer.y as i32),
+            };
+            self.paint(&mut c, &items, lit);
+        }
+        self.items = items;
+        // The inner part's rows, moved to the front.
+        let row = outer.w as usize * 4;
+        let (dx, dy) = ((area.x - outer.x) as usize * 4, (area.y - outer.y) as usize);
+        let inner = area.w as usize * 4;
+        for y in 0..area.h as usize {
+            let from = (dy + y) * row + dx;
+            scratch.copy_within(from..from + inner, y * inner);
+        }
+        scratch.truncate(area.len());
+        self.scratch = scratch;
     }
 
     /// The page `s` shows, and the note over it.
@@ -1448,16 +1823,17 @@ impl Panel {
             return items;
         }
 
-        // Tabs: everyday things, the monitors, everything set once.
+        // Tabs: everyday things, the monitors, the profiles, everything set once.
         let tabs = [
             (Tab::Quick, l.t("tab-quick")),
             (Tab::Monitors, l.t("tab-monitors")),
+            (Tab::Profiles, l.t("tab-profiles")),
             (
                 Tab::Settings(s.tab.section().unwrap_or_default()),
                 l.t("tab-settings"),
             ),
         ];
-        let tab_w = (w - 2.0 * lx - 2.0 * 10.0) / 3.0;
+        let tab_w = (w - 2.0 * lx - 3.0 * 10.0) / 4.0;
         // A track the tabs sit in, so they read as one control, apart from the
         // option buttons below.
         items.push(Item::Box(
@@ -1481,16 +1857,20 @@ impl Panel {
                 in_column(&mut items[at..], lx, whole);
             }
             Tab::Monitors => {
-                let left = monitor_list(s, &mut items, lx, lw, top - 12.0);
+                monitor_list(s, &mut items, lx, lw, top - 12.0);
                 in_column(&mut items[at..], lx, lw);
                 let right = items.len();
                 build_monitor_options(s, &mut items, rx, rw, top);
                 in_column(&mut items[right..], rx, rw);
-                let below = items.len();
-                save_as_profile(s, &mut items, lx, lw, left + 30.0);
-                in_column(&mut items[below..], lx, lw);
             }
-            Tab::Settings(section) => build_settings(s, section, &mut items, top - 12.0),
+            Tab::Profiles => {
+                let wrap = |t: &str, size: f32, room: f32| self.wrapped(t, size, false, room);
+                build_profiles(s, &mut items, top - 12.0, &wrap);
+            }
+            Tab::Settings(section) => {
+                let wrap = |t: &str, size: f32, room: f32| self.wrapped(t, size, false, room);
+                build_settings(s, section, &mut items, top - 12.0, &wrap);
+            }
         }
         if let Some(e) = &s.error {
             items.push(text(lx, HEIGHT as f32 - 34.0, 21.0, true, DANGER, e));
@@ -1781,6 +2161,7 @@ impl Panel {
             .sum()
     }
 
+    /// The whole picture drawn anew, nothing pointed at.
     fn render(&mut self) {
         let mut pixmap = std::mem::replace(
             &mut self.pixmap,
@@ -1788,13 +2169,24 @@ impl Panel {
         );
         pixmap.fill(tiny_skia::Color::TRANSPARENT);
         let items = std::mem::take(&mut self.items);
+        self.paint(&mut Canvas::whole(&mut pixmap), &items, None);
+        self.items = items;
+        self.pixmap = pixmap;
+    }
+
+    /// `items` drawn on `c`, with item `lit` pointed at. Shapes wholly outside `c`
+    /// are passed over.
+    fn paint(&mut self, c: &mut Canvas<'_>, items: &[Item], lit: Option<usize>) {
         for (i, item) in items.iter().enumerate() {
+            if item.bounds().is_some_and(|b| !c.meets(b)) {
+                continue;
+            }
             match item {
-                Item::Panel(r) => fill(&mut pixmap, rounded(*r, 36.0), [16, 18, 24, 240]),
+                Item::Panel(r) => fill(c, rounded(*r, 36.0), [16, 18, 24, 240]),
                 // Drawn last, over everything (see `Panel::draw_note`).
                 Item::Note { .. } => {}
-                Item::Box(r, color) => fill(&mut pixmap, rounded(*r, 14.0), *color),
-                Item::Dot { x, y, r, color } => fill(&mut pixmap, circle(*x, *y, *r), *color),
+                Item::Box(r, color) => fill(c, rounded(*r, 14.0), *color),
+                Item::Dot { x, y, r, color } => fill(c, circle(*x, *y, *r), *color),
                 Item::Text {
                     x,
                     baseline,
@@ -1803,7 +2195,7 @@ impl Panel {
                     color,
                     text,
                     ..
-                } => self.draw_text(&mut pixmap, *x, *baseline, *size, *medium, *color, text),
+                } => self.draw_text(c, *x, *baseline, *size, *medium, *color, text),
                 Item::Wedge {
                     cx,
                     cy,
@@ -1816,17 +2208,17 @@ impl Panel {
                     style,
                     ..
                 } => {
-                    let hovered = self.hovered == Some(i);
+                    let hovered = lit == Some(i);
                     let bg = match (style, hovered) {
                         (Style::Selected, _) => ACCENT,
                         (_, true) => [255, 255, 255, 52],
                         _ => [255, 255, 255, 20],
                     };
-                    fill(&mut pixmap, sector(*cx, *cy, *r0, *r1, *a0, *a1), bg);
+                    fill(c, sector(*cx, *cy, *r0, *r1, *a0, *a1), bg);
                     let (mx, my) = wedge_center(*cx, *cy, *r0, *r1, *a0, *a1);
                     let tw = self.text_width(label, *size, true);
                     self.draw_text(
-                        &mut pixmap,
+                        c,
                         mx - tw / 2.0,
                         my + size * 0.36,
                         *size,
@@ -1843,7 +2235,7 @@ impl Panel {
                     ..
                 } => {
                     let size = *size;
-                    let hovered = self.hovered == Some(i);
+                    let hovered = lit == Some(i);
                     let (bg, fg) = match (style, hovered) {
                         (Style::Selected, _) => (ACCENT, [255, 255, 255, 255]),
                         (Style::TabOn, _) => ([255, 255, 255, 34], [255, 255, 255, 255]),
@@ -1856,10 +2248,10 @@ impl Panel {
                         (_, true) => ([255, 255, 255, 46], [255, 255, 255, 255]),
                         _ => ([255, 255, 255, 20], TEXT),
                     };
-                    fill(&mut pixmap, rounded(*r, 12.0), bg);
+                    fill(c, rounded(*r, 12.0), bg);
                     match style {
                         Style::Disabled => {
-                            stroke(&mut pixmap, rounded(*r, 12.0), [255, 255, 255, 26], 1.5);
+                            stroke(c, rounded(*r, 12.0), [255, 255, 255, 26], 1.5);
                         }
                         // The current tab: an accent bar along its bottom edge. The
                         // primary monitor on the map can be narrower than a tab.
@@ -1871,14 +2263,14 @@ impl Panel {
                                 r.width() - 2.0 * inset,
                                 4.0,
                             );
-                            fill(&mut pixmap, rounded(bar, 2.0), ACCENT);
+                            fill(c, rounded(bar, 2.0), ACCENT);
                         }
                         _ => {}
                     }
                     let tw = self.text_width(label, size, true);
                     let baseline = r.top() + r.height() / 2.0 + size * 0.36;
                     self.draw_text(
-                        &mut pixmap,
+                        c,
                         r.left() + (r.width() - tw) / 2.0,
                         baseline,
                         size,
@@ -1889,7 +2281,6 @@ impl Panel {
                 }
             }
         }
-        // A name shortened on its button, pointed at: whole, above it.
         if let Some(Item::Note {
             rect: r,
             tip,
@@ -1902,29 +2293,25 @@ impl Panel {
             ..
         }) = items.iter().rev().find(|i| matches!(i, Item::Note { .. }))
         {
-            let hovered = matches!(
-                self.hovered.and_then(|i| items.get(i)),
-                Some(Item::Note { .. })
-            );
+            let hovered = matches!(lit.and_then(|i| items.get(i)), Some(Item::Note { .. }));
             self.draw_note(
-                &mut pixmap,
+                c,
                 (*r, *tip, *above, *kind, hovered),
                 (text, *size),
                 detail.as_deref().map(|d| (d, *detail_size)),
             );
         }
+        // A name shortened on its button, pointed at: whole, above it.
         if let Some(Item::Button {
             rect: r,
             label,
             full: Some(full),
             ..
-        }) = self.hovered.and_then(|i| items.get(i))
+        }) = lit.and_then(|i| items.get(i))
             && label != full
         {
-            self.draw_tip(&mut pixmap, *r, full);
+            self.draw_tip(c, *r, full);
         }
-        self.items = items;
-        self.pixmap = pixmap;
     }
 
     /// A note (see [`Item::Note`]): a dark box with an edge in its kind's colour, a
@@ -1932,7 +2319,7 @@ impl Panel {
     /// a "×" on its right (pressing anywhere on it takes it away).
     fn draw_note(
         &mut self,
-        pixmap: &mut Pixmap,
+        c: &mut Canvas<'_>,
         (r, tip, above, kind, hovered): (Rect, Option<f32>, bool, Kind, bool),
         (text, size): (&str, f32),
         detail: Option<(&str, f32)>,
@@ -1954,13 +2341,13 @@ impl Panel {
             pb.line_to(tx, point);
             pb.line_to(tx + 10.0, base);
             pb.close();
-            fill(pixmap, pb.finish(), edge);
+            fill(c, pb.finish(), edge);
         }
         let shape = rounded(r, 12.0);
-        fill(pixmap, shape.clone(), [26, 30, 40, 255]);
+        fill(c, shape.clone(), [26, 30, 40, 255]);
         let [er, eg, eb, _] = edge;
         let alpha = if hovered { 255 } else { 190 };
-        stroke(pixmap, shape, [er, eg, eb, alpha], 2.0);
+        stroke(c, shape, [er, eg, eb, alpha], 2.0);
         // In the middle of the box (which may have grown over what it covers), left
         // of the "×".
         let mid = r.top() + r.height() / 2.0;
@@ -1968,25 +2355,33 @@ impl Panel {
         let cw = self.text_width("×", 26.0, true);
         let cx = r.right() - NOTE_PAD / 2.0 - NOTE_CLOSE / 2.0 - cw / 2.0;
         let cy = mid.min(r.top() + 23.0) + 8.0;
-        self.draw_text(pixmap, cx, cy, 26.0, true, close, "×");
+        self.draw_text(c, cx, cy, 26.0, true, close, "×");
         let (left, room) = (r.left() + NOTE_PAD, r.width() - 2.0 * NOTE_PAD - NOTE_CLOSE);
         let tw = self.text_width(text, size, true);
         let x = left + (room - tw) / 2.0;
         match detail {
-            None => self.draw_text(pixmap, x, mid + size * 0.36, size, true, fg, text),
+            None => self.draw_text(c, x, mid + size * 0.36, size, true, fg, text),
             Some((detail, dsize)) => {
-                self.draw_text(pixmap, x, mid - 4.0, size, true, fg, text);
+                self.draw_text(c, x, mid - 4.0, size, true, fg, text);
                 let dw = self.text_width(detail, dsize, false);
                 let dx = left + (room - dw) / 2.0;
-                self.draw_text(pixmap, dx, mid + dsize + 4.0, dsize, false, MUTED, detail);
+                self.draw_text(c, dx, mid + dsize + 4.0, dsize, false, MUTED, detail);
             }
         }
     }
 
-    /// `text` on a dark label just above `over` (below it where there is no room above),
-    /// within the panel, drawn smaller where it is wide.
-    fn draw_tip(&mut self, pixmap: &mut Pixmap, over: Rect, text: &str) {
-        let (pw, ph) = (pixmap.width() as f32, pixmap.height() as f32);
+    /// The whole picture's size (the main menu's or the palm menu's).
+    fn picture_size(&self) -> (f32, f32) {
+        if self.wrist {
+            (WRIST_WIDTH as f32, WRIST_HEIGHT as f32)
+        } else {
+            (WIDTH as f32, HEIGHT as f32)
+        }
+    }
+
+    /// Where [`Panel::draw_tip`] puts `text` for `over`, and its size.
+    fn tip_rect(&mut self, over: Rect, text: &str) -> (Rect, f32) {
+        let (pw, ph) = self.picture_size();
         let size = self.fitting(text, 20.0, true, pw - 64.0);
         let tw = self.text_width(text, size, true);
         let (w, h) = (tw + 28.0, size + 18.0);
@@ -1996,13 +2391,19 @@ impl Panel {
         } else {
             (over.bottom() + 6.0).min(ph - h - 8.0)
         };
-        let r = rect(x, y, w, h);
-        fill(pixmap, rounded(r, 10.0), [16, 18, 24, 245]);
-        stroke(pixmap, rounded(r, 10.0), [255, 255, 255, 40], 1.5);
+        (rect(x, y, w, h), size)
+    }
+
+    /// `text` on a dark label just above `over` (below it where there is no room above),
+    /// within the panel, drawn smaller where it is wide.
+    fn draw_tip(&mut self, c: &mut Canvas<'_>, over: Rect, text: &str) {
+        let (r, size) = self.tip_rect(over, text);
+        fill(c, rounded(r, 10.0), [16, 18, 24, 245]);
+        stroke(c, rounded(r, 10.0), [255, 255, 255, 40], 1.5);
         self.draw_text(
-            pixmap,
-            x + 14.0,
-            y + h / 2.0 + size * 0.36,
+            c,
+            r.left() + 14.0,
+            r.top() + r.height() / 2.0 + size * 0.36,
             size,
             true,
             TEXT,
@@ -2013,7 +2414,7 @@ impl Panel {
     #[allow(clippy::too_many_arguments)]
     fn draw_text(
         &mut self,
-        pixmap: &mut Pixmap,
+        c: &mut Canvas<'_>,
         x: f32,
         baseline: f32,
         size: f32,
@@ -2021,22 +2422,28 @@ impl Panel {
         color: [u8; 4],
         s: &str,
     ) {
-        let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
-        let data = pixmap.data_mut();
+        let (pw, ph) = (c.pm.width() as i32, c.pm.height() as i32);
+        let (ox, oy) = c.at;
+        let data = c.pm.data_mut();
         // The cache and the fonts are separate fields: each glyph is borrowed from the
         // cache, not copied out of it.
         let font = if medium { &self.medium } else { &self.regular };
         let mut pen = x;
-        for c in s.chars() {
-            let (m, coverage) = cached_glyph(&mut self.glyphs, font, medium, c, size);
-            let gx = (pen + m.xmin as f32).round() as i32;
-            let gy = (baseline - m.height as f32 - m.ymin as f32).round() as i32;
+        for ch in s.chars() {
+            let (m, coverage) = cached_glyph(&mut self.glyphs, font, medium, ch, size);
+            // Where it is in the whole picture, then in the part drawn.
+            let gx = (pen + m.xmin as f32).round() as i32 - ox;
+            let gy = (baseline - m.height as f32 - m.ymin as f32).round() as i32 - oy;
+            pen += m.advance_width;
             let (w, h) = (m.width as i32, m.height as i32);
             // Only the part of the glyph inside the pixmap.
             let (rows, cols) = (
                 gy.max(0) - gy..h.min(ph - gy),
                 gx.max(0) - gx..w.min(pw - gx),
             );
+            if rows.is_empty() || cols.is_empty() {
+                continue;
+            }
             for row in rows {
                 let py = gy + row;
                 for col in cols.clone() {
@@ -2054,7 +2461,6 @@ impl Panel {
                     data[i + 3] = (a + data[i + 3] as u32 * (255 - a) / 255) as u8;
                 }
             }
-            pen += m.advance_width;
         }
     }
 }
@@ -2078,9 +2484,10 @@ impl Panel {
     /// Premultiplied RGBA.
     pub fn pill_image(&mut self, label: &str, width: u32, height: u32, lit: bool) -> Vec<u8> {
         let mut p = Pixmap::new(width, height).expect("pill size");
+        let c = &mut Canvas::whole(&mut p);
         let (w, h) = (width as f32, height as f32);
         let bg = if lit { ACCENT } else { [16, 18, 24, 235] };
-        fill(&mut p, rounded(rect(0.0, 0.0, w, h), h / 2.0), bg);
+        fill(c, rounded(rect(0.0, 0.0, w, h), h / 2.0), bg);
         let mut size = h * 0.4;
         while size > 12.0 && self.text_width(label, size, true) > w - h * 0.6 {
             size -= 1.0;
@@ -2088,7 +2495,7 @@ impl Panel {
         let tw = self.text_width(label, size, true);
         let fg = [255, 255, 255, 255];
         self.draw_text(
-            &mut p,
+            c,
             (w - tw) / 2.0,
             h / 2.0 + size * 0.36,
             size,
@@ -2104,15 +2511,16 @@ impl Panel {
     /// Premultiplied RGBA.
     pub fn placeholder_image(&mut self, label: &str, width: u32, height: u32) -> Vec<u8> {
         let mut p = Pixmap::new(width, height).expect("placeholder size");
+        let c = &mut Canvas::whole(&mut p);
         let (w, h) = (width as f32, height as f32);
         let edge = (w.min(h) * 0.02).max(4.0);
         fill(
-            &mut p,
+            c,
             rounded(rect(0.0, 0.0, w, h), edge * 3.0),
             [120, 160, 255, 150],
         );
         fill(
-            &mut p,
+            c,
             rounded(rect(edge, edge, w - 2.0 * edge, h - 2.0 * edge), edge * 2.0),
             [16, 18, 24, 170],
         );
@@ -2122,7 +2530,7 @@ impl Panel {
         }
         let tw = self.text_width(label, size, true);
         self.draw_text(
-            &mut p,
+            c,
             (w - tw) / 2.0,
             h / 2.0 + size * 0.36,
             size,
@@ -2138,18 +2546,15 @@ impl Panel {
     /// Premultiplied RGBA.
     pub fn toast_image(&mut self, message: &str, width: u32, height: u32) -> Vec<u8> {
         let mut p = Pixmap::new(width, height).expect("toast size");
+        let c = &mut Canvas::whole(&mut p);
         let (w, h) = (width as f32, height as f32);
-        fill(
-            &mut p,
-            rounded(rect(0.0, 0.0, w, h), 28.0),
-            [16, 18, 24, 235],
-        );
+        fill(c, rounded(rect(0.0, 0.0, w, h), 28.0), [16, 18, 24, 235]);
         let room = w - 72.0;
         let one = h * 0.3;
         if self.text_width(message, one, true) <= room {
             let tw = self.text_width(message, one, true);
             self.draw_text(
-                &mut p,
+                c,
                 (w - tw) / 2.0,
                 h / 2.0 + one * 0.36,
                 one,
@@ -2185,7 +2590,7 @@ impl Panel {
         for (k, line) in [first, second].iter().enumerate() {
             let tw = self.text_width(line, size, true).min(room);
             let baseline = h / 2.0 - size * 0.25 + k as f32 * size * 1.25;
-            self.draw_text(&mut p, (w - tw) / 2.0, baseline, size, k == 0, TEXT, line);
+            self.draw_text(c, (w - tw) / 2.0, baseline, size, k == 0, TEXT, line);
         }
         p.take()
     }
@@ -2195,22 +2600,24 @@ impl Panel {
 /// Premultiplied RGBA, `size`×`size`.
 pub fn cursor_image(size: u32) -> Vec<u8> {
     let mut p = Pixmap::new(size, size).expect("cursor size");
+    let canvas = &mut Canvas::whole(&mut p);
     let c = size as f32 / 2.0;
-    fill(&mut p, circle(c, c, c - 1.0), [20, 22, 28, 200]);
-    fill(&mut p, circle(c, c, c * 0.62), [255, 255, 255, 255]);
+    fill(canvas, circle(c, c, c - 1.0), [20, 22, 28, 200]);
+    fill(canvas, circle(c, c, c * 0.62), [255, 255, 255, 255]);
     p.take()
 }
 
 /// Round "☰" button that opens the menu. Premultiplied RGBA, `size`×`size`.
 pub fn menu_button_image(size: u32, hovered: bool) -> Vec<u8> {
     let mut p = Pixmap::new(size, size).expect("button size");
+    let c = &mut Canvas::whole(&mut p);
     let s = size as f32;
     let bg = if hovered { ACCENT } else { [16, 18, 24, 225] };
-    fill(&mut p, circle(s / 2.0, s / 2.0, s / 2.0 - 1.0), bg);
+    fill(c, circle(s / 2.0, s / 2.0, s / 2.0 - 1.0), bg);
     for i in -1..=1 {
         let y = s / 2.0 + i as f32 * s * 0.15;
         fill(
-            &mut p,
+            c,
             rounded(rect(s * 0.3, y - s * 0.035, s * 0.4, s * 0.07), s * 0.035),
             [255, 255, 255, 255],
         );
@@ -2230,7 +2637,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         .monitors
         .iter()
         .filter_map(|m| m.seen)
-        .chain(s.mirror_seen)
+        .chain(s.physical_seen.iter().map(|(seen, _)| *seen))
         .collect();
     let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
     for [cx, cy, hw, hh] in &all {
@@ -2255,8 +2662,29 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             (2.0 * hh * scale - 2.0 * gap).max(8.0),
         )
     };
-    if let Some(m) = s.mirror_seen {
-        items.push(Item::Box(to_rect(m), [255, 255, 255, 14]));
+    // The PC's own displays: fainter, each with its name inside, smaller or shortened
+    // where it does not fit (they are switched under the map, not picked on it).
+    for (seen, name) in &s.physical_seen {
+        let r = to_rect(*seen);
+        items.push(Item::Box(r, [255, 255, 255, 14]));
+        let size = (r.height() * 0.32).clamp(SMALLEST, 18.0);
+        if r.width() > 24.0 && r.height() > size + 4.0 {
+            let mut label = text_in(
+                r.width() - 12.0,
+                text(
+                    r.left() + 6.0,
+                    r.top() + r.height() / 2.0 + size * 0.36,
+                    size,
+                    false,
+                    MUTED,
+                    name,
+                ),
+            );
+            if let Item::Text { shorten, .. } = &mut label {
+                *shorten = true;
+            }
+            items.push(label);
+        }
     }
     let selected = s.selected.or(s.primary);
     for m in &s.monitors {
@@ -2338,6 +2766,39 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
                 },
             ),
         ));
+        // Another scale, where the PC makes monitors at its scales.
+        let scales = scales_of(s);
+        if !scales.is_empty() {
+            let (y0, bw) = (y + 66.0, 92.0);
+            let n = scales.len().min(3);
+            let label = l.t("scale");
+            items.push(text_in(
+                lw - n as f32 * (bw + 8.0) - 10.0,
+                text(lx, y0 + 25.0, 18.0, false, MUTED, label),
+            ));
+            for (i, &scale) in scales.iter().take(3).enumerate() {
+                let r = rect(
+                    lx + lw - 10.0 - (n - i) as f32 * (bw + 8.0) + 8.0,
+                    y0,
+                    bw,
+                    36.0,
+                );
+                let on = m.scale == scale;
+                let action = Action::SetScale(m.id, scale);
+                let mut b = button(
+                    r,
+                    &l.f("percent", &[("value", scale.into())]),
+                    if on { Style::Selected } else { Style::Normal },
+                    (!on).then_some(action),
+                );
+                if let Item::Button { key, size, .. } = &mut b {
+                    *key = Some(action);
+                    *size = 17.0;
+                }
+                items.push(b);
+            }
+            y += 48.0;
+        }
         if s.confirm_remove == Some(m.id) {
             items.push(button(
                 rect(
@@ -2407,41 +2868,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         ));
         y += 58.0;
     }
-    // A display of the PC: shown or hidden, said by the highlighted option, named; with
-    // none connected (the lid closed, no monitor) there is nothing to switch.
-    let connected = s.mirror_name.is_some();
-    let name = s
-        .mirror_name
-        .clone()
-        .unwrap_or_else(|| l.t("pc-display").to_owned());
-    let title = if !connected {
-        format!("{name} · {}", l.t("pc-display-not-connected"))
-    } else {
-        name
-    };
-    y += 34.0;
-    segmented(
-        items,
-        lx,
-        lw,
-        &mut y,
-        &title,
-        vec![
-            (
-                l.t("pc-display-shown"),
-                Action::SetMirror(true),
-                s.mirror_wanted,
-                connected,
-            ),
-            (
-                l.t("pc-display-hidden"),
-                Action::SetMirror(false),
-                !s.mirror_wanted,
-                connected,
-            ),
-        ],
-    );
-    y -= 16.0;
+    y = pc_displays(s, items, lx, lw, y + 34.0);
     items.push(button(
         rect(lx, y, lw, 52.0),
         l.t("monitors-line-up"),
@@ -2449,6 +2876,153 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         Some(Action::Tidy),
     ));
     y + 52.0
+}
+
+/// Scales the PC makes monitors at, where it makes them at more than one: what the
+/// menu offers.
+fn scales_of(s: &UiState) -> &[u16] {
+    match &s.limits {
+        Some(l) if s.can_scale && l.scales.len() > 1 => &l.scales,
+        _ => &[],
+    }
+}
+
+/// The PC's own displays from `y` (those connected first), each on a row: its name,
+/// its connector smaller under it, and its switch (shown or hidden, said by the
+/// highlighted option). One not connected says so and keeps its switch; with as many
+/// shown as the PC allows, the others' "Shown" waits, saying why. As many rows as fit
+/// above "Line up", a page at a time, the pages turned beside the title. Where the
+/// next thing goes.
+fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f32 {
+    let l = &s.texts;
+    if s.physical.is_empty() {
+        return y - 18.0;
+    }
+    // Room above "Line up" and the bottom line.
+    let rows = ((HEIGHT as f32 - 166.0 - y) / 60.0).floor().max(1.0) as usize;
+    let pages = s.physical.len().div_ceil(rows);
+    let page = usize::from(s.physical_page) % pages;
+    let title_room = if pages > 1 { w - PAGER_W - 10.0 } else { w };
+    items.push(text_in(
+        title_room,
+        text(x, y, 21.0, true, SECTION, l.t("pc-displays")),
+    ));
+    if pages > 1 {
+        pager(
+            items,
+            l,
+            (x + w, y - 8.0),
+            (page, pages),
+            Action::PhysicalPage,
+        );
+    }
+    y += 16.0;
+    let max = s.limits.as_ref().map(|l| usize::from(l.physical_max));
+    let shown = s.physical.iter().filter(|d| d.shown && d.connected).count();
+    let full = max.is_some_and(|max| shown >= max);
+    let bw = 128.0;
+    for d in s.physical.iter().skip(page * rows).take(rows) {
+        items.push(Item::Box(rect(x, y, w, 54.0), [255, 255, 255, 8]));
+        let room = w - 2.0 * bw - 10.0 - 32.0;
+        let mut name = text_in(room, text(x + 16.0, y + 24.0, 19.0, true, TEXT, &d.name));
+        if let Item::Text { shorten, .. } = &mut name {
+            *shorten = true;
+        }
+        items.push(name);
+        let note = if !d.connected {
+            Some(l.t("pc-display-not-connected"))
+        } else if full && !d.shown {
+            Some(l.t("pc-display-limit"))
+        } else {
+            None
+        };
+        let under = match (&d.connector, note) {
+            (Some(c), Some(n)) => format!("{c} · {n}"),
+            (Some(c), None) => c.clone(),
+            (None, Some(n)) => n.to_owned(),
+            (None, None) => String::new(),
+        };
+        if !under.is_empty() {
+            let mut t = text_in(room, text(x + 16.0, y + 45.0, 15.0, false, MUTED, &under));
+            if let Item::Text { shorten, .. } = &mut t {
+                *shorten = true;
+            }
+            items.push(t);
+        }
+        let can_show = !full || d.shown || !d.connected;
+        for (i, (label, on, enabled)) in [
+            (l.t("pc-display-shown"), true, can_show),
+            (l.t("pc-display-hidden"), false, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = rect(
+                x + w - 2.0 * bw - 14.0 + i as f32 * (bw + 6.0),
+                y + 7.0,
+                bw,
+                40.0,
+            );
+            let action = Action::ShowPhysical(d.id, on);
+            let chosen = d.shown == on;
+            let style = match (enabled, chosen) {
+                (_, true) => Style::Selected,
+                (false, _) => Style::Disabled,
+                (true, false) => Style::Normal,
+            };
+            let mut b = button(r, label, style, (enabled && !chosen).then_some(action));
+            if let Item::Button { key, size, .. } = &mut b {
+                *key = Some(action);
+                *size = 17.0;
+            }
+            items.push(b);
+        }
+        y += 60.0;
+    }
+    y + 4.0
+}
+
+/// How wide [`pager`] is.
+const PAGER_W: f32 = 250.0;
+
+/// "‹ Page 2 of 3 ›", its right edge at `right` and its middle at `mid` (x, y): the
+/// buttons turn to the page before and after (`turn` to it), round.
+fn pager(
+    items: &mut Vec<Item>,
+    l: &Texts,
+    (right, mid): (f32, f32),
+    (page, pages): (usize, usize),
+    turn: fn(u8) -> Action,
+) {
+    let to = |p: usize| turn(u8::try_from(p % pages).unwrap_or(0));
+    let (bw, bh) = (44.0, 36.0);
+    items.push(button(
+        rect(right - PAGER_W, mid - bh / 2.0, bw, bh),
+        "‹",
+        Style::Normal,
+        Some(to(page + pages - 1)),
+    ));
+    items.push(button(
+        rect(right - bw, mid - bh / 2.0, bw, bh),
+        "›",
+        Style::Normal,
+        Some(to(page + 1)),
+    ));
+    let label = l.f(
+        "page-of",
+        &[("page", (page + 1).into()), ("pages", pages.into())],
+    );
+    items.push(text_in(
+        PAGER_W - 2.0 * bw - 16.0,
+        text(
+            right - PAGER_W + bw + 8.0,
+            mid + 6.0,
+            16.0,
+            false,
+            MUTED,
+            &label,
+        ),
+    ));
 }
 
 /// A row with a title, a muted note and one button on the right.
@@ -2501,7 +3075,49 @@ fn segmented(
 /// Add a monitor, layout, curve.
 fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, mut y: f32) -> f32 {
     let l = &s.texts;
-    items.push(text(rx, y, 21.0, false, MUTED, l.t("add-monitor")));
+    let scales = scales_of(s);
+    // The scale the new monitor gets, beside the title: small choices on its right.
+    let (sw, sgap) = (76.0, 6.0);
+    let shown = scales.len().min(3);
+    let choices_w = shown as f32 * (sw + sgap);
+    if shown > 0 {
+        let label = l.t("scale");
+        let label_w = 120.0;
+        items.push(text_in(
+            label_w,
+            text(rx + rw - choices_w - label_w, y, 17.0, false, MUTED, label),
+        ));
+        for (i, &scale) in scales.iter().take(3).enumerate() {
+            let r = rect(
+                rx + rw - choices_w + sgap + i as f32 * (sw + sgap),
+                y - 26.0,
+                sw,
+                36.0,
+            );
+            let on = s.add_scale == scale;
+            let action = Action::AddScale(scale);
+            let mut b = button(
+                r,
+                &l.f("percent", &[("value", scale.into())]),
+                if on { Style::Selected } else { Style::Normal },
+                (!on).then_some(action),
+            );
+            if let Item::Button { key, size, .. } = &mut b {
+                *key = Some(action);
+                *size = 16.0;
+            }
+            items.push(b);
+        }
+    }
+    let title_room = if shown > 0 {
+        rw - choices_w - 130.0
+    } else {
+        rw
+    };
+    items.push(text_in(
+        title_room,
+        text(rx, y, 21.0, false, MUTED, l.t("add-monitor")),
+    ));
     y += 18.0;
     // The sizes the PC offers (it says them when the headset connects), six at most.
     let max = s.limits.as_ref().map(|l| usize::from(l.virtual_max));
@@ -3077,29 +3693,46 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     let l = &s.texts;
     let st = s.settings;
     let connected = s.host.is_some();
-    items.push(text(x, y + 14.0, 21.0, true, SECTION, l.t("profile")));
+    items.push(text(x, y + 14.0, 21.0, true, SECTION, l.t("profiles")));
     y += 32.0;
-    let cw = (w - 2.0 * 12.0) / 3.0;
-    for (i, saved) in s.saved_profiles.iter().enumerate() {
-        let r = rect(x + i as f32 * (cw + 12.0), y, cw, 72.0);
+    // The first three, the one in use among them (in place of the third where it is
+    // further down the list), and the way to all of them.
+    let cw = (w - 3.0 * 12.0) / 4.0;
+    let mut first: Vec<usize> = (0..s.profiles.len().min(3)).collect();
+    if let Some(a) = s
+        .active_profile
+        .filter(|a| *a >= 3 && *a < s.profiles.len())
+    {
+        first[2] = a;
+    }
+    for (k, &i) in first.iter().enumerate() {
+        let r = rect(x + k as f32 * (cw + 12.0), y, cw, 72.0);
         let active = s.active_profile == Some(i);
-        let style = match (connected && *saved, active) {
+        let style = match (connected, active) {
             (false, _) => Style::Disabled,
             (true, true) => Style::Selected,
             (true, false) => Style::Normal,
         };
-        let action = (connected && *saved && !active).then_some(Action::ApplyProfile(i));
-        let name = l.f("profile-n", &[("n", (i + 1).into())]);
-        let mut b = button(r, &name, style, action);
+        let action = (connected && !active).then_some(Action::ApplyProfile(i));
+        let mut b = name_button(r, &s.profiles[i], 19.0, style, action);
         if let Item::Button { key, .. } = &mut b {
             *key = Some(Action::ApplyProfile(i));
         }
         items.push(b);
-        if !saved {
-            let empty = l.t("profile-empty");
-            items.push(text(r.left(), r.bottom() + 22.0, 17.0, false, MUTED, empty));
-        }
     }
+    if s.profiles.is_empty() {
+        let none = l.t("profiles-none-short");
+        items.push(text_in(
+            3.0 * (cw + 12.0) - 12.0,
+            text(x, y + 44.0, 19.0, false, MUTED, none),
+        ));
+    }
+    items.push(button(
+        rect(x + 3.0 * (cw + 12.0), y, cw, 72.0),
+        l.t("profiles-all"),
+        Style::Normal,
+        Some(Action::Tab(Tab::Profiles)),
+    ));
     y += 72.0 + 40.0;
     let on_off = |on: bool| {
         if on { l.t("on") } else { l.t("off") }
@@ -3193,40 +3826,177 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     }
 }
 
-/// Saves the current setup into one of the profiles (second press confirms).
-fn save_as_profile(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
+/// Every profile, ten to a page, two to a row across the page, each with its name to
+/// switch to it (the one in use highlighted), "Save here" to save the setup over it and
+/// "×" to delete it (each asks again first); "New profile" saves the setup as one
+/// more; with more than ten, the pages turn beside it. Under the list, how many there
+/// may be and where they are named.
+fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>) {
     let l = &s.texts;
-    items.push(text(x, y, 21.0, true, SECTION, l.t("profile-save")));
-    y += 18.0;
-    let bw = (w - 2.0 * 10.0) / 3.0;
+    let (x, w) = (44.0, WIDTH as f32 - 88.0);
+    let at = items.len();
+    let connected = s.host.is_some();
     // Something to save: the PC's monitors.
-    let can = s.host.is_some() && !s.monitors.is_empty();
-    for i in 0..s.saved_profiles.len() {
-        let armed = s.confirm_save == Some(i);
-        let label = if armed {
-            l.t("profile-replace").to_owned()
+    let can_save = connected && !s.monitors.is_empty();
+    let full = s.profiles.len() >= crate::profiles::MAX_PROFILES;
+    let pages = s.profiles.len().div_ceil(PROFILES_PER_PAGE).max(1);
+    let page = usize::from(s.profile_page) % pages;
+    let pager_room = if pages > 1 { PAGER_W + 20.0 } else { 0.0 };
+    items.push(text_in(
+        w - 330.0 - pager_room,
+        text(x, y + 30.0, 21.0, true, SECTION, l.t("profiles")),
+    ));
+    if pages > 1 {
+        pager(
+            items,
+            l,
+            (x + w - 320.0, y + 24.0),
+            (page, pages),
+            Action::ProfilePage,
+        );
+    }
+    let new = Action::NewProfile;
+    let mut b = button(
+        rect(x + w - 300.0, y, 300.0, 48.0),
+        l.t("profile-new"),
+        if can_save && !full {
+            Style::Normal
         } else {
-            l.f("profile-n", &[("n", (i + 1).into())])
-        };
-        // The profile the monitors are as now: saved to or switched to last.
+            Style::Disabled
+        },
+        (can_save && !full).then_some(new),
+    );
+    if let Item::Button { key, .. } = &mut b {
+        *key = Some(new);
+    }
+    items.push(b);
+    y += 70.0;
+    if s.profiles.is_empty() {
+        let none = l.t("profiles-none");
+        for (k, line) in wrap(none, 19.0, w).iter().enumerate() {
+            items.push(text(
+                x,
+                y + 30.0 + k as f32 * 28.0,
+                19.0,
+                false,
+                MUTED,
+                line,
+            ));
+        }
+    }
+    let col_w = (w - 32.0) / 2.0;
+    let on_page = s
+        .profiles
+        .len()
+        .saturating_sub(page * PROFILES_PER_PAGE)
+        .min(PROFILES_PER_PAGE);
+    for (k, (i, name)) in s
+        .profiles
+        .iter()
+        .enumerate()
+        .skip(page * PROFILES_PER_PAGE)
+        .take(PROFILES_PER_PAGE)
+        .enumerate()
+    {
+        let cx = x + (k % 2) as f32 * (col_w + 32.0);
+        let ry = y + (k / 2) as f32 * 62.0;
         let active = s.active_profile == Some(i);
-        let style = match (can, armed, active) {
-            (false, _, _) => Style::Disabled,
-            (true, true, _) => Style::Armed,
-            (true, false, true) => Style::Selected,
-            (true, false, false) => Style::Normal,
+        let (save_w, del_w) = (170.0, 52.0);
+        let name_w = col_w - save_w - del_w - 20.0;
+        let style = match (connected, active) {
+            (false, _) => Style::Disabled,
+            (true, true) => Style::Selected,
+            (true, false) => Style::Normal,
         };
-        items.push(button(
-            rect(x + i as f32 * (bw + 10.0), y, bw, 48.0),
-            &label,
+        let apply = Action::ApplyProfile(i);
+        let mut b = name_button(
+            rect(cx, ry, name_w, 52.0),
+            name,
+            19.0,
             style,
-            can.then_some(Action::SaveProfile(i)),
+            (connected && !active).then_some(apply),
+        );
+        if let Item::Button { key, .. } = &mut b {
+            *key = Some(apply);
+        }
+        items.push(b);
+        let tools = rect(cx + name_w + 10.0, ry, save_w + del_w + 10.0, 52.0);
+        if s.confirm_delete == Some(i) {
+            items.push(button(
+                tools,
+                l.t("profile-delete-confirm"),
+                Style::Armed,
+                Some(Action::DeleteProfile(i)),
+            ));
+            continue;
+        }
+        let save = Action::SaveProfile(i);
+        let armed = s.confirm_save == Some(i);
+        let mut b = button(
+            rect(tools.left(), ry, save_w, 52.0),
+            if armed {
+                l.t("profile-replace")
+            } else {
+                l.t("profile-save-here")
+            },
+            match (can_save, armed) {
+                (false, _) => Style::Disabled,
+                (true, true) => Style::Armed,
+                (true, false) => Style::Normal,
+            },
+            can_save.then_some(save),
+        );
+        if let Item::Button { key, .. } = &mut b {
+            *key = Some(save);
+        }
+        items.push(b);
+        items.push(button(
+            rect(tools.right() - del_w, ry, del_w, 52.0),
+            "×",
+            Style::Danger,
+            Some(Action::DeleteProfile(i)),
         ));
     }
+    y += on_page.div_ceil(2) as f32 * 62.0;
+    if s.profiles.is_empty() {
+        y += 90.0;
+    }
+    if full {
+        items.push(text(
+            x,
+            y + 10.0,
+            18.0,
+            false,
+            MUTED,
+            &l.f(
+                "profiles-at-most",
+                &[("count", crate::profiles::MAX_PROFILES.into())],
+            ),
+        ));
+        y += 34.0;
+    }
+    for (k, line) in wrap(l.t("profiles-rename-hint"), 17.0, w)
+        .iter()
+        .enumerate()
+    {
+        items.push(text(
+            x,
+            y + 20.0 + k as f32 * 26.0,
+            17.0,
+            false,
+            MUTED,
+            line,
+        ));
+    }
+    in_column(&mut items[at..], x, w);
 }
 
+/// Splits a text at words into lines: `wrap(text, size, room)` (see
+/// [`Panel::wrapped`]), for the pages built without the fonts at hand.
+type Wrap<'a> = &'a dyn Fn(&str, f32, f32) -> Vec<String>;
+
 /// Settings: the parts listed on the left, the chosen one on the right.
-fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32) {
+fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32, wrap: Wrap<'_>) {
     let l = &s.texts;
     let (nx, nw) = (44.0, 230.0);
     let sections = [
@@ -3235,6 +4005,7 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
         (Section::Sound, l.t("section-sound")),
         (Section::Language, l.t("section-language")),
         (Section::Pc, l.t("section-pc")),
+        (Section::Paired, l.t("section-paired")),
         (Section::Help, l.t("section-help")),
     ];
     for (i, (sec, label)) in sections.into_iter().enumerate() {
@@ -3258,7 +4029,7 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
     let (cx, cw) = (nx + nw + 50.0, WIDTH as f32 - (nx + nw + 50.0) - 44.0);
     let ctop = top + 12.0;
     let at = items.len();
-    settings_page(s, section, items, cx, cw, ctop);
+    settings_page(s, section, items, cx, cw, ctop, wrap);
     in_column(&mut items[at..], cx, cw);
 }
 
@@ -3270,6 +4041,7 @@ fn settings_page(
     cx: f32,
     cw: f32,
     ctop: f32,
+    wrap: Wrap<'_>,
 ) {
     let l = &s.texts;
     match section {
@@ -3375,11 +4147,14 @@ fn settings_page(
         Section::Pc => {
             let w = cw.min(700.0);
             let mut y = build_pc(s, items, cx, w, ctop);
+            // Two switches side by side.
+            let half = (w - 16.0) / 2.0;
+            let mut y2 = y;
             let on = s.settings.notifications;
             segmented(
                 items,
                 cx,
-                w,
+                half,
                 &mut y,
                 l.t("pc-notifications"),
                 vec![
@@ -3387,8 +4162,31 @@ fn settings_page(
                     (l.t("on"), Action::Notifications(true), on, true),
                 ],
             );
-            paired_pcs(s, items, cx, w, y + 10.0);
+            let on = s.settings.no_limits;
+            segmented(
+                items,
+                cx + half + 16.0,
+                half,
+                &mut y2,
+                l.t("no-limits"),
+                vec![
+                    (l.t("off"), Action::NoLimits(false), !on, true),
+                    (l.t("on"), Action::NoLimits(true), on, true),
+                ],
+            );
+            // What it costs, under its own switch.
+            for (k, line) in wrap(l.t("no-limits-note"), 17.0, half).iter().enumerate() {
+                items.push(text(
+                    cx + half + 16.0,
+                    y2 - 18.0 + k as f32 * 23.0,
+                    17.0,
+                    false,
+                    MUTED,
+                    line,
+                ));
+            }
         }
+        Section::Paired => paired_pcs(s, items, cx, cw.min(700.0), ctop + 10.0),
         Section::Controls => build_controls(s, items, cx, cw.min(640.0), ctop),
         Section::Help => {
             hints(l, items, cx, ctop + 10.0);
@@ -3579,9 +4377,9 @@ fn paired_pcs(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         items.push(text(x, y + 26.0, 19.0, false, MUTED, l.t("paired-none")));
         return;
     }
-    // Two fit; with more, one and how many others.
-    let shown = if s.paired.len() > 2 {
-        1
+    // Eight fit; with more, seven and how many others.
+    let shown = if s.paired.len() > 8 {
+        7
     } else {
         s.paired.len()
     };
@@ -3878,7 +4676,16 @@ fn union(a: &Rect, b: &Rect) -> Rect {
 
 /// A circle, `None` if degenerate.
 fn circle(cx: f32, cy: f32, r: f32) -> Option<Path> {
-    let path = PathBuilder::from_circle(cx, cy, r);
+    let path = (r > 0.0 && r.is_finite())
+        .then(|| {
+            let n = (r * std::f32::consts::TAU / 3.0).ceil().clamp(12.0, 128.0) as usize;
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx + r, cy);
+            arc(&mut pb, (cx, cy), r, 0.0, std::f32::consts::TAU, n);
+            pb.close();
+            pb.finish()
+        })
+        .flatten();
     debug_assert!(
         path.is_some(),
         "degenerate circle at {cx}, {cy}, radius {r}"
@@ -3982,27 +4789,40 @@ fn name_button(rect: Rect, name: &str, size: f32, style: Style, action: Option<A
 
 /// A rounded rectangle, `None` if degenerate.
 fn rounded(r: Rect, radius: f32) -> Option<Path> {
-    let rad = radius.min(r.width() / 2.0).min(r.height() / 2.0);
-    let k = rad * 0.552_284_8;
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let rad = radius.min(r.width() / 2.0).min(r.height() / 2.0).max(0.0);
     let (l, t, rt, b) = (r.left(), r.top(), r.right(), r.bottom());
+    // Each corner a few straight steps (a tenth of a pixel off the arc at most).
+    let n = (rad / 1.5).ceil().clamp(2.0, 24.0) as usize;
     let mut pb = PathBuilder::new();
     pb.move_to(l + rad, t);
     pb.line_to(rt - rad, t);
-    pb.cubic_to(rt - rad + k, t, rt, t + rad - k, rt, t + rad);
+    arc(&mut pb, (rt - rad, t + rad), rad, -FRAC_PI_2, 0.0, n);
     pb.line_to(rt, b - rad);
-    pb.cubic_to(rt, b - rad + k, rt - rad + k, b, rt - rad, b);
+    arc(&mut pb, (rt - rad, b - rad), rad, 0.0, FRAC_PI_2, n);
     pb.line_to(l + rad, b);
-    pb.cubic_to(l + rad - k, b, l, b - rad + k, l, b - rad);
+    arc(&mut pb, (l + rad, b - rad), rad, FRAC_PI_2, PI, n);
     pb.line_to(l, t + rad);
-    pb.cubic_to(l, t + rad - k, l + rad - k, t, l + rad, t);
+    arc(&mut pb, (l + rad, t + rad), rad, PI, 1.5 * PI, n);
     pb.close();
     let path = pb.finish();
     debug_assert!(path.is_some(), "degenerate rounded rect {r:?}");
     path
 }
 
+/// An arc around `center` of radius `r` from angle `a0` to `a1` (radians, clockwise on
+/// the screen from the right), in `n` straight steps, its start already in `pb`.
+/// Straight steps rather than curves: a shape cut at the edge of a part of the picture
+/// is then drawn there as it is in the whole picture (see `Panel::draw_part`).
+fn arc(pb: &mut PathBuilder, (cx, cy): (f32, f32), r: f32, a0: f32, a1: f32, n: usize) {
+    for i in 1..=n {
+        let a = a0 + (a1 - a0) * i as f32 / n as f32;
+        pb.line_to(cx + r * a.cos(), cy + r * a.sin());
+    }
+}
+
 /// Outlines `path`; nothing when there is none (a degenerate shape).
-fn stroke(pixmap: &mut Pixmap, path: Option<Path>, [r, g, b, a]: [u8; 4], width: f32) {
+fn stroke(c: &mut Canvas<'_>, path: Option<Path>, [r, g, b, a]: [u8; 4], width: f32) {
     let Some(path) = path else { return };
     let mut paint = Paint::default();
     paint.set_color_rgba8(r, g, b, a);
@@ -4011,22 +4831,18 @@ fn stroke(pixmap: &mut Pixmap, path: Option<Path>, [r, g, b, a]: [u8; 4], width:
         width,
         ..Stroke::default()
     };
-    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    let t = c.transform();
+    c.pm.stroke_path(&path, &paint, &stroke, t, None);
 }
 
 /// Fills `path`; nothing when there is none (a degenerate shape).
-fn fill(pixmap: &mut Pixmap, path: Option<Path>, [r, g, b, a]: [u8; 4]) {
+fn fill(c: &mut Canvas<'_>, path: Option<Path>, [r, g, b, a]: [u8; 4]) {
     let Some(path) = path else { return };
     let mut paint = Paint::default();
     paint.set_color_rgba8(r, g, b, a);
     paint.anti_alias = true;
-    pixmap.fill_path(
-        &path,
-        &paint,
-        FillRule::Winding,
-        Transform::identity(),
-        None,
-    );
+    let t = c.transform();
+    c.pm.fill_path(&path, &paint, FillRule::Winding, t, None);
 }
 
 #[cfg(test)]
@@ -4120,6 +4936,7 @@ mod tests {
                 height: 800,
                 place: Place::Unknown,
                 seen: None,
+                scale: 100,
             }],
             host: Some("workstation".into()),
             found: Vec::new(),
@@ -4133,6 +4950,7 @@ mod tests {
                     height: 1440,
                     place: Place::Unknown,
                     seen: Some([-1.0, 0.0, 0.5, 0.28]),
+                    scale: 100,
                 },
                 MonitorEntry {
                     id: k(102),
@@ -4141,6 +4959,7 @@ mod tests {
                     height: 1440,
                     place: Place::Unknown,
                     seen: Some([0.0, 0.0, 0.5, 0.28]),
+                    scale: 100,
                 },
                 MonitorEntry {
                     id: k(103),
@@ -4149,16 +4968,32 @@ mod tests {
                     height: 2560,
                     place: Place::Unknown,
                     seen: Some([0.78, 0.12, 0.28, 0.5]),
+                    scale: 100,
                 },
             ],
             selected: None,
-            mirror_seen: Some([0.0, -0.55, 0.35, 0.22]),
+            physical_seen: vec![([0.0, -0.55, 0.35, 0.22], "DELL U2720Q".into())],
+            physical_page: 0,
+            physical: vec![
+                PhysicalEntry {
+                    id: k(100),
+                    name: "Екран ноутбука".into(),
+                    connector: Some("eDP-1".into()),
+                    shown: false,
+                    connected: false,
+                },
+                PhysicalEntry {
+                    id: k(117),
+                    name: "DELL U2720Q".into(),
+                    connector: Some("HDMI-A-1".into()),
+                    shown: true,
+                    connected: true,
+                },
+            ],
             primary: Some(k(102)),
             cinema_screen: None,
-            mirror_wanted: true,
             audio_wanted: true,
             mic_wanted: true,
-            mirror_name: Some("Екран HDMI-A-1".into()),
             settings: Settings::default(),
             room_available: true,
             panorama_available: true,
@@ -4178,7 +5013,11 @@ mod tests {
             intro: false,
             update: None,
             update_from: NoStore.update_hint(),
-            saved_profiles: [true, false, true],
+            profiles: vec!["Профіль 1".into(), "Робота".into(), "Профіль 3".into()],
+            profile_page: 0,
+            confirm_delete: None,
+            can_scale: true,
+            add_scale: 100,
             active_profile: None,
             note: None,
         }
@@ -4215,6 +5054,7 @@ mod tests {
                         id: k(107),
                         label: "6".into(),
                         seen: None,
+                        scale: 100,
                         ..s.monitors[0].clone()
                     });
                     for t in texts(&s) {
@@ -4285,38 +5125,170 @@ mod tests {
         assert!(adds(&s).iter().all(|(_, on)| !on), "before the PC said");
     }
 
-    /// The switch of the PC's display names the display it acts on; with none of the
-    /// PC's displays connected it says so and switches nothing.
+    /// A display's row: its name, "Shown" (its action where pressable, its style) and
+    /// "Hidden".
+    type Row = (String, Option<Action>, Style, Option<Action>, Style);
+
+    /// The switches of the PC's own displays, a row each.
+    fn physical_rows(s: &UiState) -> Vec<Row> {
+        let items = Panel::new().build(s);
+        s.physical
+            .iter()
+            .map(|d| {
+                let of = |on: bool| {
+                    items
+                        .iter()
+                        .find_map(|i| match i {
+                            Item::Button {
+                                key: Some(Action::ShowPhysical(k, o)),
+                                action,
+                                style,
+                                ..
+                            } if *k == d.id && *o == on => Some((*action, *style)),
+                            _ => None,
+                        })
+                        .expect("a switch")
+                };
+                let (show, show_style) = of(true);
+                let (hide, hide_style) = of(false);
+                (d.name.clone(), show, show_style, hide, hide_style)
+            })
+            .collect()
+    }
+
+    /// Every display of the PC has its switch, named as the PC names it, its connector
+    /// under; one not connected says so and keeps its switch; with as many shown as
+    /// the PC allows, the others' "Shown" waits, saying why; none at all: no switches.
     #[test]
-    fn the_pc_display_switch_names_its_display() {
-        let items = |s: &UiState| Panel::new().build(s);
-        let switches = |s: &UiState| {
-            items(s)
-                .into_iter()
-                .filter(|i| {
-                    matches!(
-                        i,
-                        Item::Button {
-                            action: Some(Action::SetMirror(_)),
-                            ..
-                        }
-                    )
-                })
-                .count()
-        };
+    fn every_pc_display_has_its_switch() {
         let says = |s: &UiState, what: &str| {
-            items(s)
+            Panel::new()
+                .build(s)
                 .iter()
                 .any(|i| matches!(i, Item::Text { text, .. } if text == what))
         };
         let mut s = sample_state();
         s.tab = Tab::Monitors;
-        s.mirror_wanted = false;
-        assert!(says(&s, "Екран HDMI-A-1"));
-        assert_eq!(switches(&s), 1, "the option not chosen");
-        s.mirror_name = None;
-        assert!(says(&s, "Екран ПК · не підключено"));
-        assert_eq!(switches(&s), 0);
+        let rows = physical_rows(&s);
+        assert_eq!(
+            rows,
+            [
+                (
+                    "Екран ноутбука".into(),
+                    Some(Action::ShowPhysical(k(100), true)),
+                    Style::Normal,
+                    None,
+                    Style::Selected
+                ),
+                (
+                    "DELL U2720Q".into(),
+                    None,
+                    Style::Selected,
+                    Some(Action::ShowPhysical(k(117), false)),
+                    Style::Normal
+                ),
+            ]
+        );
+        assert!(says(&s, "Екран ноутбука"));
+        assert!(says(&s, "eDP-1 · не підключено"));
+        assert!(says(&s, "HDMI-A-1"));
+        // The laptop's lid opened, the PC allowing one: its "Shown" waits.
+        s.physical[0].connected = true;
+        let rows = physical_rows(&s);
+        assert_eq!((rows[0].1, rows[0].2), (None, Style::Disabled));
+        assert!(says(&s, "eDP-1 · досягнуто межі ПК"));
+        // Allowing two: it can be shown.
+        s.limits.as_mut().unwrap().physical_max = 2;
+        let rows = physical_rows(&s);
+        assert_eq!(rows[0].1, Some(Action::ShowPhysical(k(100), true)));
+        s.physical.clear();
+        assert!(!says(&s, crate::lang::builtin("uk").t("pc-displays")));
+    }
+
+    /// More displays of the PC than fit above "Line up": a page at a time, the pages
+    /// turned beside the title, round; every one of them can be switched on some page.
+    #[test]
+    fn every_pc_display_can_be_switched_page_by_page() {
+        let mut s = sample_state();
+        s.tab = Tab::Monitors;
+        s.selected = Some(k(102));
+        s.physical = (0..7)
+            .map(|n| PhysicalEntry {
+                id: k(200 + n),
+                name: format!("DP-{n}"),
+                connector: None,
+                shown: false,
+                connected: true,
+            })
+            .collect();
+        let mut switched = std::collections::BTreeSet::new();
+        let mut pages = 0;
+        for page in 0..4 {
+            s.physical_page = page;
+            let items = Panel::new().build(&s);
+            let turns: Vec<Action> = items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Button {
+                        action: Some(a @ Action::PhysicalPage(_)),
+                        ..
+                    } => Some(*a),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(turns.len(), 2, "back and on");
+            for i in &items {
+                if let Item::Button {
+                    key: Some(Action::ShowPhysical(id, true)),
+                    ..
+                } = i
+                {
+                    switched.insert(*id);
+                }
+            }
+            pages += 1;
+            let mut p = Panel::new();
+            p.set_state(&s);
+            assert!(p.overflows().is_empty(), "{:?}", p.overflows());
+        }
+        assert_eq!(switched.len(), 7, "after {pages} pages");
+    }
+
+    /// The scale: of a monitor picked, where the PC makes monitors at its scales,
+    /// its own highlighted; for a monitor added, the one chosen; none where the PC has
+    /// one scale or does not name the capability.
+    #[test]
+    fn scales_where_the_pc_makes_them() {
+        let scales = |s: &UiState| -> Vec<(Action, Style)> {
+            Panel::new()
+                .build(s)
+                .into_iter()
+                .filter_map(|i| match i {
+                    Item::Button {
+                        key: Some(a @ (Action::SetScale(..) | Action::AddScale(_))),
+                        style,
+                        ..
+                    } => Some((a, style)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut s = sample_state();
+        s.tab = Tab::Monitors;
+        s.selected = Some(k(102));
+        s.monitors[1].scale = 125;
+        s.add_scale = 150;
+        let all = scales(&s);
+        assert_eq!(all.len(), 6, "{all:?}");
+        assert!(all.contains(&(Action::AddScale(150), Style::Selected)));
+        assert!(all.contains(&(Action::AddScale(100), Style::Normal)));
+        assert!(all.contains(&(Action::SetScale(k(102), 125), Style::Selected)));
+        assert!(all.contains(&(Action::SetScale(k(102), 150), Style::Normal)));
+        s.can_scale = false;
+        assert!(scales(&s).is_empty());
+        s.can_scale = true;
+        s.limits.as_mut().unwrap().scales = vec![100];
+        assert!(scales(&s).is_empty());
     }
 
     /// Every page and state, in both languages, without text that does not fit.
@@ -4450,7 +5422,7 @@ mod tests {
         }
     }
 
-    /// The profile buttons of a tab: label, style, action.
+    /// The buttons of a page standing for a profile: label, style, action.
     fn profile_buttons(st: &UiState) -> Vec<(String, Style, Option<Action>)> {
         Panel::new()
             .build(st)
@@ -4460,24 +5432,29 @@ mod tests {
                     label,
                     style,
                     action,
+                    key:
+                        Some(
+                            Action::ApplyProfile(_)
+                            | Action::SaveProfile(_)
+                            | Action::DeleteProfile(_)
+                            | Action::NewProfile,
+                        ),
                     ..
-                } if label.starts_with("Profile") || label == "Replace?" => {
-                    Some((label, style, action))
-                }
+                } => Some((label, style, action)),
                 _ => None,
             })
             .collect()
     }
 
     /// The profile saved to or switched to last is the one highlighted, where it is
-    /// switched to (Quick) and where it is saved (Monitors); saving to it again asks
-    /// first, as for any saved one.
+    /// switched to (Quick and Profiles); saving over one or deleting one asks first;
+    /// a new one is saved from the setup as it is.
     #[test]
     fn the_active_profile_is_highlighted() {
         let mut st = sample_state();
         st.texts = crate::lang::builtin("en");
+        st.profiles = vec!["Profile 1".into(), "Work".into()];
         st.active_profile = Some(1);
-        st.saved_profiles = [true, true, false];
 
         st.tab = Tab::Quick;
         let quick = profile_buttons(&st);
@@ -4489,51 +5466,93 @@ mod tests {
                     Style::Normal,
                     Some(Action::ApplyProfile(0))
                 ),
-                ("Profile 2".into(), Style::Selected, None),
-                ("Profile 3".into(), Style::Disabled, None),
+                ("Work".into(), Style::Selected, None),
             ]
         );
 
-        st.tab = Tab::Monitors;
-        let save = profile_buttons(&st);
+        st.tab = Tab::Profiles;
+        let all = profile_buttons(&st);
+        let save = |i| {
+            (
+                "Save here".to_owned(),
+                Style::Normal,
+                Some(Action::SaveProfile(i)),
+            )
+        };
+        let delete = |i| {
+            (
+                "×".to_owned(),
+                Style::Danger,
+                Some(Action::DeleteProfile(i)),
+            )
+        };
         assert_eq!(
-            save,
+            all,
             [
+                (
+                    "New profile".into(),
+                    Style::Normal,
+                    Some(Action::NewProfile)
+                ),
                 (
                     "Profile 1".into(),
                     Style::Normal,
-                    Some(Action::SaveProfile(0))
+                    Some(Action::ApplyProfile(0))
                 ),
-                (
-                    "Profile 2".into(),
-                    Style::Selected,
-                    Some(Action::SaveProfile(1))
-                ),
-                (
-                    "Profile 3".into(),
-                    Style::Normal,
-                    Some(Action::SaveProfile(2))
-                ),
+                save(0),
+                delete(0),
+                ("Work".into(), Style::Selected, None),
+                save(1),
+                delete(1),
             ]
         );
 
-        // Pressed once to save over it: it asks, and the question shows over the mark.
+        // Pressed once to save over it, or to delete it: it asks.
         st.confirm_save = Some(1);
-        assert_eq!(
-            profile_buttons(&st)[1],
-            (
-                "Replace?".into(),
-                Style::Armed,
-                Some(Action::SaveProfile(1))
-            )
+        assert!(profile_buttons(&st).contains(&(
+            "Replace?".into(),
+            Style::Armed,
+            Some(Action::SaveProfile(1))
+        )));
+        st.confirm_save = None;
+        st.confirm_delete = Some(0);
+        assert!(profile_buttons(&st).contains(&(
+            "Press again to delete".into(),
+            Style::Armed,
+            Some(Action::DeleteProfile(0))
+        )));
+        st.confirm_delete = None;
+
+        // Without monitors nothing is saved; at most twenty.
+        let mut none = st.clone();
+        none.monitors.clear();
+        assert!(
+            profile_buttons(&none)
+                .iter()
+                .filter(|(_, _, a)| matches!(a, Some(Action::NewProfile | Action::SaveProfile(_))))
+                .count()
+                == 0
         );
+        let mut full = st.clone();
+        full.profiles = (1..=crate::profiles::MAX_PROFILES)
+            .map(|n| format!("Profile {n}"))
+            .collect();
+        assert_eq!(
+            profile_buttons(&full)[0],
+            ("New profile".into(), Style::Disabled, None)
+        );
+        // Ten a page: the second page has the rest, the page buttons say which.
+        full.profile_page = 1;
+        let second = profile_buttons(&full);
+        assert!(second.iter().any(|(l, ..)| l == "Profile 11"));
+        assert!(!second.iter().any(|(l, ..)| l == "Profile 10"));
 
         // Switching to a profile or saving one keeps it; a layout chosen, a monitor
         // moved, added or removed by hand leaves it, and then none is marked.
-        st.confirm_save = None;
         for keeps in [
             Action::ApplyProfile(0),
             Action::SaveProfile(1),
+            Action::NewProfile,
             Action::Recenter,
         ] {
             assert!(!keeps.leaves_profile(), "{keeps:?}");
@@ -4550,14 +5569,14 @@ mod tests {
             },
             Action::Remove(k(102)),
             Action::MakePrimary(k(103)),
-            Action::SetMirror(true),
+            Action::ShowPhysical(k(117), false),
+            Action::SetScale(k(102), 125),
         ];
+        st.tab = Tab::Quick;
         for action in by_hand {
             let mut st = st.clone();
             assert!(action.leaves_profile(), "{action:?}");
-            if action.leaves_profile() {
-                st.active_profile = None;
-            }
+            st.active_profile = None;
             assert!(
                 profile_buttons(&st)
                     .iter()
@@ -4583,7 +5602,9 @@ mod tests {
                 Tab::Settings(Section::Sound),
                 Tab::Settings(Section::Language),
                 Tab::Settings(Section::Pc),
+                Tab::Settings(Section::Paired),
                 Tab::Settings(Section::Help),
+                Tab::Profiles,
             ] {
                 let mut st = sample_state();
                 st.texts = lang.clone();
@@ -4594,8 +5615,11 @@ mod tests {
                 st.settings.focus = true;
                 st.mic_wanted = false;
                 st.audio_wanted = false;
-                st.mirror_wanted = false;
-                st.mirror_name = None;
+                for d in &mut st.physical {
+                    d.shown = false;
+                    d.connected = true;
+                }
+                st.confirm_delete = Some(1);
                 st.active_profile = Some(1);
                 st.error = Some(lang.f("monitors-at-most", &[("count", 6.into())]));
                 states.push(st.clone());
@@ -4627,6 +5651,7 @@ mod tests {
                         // The longest name.
                         place: Place::Right,
                         seen: Some([(id as f32 - 2.5) * 0.9, 0.0, 0.45, 0.19]),
+                        scale: 100,
                     })
                     .collect();
                 states.push(st);
@@ -4693,7 +5718,13 @@ mod tests {
                     items
                         .iter()
                         .filter_map(|i| match i {
-                            Item::Text { text, size, .. } => Some((text.clone(), *size)),
+                            // Names are the PC's too, shortened where long.
+                            Item::Text {
+                                text,
+                                size,
+                                shorten: false,
+                                ..
+                            } => Some((text.clone(), *size)),
                             // Names are the PC's, not the menu's texts.
                             Item::Button {
                                 label,
@@ -4916,7 +5947,9 @@ mod tests {
                 Tab::Settings(Section::Sound),
                 Tab::Settings(Section::Language),
                 Tab::Settings(Section::Pc),
+                Tab::Settings(Section::Paired),
                 Tab::Settings(Section::Help),
+                Tab::Profiles,
             ] {
                 let mut st = sample_state();
                 st.texts = lang.clone();
@@ -5014,6 +6047,124 @@ mod tests {
         assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 
+    /// Where two pictures `width` wide differ by more than `by`: none, or how many
+    /// bytes, by how much at most, and the box around them.
+    fn differ(a: &[u8], b: &[u8], width: u32, by: u8) -> Option<String> {
+        assert_eq!(a.len(), b.len());
+        let (mut n, mut most, mut bx) = (0, 0, (u32::MAX, u32::MAX, 0, 0));
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            if x.abs_diff(*y) > by {
+                n += 1;
+                most = most.max(x.abs_diff(*y));
+                let px = (i / 4) as u32;
+                let (cx, cy) = (px % width, px / width);
+                bx = (bx.0.min(cx), bx.1.min(cy), bx.2.max(cx), bx.3.max(cy));
+            }
+        }
+        (n > 0).then(|| format!("{n} bytes differ, by {most} at most, in {bx:?}"))
+    }
+
+    /// The whole picture with item `lit` pointed at, drawn at once.
+    fn drawn_whole(p: &mut Panel, lit: usize) -> Vec<u8> {
+        let mut pixmap = Pixmap::new(p.pixmap.width(), p.pixmap.height()).unwrap();
+        let items = std::mem::take(&mut p.items);
+        p.paint(&mut Canvas::whole(&mut pixmap), &items, Some(lit));
+        p.items = items;
+        pixmap.take()
+    }
+
+    /// Pointing at a button (a tab, a monitor on the map with its whole name above,
+    /// the note, a sector of the palm menu) draws only its part again, and the picture
+    /// is the one drawing it whole with that button pointed at makes (a curved edge cut
+    /// at the part's edge is smoothed by at most one step otherwise); going back to a
+    /// button already pointed at draws nothing (copied) and changes only its part;
+    /// pointing at nothing gives back the picture with nothing pointed at, to the bit.
+    #[test]
+    fn pointing_draws_only_its_part_as_the_whole_would() {
+        let mut monitors = sample_state();
+        monitors.monitors[0].label = "DELL U2720Q a very long name".into();
+        monitors.note = Some(Note::done(
+            Some(Action::Preset(Preset::Wall)),
+            "Розкладку змінено",
+        ));
+        let mut quick = sample_state();
+        quick.tab = Tab::Quick;
+        let mut pc = sample_state();
+        pc.tab = Tab::Settings(Section::Pc);
+        let mut checked = 0;
+        for (wrist, st) in [
+            (false, monitors),
+            (false, quick),
+            (false, pc),
+            (true, sample_state()),
+        ] {
+            let mut p = if wrist { Panel::wrist() } else { Panel::new() };
+            p.set_state(&st);
+            let plain = p.render_if_dirty().unwrap().to_vec();
+            assert_eq!(p.damage(), None, "drawn whole");
+            let points: Vec<(usize, (f32, f32))> = p
+                .items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| match item {
+                    Item::Button { rect: r, .. } | Item::Note { rect: r, .. } => {
+                        Some((i, (r.left() + r.width() / 2.0, r.top() + r.height() / 2.0)))
+                    }
+                    Item::Wedge { .. } => {
+                        let b = item.bounds()?;
+                        Some((i, (b.left() + b.width() / 2.0, b.top() + 30.0)))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let mut before: Option<usize> = None;
+            for &(i, at) in &points {
+                p.hover(Some(at));
+                if p.hovered != Some(i) {
+                    continue;
+                }
+                let drawn = p.render_if_dirty().expect("another button").to_vec();
+                let whole = drawn_whole(&mut p, i);
+                let w = p.pixmap.width();
+                let what = match &p.items[i] {
+                    Item::Button { label, rect, .. } => format!("{label:?} {rect:?}"),
+                    Item::Note { rect, .. } => format!("note {rect:?}"),
+                    _ => String::new(),
+                };
+                assert_eq!(
+                    differ(&drawn, &whole, w, 0),
+                    None,
+                    "item {i} {what} {:?} of {:?}",
+                    p.damage(),
+                    st.tab
+                );
+                // The parts of the one pointed at before and of this one, not the whole
+                // picture (the two may be far apart: the box around both).
+                let damage = p.damage().expect("parts");
+                assert!(!damage.is_empty());
+                if let Some(b) = before {
+                    // Back to the one before: its kept copies.
+                    let at = points.iter().find(|(j, _)| *j == b).unwrap().1;
+                    p.hover(Some(at));
+                    let back = p.render_if_dirty().unwrap().to_vec();
+                    assert_eq!(differ(&back, &drawn_whole(&mut p, b), w, 0), None);
+                    p.hover(Some(points.iter().find(|(j, _)| *j == i).unwrap().1));
+                    let again = p.render_if_dirty().unwrap().to_vec();
+                    assert_eq!(differ(&again, &drawn, w, 0), None);
+                }
+                before = Some(i);
+                checked += 1;
+            }
+            p.hover(None);
+            let w = p.pixmap.width();
+            let none = p.render_if_dirty().unwrap().to_vec();
+            assert_eq!(differ(&none, &plain, w, 0), None);
+
+            assert!(p.render_if_dirty().is_none(), "nothing changed");
+        }
+        assert!(checked > 60, "{checked} buttons");
+    }
+
     /// The palm menu in every language, the longer one too, without text that does not
     /// fit.
     #[test]
@@ -5090,7 +6241,11 @@ mod tests {
         let mut st = sample_state();
         st.tab = Tab::Monitors;
         st.primary = Some(k(primary));
-        st.mirror_seen = spots.get(&MIRROR_ID).copied();
+        st.physical_seen = spots
+            .get(&MIRROR_ID)
+            .map(|seen| (*seen, "eDP-1".to_owned()))
+            .into_iter()
+            .collect();
         st.monitors = monitors
             .iter()
             .map(|&(id, width, height, ..)| MonitorEntry {
@@ -5100,6 +6255,7 @@ mod tests {
                 height,
                 place: Place::Center,
                 seen: spots.get(&id).copied(),
+                scale: 100,
             })
             .collect();
         for selected in std::iter::once(None).chain(monitors.iter().map(|m| Some(k(m.0)))) {

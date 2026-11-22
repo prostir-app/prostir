@@ -116,9 +116,10 @@ struct PcView {
     /// Its monitors left to right, shared with its desktop.
     order: Vec<DisplayKey>,
     primary: Option<DisplayKey>,
-    /// Its display shown (see [`physical::mirror`]).
-    mirror: Option<DisplayKey>,
-    /// Its monitors and its display shown that stream, left to right, with their
+    /// Its own displays shown, in its list's order, with where each is on its desktop
+    /// (x, y, width, height, where known): placed as one group as they stand there.
+    physical: Vec<(DisplayKey, Option<[i32; 4]>)>,
+    /// Its monitors and its own displays shown that stream, left to right, with their
     /// stream sizes: what its desktop is made of (see `relist`).
     sizes: Vec<(DisplayKey, u32, u32)>,
     /// The desktop last sent to it.
@@ -357,10 +358,10 @@ impl World {
         window(&self.listed, id)
     }
 
-    /// The display of the PC itself shown in the headset, if one is (see
-    /// [`physical::mirror`]).
-    pub fn mirror(&self) -> Option<DisplayKey> {
-        self.main()?.mirror
+    /// The main PC's own displays shown in the headset, in its list's order, with
+    /// where each is on its desktop.
+    pub fn physical(&self) -> &[(DisplayKey, Option<[i32; 4]>)] {
+        self.main().map_or(&[], |v| v.physical.as_slice())
     }
 
     /// The main PC's primary display, as it says.
@@ -387,13 +388,16 @@ impl World {
         &self.lineup
     }
 
-    /// The laptop screen with its stream size, while it streams.
-    fn mirror_size(&self) -> Option<(DisplayKey, u32, u32)> {
-        let id = self.mirror()?;
-        self.streams.get(&id).map(|&(w, h)| (id, w, h))
+    /// The main PC's own displays shown whose streams show, with their stream sizes
+    /// and where each is on its desktop.
+    fn physical_sizes(&self) -> Vec<layout::Physical<DisplayKey>> {
+        self.physical()
+            .iter()
+            .filter_map(|&(id, desk)| self.streams.get(&id).map(|&(w, h)| (id, w, h, desk)))
+            .collect()
     }
 
-    /// The monitors and the laptop screen kept left to right again, after what they
+    /// The monitors and the PC's own displays kept left to right again, after what they
     /// are made of changed (nothing is allocated once their buffers are large enough).
     fn relist(&mut self) {
         self.lineup.clear();
@@ -418,19 +422,26 @@ impl World {
         if let Some(rest) = self.lineup.get_mut(known..) {
             rest.sort_unstable();
         }
-        let mirror = self.mirror_size();
         self.sizes.clear();
         self.sizes.extend_from_slice(&self.lineup);
-        self.sizes.extend(mirror);
+        let main = self.pc();
+        let streams = &self.streams;
+        if let Some(view) = main.and_then(|pc| self.pcs.get(&pc)) {
+            for (id, _) in &view.physical {
+                if let Some(&(w, h)) = streams.get(id) {
+                    self.sizes.push((*id, w, h));
+                }
+            }
+        }
         // Each PC's desktop is made of its own displays.
         for (pc, view) in &mut self.pcs {
             view.sizes.clear();
             view.sizes
                 .extend(self.lineup.iter().filter(|m| m.0.pc == *pc).copied());
-            if let Some(id) = view.mirror
-                && let Some(&(w, h)) = self.streams.get(&id)
-            {
-                view.sizes.push((id, w, h));
+            for (id, _) in &view.physical {
+                if let Some(&(w, h)) = streams.get(id) {
+                    view.sizes.push((*id, w, h));
+                }
             }
         }
     }
@@ -451,7 +462,7 @@ impl World {
             view.connected = false;
             view.order.clear();
             view.has_list = false;
-            view.mirror = None;
+            view.physical.clear();
             view.pending_layout = None;
             view.arrange = None;
         }
@@ -497,7 +508,14 @@ impl World {
         }
         let view = self.pcs.entry(pc).or_default();
         view.has_list = true;
-        view.mirror = physical::mirror(displays).map(key);
+        view.physical.clear();
+        view.physical.extend(
+            displays
+                .displays
+                .iter()
+                .filter(|d| d.is_shown_physical())
+                .map(|d| (key(d.id), d.desk.map(physical::desk_rect))),
+        );
         view.order.clear();
         view.order.extend(
             displays
@@ -895,19 +913,46 @@ impl World {
         placements
     }
 
-    /// Puts the laptop mirror back under the primary monitor, leaving the rest alone.
-    fn place_mirror(&mut self, s: &Settings) {
-        let all = self.around_user(layout::arrange(
+    /// Puts the PC's own displays shown back under the primary monitor as one group
+    /// (see `layout::arrange`), leaving the rest alone: all of them, as they stand to
+    /// each other on the PC's desktop (one more of them shown changes the group).
+    fn place_physical(&mut self, s: &Settings) {
+        let laid = self.physical_laid(s);
+        self.placements.extend(laid);
+    }
+
+    /// The PC's own displays that show, laid out as one group under the primary
+    /// monitor (see `layout::arrange`).
+    fn physical_laid(&self, s: &Settings) -> Vec<(DisplayKey, Placement)> {
+        let physical = self.physical_sizes();
+        let laid = self.around_user(layout::arrange(
             s.preset,
             &self.lineup,
             self.primary(),
-            self.mirror_size(),
+            &physical,
             self.curve_factor(s),
         ));
-        if let Some(id) = self.mirror()
-            && let Some(p) = all.get(&id)
-        {
-            self.placements.insert(id, *p);
+        physical
+            .iter()
+            .filter_map(|(id, ..)| Some((*id, *laid.get(id)?)))
+            .collect()
+    }
+
+    /// The PC's own displays that show and have no place yet get one in the group: all
+    /// of them where none has one; else each where the group puts it next to one placed
+    /// already, wherever the person moved that one (see `layout::kept_to`). Those
+    /// placed stay where they are.
+    fn place_new_physical(&mut self, s: &Settings) {
+        let laid = self.physical_laid(s);
+        let anchor = laid
+            .iter()
+            .find_map(|(id, at)| Some((*at, *self.placements.get(id)?)));
+        for (id, at) in laid {
+            if self.placements.contains_key(&id) {
+                continue;
+            }
+            let p = anchor.map_or(at, |(from, to)| layout::kept_to(at, from, to));
+            self.placements.insert(id, p);
         }
     }
 
@@ -939,7 +984,7 @@ impl World {
             s.preset,
             &self.lineup,
             self.primary(),
-            self.mirror_size(),
+            &self.physical_sizes(),
             self.curve_factor(s),
         ));
         self.placements.extend(laid);
@@ -955,11 +1000,11 @@ impl World {
         self.arrange_all(s, now);
     }
 
-    /// Another curve was chosen: flat, the laptop screen hangs tilted, curved it
-    /// continues the cylinder.
+    /// Another curve was chosen: flat, the PC's own displays hang tilted, curved they
+    /// continue the cylinder.
     pub fn curve_chosen(&mut self, s: &Settings) {
         if !self.cinema {
-            self.place_mirror(s);
+            self.place_physical(s);
         }
     }
 
@@ -999,11 +1044,12 @@ impl World {
             self.placements.insert(m.0, at);
             placed = true;
         }
-        if let Some(id) = self.mirror()
-            && self.streams.contains_key(&id)
-            && !self.placements.contains_key(&id)
+        if self
+            .physical()
+            .iter()
+            .any(|(id, _)| self.streams.contains_key(id) && !self.placements.contains_key(id))
         {
-            self.place_mirror(s);
+            self.place_new_physical(s);
             placed = true;
         }
         if placed {
@@ -1504,10 +1550,30 @@ impl World {
             self.arrange_all(s, now);
             return;
         }
-        let lid = self.mirror().filter(|id| self.placements.contains_key(id));
+        // The first display of the PC itself that shows is lined up as a laptop's
+        // screen; the others go with it, standing to it as they stood (they are not
+        // lined up, and so cover no monitor the first one does not).
+        let lid = self
+            .physical()
+            .iter()
+            .map(|p| p.0)
+            .find(|id| self.streams.contains_key(id) && self.placements.contains_key(id));
+        let others: Vec<DisplayKey> = self
+            .physical()
+            .iter()
+            .map(|p| p.0)
+            .filter(|id| Some(*id) != lid)
+            .collect();
+        let lid_was = lid.and_then(|id| self.placements.get(&id).copied());
+        let sizes: Vec<(DisplayKey, u32, u32)> = self
+            .sizes
+            .iter()
+            .filter(|m| !others.contains(&m.0))
+            .copied()
+            .collect();
         let lined = layout::line_up(
             &self.placements,
-            &self.sizes,
+            &sizes,
             self.center,
             self.tilt,
             self.primary(),
@@ -1516,6 +1582,14 @@ impl World {
         );
         // Window panels (and anything not laid out) stay as they are.
         self.placements.extend(lined);
+        if let (Some(from), Some(to)) = (lid_was, lid.and_then(|id| self.placements.get(&id))) {
+            let to = *to;
+            for id in &others {
+                if let Some(p) = self.placements.get_mut(id) {
+                    *p = layout::kept_to(*p, from, to);
+                }
+            }
+        }
         self.held = [None, None];
         self.save_layout();
         self.send_layout(now);
@@ -1853,18 +1927,20 @@ impl World {
             .primary()
             .filter(shown)
             .or_else(|| self.lineup.iter().map(|m| m.0).find(|id| shown(id)));
-        let mirror = self
-            .mirror()
-            .filter(|id| self.streams.contains_key(id))
-            .and_then(|id| Some((*self.placements.get(&id)?, self.height_of(id))));
+        let hanging = |id: &DisplayKey| {
+            self.streams
+                .contains_key(id)
+                .then(|| Some((*self.placements.get(id)?, self.height_of(*id))))
+                .flatten()
+        };
         self.button = anchor.and_then(|id| {
             let p = self.placements.get(&id)?;
             let h = self.height_of(id);
             let mut x = -p.width / 2.0 + BUTTON_SIZE;
-            if let Some((m, mh)) = mirror {
+            for (m, mh) in self.physical().iter().filter_map(|(id, _)| hanging(id)) {
                 let corner = m.position + m.rotation * Vec3::new(-m.width / 2.0, mh / 2.0, 0.0);
                 let local = p.rotation.inverse() * (corner - p.position);
-                // Only when the mirror actually hangs under this monitor.
+                // Only a display that actually hangs under this monitor.
                 if local.y < -h / 2.0 + 0.05 && local.y > -h / 2.0 - 0.3 {
                     x = x.min(local.x - BUTTON_SIZE * 0.8);
                 }

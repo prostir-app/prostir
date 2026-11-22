@@ -1,5 +1,5 @@
 //! The PC: finding and pairing, forgetting, its encoding, sound and own displays, the
-//! microphone, the mouse.
+//! microphone, the mouse, "No limits".
 
 use log::info;
 use prostir_proto::request::Request;
@@ -42,15 +42,25 @@ impl Model {
                     ui::Asked::Sound,
                 );
             }
-            Action::SetMirror(enabled) => {
-                if let Some(id) = self.physical_id() {
-                    self.headset.mirror_wanted = enabled;
-                    self.request_for(
-                        id,
-                        |id| Request::ShowPhysical { id, shown: enabled },
-                        ui::Asked::Mirror,
-                    );
+            Action::ShowPhysical(k, shown) => {
+                // The switch moves at once; the PC's list says how it stands after.
+                self.menu.physical_asked.retain(|(a, _)| *a != k);
+                self.menu.physical_asked.push((k, shown));
+                let sent = self.request_for(
+                    k,
+                    |id| Request::ShowPhysical { id, shown },
+                    ui::Asked::Physical(k),
+                );
+                if sent.is_none() {
+                    self.menu.physical_asked.retain(|(a, _)| *a != k);
                 }
+            }
+            Action::PhysicalPage(page) => self.menu.physical_page = page,
+            Action::NoLimits(on) => {
+                self.settings.no_limits = on;
+                self.saves.mark(persist::File::Settings);
+                self.prefs_changed();
+                self.done(action);
             }
             Action::AskMic => self.effects.push(Effect::Mic(MicCmd::AskAgain)),
             Action::ForgetPc(i) => {

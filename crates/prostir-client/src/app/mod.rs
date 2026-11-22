@@ -40,6 +40,7 @@ use crate::lang::{Known, Lang, LangState, Moment, Texts};
 use crate::layout::{self, Desk, Placement, Ray};
 use crate::net::NetEvent;
 use crate::note::{self, Note, Notes};
+use crate::pending;
 use crate::persist::{self, PersistEvent};
 use crate::platform::store::UpdateHint;
 use crate::presence;
@@ -48,7 +49,6 @@ use crate::session::{Attempt, NetCmd, Session};
 use crate::settings::Settings;
 use crate::ui::{self, Action, Tab};
 use crate::world::World;
-use crate::{pending, physical};
 
 pub use actions::By;
 use actions::Forgetting;
@@ -268,9 +268,20 @@ pub struct Menu {
     pub error: Option<(String, Instant)>,
     /// "×" pressed once on this monitor; a second press within a few seconds removes it.
     pub confirm_remove: Option<(DisplayKey, Instant)>,
-    /// "Save current" pressed once for this profile.
+    /// "Save here" pressed once for this profile.
     pub confirm_save: Option<(usize, Instant)>,
+    /// "×" pressed once for this profile.
+    pub confirm_delete: Option<(usize, Instant)>,
     pub confirm_forget: Option<(usize, Instant)>,
+    /// Which profiles the Profiles tab shows, when there are many.
+    pub profile_page: u8,
+    /// Which displays of the PC the Monitors tab shows, when there are more than fit.
+    pub physical_page: u8,
+    /// The scale a monitor added gets, percent.
+    pub add_scale: u16,
+    /// Displays of the PC itself asked to be shown or hidden, the last ask of each
+    /// first: their switches show it until the PC answers.
+    pub physical_asked: Vec<(DisplayKey, bool)>,
     /// What the open menu says under the button pressed (see `note`).
     pub notes: Notes,
     /// Which languages the Language page shows, when there are many.
@@ -300,8 +311,6 @@ pub struct Headset {
     pub mic_denied: bool,
     /// The microphone's switch, as the menu shows it.
     pub mic_wanted: bool,
-    /// The switch of the PC's own display, as the menu shows it.
-    pub mirror_wanted: bool,
 }
 
 /// The time and the date on the palm menu, written again only when the minute, the
@@ -378,6 +387,8 @@ pub struct Model {
     sessions: BTreeSet<PcId>,
     /// The microphone permission the PC was last told.
     mic_told: u8,
+    /// The profiles or the one in use changed: the PCs hear at the end of the pass.
+    profiles_changed: bool,
     /// The palm menu showed when last looked at.
     palm_shown: bool,
 
@@ -472,7 +483,12 @@ impl Model {
                 error: None,
                 confirm_remove: None,
                 confirm_save: None,
+                confirm_delete: None,
                 confirm_forget: None,
+                profile_page: 0,
+                physical_page: 0,
+                add_scale: 100,
+                physical_asked: Vec::new(),
                 notes: Notes::default(),
                 language_page: 0,
                 active_profile: None,
@@ -487,11 +503,11 @@ impl Model {
                 mic_permission,
                 mic_denied: false,
                 mic_wanted: settings.mic,
-                mirror_wanted: true,
             },
             settings,
             sessions: BTreeSet::new(),
             mic_told: mic_permission,
+            profiles_changed: false,
             palm_shown: false,
             head: (Vec3::ZERO, -Vec3::Z),
             head_right: Vec3::X,
@@ -609,16 +625,21 @@ impl Model {
         self.key(self.pc().focus.as_ref()?.display?)
     }
 
-    /// The display of the PC itself the switch shows or hides: one connected now,
-    /// never a closed laptop's panel (see [`physical::switch`]).
-    pub fn physical_id(&self) -> Option<DisplayKey> {
-        self.key(physical::switch(self.pc().displays.as_ref()?)?.id)
+    /// The PC makes monitors at another scale (its capability 10).
+    pub fn can_scale(&self) -> bool {
+        self.pc()
+            .caps
+            .as_ref()
+            .is_some_and(|c| c.has(caps::pc::SCALE))
     }
 
-    /// What the switch of the PC's own display is called, if a display of the PC is
-    /// connected.
-    pub fn physical_name(&self) -> Option<String> {
-        physical::switch(self.pc().displays.as_ref()?).map(|d| physical::label(d, self.texts()))
+    /// Profile `i` as the menu names it: by the name it was given, else by its number
+    /// ("Profile 2").
+    pub fn profile_name(&self, i: usize) -> String {
+        match self.profiles.get(i).and_then(|p| p.name.as_ref()) {
+            Some(name) => name.clone(),
+            None => self.texts().f("profile-n", &[("n", (i + 1).into())]),
+        }
     }
 
     /// What the user reads for display `id`: as the PC's desktop names it.
@@ -685,12 +706,25 @@ impl Model {
         std::mem::swap(&mut self.effects, out);
     }
 
-    /// The end of a pass of the loop: each file changed in it is to be saved, once.
+    /// The end of a pass of the loop: each file changed in it is to be saved, once; the
+    /// PCs hear of the profiles if they changed.
     pub fn end_pass(&mut self) {
         self.saves.add(self.world.take_saves());
         for file in self.saves.take() {
             self.effects.push(Effect::Save(file));
         }
+        if self.profiles_changed {
+            self.tell_profiles();
+        }
+    }
+
+    /// The PCs hear of the profiles now, and the next session starts with them.
+    fn tell_profiles(&mut self) {
+        self.profiles_changed = false;
+        let state = self.headset_state();
+        self.session.set_headset(state);
+        let part = self.profiles_part();
+        self.tell_all(&ClientMsg::Profiles { part });
     }
 
     // ---- What changes it ----
@@ -916,10 +950,16 @@ impl Model {
         let error = m.error.take_if(|(_, at)| over(*at, ERROR_SHOWN_FOR));
         let remove = m.confirm_remove.take_if(|(_, at)| over(*at, CONFIRM_FOR));
         let save = m.confirm_save.take_if(|(_, at)| over(*at, CONFIRM_FOR));
+        let delete = m.confirm_delete.take_if(|(_, at)| over(*at, CONFIRM_FOR));
         let forget = m.confirm_forget.take_if(|(_, at)| over(*at, CONFIRM_FOR));
         m.toast
             .take_if(|t| now.saturating_duration_since(t.since) > TOAST_FOR);
-        if error.is_some() || remove.is_some() || save.is_some() || forget.is_some() {
+        if error.is_some()
+            || remove.is_some()
+            || save.is_some()
+            || delete.is_some()
+            || forget.is_some()
+        {
             self.rev += 1;
         }
     }
@@ -1248,9 +1288,26 @@ impl Model {
         });
     }
 
-    /// Profile `i` as the menu names it ("Profile 2").
-    fn profile_name(&self, i: usize) -> String {
-        self.texts().f("profile-n", &[("n", (i + 1).into())])
+    /// The profiles or the one in use changed: the PCs hear of it once this pass ends
+    /// (see [`Model::end_pass`]).
+    fn profiles_changed(&mut self) {
+        self.profiles_changed = true;
+        self.rev += 1;
+    }
+
+    /// The profiles as the PCs are told: their names (empty for one without), and the
+    /// one in use.
+    fn profiles_part(&self) -> state::Profiles {
+        state::Profiles {
+            list: self
+                .profiles
+                .iter()
+                .map(|p| state::ProfileName {
+                    name: p.name.clone().unwrap_or_default(),
+                })
+                .collect(),
+            active: self.menu.active_profile.and_then(|a| u8::try_from(a).ok()),
+        }
     }
 
     /// The monitor most straight ahead of the head (not a window panel).
@@ -1334,13 +1391,16 @@ impl Model {
 
     /// What the headset says about itself when it opens a session.
     pub fn headset_state(&self) -> HeadsetState {
-        headset_state(
-            &self.settings,
-            self.presence.worn(),
-            self.headset.battery,
-            self.headset.mic_permission,
-            &self.headset.caps,
-        )
+        HeadsetState {
+            profiles: Some(self.profiles_part()),
+            ..headset_state(
+                &self.settings,
+                self.presence.worn(),
+                self.headset.battery,
+                self.headset.mic_permission,
+                &self.headset.caps,
+            )
+        }
     }
 
     /// The microphone's switch or permission changed: the PC hears at once (it makes
@@ -1422,6 +1482,11 @@ impl Model {
             );
             return None;
         };
+        // A display of the PC asked to be shown or hidden: its switch shows what the
+        // PC says again.
+        if let ui::Asked::Physical(k) = what {
+            self.menu.physical_asked.retain(|(a, _)| *a != k);
+        }
         let took = answered.took.unwrap_or_default().as_millis();
         info!("request {} answered in {took} ms", req.0);
         if let Outcome::Failed { error, detail } = outcome {
@@ -1555,6 +1620,8 @@ fn tab_code(tab: Tab) -> u8 {
         Tab::Settings(Section::Pc) => 5,
         Tab::Settings(Section::Help) => 6,
         Tab::Settings(Section::Controls) => 7,
+        Tab::Profiles => 8,
+        Tab::Settings(Section::Paired) => 9,
     }
 }
 
@@ -1568,6 +1635,8 @@ fn tab_from_code(code: u8) -> Tab {
         5 => Tab::Settings(Section::Pc),
         6 => Tab::Settings(Section::Help),
         7 => Tab::Settings(Section::Controls),
+        8 => Tab::Profiles,
+        9 => Tab::Settings(Section::Paired),
         _ => Tab::Quick,
     }
 }
@@ -1604,6 +1673,8 @@ pub fn headset_state(
         // The headset's own volume follows the PC's slider from 0.2.0 step 7.11.
         volume: None,
         up: std::iter::once((mic.kind, mic)).collect(),
+        // The model adds them (see `Model::headset_state`).
+        profiles: None,
     }
 }
 

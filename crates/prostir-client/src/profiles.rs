@@ -2,32 +2,97 @@
 //! monitors there are (their sizes and scales, the primary one, the PC's own displays
 //! shown) and where they stand, nothing more: cinema, the background, the curve and
 //! the preset are settings over whatever profile is on, and stay as they are when one
-//! is switched to. Three slots, empty until the setup as it stands is saved into one.
+//! is switched to. A list of up to [`MAX_PROFILES`] in the order the menu shows them,
+//! each with the name given it from the PC, or none (the menu then calls it by its
+//! number, "Profile 2").
 
 #![forbid(unsafe_code)]
 
 use glam::Vec3;
 use prostir_layout::space::Frame;
-use prostir_proto::state::Mode;
+use prostir_proto::state::{MAX_DISPLAY_NAME, Mode};
 
 use crate::ids::{DisplayKey, PcId};
 use crate::layout::{self, Arrangement, Key, Placement};
 use crate::persist::{self, LoadError, Skipped};
 
-pub const SLOTS: usize = 3;
+/// Profiles kept at most: more than a menu can list without getting in the way.
+pub const MAX_PROFILES: usize = 20;
 /// Monitors in a profile: more than any PC makes (it answers with its own limit).
 const MAX_MONITORS: usize = 10;
 
-/// The slots: a profile saved in each, or none.
-pub type Slots = [Option<Profile>; SLOTS];
+/// The profiles, in the menu's order.
+pub type Slots = Vec<Profile>;
 
-/// No profile saved in any slot.
+/// No profile saved.
 pub fn empty() -> Slots {
-    std::array::from_fn(|_| None)
+    Vec::new()
+}
+
+/// Characters that turn the direction of text around (bidi overrides, embeddings and
+/// isolates): a name with them could show something other than what it says.
+fn turns_text(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Whether `name` is a number only: what names a profile by its place, never a name.
+pub fn is_number(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A name given to a profile, as it is kept: on one line, without characters that
+/// turn the text around and without spaces around it, at most as long as the protocol
+/// carries; none when nothing is left, or only a number (which names a profile by its
+/// place).
+pub fn clean_name(name: &str) -> Option<String> {
+    let one_line: String = name
+        .chars()
+        .filter(|c| !turns_text(*c))
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let name = prostir_proto::state::clip(one_line.trim(), MAX_DISPLAY_NAME);
+    let name = name.trim();
+    (!name.is_empty() && !is_number(name)).then(|| name.to_owned())
+}
+
+/// How the built-in languages call profile number `n` (`Profile 2`, `Профіль 2`), from
+/// their files.
+fn builtin_names(n: usize) -> impl Iterator<Item = String> {
+    crate::lang::BUILTIN.iter().filter_map(move |(_, ftl)| {
+        let line = ftl.lines().find_map(|l| l.strip_prefix("profile-n = "))?;
+        Some(line.replace("{ $n }", &n.to_string()))
+    })
+}
+
+/// The profile a command names, its place in the list: a number only is its number
+/// from 1; else the name it was given, exactly; else the number as a menu calls it
+/// (`Profile 2`, `Профіль 2`, or `menu_name(2)`, the menu's own language).
+pub fn find(profiles: &Slots, named: &str, menu_name: &dyn Fn(usize) -> String) -> Option<usize> {
+    let named = named.trim();
+    let number = |n: usize| (1..=profiles.len()).contains(&n).then(|| n - 1);
+    if is_number(named) {
+        return named.parse::<usize>().ok().and_then(number);
+    }
+    if let Some(i) = profiles
+        .iter()
+        .position(|p| p.name.as_deref() == Some(named))
+    {
+        return Some(i);
+    }
+    let n = named
+        .split_whitespace()
+        .next_back()?
+        .parse::<usize>()
+        .ok()?;
+    let called = menu_name(n) == named || builtin_names(n).any(|m| m == named);
+    called.then(|| number(n)).flatten()
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Profile {
+    /// The name given to it (from the PC); none: called by its number.
+    pub name: Option<String>,
     /// The monitors, left to right: their sizes and scales.
     pub monitors: Vec<Mode>,
     /// Index into `monitors`.
@@ -102,6 +167,7 @@ impl Profile {
             .filter(|r| r.is_finite() && *r > 0.1)
             .unwrap_or(layout::RADIUS);
         Self {
+            name: None,
             primary: primary
                 .and_then(|p| index(&p))
                 .and_then(|i| u8::try_from(i).ok())
@@ -127,6 +193,9 @@ impl Profile {
     /// `out`.
     fn write_text(&self, out: &mut String) {
         use std::fmt::Write as _;
+        if let Some(name) = &self.name {
+            let _ = writeln!(out, "name {name}");
+        }
         out.push_str("monitors");
         for (i, m) in self.monitors.iter().enumerate() {
             let star = if i == usize::from(self.primary) {
@@ -170,7 +239,7 @@ impl Profile {
 /// and `profiles.txt` is to be written.
 pub fn forget_pc(profiles: &mut Slots, pc: PcId) -> bool {
     let mut changed = false;
-    for p in profiles.iter_mut().flatten() {
+    for p in profiles.iter_mut() {
         let before = p.shown.len();
         p.shown.retain(|k| k.pc != pc);
         changed |= p.shown.len() != before;
@@ -191,6 +260,7 @@ enum Took {
 /// A profile's lines as they are read, before they are checked together.
 #[derive(Default)]
 struct Draft {
+    name: Option<String>,
     monitors: Option<(Vec<Mode>, u8)>,
     shown: Vec<DisplayKey>,
     places: Vec<(usize, Placement)>,
@@ -205,6 +275,12 @@ impl Draft {
     fn line(&mut self, line: &str) -> Took {
         let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
         let read = match word {
+            "name" => {
+                self.name.is_none() && {
+                    self.name = clean_name(rest);
+                    self.name.is_some()
+                }
+            }
             "monitors" => {
                 self.monitors.is_none() && {
                     self.monitors = parse_monitors(rest);
@@ -260,6 +336,7 @@ impl Draft {
             return None;
         }
         Some(Profile {
+            name: self.name,
             monitors,
             primary,
             shown: self.shown,
@@ -349,12 +426,13 @@ pub fn standing<K: Key>(
     (placed, rows)
 }
 
-/// The profiles `profiles.txt` holds, by slot:
+/// The profiles `profiles.txt` holds, in order:
 ///
 /// ```text
 /// format 2
 ///
 /// [0]
+/// name Work
 /// monitors 2560x1440 *2560x1440@150 1440x2560
 /// shown 0123456789abcdef:100
 /// place 0 -1.1 0 -0.9 0 0.38 0 0.92 0.77
@@ -364,35 +442,38 @@ pub fn standing<K: Key>(
 /// rows 0 1 2
 /// ```
 ///
-/// A slot that is not there is empty. A file without the format line is not read at
-/// all. Within, a line this version does not know is passed over; a profile with a
-/// line it knows but cannot read (or a second `[slot]` of the same number) is not
-/// read, and the others are. What was passed over comes back counted.
+/// The numbers of the sections give the order (files of the builds with three
+/// slots may skip a number). A file without the format line is not read at all.
+/// Within, a line this version does not know is passed over; a profile with a line it
+/// knows but cannot read (or a second `[n]` of the same number) is not read, and the
+/// others are; past [`MAX_PROFILES`], the last ones are not read. What was passed over
+/// comes back counted.
 pub fn parse(text: &str) -> Result<(Slots, Skipped), LoadError> {
-    let mut out = empty();
+    let mut read = std::collections::BTreeMap::<usize, (usize, Profile)>::new();
     let mut skipped = Skipped::default();
-    // The section being read: its slot and the line it starts on; `None` for lines
-    // that belong to no slot that is read.
+    // The section being read: its number and the line it starts on; `None` for lines
+    // that belong to no section that is read.
     let mut current: Option<(usize, usize, Draft)> = None;
-    let finish =
-        |section: Option<(usize, usize, Draft)>, out: &mut Slots, skipped: &mut Skipped| {
-            if let Some((slot, n, draft)) = section {
-                match (draft.profile(), out.get_mut(slot)) {
-                    (Some(profile), Some(o)) => *o = Some(profile),
-                    _ => skipped.line(n),
+    let finish = |section: Option<(usize, usize, Draft)>,
+                  read: &mut std::collections::BTreeMap<usize, (usize, Profile)>,
+                  skipped: &mut Skipped| {
+        if let Some((slot, n, draft)) = section {
+            match draft.profile() {
+                Some(profile) => {
+                    read.insert(slot, (n, profile));
                 }
+                None => skipped.line(n),
             }
-        };
+        }
+    };
+    let mut numbers = std::collections::BTreeSet::new();
     for (n, line) in persist::body(text)? {
         if line.is_empty() {
             continue;
         }
         if let Some(slot) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            finish(current.take(), &mut out, &mut skipped);
-            let slot = slot
-                .parse::<usize>()
-                .ok()
-                .filter(|i| out.get(*i).is_some_and(Option::is_none));
+            finish(current.take(), &mut read, &mut skipped);
+            let slot = slot.parse::<usize>().ok().filter(|i| numbers.insert(*i));
             match slot {
                 Some(slot) => current = Some((slot, n, Draft::default())),
                 None => skipped.line(n),
@@ -408,7 +489,15 @@ pub fn parse(text: &str) -> Result<(Slots, Skipped), LoadError> {
             None => skipped.line(n),
         }
     }
-    finish(current, &mut out, &mut skipped);
+    finish(current, &mut read, &mut skipped);
+    let mut out = empty();
+    for (n, profile) in read.into_values() {
+        if out.len() < MAX_PROFILES {
+            out.push(profile);
+        } else {
+            skipped.line(n);
+        }
+    }
     Ok((out, skipped))
 }
 
@@ -418,10 +507,8 @@ pub fn write_text(out: &mut String, profiles: &Slots) {
     use std::fmt::Write as _;
     persist::write_format(out);
     for (i, p) in profiles.iter().enumerate() {
-        if let Some(p) = p {
-            let _ = writeln!(out, "\n[{i}]");
-            p.write_text(out);
-        }
+        let _ = writeln!(out, "\n[{i}]");
+        p.write_text(out);
     }
 }
 
@@ -455,6 +542,7 @@ mod tests {
     fn sample() -> Profile {
         let laptop = DisplayKey::new(PcId([0xab; 8]), DisplayId(100));
         Profile {
+            name: None,
             monitors: vec![
                 Mode::new(2560, 1440),
                 Mode {
@@ -474,18 +562,21 @@ mod tests {
         }
     }
 
-    /// The text of the file: the format line, then each saved slot after an empty
-    /// line; a slot never saved is not there.
+    /// The text of the file: the format line, then each profile in order after an
+    /// empty line, its name first where it has one.
     #[test]
     fn the_text_of_the_file() {
         let mut profiles = empty();
         assert_eq!(text_of(&profiles), "format 2\n");
-        profiles[1] = Some(sample());
+        profiles.push(Profile {
+            name: Some("Робота вдома".into()),
+            ..sample()
+        });
         let place = "-1 0.5 -1.25 0 0 0 1 1.2";
         assert_eq!(
             text_of(&profiles),
             format!(
-                "format 2\n\n[1]\nmonitors 2560x1440 *2560x1440@150 1440x2560\n\
+                "format 2\n\n[0]\nname Робота вдома\nmonitors 2560x1440 *2560x1440@150 1440x2560\n\
                  shown abababababababab:100\n\
                  place 0 {place}\nplace 1 0 0.5 -1.25 0 0 0 1 1.2\nplace 2 1 0.5 -1.25 0 0 0 1 1.2\n\
                  frame 0 1.3\nrows 0 1 / 2\n"
@@ -493,11 +584,47 @@ mod tests {
         );
     }
 
+    /// A name is kept on one line, without spaces around it, as long as the protocol
+    /// carries; an empty one is none.
+    #[test]
+    fn names_are_kept_clean() {
+        assert_eq!(clean_name("  Робота\nвдома\t"), Some("Робота вдома".into()));
+        assert_eq!(clean_name(" \n "), None);
+        let long = clean_name(&"ї".repeat(100)).unwrap();
+        assert_eq!(long.len(), MAX_DISPLAY_NAME);
+        // Turning the text around, or a number only: not kept.
+        assert_eq!(clean_name("\u{202E}krow\u{202C}"), Some("krow".into()));
+        assert_eq!(clean_name(" 12 "), None);
+        assert_eq!(clean_name("Room 12"), Some("Room 12".into()));
+    }
+
+    /// The files of the builds with three slots, numbers skipped, read in their order;
+    /// more than [`MAX_PROFILES`]: the last ones are passed over.
+    #[test]
+    fn slots_become_a_list() {
+        let good = "monitors *2560x1440\n";
+        let read_back = read(&format!("format 2\n\n[2]\nname Ігри\n{good}\n[0]\n{good}"));
+        assert_eq!(read_back.len(), 2);
+        assert_eq!(read_back[0].name, None);
+        assert_eq!(read_back[1].name.as_deref(), Some("Ігри"));
+        let many = (0..MAX_PROFILES + 2).fold(String::new(), |mut all, i| {
+            all.push('[');
+            all.push_str(&i.to_string());
+            all.push_str("]\n");
+            all.push_str(good);
+            all
+        });
+        let (profiles, skipped) = parse(&format!("format 2\n{many}")).unwrap();
+        assert_eq!(profiles.len(), MAX_PROFILES);
+        assert_eq!(skipped.count, 2);
+    }
+
     #[test]
     fn roundtrip() {
         let mut profiles = empty();
-        profiles[0] = Some(sample());
-        profiles[2] = Some(Profile {
+        profiles.push(sample());
+        profiles.push(Profile {
+            name: Some("Кіно".into()),
             monitors: vec![Mode::new(1920, 1080)],
             primary: 0,
             shown: Vec::new(),
@@ -514,8 +641,8 @@ mod tests {
         });
         let back = read(&text_of(&profiles));
         assert_eq!(back[0], profiles[0]);
-        assert_eq!(back[1], None);
-        let (a, b) = (back[2].as_ref().unwrap(), profiles[2].as_ref().unwrap());
+        let (a, b) = (&back[1], &profiles[1]);
+        assert_eq!(a.name, b.name);
         assert!(a.places[0].rotation.angle_between(b.places[0].rotation) < 1e-4);
         assert_eq!(a.frame, b.frame);
         // A profile saved before its monitors had places: none, no frame, no rows.
@@ -523,14 +650,14 @@ mod tests {
         unplaced.places.clear();
         unplaced.rows.clear();
         unplaced.frame = None;
-        let text = text_of(&[Some(unplaced.clone()), None, None]);
+        let text = text_of(&vec![unplaced.clone()]);
         assert!(!text.contains("frame"));
-        assert_eq!(read(&text)[0], Some(unplaced));
+        assert_eq!(read(&text)[0], unplaced);
         // Places without a frame: where they were in the room.
         let mut in_room = sample();
         in_room.frame = None;
-        let text = text_of(&[None, Some(in_room.clone()), None]);
-        assert_eq!(read(&text)[1], Some(in_room));
+        let text = text_of(&vec![sample(), in_room.clone()]);
+        assert_eq!(read(&text)[1], in_room);
     }
 
     /// Files of 0.1 and of the builds before this format are not read at all. Within
@@ -546,20 +673,20 @@ mod tests {
         let place = "0 0 -1 0 0 0 1 1.2";
         let two = format!("monitors 2560x1440 *2560x1440\nplace 0 {place}\nplace 1 {place}\n");
         let good = format!("{two}frame 0 1.3\n");
-        let profile = read(&format!("format 2\n[0]\n{good}"))[0].clone().unwrap();
+        let profile = read(&format!("format 2\n[0]\n{good}"))[0].clone();
         // Unknown lines: passed over, the profile read as without them.
         for extra in ["preset wall\n", "mirror on\n", "lens 2\n"] {
             let (slots, skipped) = parse(&format!("format 2\n[0]\n{good}{extra}")).unwrap();
-            assert_eq!(slots[0].as_ref(), Some(&profile), "{extra:?}");
+            assert_eq!(slots.first(), Some(&profile), "{extra:?}");
             assert_eq!((skipped.count, skipped.first), (1, Some(7)), "{extra:?}");
         }
         let crlf = format!("format 2\n[0]\n{good}").replace('\n', "\r\n");
-        assert_eq!(read(crlf.trim_end())[0].as_ref(), Some(&profile));
+        assert_eq!(read(crlf.trim_end()).first(), Some(&profile));
         // Places that are not all there: none, laid out by the preset.
         let one = read(&format!(
             "format 2\n[0]\nmonitors 2560x1440 *2560x1440\nplace 0 {place}\nframe 0 1.3\n"
         ));
-        let one = one[0].as_ref().unwrap();
+        let one = &one[0];
         assert!(one.places.is_empty() && one.frame.is_none());
         // A value it cannot read: that profile only.
         let many = ["1920x1080"; 11].join(" ");
@@ -578,19 +705,23 @@ mod tests {
             format!("{good}frame 0 1.3\n"),
             format!("{two}frame 2 1.3\n"),
             "shown 0123456789abcdef:3\n".to_owned(),
+            "name a\nname b\nmonitors *2560x1440\n".to_owned(),
         ] {
             let text = format!("format 2\n[0]\n{bad}\n[2]\n{good}");
             let (slots, skipped) = parse(&text).unwrap();
-            assert_eq!(slots[0], None, "{bad:?}");
-            assert_eq!(slots[2].as_ref(), Some(&profile), "{bad:?}: the other one");
+            assert_eq!(
+                slots,
+                std::slice::from_ref(&profile),
+                "{bad:?}: only the other one"
+            );
             assert_eq!(skipped.first, Some(2), "{bad:?}");
         }
-        // Lines before any slot, a slot twice or out of range: passed over.
+        // Lines before any section, a section twice or not a number: passed over.
         let (slots, skipped) = parse(&format!(
-            "format 2\n{good}[0]\n{good}[0]\n{good}[3]\n{good}"
+            "format 2\n{good}[0]\n{good}[0]\n{good}[x]\n{good}"
         ))
         .unwrap();
-        assert_eq!(slots[0].as_ref(), Some(&profile));
+        assert_eq!(slots, [profile]);
         assert_eq!(skipped.first, Some(2));
         assert!(skipped.count >= 3);
     }
@@ -602,9 +733,11 @@ mod tests {
         let mut p = sample();
         let other = DisplayKey::new(PcId([1; 8]), DisplayId(100));
         p.shown.push(other);
-        profiles[2] = Some(p);
+        profiles.push(sample());
+        profiles.push(p);
         assert!(forget_pc(&mut profiles, PcId([0xab; 8])));
-        assert_eq!(profiles[2].as_ref().unwrap().shown, [other]);
+        assert_eq!(profiles[1].shown, [other]);
+        assert!(profiles[0].shown.is_empty());
         assert!(!forget_pc(&mut profiles, PcId([0xab; 8])));
     }
 
@@ -724,10 +857,10 @@ mod tests {
             let rows = vec![(0..n as u32).collect()];
             let p = Profile::of(&monitors, Some(0), Vec::new(), &live, None, &rows);
             assert!(p.monitors.len() <= MAX_MONITORS);
-            let text = text_of(&[Some(p.clone()), None, None]);
+            let text = text_of(&vec![p.clone()]);
             let (back, skipped) = parse(&text).unwrap();
             assert!(skipped.is_empty(), "case {case}: {skipped:?}\n{text}");
-            let back = back[0].as_ref().unwrap();
+            let back = &back[0];
             assert_eq!(back.monitors, p.monitors, "case {case}");
             assert_eq!(back.places.len(), p.places.len(), "case {case}");
         }

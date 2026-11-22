@@ -268,8 +268,11 @@ pub fn done_text(action: Action) -> Option<&'static str> {
         Action::Remove(_) => "note-monitor-removed",
         Action::CloseWindow(_) => "note-window-closed",
         Action::MakePrimary(_) => "note-primary",
-        Action::SetMirror(true) => "note-display-shown",
-        Action::SetMirror(false) => "note-display-hidden",
+        Action::ShowPhysical(_, true) => "note-display-shown",
+        Action::ShowPhysical(_, false) => "note-display-hidden",
+        Action::SetScale(..) => "note-scale",
+        Action::NoLimits(true) => "note-no-limits-on",
+        Action::NoLimits(false) => "note-no-limits-off",
         Action::SetAudio(true) => "note-sound-headset",
         Action::SetAudio(false) => "note-sound-pc",
         Action::SetEncoding(_) => "note-encoding",
@@ -478,15 +481,15 @@ mod tests {
             "answered once"
         );
         let mirror = Asker {
-            on: Some(Action::SetMirror(false)),
+            on: Some(Action::ShowPhysical(k(4), false)),
             newer_waits: false,
         };
         let other = Outcome::failed(ErrorCode::OTHER, "the desktop is busy");
-        let told = answer(Asked::Mirror, mirror, &other, &texts).expect("said");
+        let told = answer(Asked::Physical(k(4)), mirror, &other, &texts).expect("said");
         assert_eq!(&*told.note.text, "the desktop is busy");
         assert_eq!(told.note.detail, None);
         let bare = Outcome::failed(ErrorCode::OTHER, "");
-        let told = answer(Asked::Mirror, mirror, &bare, &texts).expect("said");
+        let told = answer(Asked::Physical(k(4)), mirror, &bare, &texts).expect("said");
         assert_eq!(&*told.note.text, "It did not work");
     }
 
@@ -674,8 +677,8 @@ mod tests {
                 Action::Remove(k(1)),
                 Action::CloseWindow(k(1)),
                 Action::MakePrimary(k(1)),
-                Action::SetMirror(true),
-                Action::SetMirror(false),
+                Action::ShowPhysical(k(1), true),
+                Action::ShowPhysical(k(1), false),
                 Action::SetAudio(true),
                 Action::SetAudio(false),
                 Action::SetEncoding(crate::ui::EncodingChange::default()),

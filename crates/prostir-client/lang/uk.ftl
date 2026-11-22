@@ -27,6 +27,7 @@ status-searching = Шукаю ПК…
 change-pc = Змінити ПК
 tab-quick = Швидке
 tab-monitors = Монітори
+tab-profiles = Профілі
 tab-settings = Налаштування
 
 ## Меню на долоні
@@ -112,9 +113,10 @@ intro-done = Зрозуміло
 
 ## Швидке
 
-profile = Профіль
+profiles = Профілі
 profile-n = Профіль { $n }
-profile-empty = Порожній
+profiles-all = Усі профілі
+profiles-none-short = Профілів ще немає
 layout-lying = Лежачи
 quick-in-front = Перед собою
 quick-in-front-state = Повернути все до себе
@@ -151,6 +153,10 @@ laptop-screen = Екран ноутбука
 pc-display-not-connected = не підключено
 pc-display-shown = Показано
 pc-display-hidden = Приховано
+pc-displays = Екрани ПК
+pc-display-limit = досягнуто межі ПК
+page-of = Сторінка { $page } з { $pages }
+scale = Масштаб
 monitors-line-up = Вирівняти: прибрати шви (кнопка A)
 add-monitor = Додати монітор
 monitors-at-most =
@@ -172,8 +178,28 @@ drag = Тягнути
 drag-one = Один монітор
 drag-all = Усі разом
 cinema-screen = Екран для кінотеатру
-profile-save = Зберегти як профіль
 profile-replace = Замінити?
+
+## Профілі
+
+profile-new = Новий профіль
+profile-save-here = Зберегти сюди
+profile-delete-confirm = Видалити? Ще раз
+profiles-none = Розставте монітори й натисніть «Новий профіль»: розстановка збережеться, і до неї можна повернутися одним натисканням.
+profiles-at-most =
+    { $count ->
+        [one] Щонайбільше { $count } профіль
+        [few] Щонайбільше { $count } профілі
+       *[many] Щонайбільше { $count } профілів
+    }
+profiles-rename-hint = Назву профілю можна змінити у вікні Prostir на ПК.
+note-profile-deleted = Профіль «{ $name }» видалено
+note-profiles-full =
+    { $count ->
+        [one] Уже { $count } профіль: спершу видаліть зайвий
+        [few] Уже { $count } профілі: спершу видаліть зайвий
+       *[many] Уже { $count } профілів: спершу видаліть зайвий
+    }
 
 ## Налаштування
 
@@ -182,6 +208,7 @@ section-controls = Керування
 section-sound = Звук
 section-language = Мова
 section-pc = ПК
+section-paired = Сполучені ПК
 section-help = Довідка
 
 ## Налаштування: вигляд
@@ -266,6 +293,8 @@ pc-codec = Кодек
 pc-codec-note = HEVC: найчіткіший текст. H.264: менше пам'яті на ПК.
 pc-sharp = Чіткіший текст (+2 мс)
 pc-notifications = Сповіщення ПК у шоломі
+no-limits = Без обмежень
+no-limits-note = Більше моніторів і екранів, ніж радить Prostir. Можливі пропуски кадрів, нагрів і швидша розрядка.
 paired-pcs = Сполучені ПК
 paired-none = Немає
 paired-forget-confirm = Забути? Ще раз
@@ -318,6 +347,9 @@ note-window-closed = Вікно повернуто на монітори
 note-primary = Тепер це головний монітор
 note-display-shown = Екран ПК показано
 note-display-hidden = Екран ПК приховано
+note-scale = Масштаб змінено
+note-no-limits-on = Можна більше моніторів і екранів
+note-no-limits-off = Знову рекомендовані межі
 note-sound-headset = Звук ПК грає в шоломі
 note-sound-pc = Звук ПК грає на ПК
 note-encoding = Налаштування відео застосовано
@@ -353,7 +385,7 @@ failure-encoder = Кодувальник ПК не запустився
 failure-capture = Зображення не знято
 failure-sound = Звук не перемкнувся
 failure-not-on-displays = Миша не на моніторах
-failure-no-such-profile = У цьому слоті немає збереженого профілю
+failure-no-such-profile = Такого профілю немає
 failure-bad-argument = Неправильне значення
 failure-other = Не вдалося
 

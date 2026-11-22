@@ -21,6 +21,7 @@ use openxr::sys::Handle as _;
 
 use crate::layout::Placement;
 use crate::platform::controllers::Needs;
+use crate::ui::Area;
 
 /// The extensions the app turns on: those it cannot do without, and (unless
 /// `minimal`, which checks the app on a headset without any other) every optional one
@@ -258,6 +259,9 @@ pub struct ImageLayer {
     /// The pixels bottom row first, as GL takes them: kept between uploads of an image
     /// that changes, so turning it over allocates nothing after the first.
     flipped: Vec<u8>,
+    /// For each image of the swapchain, what changed since it was last written: an
+    /// image that was shown while a part changed gets that part too.
+    stale: Vec<Area>,
 }
 
 impl ImageLayer {
@@ -287,7 +291,14 @@ impl ImageLayer {
             mip_count: 1,
         })?;
         let images = swapchain.enumerate_images()?;
+        let whole = Area {
+            x: 0,
+            y: 0,
+            w: width,
+            h: height,
+        };
         Ok(Self {
+            stale: vec![whole; images.len()],
             swapchain,
             images,
             width,
@@ -305,7 +316,10 @@ impl ImageLayer {
 
     /// Uploads RGBA8 pixels given top row first (GL images are stored bottom row first).
     pub fn upload(&mut self, gl: &glow::Context, rgba: &[u8]) -> Result<()> {
-        if self.is_static && self.uploaded {
+        if !self.is_static {
+            return self.upload_part(gl, rgba, None);
+        }
+        if self.uploaded {
             return Ok(());
         }
         let row = self.width as usize * 4;
@@ -349,12 +363,111 @@ impl ImageLayer {
         self.swapchain.release_image()?;
         self.uploaded = true;
         // A static image is uploaded once: its copy is not kept.
-        if self.is_static {
-            self.flipped = Vec::new();
-        } else {
-            #[cfg(all(feature = "selftest", not(feature = "store")))]
-            crate::selftest::uploaded(began);
+        self.flipped = Vec::new();
+        #[cfg(all(feature = "selftest", not(feature = "store")))]
+        let _ = began;
+        Ok(())
+    }
+
+    /// Uploads `part` of RGBA8 pixels given top row first (`None`: all of them) into
+    /// an image that changes (the menu: only the buttons pointed at, see
+    /// `ui::Panel::damage`). The swapchain's image written gets what changed since it
+    /// was last written, so it ends up as `rgba` whichever image the runtime hands out.
+    pub fn upload_part(
+        &mut self,
+        gl: &glow::Context,
+        rgba: &[u8],
+        part: Option<Area>,
+    ) -> Result<()> {
+        let row = self.width as usize * 4;
+        if rgba.len() != row * self.height as usize {
+            bail!(
+                "image is {} bytes, expected {}",
+                rgba.len(),
+                row * self.height as usize
+            );
         }
+        let whole = Area {
+            x: 0,
+            y: 0,
+            w: self.width,
+            h: self.height,
+        };
+        // A part within the image; all of it the first time (nothing kept yet).
+        let part = match part {
+            _ if self.flipped.len() != rgba.len() => whole,
+            None => whole,
+            Some(p) => Area {
+                x: p.x.min(self.width),
+                y: p.y.min(self.height),
+                w: p.w.min(self.width.saturating_sub(p.x)),
+                h: p.h.min(self.height.saturating_sub(p.y)),
+            },
+        };
+        if part.is_empty() && self.stale.iter().all(Area::is_empty) {
+            return Ok(());
+        }
+        #[cfg(all(feature = "selftest", not(feature = "store")))]
+        let began = crate::selftest::upload_started();
+        // Its rows turned over into the copy kept from the last upload (each a plain
+        // copy; nothing allocated after the first).
+        if part == whole {
+            self.flipped.clear();
+            self.flipped.reserve_exact(rgba.len());
+            for line in rgba.chunks_exact(row).rev() {
+                self.flipped.extend_from_slice(line);
+            }
+        } else {
+            let (x, w) = (part.x as usize * 4, part.w as usize * 4);
+            for y in part.y as usize..(part.y + part.h) as usize {
+                let to = (self.height as usize - 1 - y) * row + x;
+                let from = y * row + x;
+                self.flipped[to..to + w].copy_from_slice(&rgba[from..from + w]);
+            }
+        }
+        for s in &mut self.stale {
+            *s = s.union(part);
+        }
+        let index = self.swapchain.acquire_image()? as usize;
+        self.swapchain.wait_image(xr::Duration::INFINITE)?;
+        let texture = NonZeroU32::new(self.images[index]).context("null GL texture")?;
+        let todo = self.stale.get(index).copied().unwrap_or(whole);
+        if !todo.is_empty() {
+            // Rows from the bottom in GL; the rest of each row skipped.
+            let bottom = (self.height - (todo.y + todo.h)) as i32;
+            // SAFETY: the texture belongs to the acquired swapchain image; the context is
+            // current; the rows read lie within `flipped` (`todo` is within the image).
+            unsafe {
+                gl.bind_texture(glow::TEXTURE_2D, Some(glow::NativeTexture(texture)));
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+                gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, self.width as i32);
+                gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, todo.x as i32);
+                gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, bottom);
+                gl.tex_sub_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    todo.x as i32,
+                    bottom,
+                    todo.w as i32,
+                    todo.h as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&self.flipped)),
+                );
+                gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
+                gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, 0);
+                gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, 0);
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.flush();
+            }
+        }
+        if let Some(s) = self.stale.get_mut(index) {
+            *s = Area::EMPTY;
+        }
+        self.swapchain.release_image()?;
+        self.uploaded = true;
+        #[cfg(all(feature = "selftest", not(feature = "store")))]
+        crate::selftest::uploaded(began);
         Ok(())
     }
 

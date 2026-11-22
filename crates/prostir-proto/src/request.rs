@@ -63,6 +63,10 @@ wire_enum! {
         11 => Screenshot { id: DisplayId },
         /// Where the mouse is: [`Outcome::Pointer`].
         12 => FindMouse,
+        /// Another scale for monitor `id`, percent (one of `Limits.scales`): made anew
+        /// at it under the same number, `Starting` until it runs again (from 0.2.0 step
+        /// 7.10; an older PC answers `UNSUPPORTED`).
+        13 => SetScale { id: DisplayId, scale: u16 },
     }
 }
 
@@ -74,8 +78,8 @@ wire_enum! {
     pub enum Command {
         /// Bring everything in front.
         1 => Recenter,
-        /// Switch to a profile: the profile's number, 1 to 3, as the headset menu shows
-        /// it; answered once it is in place.
+        /// Switch to a profile: its name, or its number from 1 as the headset's menu
+        /// lists them; answered once it is in place.
         2 => Profile {
             #[wire(max = MAX_DISPLAY_NAME)]
             name: String,
@@ -98,6 +102,16 @@ wire_enum! {
         11 => ResetArrangement,
         /// "No limits" (changes `Prefs`).
         12 => NoLimits { on: bool },
+        /// Gives profile `profile` (its name, or its number from 1) the name `name`; an
+        /// empty name gives it back the menu's own ("Profile 2"). The headset's
+        /// `Profiles` part shows it before the reply (from 0.2.0 step 7.10; an older
+        /// headset answers `UNSUPPORTED`).
+        13 => RenameProfile {
+            #[wire(max = MAX_DISPLAY_NAME)]
+            profile: String,
+            #[wire(max = MAX_DISPLAY_NAME)]
+            name: String,
+        },
     }
 }
 
@@ -270,6 +284,10 @@ mod tests {
             },
             Command::Distance { steps: -2 },
             Command::NoLimits { on: true },
+            Command::RenameProfile {
+                profile: "2".into(),
+                name: "Робота".into(),
+            },
         ] {
             let asked = Asked::Known(c);
             assert_eq!(

@@ -65,6 +65,7 @@ fn needs(request: &Request) -> u32 {
         | Request::SetDisplays { .. }
         | Request::SetPrimary { .. }
         | Request::ShowPhysical { .. }
+        | Request::SetScale { .. }
         | Request::SetEncoding { .. }
         | Request::SetSound { .. } => perms::CHANGES,
         Request::DetachWindow => perms::CHANGES | perms::PRIVATE,
@@ -225,6 +226,19 @@ fn carry_out(
             store.change(|s| s.mirror = shown);
             displays.apply(&store.wanted());
             keep_screens(store, displays, false);
+            Outcome::Done
+        }
+        Request::SetScale { id, scale } => {
+            let id = ScreenId::from_wire(id);
+            // One of the scales the PC offers, as for a monitor added; the desktop's
+            // own are checked by `rescale`.
+            if !limits.scales.contains(&scale) {
+                let (w, h) = displays.monitor_size(id).ok_or(UserError::UnknownDisplay)?;
+                bail!(UserError::BadSize { w, h, scale });
+            }
+            displays.rescale(id, scale)?;
+            info!("headset set {id} to {scale} %");
+            keep_screens(store, displays, true);
             Outcome::Done
         }
         Request::SetEncoding {

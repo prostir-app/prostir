@@ -218,7 +218,7 @@ fn connecting_puts_monitors_where_the_file_says() {
         Preset::Arc,
         &[(k(1), 2560, 1440), (k(2), 2560, 1440), (k(3), 2560, 1440)],
         None,
-        None,
+        &[],
         None,
     );
     laid.get_mut(&k(3)).unwrap().position.y += 0.05;
@@ -1221,4 +1221,164 @@ fn dragging_keeps_the_rules() {
     assert!((sim.place(k(1)).position.y - others.0.position.y - 0.3).abs() < 1e-5);
     assert!((sim.place(k(3)).position.y - others.1.position.y - 0.3).abs() < 1e-5);
     sim.world.let_go(Thing::Display(k(2)), &sim.s, sim.now);
+}
+
+/// A display of the PC itself, shown, where `desk` (x, y, width, height) says it is on
+/// the PC's desktop, `size` pixels.
+fn pc_display(n: u32, size: (u32, u32), desk: [i32; 4]) -> Display {
+    Display {
+        kind: DisplayKind::Physical {
+            builtin: false,
+            connector: format!("DP-{n}"),
+            shown: true,
+        },
+        desk: Some(prostir_proto::state::DeskRect {
+            x: desk[0],
+            y: desk[1],
+            w: desk[2].unsigned_abs(),
+            h: desk[3].unsigned_abs(),
+        }),
+        ..monitor(n, size)
+    }
+}
+
+/// Whether `a` and `b` (`a_px`, `b_px` pixels: their shape) cover each other as seen
+/// from in front: near enough the same plane, and their rectangles overlapping by more
+/// than a hair.
+fn cover(a: &Placement, a_px: (u32, u32), b: &Placement, b_px: (u32, u32)) -> bool {
+    let (ah, bh) = (
+        a.width * a_px.1 as f32 / a_px.0 as f32,
+        b.width * b_px.1 as f32 / b_px.0 as f32,
+    );
+    // `b`'s corners on `a`'s plane.
+    let corners = [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)].map(|(x, y)| {
+        let at = b.position + b.rotation * Vec3::new(x * b.width / 2.0, y * bh / 2.0, 0.0);
+        a.rotation.inverse() * (at - a.position)
+    });
+    let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for c in &corners {
+        (x0, x1, y0, y1) = (x0.min(c.x), x1.max(c.x), y0.min(c.y), y1.max(c.y));
+    }
+    let eps = 1e-4;
+    corners.iter().all(|c| c.z.abs() < 0.3)
+        && x1 > -a.width / 2.0 + eps
+        && x0 < a.width / 2.0 - eps
+        && y1 > -ah / 2.0 + eps
+        && y0 < ah / 2.0 - eps
+}
+
+/// Displays by number, with their sizes in pixels.
+type Sized = Vec<(u32, (u32, u32))>;
+
+/// The monitors and three displays of the PC side by side on its desktop, all
+/// streaming and drawn.
+fn with_three_pc_displays() -> (Sim, Sized) {
+    let mut sim = Sim::new(None);
+    sim.connect(PC);
+    let pcs = [
+        (101, (1920, 1080), [0, 0, 1920, 1080]),
+        (102, (2560, 1440), [1920, 0, 2560, 1440]),
+        (103, (1920, 1080), [4480, 360, 1920, 1080]),
+    ];
+    let mut displays = three();
+    displays.extend(pcs.iter().map(|&(n, size, desk)| pc_display(n, size, desk)));
+    sim.list(displays);
+    let mut sizes: Vec<(u32, (u32, u32))> = (1..=3).map(|n| (n, QHD)).collect();
+    sizes.extend(pcs.iter().map(|&(n, size, _)| (n, size)));
+    for &(n, size) in &sizes {
+        sim.stream(n, size);
+    }
+    sim.settled();
+    (sim, sizes)
+}
+
+/// No two of `sizes` (number, pixels) cover each other.
+fn none_covers(sim: &Sim, sizes: &[(u32, (u32, u32))]) {
+    for (i, &(a, ap)) in sizes.iter().enumerate() {
+        for &(b, bp) in &sizes[i + 1..] {
+            assert!(
+                !cover(&sim.place(k(a)), ap, &sim.place(k(b)), bp),
+                "{a} and {b} cover each other: {:?} {:?}",
+                sim.place(k(a)),
+                sim.place(k(b))
+            );
+        }
+    }
+}
+
+/// The PC's displays glued to each other on its desktop stand a little apart in the
+/// headset, never over each other; "Line up" takes them along with the first of them
+/// and leaves no monitor covering any.
+#[test]
+fn the_pcs_displays_stand_apart_and_line_up_along() {
+    let (mut sim, sizes) = with_three_pc_displays();
+    none_covers(&sim, &sizes);
+    let (a, b) = (sim.place(k(101)), sim.place(k(102)));
+    let side = a.rotation * Vec3::X;
+    let gap =
+        (b.position - b.rotation * Vec3::X * b.width / 2.0 - (a.position + side * a.width / 2.0))
+            .dot(side);
+    assert!(gap > 0.0 && gap < 0.01, "glued, a hair apart: {gap}");
+    // A monitor pushed down over them, then "Line up".
+    let mut low = sim.place(k(2));
+    low.position.y -= 0.35;
+    sim.world.placements.insert(k(2), low);
+    sim.world.tidy_up(&sim.s, sim.now);
+    sim.settled();
+    none_covers(&sim, &sizes);
+}
+
+/// Displays that show one desktop cloned (the same place on it) stand side by side,
+/// never on top of each other.
+#[test]
+fn cloned_displays_stand_side_by_side() {
+    let mut sim = Sim::new(None);
+    sim.connect(PC);
+    let mut displays = three();
+    displays.push(pc_display(101, (1920, 1080), [0, 0, 1920, 1080]));
+    displays.push(pc_display(102, (1920, 1080), [0, 0, 1920, 1080]));
+    sim.list(displays);
+    let mut sizes: Vec<(u32, (u32, u32))> = (1..=3).map(|n| (n, QHD)).collect();
+    sizes.extend([(101, (1920, 1080)), (102, (1920, 1080))]);
+    for &(n, size) in &sizes {
+        sim.stream(n, size);
+    }
+    sim.settled();
+    none_covers(&sim, &sizes);
+    let (a, b) = (sim.place(k(101)), sim.place(k(102)));
+    assert!((a.position.y - b.position.y).abs() < 1e-4, "side by side");
+}
+
+/// A display of the PC moved by hand stays where it was put when another one starts
+/// showing; the new one stands next to it as the group has it.
+#[test]
+fn a_display_moved_by_hand_stays_when_another_comes() {
+    let mut sim = Sim::new(None);
+    sim.connect(PC);
+    let first = pc_display(101, (1920, 1080), [0, 0, 1920, 1080]);
+    let second = pc_display(102, (1920, 1080), [1920, 0, 1920, 1080]);
+    let mut displays = three();
+    displays.push(first.clone());
+    sim.list(displays);
+    for n in 1..=3 {
+        sim.stream(n, QHD);
+    }
+    sim.stream(101, (1920, 1080));
+    sim.settled();
+    // Moved by hand, up and to the left.
+    let mut moved = sim.place(k(101));
+    moved.position += Vec3::new(-0.4, 0.2, 0.0);
+    sim.world.placements.insert(k(101), moved);
+    let mut displays = three();
+    displays.extend([first, second]);
+    sim.list(displays);
+    sim.stream(102, (1920, 1080));
+    sim.settled();
+    assert!(near(&sim.place(k(101)), &moved), "where it was put");
+    let (a, b) = (sim.place(k(101)), sim.place(k(102)));
+    let local = a.rotation.inverse() * (b.position - a.position);
+    assert!(
+        local.x > a.width * 0.9 && local.y.abs() < 1e-3,
+        "beside it: {local:?}"
+    );
 }

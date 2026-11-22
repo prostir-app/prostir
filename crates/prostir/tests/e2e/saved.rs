@@ -242,9 +242,9 @@ fn killed_mid_change_leaves_readable_files() {
     pc.wait_log(SOON, "fake desktop: placed");
 }
 
-/// A display of the PC unplugged (the lid closed) stays in the list as absent, with
-/// its number, and comes back with it when plugged in again; it has its place on the
-/// desktop, shown or not.
+/// Every display of the PC shows at first; one unplugged (the lid closed) stays in
+/// the list as absent, with its number, and comes back with it when plugged in again;
+/// it has its place on the desktop, shown or not.
 #[test]
 fn a_display_of_the_pc_comes_back_with_its_number() {
     let options = Options {
@@ -266,11 +266,11 @@ fn a_display_of_the_pc_comes_back_with_its_number() {
             .collect()
     };
     headset
-        .wait(SOON, "the PC's displays, the external one shown", |v| {
+        .wait(SOON, "the PC's displays, both shown", |v| {
             let p = physical(v);
             p.len() == 2
                 && p.iter().all(|d| d.desk.is_some())
-                && p.iter().any(|d| {
+                && p.iter().all(|d| {
                     d.is_shown_physical()
                         && v.streams
                             .get(&d.id)
@@ -290,11 +290,11 @@ fn a_display_of_the_pc_comes_back_with_its_number() {
             &headset.view().display(laptop).unwrap().kind,
             DisplayKind::Physical {
                 builtin: true,
-                shown: false,
+                shown: true,
                 ..
             }
         ),
-        "an external display is the one shown first"
+        "the laptop's panel shown at first too"
     );
     assert!(hdmi.0 >= 101 && laptop.0 >= 101);
 
@@ -328,7 +328,7 @@ fn a_display_of_the_pc_comes_back_with_its_number() {
     );
     assert!(
         screens.contains(&format!(
-            "physical {} edid \"BOE 0x0a1c 0\" connector eDP-1 builtin seen ",
+            "physical {} edid \"BOE 0x0a1c 0\" connector eDP-1 builtin shown seen ",
             laptop.0
         )),
         "{screens}"
