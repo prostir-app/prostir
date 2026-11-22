@@ -825,8 +825,10 @@ impl Model {
             self.view_eye = Some(position);
             self.rev += 1;
         }
+        // While following, and on its last step (which keeps the arrangement).
+        let was_following = self.world.following();
         self.world.follow_head(&self.settings, input.dt, self.head);
-        if self.world.following() {
+        if was_following || self.world.following() {
             self.rev += 1;
         }
         self.place_sound();

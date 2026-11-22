@@ -599,3 +599,41 @@ fn the_headsets_own_news_is_quiet() {
             .any(|e| matches!(e, Effect::Send(_, ClientMsg::Request { .. })))
     );
 }
+
+/// Following the head: the arrangement glides after the turned head, the menu is
+/// told of each step, and of the last one too (the one that stops and keeps it).
+#[test]
+fn following_tells_the_menu_to_its_last_step() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::Follow(true));
+    let turned = Head {
+        position: Vec3::ZERO,
+        forward: Vec3::new(-1.0, 0.0, -1.0).normalize(),
+        right: Vec3::new(1.0, 0.0, -1.0).normalize(),
+    };
+    let mut followed = false;
+    for _ in 0..300 {
+        sim.now += 11 * MS;
+        let input = FrameInput {
+            head: Some(turned),
+            ..frame(HandState::default())
+        };
+        let (was, rev) = (sim.m.world().following(), sim.m.rev());
+        sim.m.tick(sim.now, &input);
+        sim.m.animate(sim.now, &input);
+        sim.check_view();
+        followed |= was;
+        if was {
+            assert_ne!(sim.m.rev(), rev, "a step of following, the last one too");
+        }
+        if followed && !sim.m.world().following() {
+            break;
+        }
+    }
+    assert!(
+        followed && !sim.m.world().following(),
+        "it followed and stopped"
+    );
+    assert!(sim.saves().contains(&persist::File::Desk));
+}
