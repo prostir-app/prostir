@@ -9,7 +9,7 @@ use glam::{Mat4, Vec3, Vec4};
 use glow::HasContext;
 use openxr as xr;
 
-use crate::xrutil::{Gfx, quat, vec3};
+use crate::platform::openxr::{Gfx, quat, vec3};
 
 /// A sphere to draw: world position, radius in metres, straight (non-premultiplied)
 /// linear RGBA.
@@ -27,7 +27,7 @@ pub enum Kind {
     /// A shaded ball (hands, rays).
     Ball,
     /// A soft light that brightens what is behind it: where a fingertip or a ray is
-    /// about to touch the menu, like the Quest's own windows.
+    /// about to touch the menu, like the system's own windows.
     Glow,
     /// A thin bright ring: a touch that just happened.
     Ring,

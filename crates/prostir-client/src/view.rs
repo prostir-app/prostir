@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 use crate::app::Model;
+use crate::caps::Offer;
 use crate::session::Attempt;
 use crate::ui::{self, MonitorEntry, UiState};
 
@@ -34,12 +35,18 @@ impl View {
     }
 }
 
+/// A display rate as the menu writes it, in whole hertz.
+fn hz(rate: f32) -> u16 {
+    rate.round().clamp(0.0, f32::from(u16::MAX)) as u16
+}
+
 /// What the menu shows, from `m`.
 pub fn build(m: &Model) -> UiState {
     let world = m.world();
     let session = m.session();
     let menu = m.menu();
     let headset = m.headset();
+    let caps = &headset.caps;
     let now = m.now();
     let shown_for = |at: std::time::Instant, d| now.saturating_duration_since(at) < d;
     let map = world.map_spots();
@@ -106,11 +113,16 @@ pub fn build(m: &Model) -> UiState {
         mic_denied: headset.mic_wanted && headset.mic_denied,
         mirror_name: m.physical_name(),
         settings: *m.settings(),
-        room_available: headset.can.room,
-        panorama_available: headset.can.panorama,
-        custom_available: headset.can.custom_panorama,
+        room_available: caps.offers(Offer::RoomBackground),
+        panorama_available: caps.offers(Offer::Panorama),
+        custom_available: headset.custom_panorama,
         curve_available: world.curve_supported(),
-        keyboard_available: headset.can.keyboard_window,
+        keyboard_available: caps.offers(Offer::KeyboardWindow),
+        hands_available: caps.offers(Offer::Hands),
+        display_rates: caps
+            .rate_choice()
+            .map(|(usual, saver)| (hz(usual), hz(saver))),
+        display_rate_now: headset.refresh_hz.map(hz),
         error: menu
             .error
             .as_ref()
@@ -138,7 +150,7 @@ pub fn build(m: &Model) -> UiState {
         language_page: menu.language_page,
         intro: !m.settings().intro_seen,
         update: search.update.clone(),
-        update_from: headset.can.update_from,
+        update_from: headset.update_from,
         saved_profiles: m.profiles().each_ref().map(Option::is_some),
         active_profile: menu.active_profile,
         note: menu.notes.shown().cloned(),

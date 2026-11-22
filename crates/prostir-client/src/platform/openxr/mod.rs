@@ -1,10 +1,16 @@
-//! OpenXR/Android plumbing shared by the main loop.
+//! Standard OpenXR and its `KHR` and `EXT` extensions, which any runtime may have: the
+//! extensions turned on, the controllers' and hands' input ([`input`], by the table of
+//! `platform::controllers`), the images the app draws itself and their layers, the
+//! hands and rays ([`overlay`]), the surfaces the streams are decoded into, the
+//! performance levels. The maker's extensions are `platform::meta`.
+
+pub mod egl;
+pub mod input;
+pub mod overlay;
 
 use std::num::NonZeroU32;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-use android_activity::AndroidApp;
 use anyhow::{Context, Result, bail};
 use glam::{Quat, Vec3};
 use glow::HasContext;
@@ -14,6 +20,85 @@ use openxr as xr;
 use openxr::sys::Handle as _;
 
 use crate::layout::Placement;
+use crate::platform::controllers::Needs;
+
+/// The extensions the app turns on: those it cannot do without, and (unless
+/// `minimal`, which checks the app on a headset without any other) every optional one
+/// the runtime has, the maker's among them (`platform::meta`).
+pub fn extensions(available: &xr::ExtensionSet, minimal: bool) -> xr::ExtensionSet {
+    let mut on = xr::ExtensionSet::default();
+    on.khr_android_create_instance = true;
+    on.khr_opengl_es_enable = true;
+    on.khr_android_surface_swapchain = true;
+    if minimal {
+        return on;
+    }
+    on.khr_composition_layer_cylinder = available.khr_composition_layer_cylinder;
+    on.khr_composition_layer_equirect2 = available.khr_composition_layer_equirect2;
+    on.khr_composition_layer_color_scale_bias = available.khr_composition_layer_color_scale_bias;
+    on.khr_android_thread_settings = available.khr_android_thread_settings;
+    on.ext_hand_tracking = available.ext_hand_tracking;
+    on.ext_hand_interaction = available.ext_hand_interaction;
+    // Taken off, said at once by the headset's sensor (the session may stay shown
+    // until the system sleeps).
+    on.ext_user_presence = available.ext_user_presence;
+    on.ext_performance_settings = available.ext_performance_settings;
+    // The controllers of the profiles in the table.
+    on.bd_controller_interaction = available.bd_controller_interaction;
+    on.htc_vive_focus3_controller_interaction = available.htc_vive_focus3_controller_interaction;
+    crate::platform::meta::extensions(available, &mut on);
+    on
+}
+
+/// Whether the extension a profile of the controllers' table needs is on.
+pub fn has(on: &xr::ExtensionSet, needs: Needs) -> bool {
+    match needs {
+        Needs::Core => true,
+        Needs::HandInteraction => on.ext_hand_interaction,
+        Needs::BdControllers => on.bd_controller_interaction,
+        Needs::HtcFocus3 => on.htc_vive_focus3_controller_interaction,
+    }
+}
+
+/// A performance level for the runtime to hold the processor and the graphics at
+/// (`XR_EXT_performance_settings`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerfLevel {
+    /// Steady and low: the battery first.
+    Low,
+    /// Steady and high, within what the headset keeps up without warming too much.
+    High,
+}
+
+/// Asks the runtime for `level` on the processor and on the graphics; whether it took
+/// it (without the extension, never).
+pub fn set_perf_level(session: &xr::Session<Gfx>, level: PerfLevel) -> bool {
+    let Some(ext) = session.instance().exts().ext_performance_settings.as_ref() else {
+        return false;
+    };
+    let level_raw = match level {
+        PerfLevel::Low => xr::sys::PerfSettingsLevelEXT::SUSTAINED_LOW,
+        PerfLevel::High => xr::sys::PerfSettingsLevelEXT::SUSTAINED_HIGH,
+    };
+    let mut took = true;
+    for domain in [
+        xr::sys::PerfSettingsDomainEXT::CPU,
+        xr::sys::PerfSettingsDomainEXT::GPU,
+    ] {
+        // SAFETY: a live session of the instance the extension's function is from.
+        let result = unsafe {
+            (ext.perf_settings_set_performance_level)(session.as_raw(), domain, level_raw)
+        };
+        if result.into_raw() < 0 {
+            warn!("performance level {level:?} for {domain:?}: {result:?}");
+            took = false;
+        }
+    }
+    if took {
+        info!("performance level {level:?}");
+    }
+    took
+}
 
 pub type Gfx = xr::OpenGlEs;
 
@@ -95,8 +180,8 @@ pub fn create_surface_swapchain(
         .khr_android_surface_swapchain
         .as_ref()
         .context("XR_KHR_android_surface_swapchain is not enabled")?;
-    // Meta's runtime rejects surface swapchains with a format or non-zero counts
-    // ("info format validation failure"): MediaCodec decides those.
+    // No format and no counts: MediaCodec decides those, and a runtime may refuse a
+    // surface swapchain that names them ("info format validation failure").
     let info = xr::sys::SwapchainCreateInfo {
         ty: xr::sys::SwapchainCreateInfo::TYPE,
         next: ptr::null(),
@@ -139,63 +224,6 @@ pub fn create_surface_swapchain(
             .context("ANativeWindow_fromSurface failed")?;
         Ok((swapchain, window))
     })
-}
-
-/// Keeps Wi-Fi out of power save while the app runs. Without it the headset's
-/// radio naps between beacons and downlink frames wait at the router.
-pub fn acquire_low_latency_wifi(
-    app: &AndroidApp,
-    vm: &jni::JavaVM,
-) -> Result<jni::refs::Global<jni::objects::JObject<'static>>> {
-    use jni::objects::{JObject, JValue};
-    use jni::{jni_sig, jni_str};
-    /// WifiManager.WIFI_MODE_FULL_LOW_LATENCY (API 29).
-    const WIFI_MODE_FULL_LOW_LATENCY: i32 = 4;
-    // A Java exception on the way is caught and comes back as the error.
-    let lock = vm.attach_current_thread(|env| -> jni::errors::Result<_> {
-        let raw: jni::sys::jobject = app.activity_as_ptr().cast();
-        // SAFETY: the activity reference stays valid while the app runs; the cast only
-        // borrows it, it never deletes it.
-        let activity = unsafe { env.as_cast_raw::<JObject<'static>>(&raw) }?;
-        let context = env
-            .call_method(
-                &activity,
-                jni_str!("getApplicationContext"),
-                jni_sig!("()Landroid/content/Context;"),
-                &[],
-            )?
-            .l()?;
-        let service = env.new_string("wifi")?;
-        let wifi = env
-            .call_method(
-                &context,
-                jni_str!("getSystemService"),
-                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
-                &[JValue::Object(&service)],
-            )?
-            .l()?;
-        let tag = env.new_string("prostir")?;
-        let lock = env
-            .call_method(
-                &wifi,
-                jni_str!("createWifiLock"),
-                jni_sig!("(ILjava/lang/String;)Landroid/net/wifi/WifiManager$WifiLock;"),
-                &[
-                    JValue::Int(WIFI_MODE_FULL_LOW_LATENCY),
-                    JValue::Object(&tag),
-                ],
-            )?
-            .l()?;
-        env.call_method(
-            &lock,
-            jni_str!("setReferenceCounted"),
-            jni_sig!("(Z)V"),
-            &[JValue::Bool(false)],
-        )?;
-        env.call_method(&lock, jni_str!("acquire"), jni_sig!("()V"), &[])?;
-        env.new_global_ref(lock)
-    })?;
-    Ok(lock)
 }
 
 /// GL function loader for the EGL context the session was created with.
@@ -429,39 +457,6 @@ pub fn locate_views(
     true
 }
 
-/// How urgent a thread of this app is to the scheduler, as Android ranks its own
-/// threads of the same kind.
-#[derive(Debug, Clone, Copy)]
-pub enum Priority {
-    /// Sound in and out (`THREAD_PRIORITY_AUDIO`).
-    Audio,
-    /// Pictures and the network that brings them (`THREAD_PRIORITY_VIDEO`).
-    Video,
-}
-
-/// Whether a refused priority of each kind was logged (once per start of the
-/// process is enough: threads of a kind are refused alike).
-static REFUSAL_TOLD: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
-
-/// Raises the calling thread to `priority`, so a busy moment elsewhere on the headset
-/// delays it less. A refusal by the system is logged once for each kind.
-pub fn raise_thread_priority(priority: Priority) {
-    let (nice, kind) = match priority {
-        Priority::Audio => (-16, 0),
-        Priority::Video => (-10, 1),
-    };
-    // SAFETY: plain system call; on Linux `PRIO_PROCESS` with `who` 0 is the calling
-    // thread alone.
-    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) } != 0
-        && !REFUSAL_TOLD[kind].swap(true, Ordering::Relaxed)
-    {
-        warn!(
-            "thread priority {nice}: {} (not told again)",
-            std::io::Error::last_os_error()
-        );
-    }
-}
-
 /// Tells the runtime that the calling thread is the app's main thread and the one
 /// that renders (`XR_KHR_android_thread_settings`): the frame loop does both, and the
 /// runtime schedules it as such.
@@ -483,52 +478,4 @@ pub fn mark_main_thread(instance: &xr::Instance, session: &xr::Session<Gfx>) {
             info!("frame loop marked as the {what} thread for the runtime");
         }
     }
-}
-
-/// Whether the left hand makes the menu gesture (palm towards the face, pinch), which
-/// the Quest reports through `XR_FB_hand_tracking_aim`. The plain hand profile has no
-/// menu button, so without this a user with hands only cannot open the menu when no
-/// menu button is in view.
-pub fn hand_menu_gesture(
-    instance: &xr::Instance,
-    tracker: &xr::HandTracker,
-    space: &xr::Space,
-    time: xr::Time,
-) -> bool {
-    let Some(ext) = instance.exts().ext_hand_tracking.as_ref() else {
-        return false;
-    };
-    let mut aim = xr::sys::HandTrackingAimStateFB {
-        ty: xr::sys::HandTrackingAimStateFB::TYPE,
-        next: ptr::null_mut(),
-        status: xr::sys::HandTrackingAimFlagsFB::EMPTY,
-        aim_pose: xr::Posef::IDENTITY,
-        pinch_strength_index: 0.0,
-        pinch_strength_middle: 0.0,
-        pinch_strength_ring: 0.0,
-        pinch_strength_little: 0.0,
-    };
-    let mut joints = [xr::sys::HandJointLocationEXT::default(); 26];
-    let mut locations = xr::sys::HandJointLocationsEXT {
-        ty: xr::sys::HandJointLocationsEXT::TYPE,
-        next: (&raw mut aim).cast(),
-        is_active: xr::sys::FALSE,
-        joint_count: joints.len() as u32,
-        joint_locations: joints.as_mut_ptr(),
-    };
-    let info = xr::sys::HandJointsLocateInfoEXT {
-        ty: xr::sys::HandJointsLocateInfoEXT::TYPE,
-        next: ptr::null(),
-        base_space: space.as_raw(),
-        time,
-    };
-    // SAFETY: live tracker and space; `locations` points at 26 joints and chains a
-    // properly typed aim state, all of which outlive the call.
-    let result =
-        unsafe { (ext.locate_hand_joints)(tracker.as_raw(), &raw const info, &raw mut locations) };
-    result.into_raw() >= 0
-        && locations.is_active == xr::sys::TRUE
-        && aim
-            .status
-            .contains(xr::sys::HandTrackingAimFlagsFB::MENU_PRESSED)
 }
