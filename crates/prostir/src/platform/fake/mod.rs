@@ -312,6 +312,8 @@ pub mod audio {
 
     pub struct AudioOut {
         stop: Arc<AtomicBool>,
+        /// Its device's number.
+        sink: u32,
     }
 
     impl AudioOut {
@@ -349,7 +351,25 @@ pub mod audio {
             // The sink, and its monitor with the same number.
             sys.say("new", "sink", sink);
             sys.say("new", "source", sink);
-            Ok(Self { stop })
+            Ok(Self { stop, sink })
+        }
+
+        /// Whether its device is still there (`sound-gone` removes it).
+        pub fn alive(&self) -> bool {
+            system().sink == Some(self.sink)
+        }
+    }
+
+    /// The sound system went away and came back (a test's command, as when PipeWire
+    /// restarts): Prostir's devices are gone, and nothing says so but their removal.
+    pub fn gone() {
+        let mut sys = system();
+        if let Some(sink) = sys.sink.take() {
+            sys.level = None;
+            sys.say_together(&[("remove", "source", sink), ("remove", "sink", sink)]);
+        }
+        if let Some(mic) = sys.mic.take() {
+            sys.say("remove", "source", mic);
         }
     }
 
@@ -368,7 +388,8 @@ pub mod audio {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
             let mut sys = system();
-            if let Some(sink) = sys.sink.take() {
+            // Only its own: one made since stays.
+            if let Some(sink) = sys.sink.take_if(|s| *s == self.sink) {
                 sys.level = None;
                 log::info!("fake desktop: the headset's sound device removed (#{sink})");
                 sys.say("remove", "source", sink);
@@ -499,6 +520,8 @@ pub mod audio {
     /// the log now and then; a program records while a test says so (`record on`).
     pub struct MicIn {
         got: std::sync::atomic::AtomicUsize,
+        /// Its device's number.
+        mic: u32,
     }
 
     impl MicIn {
@@ -506,10 +529,25 @@ pub mod audio {
             let mut sys = system();
             let mic = sys.number();
             sys.mic = Some(mic);
+            log::info!("fake desktop: the headset microphone made (#{mic})");
             sys.say("new", "source", mic);
             Ok(Self {
                 got: std::sync::atomic::AtomicUsize::new(0),
+                mic,
             })
+        }
+
+        /// Whether its device is still there (`sound-gone` removes it).
+        pub fn alive(&self) -> bool {
+            system().mic == Some(self.mic)
+        }
+
+        /// Its device goes, for every share of it.
+        pub fn close(&self) {
+            let mut sys = system();
+            if let Some(mic) = sys.mic.take_if(|m| *m == self.mic) {
+                sys.say("remove", "source", mic);
+            }
         }
 
         pub fn push(&self, pcm: &[u8]) {
@@ -529,10 +567,7 @@ pub mod audio {
 
     impl Drop for MicIn {
         fn drop(&mut self) {
-            let mut sys = system();
-            if let Some(mic) = sys.mic.take() {
-                sys.say("remove", "source", mic);
-            }
+            self.close();
         }
     }
 

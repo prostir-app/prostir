@@ -23,6 +23,10 @@ use crate::router::Router;
 /// How long starting the sound or the microphone may take, and letting it go.
 const START_WITHIN: Duration = Duration::from_secs(10);
 const STOP_WITHIN: Duration = Duration::from_secs(5);
+/// While the sound or the microphone is there, it is looked at this often: a sound
+/// system that went away (restarted, or Prostir's device removed) says nothing, and
+/// the capture of a device that went takes the PC's speakers instead.
+const CHECK_EVERY: Duration = Duration::from_secs(2);
 
 /// What the control loop wants of the sound.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -152,6 +156,7 @@ impl Sound {
             audio_retry: Backoff::default(),
             mic_retry: Backoff::default(),
             recorded: None,
+            checked: Instant::now(),
         };
         let mark_gone = move || {
             let (lock, ring) = &*gone;
@@ -198,6 +203,8 @@ struct Thread {
     mic_retry: Backoff,
     /// What the microphone was last told of recordings.
     recorded: Option<(bool, u32)>,
+    /// When the sound and the microphone were last looked at.
+    checked: Instant,
 }
 
 impl Thread {
@@ -224,7 +231,8 @@ impl Thread {
         self.events.send(Event::SoundDevices(self.generation, done));
     }
 
-    /// When something that failed is tried again, while it is wanted.
+    /// When something that failed is tried again, while it is wanted, and when what is
+    /// there is looked at again.
     fn retry_at(&self) -> Option<Instant> {
         let audio = (self.wanted.audio && self.audio.is_none())
             .then_some(self.audio_retry.next)
@@ -232,11 +240,46 @@ impl Thread {
         let mic = (self.wanted.mic && self.mic.is_none())
             .then_some(self.mic_retry.next)
             .flatten();
-        crate::brain::earliest([audio, mic])
+        let check =
+            (self.audio.is_some() || self.mic.is_some()).then(|| self.checked + CHECK_EVERY);
+        crate::brain::earliest([audio, mic, check])
+    }
+
+    /// Lets go of the sound or the microphone that broke (the sound system went away,
+    /// or removed Prostir's device), and says so, so the status tells the truth; what
+    /// is still wanted is made again right after, as one that failed to start is (the
+    /// pauses come from those starts). Left as it is, the PC's sound would play on its
+    /// speakers, and the headset microphone would reach no program.
+    fn check(&mut self) {
+        self.checked = Instant::now();
+        if let Some(audio) = self.audio.take_if(|a| !a.alive()) {
+            warn!("the PC's sound no longer reaches the headset's device: making it again");
+            let _ = timed::call(
+                "sound-stop",
+                "letting go of the PC's sound that broke",
+                STOP_WITHIN,
+                move || drop(audio),
+            );
+            self.say(SoundDone::AudioOff);
+        }
+        if let Some(mic) = self.mic.take_if(|m| !m.alive()) {
+            warn!("the headset microphone is gone from the PC: making it again");
+            // Closed here, for every share: the control loop's, let go when it hears
+            // of it, has nothing left to run.
+            let _ = timed::call(
+                "mic-stop",
+                "letting go of the microphone that broke",
+                STOP_WITHIN,
+                move || mic.close(),
+            );
+            self.recorded = None;
+            self.say(SoundDone::MicOff);
+        }
     }
 
     /// Makes or lets go of the sound and the microphone as wanted.
     fn sync(&mut self) {
+        self.check();
         if self.wanted.audio && self.audio.is_none() && self.audio_retry.due() {
             let router = self.router.clone();
             let started = timed::call(

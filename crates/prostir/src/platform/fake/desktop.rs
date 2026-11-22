@@ -18,6 +18,8 @@
 //! - `record on`, `record off`: a program records from the headset's microphone;
 //! - `sound-events stop`: the sound system's events end, as when `pactl subscribe`
 //!   dies;
+//! - `sound-gone`: the sound system loses Prostir's devices (the sound device and
+//!   the microphone), as when PipeWire restarts;
 //! - `fail-source Fake-3 2`: the next two starts of that output's picture source fail
 //!   (it may not be made yet), as when KWin's PipeWire node of an output is gone;
 //! - `hang make 20`, `hang place 20`, `hang encoder-stop 20`, `hang sound-start 20`:
@@ -557,6 +559,11 @@ fn command(line: &str) -> Result<()> {
         ["sound-events", "stop"] => {
             super::audio::stop_events();
             info!("fake desktop: the sound system's events stopped");
+            return Ok(());
+        }
+        ["sound-gone"] => {
+            super::audio::gone();
+            info!("fake desktop: the sound system lost Prostir's devices");
             return Ok(());
         }
         _ => {}

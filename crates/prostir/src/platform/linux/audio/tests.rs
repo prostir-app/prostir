@@ -127,3 +127,64 @@ fn a_late_drop_leaves_the_new_device_alone() {
     assert_eq!(there, Some(new_id), "the late drop removed the new device");
     assert_eq!(gone, None, "the new device goes with its own drop");
 }
+
+/// Waits up to 3 s for `done`.
+fn within_3_s(done: impl Fn() -> bool) -> bool {
+    let until = Instant::now() + Duration::from_secs(3);
+    while !done() {
+        if Instant::now() > until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+/// The headset's sound device removed while the sound goes to it (as when the sound
+/// system restarts): the capture says nothing and moves to another device (the PC's
+/// speakers), and that is noticed. By hand, on this PC's PipeWire: `cargo test -p
+/// prostir -- --ignored a_removed_sound_device`. It makes only a device of its own
+/// (`prostir_test_gone_sink`, never the default) and removes it.
+#[test]
+#[ignore = "by hand: makes a PipeWire node of its own"]
+fn a_removed_sound_device_is_noticed() {
+    const NAME: &str = "prostir_test_gone_sink";
+    gst::init().unwrap();
+    let out = AudioOut::start_as(NAME, "Prostir test", false, |_| {}).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(out.alive(), "fine while its device is there");
+    let id = node_id(NAME).unwrap();
+    run(
+        Command::new("pw-cli").args(["destroy", &id.to_string()]),
+        TIMEOUT,
+    )
+    .unwrap();
+    assert!(within_3_s(|| !out.alive()), "the device went unnoticed");
+    drop(out);
+    assert_eq!(node_id(NAME), None);
+}
+
+/// The headset microphone's device removed (as when the sound system restarts): its
+/// `pw-loopback` ends, and that is noticed; closed, it runs nothing more when it goes.
+/// By hand, on this PC's PipeWire: `cargo test -p prostir -- --ignored
+/// a_removed_microphone`. It makes only devices of its own (`prostir_test_gone_mic`,
+/// never the default) and removes them.
+#[test]
+#[ignore = "by hand: makes PipeWire nodes of its own"]
+fn a_removed_microphone_is_noticed() {
+    const NAME: &str = "prostir_test_gone_mic";
+    const FEED: &str = "prostir_test_gone_feed";
+    let mic = MicIn::start_as(NAME, FEED, false).unwrap();
+    assert!(mic.alive(), "fine while its device is there");
+    let id = node_id(NAME).unwrap();
+    run(
+        Command::new("pw-cli").args(["destroy", &id.to_string()]),
+        TIMEOUT,
+    )
+    .unwrap();
+    assert!(within_3_s(|| !mic.alive()), "the microphone went unnoticed");
+    mic.close();
+    assert!(!mic.alive());
+    drop(mic);
+    assert_eq!(node_id(FEED), None);
+}
