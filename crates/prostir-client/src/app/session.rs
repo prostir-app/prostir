@@ -38,8 +38,7 @@ impl Model {
                 };
                 self.session.reached(step, pc, addr, now);
                 if let Some(host) = paired {
-                    let text = self.texts().f("note-paired", &[("pc", host.into())]);
-                    self.tell(Note::done(None, &text), true, true);
+                    self.say_paired(host);
                 }
             }
             NetEvent::PairOffer { key, addr, why } => {
@@ -191,8 +190,19 @@ impl Model {
         opened_with: &HeadsetState,
     ) {
         info!("connected to {addr}, PC {pc}, language {language:?}");
+        // Paired again inside the session's opening (the PC had forgotten the
+        // headset): said as for a new PC.
+        let paired = match &self.session.search().attempt {
+            Some(Attempt::Pairing { key, view, .. }) if PcId::of(key) == pc => {
+                Some(view.host.clone())
+            }
+            _ => None,
+        };
         let texts = self.texts().clone();
         self.session.connected_to(pc, addr, &texts);
+        if let Some(host) = paired {
+            self.say_paired(host);
+        }
         self.sessions.insert(pc);
         self.world.connected(pc);
         if language.is_some() && language != self.settings.pc_language {
@@ -223,6 +233,12 @@ impl Model {
             self.tell_all(&ClientMsg::Asleep);
         }
         self.menu.ip_input = None;
+    }
+
+    /// The headset paired with the PC called `host`: said once.
+    fn say_paired(&mut self, host: String) {
+        let text = self.texts().f("note-paired", &[("pc", host.into())]);
+        self.tell(Note::done(None, &text), true, true);
     }
 
     /// PC `pc` listed its displays anew (see `World::listed`): the displays gone end

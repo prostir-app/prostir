@@ -285,22 +285,22 @@ fn before_trust(conn: &mut Conn, stream: TcpStream) -> io::Result<Option<(Wire, 
     };
     // A PC we have never paired with: pair only once the user said so in the menu,
     // and never on our own (a hostile PC on the network could keep guessing codes).
-    if !trusted && !pair_if_approved(conn, &mut wire)? {
+    if !trusted && !pair_if_approved(conn, &mut wire, OfferWhy::New)? {
         return Ok(None);
     }
     Ok(Some((wire, language)))
 }
 
-/// Pairs if the user agreed to (`true` once paired); otherwise asks them and ends the
-/// connection (the PC must not be held waiting for an answer).
-fn pair_if_approved(conn: &mut Conn, wire: &mut Wire) -> io::Result<bool> {
+/// Pairs if the user agreed to (`true` once paired); otherwise asks them (saying
+/// `why`) and ends the connection (the PC must not be held waiting for an answer).
+fn pair_if_approved(conn: &mut Conn, wire: &mut Wire, why: OfferWhy) -> io::Result<bool> {
     if conn.d.pair == Some(wire.peer.key) {
         return pair(conn, wire);
     }
     conn.d.shared.tell(NetEvent::PairOffer {
         key: wire.peer.key,
         addr: conn.addr,
-        why: OfferWhy::New,
+        why,
     });
     info!(
         "an unknown PC at {}: waiting for the user to approve pairing",
@@ -482,9 +482,11 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
     let snapshot = loop {
         match read(wire)? {
             HostMsg::Snapshot { parts } => break parts,
+            // A PC this headset trusts no longer knows it: one of its own that forgot
+            // it, not a new one.
             HostMsg::PairingRequired => {
                 wire.packets.set_limits(HostMsg::limits(false));
-                if !pair_if_approved(conn, wire)? {
+                if !pair_if_approved(conn, wire, OfferWhy::Forgotten)? {
                     return Ok(());
                 }
                 wire.feedback.send(open.clone())?;

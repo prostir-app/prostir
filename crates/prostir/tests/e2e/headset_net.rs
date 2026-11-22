@@ -242,7 +242,7 @@ fn the_headset_forgets_the_pc() {
 }
 
 /// A PC that does not trust the headset (the headset trusts it): told to pair, the
-/// headset offers it to the user and does not open a session.
+/// headset offers it to the user as a PC that forgot it, and opens no session.
 #[test]
 fn a_pc_that_does_not_trust_the_headset_is_offered() {
     let dir = TestDir::new("headset-net-stranger");
@@ -256,7 +256,7 @@ fn a_pc_that_does_not_trust_the_headset_is_offered() {
         NetEvent::PairOffer { why, .. } => Some(why),
         _ => None,
     });
-    assert_eq!(why, OfferWhy::New);
+    assert_eq!(why, OfferWhy::Forgotten, "its own PC, which forgot it");
     let opened = wait(&rx, START, |e| match e {
         NetEvent::Ended { ended, .. } => Some(ended.opened),
         _ => None,

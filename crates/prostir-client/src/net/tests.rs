@@ -408,7 +408,7 @@ fn forgetting_leaves_and_drops_the_pc() {
 }
 
 /// A PC the headset does not trust is offered (before anything is sent); one that no
-/// longer trusts the headset too, when it says so.
+/// longer trusts the headset too, when it says so, as a PC that forgot it.
 #[test]
 fn strangers_are_offered_to_the_user() {
     let dir = temp_dir("unknown");
@@ -429,7 +429,7 @@ fn strangers_are_offered_to_the_user() {
         NetEvent::PairOffer { why, .. } => Some(why),
         _ => None,
     });
-    assert_eq!(why, OfferWhy::New);
+    assert_eq!(why, OfferWhy::Forgotten, "a PC of its own that forgot it");
     let ended = wait(&rx, |e| match e {
         NetEvent::Ended { pc, ended, .. } => Some((pc, ended.opened)),
         _ => None,
