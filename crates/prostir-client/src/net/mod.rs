@@ -819,7 +819,7 @@ impl Here<'_> {
                         }
                     }
                 }
-                if removed {
+                if removed || keys.is_empty() {
                     // First, so a connection that looks its PC up from now on finds it
                     // gone; one that took it already is left below.
                     shared.trusted_now(trusted);

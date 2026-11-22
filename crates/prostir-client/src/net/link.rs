@@ -51,6 +51,9 @@ const REPORT_EVERY: Duration = Duration::from_secs(10);
 pub const SILENCE: Duration = Duration::from_secs(5);
 /// Wrong codes in a row before the headset stops and asks again.
 const PAIR_ATTEMPTS: u32 = 3;
+/// After the PC's words of refusal, how long its answer that ends the attempt is
+/// waited for.
+const REFUSAL_ENDS_WITHIN: Duration = Duration::from_secs(2);
 
 /// A dial the core asked for, with what the network thread knew then.
 pub(super) struct Dial {
@@ -383,12 +386,17 @@ fn short_text(text: &str) -> String {
 /// refusal, and the user is asked again (not a wrong code, and no new request on
 /// its own, which the PC would only refuse again).
 fn pc_refused(conn: &mut Conn, wire: &mut Wire, pc_shows: bool) -> io::Result<bool> {
-    // What it said, up to its answer.
+    // What it said, up to its answer (a moment for it: the PC sends both together).
+    wire.receiver.set_idle_limit(Some(REFUSAL_ENDS_WITHIN));
     loop {
-        match read(wire)? {
-            HostMsg::PairResult { .. } => break,
-            HostMsg::Error { text } => conn.d.shared.tell(NetEvent::HostError(short_text(&text))),
-            other => return Err(io::Error::other(format!("unexpected {other:?}"))),
+        match read(wire) {
+            Ok(HostMsg::PairResult { .. }) => break,
+            Ok(HostMsg::Error { text }) => {
+                conn.d.shared.tell(NetEvent::HostError(short_text(&text)));
+            }
+            Ok(other) => return Err(io::Error::other(format!("unexpected {other:?}"))),
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => break,
+            Err(e) => return Err(e),
         }
     }
     info!("pairing with {}: the PC did not take part", conn.addr);

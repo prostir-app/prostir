@@ -261,6 +261,24 @@ fn a_session_opens_streams_and_comes_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Forgetting a PC the file does not have (gone already) is still answered with the
+/// list, which the menu waits for.
+#[test]
+fn forgetting_a_pc_not_kept_still_answers() {
+    let dir = temp_dir("forget-unknown");
+    let (pc, mut net, rx, _) = start(&dir, false, false);
+    wait(&rx, |e| matches!(e, NetEvent::Paired(_)).then_some(()));
+    net.send(NetCmd::Forget(PcId::of(&[42; 32])));
+    let list = wait(&rx, |e| match e {
+        NetEvent::Paired(list) => Some(list),
+        _ => None,
+    });
+    assert_eq!(list.len(), 1, "the PC trusted stays");
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The events until the connection of step `step` ended (within 10 s), in order.
 fn until_ended(rx: &Receiver<NetEvent>, step: u32) -> Vec<NetEvent> {
     let until = Instant::now() + Duration::from_secs(10);
@@ -436,9 +454,14 @@ fn leaving_ends_every_stream() {
 
 /// A PC that takes the connection and the versions, then refuses each request to pair
 /// with `text` (as the PC app does when it has no dialog for the code, or another
-/// headset is pairing): its address and key, and what the headset asked of it, by the
-/// messages' names, once the headset is gone.
-fn refusing_pc(dir: &Path, text: &'static str) -> (SocketAddr, [u8; 32], JoinHandle<Vec<String>>) {
+/// headset is pairing), and its answer that ends the attempt unless `no_result`: its
+/// address and key, and what the headset asked of it, by the messages' names, once the
+/// headset is gone.
+fn refusing_pc(
+    dir: &Path,
+    text: &'static str,
+    no_result: bool,
+) -> (SocketAddr, [u8; 32], JoinHandle<Vec<String>>) {
     use prostir_proto::handshake;
     use prostir_proto::link::tcp::{NoiseTcp, Plain};
     use prostir_proto::packet::{self, lane};
@@ -467,10 +490,12 @@ fn refusing_pc(dir: &Path, text: &'static str) -> (SocketAddr, [u8; 32], JoinHan
             let name = format!("{msg:?}");
             asked.push(name.split([' ', '{', '(']).next().unwrap_or("").to_owned());
             if matches!(msg, ClientMsg::PairBegin { .. }) {
-                for reply in [
+                let replies = [
                     HostMsg::Error { text: text.into() },
                     HostMsg::PairResult { tag: None },
-                ] {
+                ];
+                let n = if no_result { 1 } else { 2 };
+                for reply in replies.into_iter().take(n) {
                     let sent = reply.encode().and_then(|m| {
                         packet::send_whole(&mut *link.sender, lane::CONTROL, m, 1200)
                     });
@@ -488,14 +513,16 @@ fn refusing_pc(dir: &Path, text: &'static str) -> (SocketAddr, [u8; 32], JoinHan
 /// The PC refuses to pair (no dialog for the code, or another headset pairing): the
 /// headset says the PC's words and asks the user again at once, with no new request
 /// and no count of wrong codes; the search pauses as after a refusal. Whichever side
-/// was to show the code: also while the user waits for the PC's code to type.
+/// was to show the code: also while the user waits for the PC's code to type. Its
+/// answer that ends the attempt is waited for a moment only (not the minutes a code
+/// takes).
 #[test]
 fn a_pc_that_refuses_to_pair_is_not_asked_again() {
-    for pc_shows_code in [false, true] {
-        let dir = temp_dir(&format!("refused-{pc_shows_code}"));
+    for (pc_shows_code, no_result) in [(false, false), (true, false), (false, true), (true, true)] {
+        let dir = temp_dir(&format!("refused-{pc_shows_code}-{no_result}"));
         let headset_dir = dir.join("headset");
         std::fs::create_dir_all(&headset_dir).unwrap();
-        let (addr, key, pc) = refusing_pc(&dir, "No dialog");
+        let (addr, key, pc) = refusing_pc(&dir, "No dialog", no_result);
         let (tx, rx) = mpsc::channel();
         let mut net = Net::start(
             Config {
