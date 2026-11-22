@@ -422,6 +422,36 @@ mod tests {
         );
     }
 
+    /// `due` says when `tick` has something to do: a request that waits for
+    /// [`ASK_EVERY`] since the last one, the headset's level once the device rested
+    /// that long, and nothing when all is done.
+    #[test]
+    fn due_is_when_the_next_tick_acts() {
+        let start = Instant::now();
+        let mut pc = PcVolume::default();
+        assert_eq!(pc.due(), None, "nothing to do");
+        assert!(matches!(pc.device(30, false, start), Some(Act::Ask(_))));
+        assert_eq!(pc.due(), None, "asked, nothing waits");
+        let moved = start + Duration::from_millis(10);
+        assert_eq!(pc.device(40, false, moved), None, "too soon to ask again");
+        assert_eq!(pc.due(), Some(start + ASK_EVERY), "a request waits");
+        assert!(matches!(pc.tick(start + ASK_EVERY), Some(Act::Ask(_))));
+        let answer = Volume {
+            level: 40,
+            muted: false,
+            seq: 0,
+            ask: 2,
+        };
+        let answered = start + ASK_EVERY + Duration::from_millis(5);
+        assert_eq!(pc.from_headset(&answer, answered), None, "still moving");
+        assert_eq!(pc.due(), Some(moved + ASK_EVERY), "the level waits");
+        assert!(matches!(
+            pc.tick(moved + ASK_EVERY),
+            Some(Act::Write { .. })
+        ));
+        assert_eq!(pc.due(), None, "all done");
+    }
+
     /// The slider and the buttons at the same moment: the headset's level wins.
     #[test]
     fn at_the_same_time_the_headset_wins() {

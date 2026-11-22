@@ -107,6 +107,52 @@ mod tests {
         assert_eq!(read(&luma, w, w, h), Some(0x1234_5678));
     }
 
+    /// The layout is shared by the PC and the headset: 42 cells of 16 pixels, 672
+    /// pixels along the top, and nothing drawn to the right of them or below.
+    #[test]
+    fn the_code_is_672_by_16_pixels() {
+        assert_eq!((CELLS, CELL), (42, 16));
+        let (w, h) = (800, 20);
+        let mut luma = vec![128u8; w * h];
+        draw(&mut luma, w, w, h, 0);
+        for (y, row) in luma.chunks(w).enumerate() {
+            if y < 16 {
+                assert!(row[..16].iter().all(|b| *b == WHITE), "row {y}");
+                assert!(row[16..672].iter().all(|b| *b == BLACK), "row {y}");
+                assert!(row[672..].iter().all(|b| *b == 128), "row {y}");
+            } else {
+                assert!(row.iter().all(|b| *b == 128), "row {y}");
+            }
+        }
+    }
+
+    /// A picture narrower or lower than the code holds none: nothing is drawn into
+    /// it, and nothing read from it, even when its rows lie in a wider buffer.
+    #[test]
+    fn a_picture_smaller_than_the_code_holds_none() {
+        let stride = 800;
+        let mut luma = vec![7u8; stride * 20];
+        draw(&mut luma, stride, 671, 20, 42);
+        assert!(luma.iter().all(|b| *b == 7), "too narrow to draw");
+        draw(&mut luma, stride, 800, 20, 42);
+        assert_eq!(read(&luma, stride, 800, 20), Some(42));
+        assert_eq!(read(&luma, stride, 671, 20), None, "too narrow to read");
+        assert_eq!(read(&luma, stride, 800, 15), None, "too low to read");
+    }
+
+    /// A cell's middle at mid grey (128) is a 0: only brighter is a 1.
+    #[test]
+    fn mid_grey_is_black() {
+        let (w, h) = (CELLS * CELL, CELL);
+        let mut luma = vec![0u8; w * h];
+        draw(&mut luma, w, w, h, 0);
+        // The first cell of the value is black; make it mid grey.
+        for row in luma.chunks_mut(w) {
+            row[2 * CELL..3 * CELL].fill(128);
+        }
+        assert_eq!(read(&luma, w, w, h), Some(0));
+    }
+
     /// A plane one byte short of the code's last row is left as it is.
     #[test]
     fn a_plane_too_short_for_the_code_is_untouched() {
