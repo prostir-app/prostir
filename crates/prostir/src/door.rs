@@ -69,10 +69,27 @@ pub const MAX_NEARBY: usize = 16;
 /// A headset's name as the PC shows it, at most so many characters.
 pub const MAX_NAME_CHARS: usize = 32;
 
-/// Whether a headset that asked wants the notice of a new headset nearby: not one of
-/// this PC's, no answer (the PC is paired), the pairing window closed.
+/// Whether a headset that asked wants the notice of a new headset nearby: it looks for
+/// a PC to pair with (its query gives its name; a paired headset that asks without
+/// this PC's tag, say right after an update, gives none and wants nothing), it is not
+/// one of this PC's, it got no answer (the PC is paired), the pairing window closed.
 pub fn wants_notice(asker: &Asker, pairing: bool) -> bool {
-    !asker.answered && !asker.ours && !pairing
+    !asker.answered && !asker.ours && !pairing && has_name(asker.name.as_str())
+}
+
+/// Whether `name` keeps a letter once cleaned (see [`clean_name`]), without making
+/// anything.
+fn has_name(name: &str) -> bool {
+    name.chars()
+        .any(|c| !c.is_whitespace() && !c.is_control() && !bidi(c))
+}
+
+/// A character that changes the direction of text.
+fn bidi(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 /// Whether the notice of a new headset may be shown at `now`, [`NOTICE_EVERY`] at
@@ -107,12 +124,6 @@ pub fn notice_due(mark: &std::path::Path, now: std::time::SystemTime) -> bool {
 /// direction-changing characters (which could make it read as something else), trimmed,
 /// [`MAX_NAME_CHARS`] at most.
 pub fn clean_name(name: &str) -> String {
-    let bidi = |c: char| {
-        matches!(
-            c,
-            '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-        )
-    };
     name.chars()
         .filter(|c| !c.is_control() && !bidi(*c))
         .collect::<String>()
@@ -124,9 +135,9 @@ pub fn clean_name(name: &str) -> String {
         .to_owned()
 }
 
-/// A headset that asked for this PC lately.
+/// A headset that asked for this PC lately, looking for a PC to pair with.
 struct Near {
-    /// Its name, or its address when it gave none.
+    /// Its name.
     label: String,
     from: SocketAddr,
     at: Instant,
@@ -214,17 +225,16 @@ impl Door {
         self.last = Some(api::PairResult::Wrong);
     }
 
-    /// A headset that is not one of this PC's asked at `now`: it is nearby (by its
-    /// name, cleaned, else its address; [`MAX_NEARBY`] at most, the latest kept).
-    /// Whether it wants the notice of a new headset (see [`wants_notice`]; whether one
-    /// is shown now is [`notice_due`]'s).
+    /// A headset that is not one of this PC's asked at `now`. One that looks for a PC
+    /// to pair with (it gave its name) is nearby, by its name cleaned ([`MAX_NEARBY`]
+    /// at most, the latest kept); one that gave none (a paired headset without this
+    /// PC's tag) is not anyone's business. Whether it wants the notice of a new headset
+    /// (see [`wants_notice`]; whether one is shown now is [`notice_due`]'s).
     pub fn asked(&mut self, asker: &Asker, now: Instant) -> bool {
-        let name = clean_name(&asker.name);
-        let label = if name.is_empty() {
-            asker.from.ip().to_string()
-        } else {
-            name
-        };
+        let label = clean_name(asker.name.as_str());
+        if label.is_empty() {
+            return false;
+        }
         self.nearby.retain(|n| n.from.ip() != asker.from.ip());
         if self.nearby.len() >= MAX_NEARBY {
             self.nearby.remove(0);
@@ -349,7 +359,7 @@ mod tests {
         Asker {
             from: "192.168.1.30:5000".parse().unwrap(),
             ours,
-            name: name.into(),
+            name: crate::find::HeadsetName::new(name),
             answered,
         }
     }
@@ -413,14 +423,25 @@ mod tests {
         let now = Instant::now();
         let mut door = Door::new(PairingOpen::default(), false, now);
         assert!(!door.asked(&asker(true, true, ""), now), "one of its own");
-        assert!(door.asked(&asker(false, false, ""), now));
-        door.open_pairing(now, PAIRING_TIME);
+        assert!(door.asked(&asker(false, false, "Quest 3S"), now));
         assert!(
             !door.asked(&asker(false, false, ""), now),
+            "a paired headset without this PC's tag: it looks for no PC to pair with"
+        );
+        assert!(
+            !door.asked(&asker(false, false, " \u{202e}\n"), now),
+            "no name left"
+        );
+        door.open_pairing(now, PAIRING_TIME);
+        assert!(
+            !door.asked(&asker(false, false, "Quest 3S"), now),
             "the window is open"
         );
         door.stop_pairing();
-        assert!(!door.asked(&asker(false, true, ""), now), "it was answered");
+        assert!(
+            !door.asked(&asker(false, true, "Quest 3S"), now),
+            "it was answered"
+        );
     }
 
     /// The notice once a minute at most, kept in a file every program reads: a second
@@ -446,25 +467,27 @@ mod tests {
         let now = Instant::now();
         let mut door = Door::new(PairingOpen::default(), false, now);
         for i in 0..100u8 {
-            let mut a = asker(false, false, "");
+            let mut a = asker(false, false, &format!("Headset {i}"));
             a.from = SocketAddr::from(([10, 0, 0, i], 5000));
             door.asked(&a, now);
         }
         assert_eq!(door.nearby().len(), MAX_NEARBY);
-        assert_eq!(door.nearby().last().unwrap(), "10.0.0.99");
+        assert_eq!(door.nearby().last().unwrap(), "Headset 99");
         assert_eq!(clean_name("  Quest\u{202e}3S\n\t "), "Quest3S");
         assert_eq!(clean_name(&"я".repeat(50)).chars().count(), MAX_NAME_CHARS);
         assert_eq!(clean_name("\u{2066}\u{0007}"), "");
     }
 
-    /// Nearby: by name, else by address, one entry for each address, forgotten a
-    /// minute after it last asked.
+    /// Nearby: by name (a headset that gives none is not listed), one entry for each
+    /// address, forgotten a minute after it last asked.
     #[test]
     fn headsets_nearby_are_forgotten_after_a_minute() {
         let now = Instant::now();
         let mut door = Door::new(PairingOpen::default(), false, now);
         door.asked(&asker(false, false, ""), now);
-        assert_eq!(door.nearby(), ["192.168.1.30"]);
+        assert!(door.nearby().is_empty(), "no name: not looking to pair");
+        door.asked(&asker(false, false, "Quest 3"), now);
+        assert_eq!(door.nearby(), ["Quest 3"]);
         door.asked(
             &asker(false, false, "Quest 3S"),
             now + Duration::from_secs(1),

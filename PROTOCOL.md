@@ -140,7 +140,8 @@ What the tags hide, and what they do not:
 - Someone listening does not learn which PC is looked for (the nonce changes every
   time), nor tell headsets apart by how many PCs they know (8 tags at least, random
   ones among them, in a random order); the PC does not learn which other PCs the
-  headset knows.
+  headset knows. A query that gives no name (a paired headset without this PC's tag,
+  say right after an update) brings no notice on a PC (see below).
 - Not hidden: that a headset asks, from which address, its name while it looks for a
   PC to pair with, and that a PC answers (with its name and port). A query is not
   bound to a time: a PC answers each nonce once within 10 s (the same query sent as a
@@ -151,21 +152,24 @@ What the tags hide, and what they do not:
 Limits: a datagram that is not a whole query of 128 to 512 bytes is dropped unread
 (the host drops it in the kernel, with a socket filter); an answer is always smaller
 than the smallest query, so a forged sender address gets less than it sent and a PC
-cannot be used to amplify traffic; a PC looks at 200 datagrams a second at most
-(the rest are dropped unread) and sends at most 20 answers a second in all. Nothing a
-query says changes what a PC keeps: who is trusted, the find secrets and the pairing
+cannot be used to amplify traffic. A query with the PC's own tag is always looked at
+and answered (once for each nonce); of the rest, a PC looks at 20 a second from one
+address and 200 in all at most (implementation-defined; the others are dropped) and
+answers 20 a second at most. Nothing a query says changes what a PC keeps: who is trusted, the find secrets and the pairing
 window change only by the person at the PC or inside an encrypted session.
 
 Neither is encrypted: an answer is a hint where to connect, and trust comes from the
 handshake. Typing the PC's address and USB work whether the PC answers or not
 (pairing is protected by its code).
 
-**Implementation-defined**, the host: a query from a headset that is not its own,
-while the host does not answer it (paired, pairing closed), shows a notification on
-the PC, "New headset nearby. Pair?", with a button that opens the pairing window, at
-most once a minute. The headsets that asked recently (by name, or by address without
-a name) are the local API's `nearby`. A query from one of its own headsets lets a
-sleeping PC start ahead of the connection that follows.
+**Implementation-defined**, the host: a query from a headset that is not its own and
+looks for a PC to pair with (it gives its name), while the host does not answer it
+(paired, pairing closed), shows a notification on the PC, "New headset nearby. Pair?",
+with a button that opens the pairing window, at most once a minute. A query without a
+name (a paired headset that has no tag of this PC yet, say right after an update)
+brings no notice. The headsets that asked with a name recently are the local API's
+`nearby`. A query from one of its own headsets, answered, lets a sleeping PC start
+ahead of the connection that follows.
 
 **Implementation-defined**, a sleeping host: nothing of it wakes while nobody on the
 network talks to it. Queries that get no answer wake only a light part of it (the
@@ -196,9 +200,14 @@ opened; never from an answer). A round of its search goes:
    not answer (a TCP connection wakes a sleeping PC whole, so not more often). This is
    how the first connection works after an update, before the headset has a find
    secret, and with a secret gone stale beyond what the PC keeps;
-7. the one PC that answered every query (unpaired, or its pairing window open), if
-   exactly one did: a PC the headset does not trust is offered to the user, never
-   paired on its own.
+7. while it trusts no PC, the one PC that answered every query (unpaired, or its
+   pairing window open), if exactly one did: a PC the headset does not trust is
+   offered to the user, never paired on its own. With trusted PCs, such answers are
+   only listed for the user to pick.
+
+"Not now" to a PC offered leaves that PC alone (it is not dialed on its own until the
+user picks something), while trusted PCs are still connected to by themselves. Each
+query goes from a new UDP port, so the port does not tie one query to the next.
 
 A round goes once a second for the first 30 s of a search, then every 3 s. Nothing is
 asked while the headset is off the head or while it is in a session with as many PCs as

@@ -107,8 +107,15 @@ struct Sorter {
     /// The PC's find secret's file (the full program makes a new one when it forgets a
     /// headset), and the older ones still owed next to it.
     secret: PathBuf,
+    /// Who may get an answer, as the files said lately: read again after
+    /// [`OPEN_KEPT_FOR`], so a stream of queries does not read the files for each.
+    open: Option<(Instant, find::Open)>,
     notice: Option<(Notice, Instant)>,
 }
+
+/// How long the watcher goes by what the files said (the full program, which changes
+/// them, does not run meanwhile; when it ends, they are read again).
+const OPEN_KEPT_FOR: Duration = Duration::from_secs(1);
 
 impl Sorter {
     fn new(port: u16) -> Result<Self> {
@@ -120,6 +127,7 @@ impl Sorter {
             responder: Responder::new(port, crate::platform::hostname()),
             trust: dir.join("paired_headsets"),
             secret,
+            open: None,
             notice: None,
         })
     }
@@ -161,8 +169,18 @@ impl Sorter {
     /// own headsets asked. A stranger it does not answer brings the notice, once a
     /// minute at most however many programs ask (see `door::notice_due`).
     fn query(&mut self, udp: &std::net::UdpSocket) -> Option<Wake> {
-        let (trust, secret) = (&self.trust, &self.secret);
-        let open = || Self::open(trust, secret);
+        let (trust, secret, kept) = (&self.trust, &self.secret, &mut self.open);
+        let open = || {
+            let now = Instant::now();
+            match *kept {
+                Some((at, open)) if now.saturating_duration_since(at) < OPEN_KEPT_FOR => open,
+                _ => {
+                    let open = Self::open(trust, secret);
+                    *kept = Some((now, open));
+                    open
+                }
+            }
+        };
         let asker = match find::answer_one(udp, &mut self.responder, open) {
             Ok(Some(asker)) => asker,
             Ok(None) => return None,
@@ -171,7 +189,11 @@ impl Sorter {
                 return None;
             }
         };
+        // Answered: a repeat of a query answered lately starts nothing.
         if asker.ours {
+            if !asker.answered {
+                return None;
+            }
             info!("one of this PC's headsets asked for it at {}", asker.from);
             return Some(Wake::Headset);
         }
@@ -419,6 +441,8 @@ pub fn watch(sockets: Sockets, start: Start, window: bool) -> Result<i32> {
             if pid == c.pid {
                 let ran = c.started.elapsed();
                 child = None;
+                // The full program may have paired or forgotten headsets.
+                sorter.open = None;
                 match ended(status) {
                     Some(0) => {
                         fails = 0;

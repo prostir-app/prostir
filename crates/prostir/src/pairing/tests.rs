@@ -218,9 +218,24 @@ fn an_old_find_secret_stays_valid_for_headsets_that_were_off() {
     let third = security.new_find_secret(&[other_off], |k| *k == on);
     let kept = load_find_secrets(&path).unwrap();
     assert_eq!(kept.current, third);
-    assert_eq!(kept.owed.get(&off), Some(&first));
+    assert_eq!(kept.owed.get(&off).map(|(s, _)| *s), Some(first));
     assert!(!kept.owed.contains_key(&other_off));
     assert_eq!(security.find_secrets().stale(), [first]);
+    // Should more old secrets be owed than are kept, the newest are.
+    let mut many = FindSecrets {
+        current: [0; 32],
+        ..FindSecrets::default()
+    };
+    for i in 1..=6u8 {
+        many.renew([i; 32], [[i; 32]]);
+    }
+    let newest = many.valid();
+    assert_eq!(newest.current, [6; 32]);
+    assert_eq!(
+        newest.stale(),
+        [[5; 32], [4; 32], [3; 32], [2; 32]],
+        "the newest four"
+    );
     // `off` connects and gets the current one: no old secret is valid any more.
     security.gave_find_secret(&off);
     assert!(security.find_secrets().stale().is_empty());

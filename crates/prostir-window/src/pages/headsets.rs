@@ -208,6 +208,18 @@ pub(super) fn headsets(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
     header(ui, v, Page::Headsets);
+    // Where a headset that does not find the PC by itself reaches it (the pairing card
+    // says it there).
+    if s.pairing.is_none() && !s.pc.addresses.is_empty() {
+        let list = s.pc.addresses.join(", ");
+        text(
+            ui,
+            tk.f("hs-address", &[("address", list.into())]),
+            tk.small(),
+            p.text_muted,
+        );
+        ui.add_space(tk.th.shape.spacing);
+    }
     let revision = match v.conn {
         Conn::Live { snap, .. } => snap.revision,
         _ => 0,

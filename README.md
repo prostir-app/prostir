@@ -707,15 +707,18 @@ window then never asks. The key for counting is in the source
 only add counts, so the worst anyone can do with it is inflate the numbers. See the
 [privacy policy](https://prostir.ishawyha.dev/privacy.html).
 
-Finding the PC does not tell a stranger it is there. The headset asks with tags made
-from a secret that the PC gives only to its paired headsets, inside the encrypted
-session, and a paired PC answers only those (or everyone while its pairing window is
-open). Each query looks different (a new random value, extra random tags, the
-headset's name only while it looks for a PC to pair with), so it does not tell
-headsets apart either. The PC answers at most 20 queries a second, with less than it
-received, and nothing in a query changes anything kept. Forgetting a headset makes a
-new secret; the old one stays valid only for paired headsets that were off then,
-until their next session. Ports are listed under [Firewall](#firewall).
+Asking for the PC does not tell a stranger it is there. The headset asks with tags
+made from a secret that the PC gives only to its paired headsets, inside the
+encrypted session, and a paired PC answers only those (or everyone while its pairing
+window is open). Its TCP port can still be found by a port scan. Each query looks
+different (a new random value, extra random tags, a new port, the headset's name only
+while it looks for a PC to pair with), so it does not tell headsets apart either. The
+PC answers its own headsets and at most 20 other queries a second, always with less
+than it received, and nothing in a query changes anything kept. Forgetting a headset
+makes a new secret. The old one stays valid until every paired headset that was off
+then has connected again: until then whoever holds it gets an answer, the forgotten
+headset too, though the PC no longer lets that one connect. Ports are listed under
+[Firewall](#firewall).
 
 To report a security problem privately, use
 [GitHub's private vulnerability reporting](https://github.com/OlexiyOdarchuk/prostir/security/advisories/new).
@@ -732,7 +735,7 @@ TCP port 47830. Allow it, see [Firewall](#firewall).
 network must not isolate clients (guest networks often do). A firewall can also block
 UDP port 47831. A new headset is answered only while the PC has no paired headset or
 "Pair a new headset" is open on the PC; the headset says so after a few seconds. Type
-the PC's IP on the keypad (the settings window shows it where you pair: once
+the PC's IP on the keypad (the settings window shows it on the Headsets page: once
 connected, the headset keeps it and asks there next time, also through a VPN), or use
 a cable (developer mode). A paired PC that does not answer for 30 s: check that
 Prostir runs on it.

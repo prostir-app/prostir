@@ -95,6 +95,11 @@ pub struct FoundHost {
     pub pairing: bool,
     /// When the answer came.
     pub heard: Instant,
+    /// What the menu's list shows for it (its name, and whether its pairing window is
+    /// open), and its address as the user reads it: made once, when it answers
+    /// ([`Session::heard`]), not for each frame.
+    pub label: String,
+    pub ip: String,
 }
 
 /// What the search screen says while nothing answers.
@@ -214,6 +219,10 @@ pub struct Search {
     choice: Option<SocketAddr>,
     /// "Change PC": nothing reconnects on its own until the user picks one.
     picking: bool,
+    /// The PC the user said "Not now" to (its address, and its number once known):
+    /// not dialed on its own until the user picks something, while other trusted PCs
+    /// still are.
+    declined: Option<(SocketAddr, PcId)>,
     /// The user agreed to pair with this PC (until when).
     approved: Option<([u8; 32], Instant)>,
     /// Pairing the other way round: the PC shows the code, the headset asks for it.
@@ -493,6 +502,7 @@ impl Session {
     pub fn connect_to(&mut self, addr: SocketAddr, now: Instant) {
         self.search.choice = Some(addr);
         self.search.picking = false;
+        self.search.declined = None;
         let others: Vec<PcId> = self
             .links
             .iter()
@@ -513,6 +523,7 @@ impl Session {
     pub fn change_pc(&mut self) {
         self.search.choice = None;
         self.search.picking = true;
+        self.search.declined = None;
         self.search.since = None;
         self.leave_all(HeadsetGoodbye::OtherPc);
         if self.attempt_addr().is_some() {
@@ -539,11 +550,14 @@ impl Session {
             self.search.approved = Some((key, now + APPROVAL));
             self.search.choice = Some(addr);
             self.search.picking = false;
+            self.search.declined = None;
         } else {
-            // Not this PC: wait for the user to pick one.
+            // Not this PC: it is not dialed on its own any more. With trusted PCs the
+            // search goes on for them; without, it waits for the user to pick one.
             self.search.approved = None;
             self.search.choice = None;
-            self.search.picking = true;
+            self.search.picking = self.paired.is_empty();
+            self.search.declined = Some((addr, PcId::of(&key)));
         }
         self.round_now(now);
     }
@@ -588,16 +602,38 @@ impl Session {
             .retain(|(pc, _)| paired.iter().any(|p| p.pc == *pc));
     }
 
-    /// A PC answered a query at `now`: listed (in place of its earlier answer), and a
-    /// trusted one is connected to at once while the round waits for answers.
-    pub fn heard(&mut self, host: FoundHost, now: Instant) {
-        let found = &mut self.search.found;
-        found.retain(|h| h.addr != host.addr && (host.pc.is_none() || h.pc != host.pc));
-        if found.len() >= FOUND_MAX {
-            found.remove(0);
-        }
+    /// A PC answered a query at `now`: listed (where its earlier answer was, so the list
+    /// keeps its order and a press picks the PC shown; a new one last), and a trusted
+    /// one is connected to at once while the round waits for answers.
+    pub fn heard(&mut self, mut host: FoundHost, now: Instant, texts: &Texts) {
+        host.label = if host.pairing {
+            format!("{} · {}", host.name, texts.t("connect-pairing-open"))
+        } else {
+            host.name.clone()
+        };
+        host.ip = host.addr.ip().to_string();
         let (addr, pc) = (host.addr, host.pc);
-        found.push(host);
+        let found = &mut self.search.found;
+        let same = |h: &FoundHost| h.addr == addr || (pc.is_some() && h.pc == pc);
+        match found.iter().position(same) {
+            Some(i) => {
+                found[i] = host;
+                // Another entry of the same PC (it moved): one is enough.
+                let mut k = 0;
+                found.retain(|h| {
+                    k += 1;
+                    k - 1 == i || !same(h)
+                });
+            }
+            None => {
+                if found.len() >= FOUND_MAX
+                    && let Some(oldest) = (0..found.len()).min_by_key(|&i| found[i].heard)
+                {
+                    found.remove(oldest);
+                }
+                found.push(host);
+            }
+        }
         let Round::Waiting { at: Plan::Ask, .. } = self.search.round else {
             return;
         };
@@ -608,6 +644,7 @@ impl Session {
         } else if self.search.choice.is_none()
             && !self.search.picking
             && pc.is_some_and(|pc| self.wants(pc))
+            && !self.is_declined(addr, pc)
         {
             self.dial(Plan::Answer, Dest::Addr(addr), now);
         }
@@ -825,12 +862,15 @@ impl Session {
     // ---- The time ----
 
     /// Once a pass of the main loop, with or without frames: answers too old are no
-    /// longer listed, the hint follows, and the next round of the search starts when it
-    /// is due.
-    pub fn tick(&mut self, now: Instant) {
+    /// longer listed, the hint follows the time (it lives in [`Search::hint`]), and the
+    /// next round of the search starts when it is due. Whether what the menu shows of
+    /// the search changed (the list of answers or the hint): time alone changes them.
+    pub fn tick(&mut self, now: Instant) -> bool {
+        let listed = self.search.found.len();
         self.search
             .found
             .retain(|h| now.saturating_duration_since(h.heard) < HEARD_WITHIN);
+        let hint = self.search.hint;
         let searching = self.worn
             && !self.quit
             && !self.links.values().any(|l| !matches!(l, Link::Lost { .. }));
@@ -848,6 +888,7 @@ impl Session {
         if matches!(self.search.round, Round::Idle) && self.may_search() {
             self.step_after(None, now);
         }
+        self.search.found.len() != listed || self.search.hint != hint
     }
 
     // ---- Inside ----
@@ -913,7 +954,11 @@ impl Session {
             at = Some(next);
             match next {
                 // USB: not while the user picks a PC or picked one on the network.
-                Plan::Usb if !picking && choice.is_none_or(|c| c.ip().is_loopback()) => {
+                Plan::Usb
+                    if !picking
+                        && choice.is_none_or(|c| c.ip().is_loopback())
+                        && !self.declined_addr(usb_addr()) =>
+                {
                     return self.dial(next, Dest::Usb, now);
                 }
                 Plan::Choice => {
@@ -930,7 +975,11 @@ impl Session {
                         return self.dial(next, Dest::Addr(addr), now);
                     }
                 }
-                Plan::HostFile if own_way => return self.dial(next, Dest::HostFile, now),
+                // Its address is not known here: not while a PC is declined (it may be
+                // that one).
+                Plan::HostFile if own_way && self.search.declined.is_none() => {
+                    return self.dial(next, Dest::HostFile, now);
+                }
                 Plan::LastHost if own_way => {
                     if let Some(pc) = self.last_due(now) {
                         self.search.last_dialed.retain(|(p, _)| *p != pc);
@@ -938,9 +987,10 @@ impl Session {
                         return self.dial(next, Dest::LastOf(pc), now);
                     }
                 }
-                // Exactly one PC answered everyone: just use it (unknown, it is offered
-                // to the user). Several: wait for a pick.
-                Plan::Sole if own_way => {
+                // Exactly one PC answered everyone and none is trusted: just use it
+                // (unknown, it is offered to the user). Several, or trusted PCs to wait
+                // for: listed, for the user to pick.
+                Plan::Sole if own_way && self.paired.is_empty() => {
                     if let Some(addr) = self.sole_other() {
                         return self.dial(next, Dest::Addr(addr), now);
                     }
@@ -1004,9 +1054,21 @@ impl Session {
         self.search
             .found
             .iter()
-            .rev()
-            .find(|h| h.pc.is_some_and(|pc| self.wants(pc)))
+            .filter(|h| h.pc.is_some_and(|pc| self.wants(pc)))
+            .filter(|h| !self.is_declined(h.addr, h.pc))
+            .max_by_key(|h| h.heard)
             .map(|h| h.addr)
+    }
+
+    /// Whether the user said "Not now" to the PC at `addr` (or to PC `pc`).
+    fn is_declined(&self, addr: SocketAddr, pc: Option<PcId>) -> bool {
+        self.search
+            .declined
+            .is_some_and(|(a, p)| a == addr || pc == Some(p))
+    }
+
+    fn declined_addr(&self, addr: SocketAddr) -> bool {
+        self.search.declined.is_some_and(|(a, _)| a == addr)
     }
 
     /// The address of the one PC that answered without being a trusted one (it
@@ -1024,6 +1086,7 @@ impl Session {
     fn last_due(&self, now: Instant) -> Option<PcId> {
         self.paired.iter().map(|p| p.pc).find(|pc| {
             self.wants(*pc)
+                && self.search.declined.is_none_or(|(_, d)| d != *pc)
                 && self
                     .search
                     .last_dialed
@@ -1118,6 +1181,14 @@ impl Session {
             addr.ip().to_string()
         }
     }
+}
+
+/// The PC over USB: `adb reverse` makes `127.0.0.1:47830` reach it.
+fn usb_addr() -> SocketAddr {
+    SocketAddr::new(
+        std::net::Ipv4Addr::LOCALHOST.into(),
+        prostir_proto::TCP_PORT,
+    )
 }
 
 /// The address of a link still on its way or in its session.

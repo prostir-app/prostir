@@ -90,14 +90,13 @@ impl Sim {
     /// An answer to the query under way: of trusted PC `n`, or (`None`) of one that
     /// answers everyone.
     fn answer(&mut self, n: Option<u8>, at: SocketAddr) {
-        let host = FoundHost {
-            name: n.map_or_else(|| "Desk".into(), |n| format!("PC {n}")),
-            addr: at,
-            pc: n.map(pc),
-            pairing: false,
-            heard: self.now,
-        };
-        self.s.heard(host, self.now);
+        let host = found(
+            n.map_or_else(|| "Desk".into(), |n| format!("PC {n}")),
+            at,
+            n.map(pc),
+            self.now,
+        );
+        self.s.heard(host, self.now, &self.texts);
     }
 
     /// The step is a query, sent around (and to `also`); whether it carries the name.
@@ -124,6 +123,19 @@ impl Sim {
 
     fn end(&mut self, step: StepId, n: Option<u8>, ended: &Ended, lasted: Duration) -> LinkEnded {
         self.s.ended(step, n.map(pc), ended, lasted, self.now)
+    }
+}
+
+/// An answer as the network thread tells it.
+fn found(name: String, addr: SocketAddr, pc: Option<PcId>, heard: Instant) -> FoundHost {
+    FoundHost {
+        name,
+        addr,
+        pc,
+        pairing: false,
+        heard,
+        label: String::new(),
+        ip: String::new(),
     }
 }
 
@@ -388,14 +400,9 @@ fn the_selftest_asks_its_fake_pc_alone() {
         panic!("{cmds:?}");
     };
     s.heard(
-        FoundHost {
-            name: "Prostir selftest".into(),
-            addr: addr(9),
-            pc: Some(pc(1)),
-            pairing: false,
-            heard: later,
-        },
+        found("Prostir selftest".into(), addr(9), Some(pc(1)), later),
         later,
+        &lang::builtin("en"),
     );
     let cmds: Vec<NetCmd> = s.take_cmds().collect();
     assert!(
@@ -761,4 +768,79 @@ fn pairing_again_inside_the_link() {
     sim.s.connected_to(pc(1), usb(), &sim.texts);
     assert!(sim.s.search().attempt.is_none(), "the pairing is over");
     assert!(sim.s.connected(pc(1)));
+}
+
+/// With a trusted PC, one that answers everyone is listed but not dialed on its own;
+/// "Not now" to an unknown PC leaves that one alone, and the trusted PC is still
+/// connected to by itself.
+#[test]
+fn trusted_pcs_go_on_after_not_now() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.missed(s);
+    let (s, _) = sim.asked(None);
+    sim.answer(None, addr(7));
+    sim.missed(s);
+    for cmd in miss_all(&mut sim) {
+        assert!(
+            !matches!(cmd, NetCmd::Dial { to: Dest::Addr(a), .. } if a == addr(7)),
+            "not dialed: a trusted PC is waited for"
+        );
+    }
+    assert_eq!(sim.s.search().found.len(), 1, "listed");
+    // An unknown PC over USB: offered, and "Not now".
+    sim.after(ASK_FAST);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    sim.s.dialed(s, usb());
+    sim.s.offered(key(5), usb(), OfferWhy::New, &sim.texts);
+    sim.end(s, None, &Ended::default(), MS);
+    sim.s.answer_offer(false, sim.now);
+    sim.after(ASK_FAST);
+    // USB is not dialed again; the query goes, and the trusted PC's answer is taken.
+    let (_, pairing) = sim.asked(None);
+    assert!(!pairing, "not looking for a new PC");
+    sim.answer(Some(1), addr(5));
+    let (_, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(5)));
+}
+
+/// A PC that answers again keeps its place in the list (a press picks the PC shown),
+/// and the list says what it shows once, when the answer comes; the time alone
+/// changing the list or the hint is told.
+#[test]
+fn the_list_keeps_its_order() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.after(MS);
+    let mut pairing = found("Desk".into(), addr(7), None, sim.now);
+    pairing.pairing = true;
+    sim.s.heard(pairing, sim.now, &sim.texts);
+    sim.answer(None, addr(8));
+    sim.now += Duration::from_secs(2);
+    sim.answer(None, addr(7));
+    let listed: Vec<_> = sim
+        .s
+        .search()
+        .found
+        .iter()
+        .map(|h| (h.addr, h.label.as_str(), h.ip.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (addr(7), "Desk", "192.168.1.7"),
+            (addr(8), "Desk", "192.168.1.8")
+        ]
+    );
+    let mut open = found("Desk".into(), addr(8), None, sim.now);
+    open.pairing = true;
+    sim.s.heard(open, sim.now, &sim.texts);
+    assert_eq!(sim.s.search().found[1].label, "Desk · pairing open");
+    // While the answers are fresh, nothing changes with the time.
+    assert!(!sim.s.tick(sim.now), "nothing changed");
+    sim.now += HEARD_WITHIN;
+    assert!(sim.s.tick(sim.now), "the answers went: the menu changes");
+    assert!(sim.s.search().found.is_empty());
 }

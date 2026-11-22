@@ -228,36 +228,39 @@ const NOT_FOR_HEADSETS: [&str; 9] = [
 pub fn local_addresses() -> Vec<Ipv4Addr> {
     let mut out = Vec::new();
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: getifaddrs fills `list`, which is walked read-only and freed once; each
-    // name is a NUL-terminated string the list owns.
-    unsafe {
-        if libc::getifaddrs(&raw mut list) != 0 {
-            return out;
-        }
-        let mut cur = list;
-        while let Some(ifa) = cur.as_ref() {
-            let flags = ifa.ifa_flags;
-            let up = flags & libc::IFF_UP as u32 != 0 && flags & libc::IFF_LOOPBACK as u32 == 0;
-            let name = if ifa.ifa_name.is_null() {
-                &[][..]
-            } else {
-                std::ffi::CStr::from_ptr(ifa.ifa_name).to_bytes()
-            };
-            let virtual_ = NOT_FOR_HEADSETS
-                .iter()
-                .any(|p| name.starts_with(p.as_bytes()));
-            let addr = ifa.ifa_addr;
-            if up && !virtual_ && !addr.is_null() && i32::from((*addr).sa_family) == libc::AF_INET {
-                let sin = &*addr.cast::<libc::sockaddr_in>();
-                let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-                if !ip.is_loopback() && !ip.is_link_local() && !out.contains(&ip) {
-                    out.push(ip);
-                }
-            }
-            cur = ifa.ifa_next;
-        }
-        libc::freeifaddrs(list);
+    // SAFETY: getifaddrs fills `list`, freed once below.
+    if unsafe { libc::getifaddrs(&raw mut list) } != 0 {
+        return out;
     }
+    let mut cur = list;
+    // SAFETY: `cur` is null or a node of `list`, alive until it is freed below.
+    while let Some(ifa) = unsafe { cur.as_ref() } {
+        let flags = ifa.ifa_flags;
+        let up = flags & libc::IFF_UP as u32 != 0 && flags & libc::IFF_LOOPBACK as u32 == 0;
+        let name = if ifa.ifa_name.is_null() {
+            &[][..]
+        } else {
+            // SAFETY: a NUL-terminated name the list owns, alive until it is freed.
+            unsafe { std::ffi::CStr::from_ptr(ifa.ifa_name) }.to_bytes()
+        };
+        let virtual_ = NOT_FOR_HEADSETS
+            .iter()
+            .any(|p| name.starts_with(p.as_bytes()));
+        let addr = ifa.ifa_addr;
+        // SAFETY: a non-null address the list owns.
+        let inet = !addr.is_null() && i32::from(unsafe { (*addr).sa_family }) == libc::AF_INET;
+        if up && !virtual_ && inet {
+            // SAFETY: an AF_INET address is a `sockaddr_in`.
+            let sin = unsafe { &*addr.cast::<libc::sockaddr_in>() };
+            let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+            if !ip.is_loopback() && !ip.is_link_local() && !out.contains(&ip) {
+                out.push(ip);
+            }
+        }
+        cur = ifa.ifa_next;
+    }
+    // SAFETY: the list getifaddrs made, freed once; nothing of it is used after.
+    unsafe { libc::freeifaddrs(list) };
     out
 }
 

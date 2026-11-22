@@ -156,6 +156,8 @@ mon-kept-desc = Kept for the next headset: they appear when it connects.
 
 hs-title = Headsets
 hs-sub = Headsets this PC trusts. A new headset needs a code only once.
+# $address (String): the PC's addresses, separated by commas
+hs-address = This PC's address, for a headset that does not find it by itself: { $address }
 hs-now = Connected now
 hs-last = Last connected { $when }
 hs-never = Last connected: not known

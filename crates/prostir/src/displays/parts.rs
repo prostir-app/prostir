@@ -210,7 +210,7 @@ impl Displays {
                 Display {
                     id: s.id.wire(),
                     kind,
-                    name: clip(&s.name(), state::MAX_DISPLAY_NAME),
+                    name: clip(&self.shown_name(s), state::MAX_DISPLAY_NAME),
                     mode: Mode {
                         w,
                         h,

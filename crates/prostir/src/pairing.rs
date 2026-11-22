@@ -316,22 +316,39 @@ pub struct Security {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FindSecrets {
     pub current: FindSecret,
-    /// The secret each such headset (by its key) still has.
-    pub owed: std::collections::BTreeMap<[u8; 32], FindSecret>,
+    /// The secret each such headset (by its key) still has, and when it stopped being
+    /// the current one (a number that grows with each new secret).
+    pub owed: std::collections::BTreeMap<[u8; 32], (FindSecret, u64)>,
 }
 
 impl FindSecrets {
-    /// What a query may be answered by: the current secret and those still owed.
+    /// What a query may be answered by: the current secret and those still owed, the
+    /// newest [`crate::find::STALE_KEPT`] of them (a headset that has an older one
+    /// reaches the PC by its last address). Nothing new is made.
     pub fn valid(&self) -> crate::find::Secrets {
-        crate::find::Secrets::with_stale(self.current, self.owed.values())
+        let mut newest = [[0u8; 32]; crate::find::STALE_KEPT];
+        let mut n = 0;
+        while n < newest.len() {
+            let taken = &newest[..n];
+            let next = self
+                .owed
+                .values()
+                .filter(|(s, _)| *s != self.current && !taken.contains(s))
+                .max_by_key(|(_, made)| *made);
+            let Some((secret, _)) = next else { break };
+            newest[n] = *secret;
+            n += 1;
+        }
+        crate::find::Secrets::with_stale(self.current, &newest[..n])
     }
 
     /// The current secret changes to `new`: each headset of `off` (trusted, not in a
     /// session, so it does not get `new` now) keeps the one it has valid.
     fn renew(&mut self, new: FindSecret, off: impl IntoIterator<Item = [u8; 32]>) {
+        let made = self.owed.values().map(|(_, m)| m + 1).max().unwrap_or(1);
         let old = std::mem::replace(&mut self.current, new);
         for key in off {
-            self.owed.entry(key).or_insert(old);
+            self.owed.entry(key).or_insert((old, made));
         }
     }
 }
@@ -342,8 +359,9 @@ pub fn find_secret_file(dir: &std::path::Path) -> PathBuf {
 }
 
 /// The file of the find secrets still owed, next to `secret_file`: a line
-/// `<headset key hex> <secret hex>` for each headset that has an older one. A file of
-/// its own, so `find_secret` stays as earlier builds read it.
+/// `<headset key hex> <secret hex> <when>` for each headset that has an older one (when:
+/// a number that grows with each new secret). A file of its own, so `find_secret`
+/// stays as earlier builds read it.
 pub fn owed_file(secret_file: &std::path::Path) -> PathBuf {
     secret_file.with_file_name("find_secret_owed")
 }
@@ -377,11 +395,11 @@ pub fn load_find_secrets(path: &std::path::Path) -> Result<FindSecrets> {
         Ok(text) => text
             .lines()
             .filter_map(|line| {
-                let (key, secret) = line.split_once(' ')?;
-                Some((
-                    secure::from_hex::<32>(key)?,
-                    secure::from_hex::<32>(secret.trim())?,
-                ))
+                let mut fields = line.split_whitespace();
+                let key = secure::from_hex::<32>(fields.next()?)?;
+                let secret = secure::from_hex::<32>(fields.next()?)?;
+                let made = fields.next().and_then(|m| m.parse().ok()).unwrap_or(0);
+                Some((key, (secret, made)))
             })
             .collect(),
         Err(_) => std::collections::BTreeMap::new(),
@@ -411,8 +429,13 @@ fn save_owed(path: &std::path::Path, secrets: &FindSecrets) -> Result<()> {
         };
     }
     let mut text = String::new();
-    for (key, secret) in &secrets.owed {
-        let _ = writeln!(text, "{} {}", secure::to_hex(key), secure::to_hex(secret));
+    for (key, (secret, made)) in &secrets.owed {
+        let _ = writeln!(
+            text,
+            "{} {} {made}",
+            secure::to_hex(key),
+            secure::to_hex(secret)
+        );
     }
     secure::write_atomic(&file, text.as_bytes())
         .with_context(|| format!("cannot write {}", file.display()))
@@ -472,10 +495,12 @@ impl Security {
         // Owed to trusted headsets only: one forgotten is owed nothing.
         find.owed.retain(|key, _| trusted.contains(key));
         find.renew(secret, trusted.into_iter().filter(|key| !in_session(key)));
-        if let Err(e) = save_find_secret(&self.find_file, secret) {
+        // The old secret kept for the headsets that were off first, then the new one:
+        // cut short between the two, the files lose nothing a headset holds.
+        if let Err(e) = save_owed(&self.find_file, &find) {
             warn!("{e:#}");
         }
-        if let Err(e) = save_owed(&self.find_file, &find) {
+        if let Err(e) = save_find_secret(&self.find_file, secret) {
             warn!("{e:#}");
         }
         info!(

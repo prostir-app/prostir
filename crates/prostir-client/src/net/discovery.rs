@@ -9,15 +9,17 @@
 //! - **Tracking the headset.** A query has a new random nonce each time, so its tags
 //!   change each time; at least eight of them, random ones among them, in a random
 //!   order: two queries look like two headsets', and how many PCs it knows does not
-//!   show. Its name goes out only while it looks for a PC to pair with. What cannot be
-//!   hidden: that something asks, from its address.
+//!   show. Each query goes from a socket of its own, so its port does not tie it to
+//!   the last one either. Its name goes out only while it looks for a PC to pair with.
+//!   What cannot be hidden: that something asks, from its address.
 //! - **The find secrets.** Each trusted PC's secret comes from that PC inside the
 //!   encrypted session, and only from it (a secret is kept under the key of the PC whose
 //!   session gave it); the file is the app's own (mode 0600). Forgetting a PC drops its
 //!   secret and its address.
 //! - **Forged answers.** An answer is a hint where to connect, nothing more: it changes
 //!   nothing kept. Only an answer to the last query (its nonce) counts, at most
-//!   [`ANSWERS_MAX`] of them; whose it is shows by its tag, which only the PC that
+//!   [`ANSWERS_MAX`] of PCs that answer everyone (a trusted PC's always counts); whose
+//!   it is shows by its tag, which only the PC that
 //!   holds the secret can make. Someone who copies a real answer to another address
 //!   gets a connection whose handshake shows a key the headset does not trust: it is
 //!   offered to the user as a new PC, never connected to as the trusted one, and
@@ -40,7 +42,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
-use prostir_proto::discovery::{Answer, FindSecret, MAX_ANSWER, Query, flags};
+use prostir_proto::discovery::{AnswerRef, FindSecret, MAX_ANSWER, Query, flags};
 use prostir_proto::secure::{self, TrustStore};
 
 use super::{Config, FoundHost, NetEvent, Shared, lock};
@@ -51,10 +53,10 @@ use crate::session::{AskTo, StepId};
 pub const CONNECT_WITHIN: Duration = Duration::from_millis(400);
 /// How long the answers to a query are waited for: they come within milliseconds.
 pub const ANSWERS_WITHIN: Duration = Duration::from_millis(300);
-/// The most answers taken from one query.
+/// The most answers of PCs that answer everyone taken from one query.
 pub const ANSWERS_MAX: usize = 8;
-/// The interfaces' broadcast addresses are looked up again after this.
-const BROADCASTS_FOR: Duration = Duration::from_secs(10);
+/// The interfaces' broadcast addresses and `host.txt` are looked up again after this.
+const LOOK_AGAIN_AFTER: Duration = Duration::from_secs(10);
 /// The first line of the files kept here.
 const FORMAT: &str = "format 2";
 
@@ -286,16 +288,18 @@ impl Finder {
     }
 }
 
-/// What the asking thread keeps from one query to the next: its socket and its
-/// memory, made once.
+/// What the asking thread keeps from one query to the next: its memory, made once, and
+/// what it looks up now and then (the interfaces' broadcast addresses, `host.txt`).
 struct Asking {
-    socket: Option<UdpSocket>,
     told: bool,
     query: Query,
     bytes: Vec<u8>,
     to: Vec<SocketAddr>,
     broadcasts: Vec<Ipv4Addr>,
-    broadcasts_at: Option<Instant>,
+    /// The address in `host.txt`.
+    typed: Option<SocketAddr>,
+    /// When the broadcast addresses and `host.txt` were looked up last.
+    looked_at: Option<Instant>,
     /// The addresses that answered the query in progress.
     answered: Vec<SocketAddr>,
     secrets: Vec<([u8; 32], FindSecret)>,
@@ -303,28 +307,28 @@ struct Asking {
 
 fn find(asks: &Receiver<Ask>, targets: &Targets, shared: &Shared, known: &Mutex<Known>) {
     let mut a = Asking {
-        socket: None,
         told: false,
         query: Query::new([], ""),
         bytes: Vec::with_capacity(prostir_proto::discovery::MIN_QUERY),
         to: Vec::new(),
         broadcasts: Vec::new(),
-        broadcasts_at: None,
+        typed: None,
+        looked_at: None,
         answered: Vec::with_capacity(ANSWERS_MAX),
         secrets: Vec::new(),
     };
     while let Ok(ask) = asks.recv() {
-        let socket = a.socket.take().or_else(|| open(&mut a.told));
-        if let Some(socket) = &socket {
-            ask_once(&mut a, socket, &ask, targets, shared, known);
+        // A socket of its own for each query: its port does not tie one query of this
+        // headset to the next (on another network, say).
+        if let Some(socket) = open(&mut a.told) {
+            ask_once(&mut a, &socket, &ask, targets, shared, known);
         }
-        a.socket = socket;
         shared.tell(NetEvent::Missed { step: ask.step });
     }
 }
 
-/// The socket queries go from and answers come to: a port of its own (an answer goes
-/// where its query came from), broadcasts allowed.
+/// A socket a query goes from and its answers come to: a port of its own (an answer
+/// goes where its query came from), broadcasts allowed.
 fn open(told: &mut bool) -> Option<UdpSocket> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).and_then(|s| {
         s.set_broadcast(true)?;
@@ -342,6 +346,44 @@ fn open(told: &mut bool) -> Option<UdpSocket> {
     }
 }
 
+/// Where a query of `ask` goes, in `a.to` (see [`Targets`]).
+fn targets_of(a: &mut Asking, ask: &Ask, targets: &Targets, known: &Known) {
+    a.to.clear();
+    let also = match ask.to {
+        AskTo::Exactly(to) => return a.to.push(to),
+        AskTo::Around { also } => also,
+    };
+    let Some(port) = targets.port else {
+        return;
+    };
+    let now = Instant::now();
+    if a.looked_at
+        .is_none_or(|t| now.saturating_duration_since(t) >= LOOK_AGAIN_AFTER)
+    {
+        a.looked_at = Some(now);
+        a.typed = targets.host_file.as_deref().and_then(read_addr);
+        if targets.broadcast {
+            let before = a.broadcasts.len();
+            a.broadcasts.clear();
+            (targets.broadcasts)(&mut a.broadcasts);
+            if a.broadcasts.len() != before {
+                log::debug!("queries go as broadcasts to {:?}", a.broadcasts);
+            }
+        }
+    }
+    if targets.broadcast {
+        a.to.push(SocketAddr::from((Ipv4Addr::BROADCAST, port)));
+        a.to.extend(a.broadcasts.iter().map(|ip| SocketAddr::from((*ip, port))));
+    }
+    let direct = known.last.values().copied().chain(a.typed).chain(also);
+    for addr in direct {
+        let to = SocketAddr::new(addr.ip(), port);
+        if !a.to.contains(&to) {
+            a.to.push(to);
+        }
+    }
+}
+
 /// Sends one query (see [`Targets`]) and tells the answers that come in time.
 fn ask_once(
     a: &mut Asking,
@@ -351,38 +393,11 @@ fn ask_once(
     shared: &Shared,
     known: &Mutex<Known>,
 ) {
-    a.to.clear();
-    a.secrets.clear();
     {
         let known = lock(known);
+        a.secrets.clear();
         a.secrets.extend(known.secrets().map(|(k, s)| (*k, *s)));
-        match ask.to {
-            AskTo::Exactly(to) => a.to.push(to),
-            AskTo::Around { also } => {
-                if let Some(port) = targets.port {
-                    if targets.broadcast {
-                        let now = Instant::now();
-                        if a.broadcasts_at
-                            .is_none_or(|t| now.saturating_duration_since(t) >= BROADCASTS_FOR)
-                        {
-                            a.broadcasts.clear();
-                            (targets.broadcasts)(&mut a.broadcasts);
-                            a.broadcasts_at = Some(now);
-                        }
-                        a.to.push(SocketAddr::from((Ipv4Addr::BROADCAST, port)));
-                        a.to.extend(a.broadcasts.iter().map(|ip| SocketAddr::from((*ip, port))));
-                    }
-                    let typed = targets.host_file.as_deref().and_then(read_addr);
-                    let direct = known.last.values().copied().chain(typed).chain(also);
-                    for addr in direct {
-                        let to = SocketAddr::new(addr.ip(), port);
-                        if !a.to.contains(&to) {
-                            a.to.push(to);
-                        }
-                    }
-                }
-            }
-        }
+        targets_of(a, ask, targets, &known);
     }
     let name = if ask.pairing {
         shared.name.as_str()
@@ -397,12 +412,12 @@ fn ask_once(
         }
     }
     a.answered.clear();
+    // Answers of PCs that answer everyone, counted: a flood of made-up ones cannot keep
+    // a trusted PC's out.
+    let mut others = 0;
     let until = Instant::now() + ANSWERS_WITHIN;
     let mut buf = [0u8; MAX_ANSWER + 1];
     while let Some(left) = until.checked_duration_since(Instant::now()) {
-        if a.answered.len() >= ANSWERS_MAX {
-            break;
-        }
         let _ = socket.set_read_timeout(Some(left.max(Duration::from_millis(1))));
         let (n, from) = match socket.recv_from(&mut buf) {
             Ok(got) => got,
@@ -413,25 +428,33 @@ fn ask_once(
             }
         };
         // Only an answer to this query counts.
-        let Some(answer) = Answer::decode(&buf[..n]).filter(|x| x.nonce == a.query.nonce) else {
+        let Some(answer) = AnswerRef::read(&buf[..n]).filter(|x| x.nonce == a.query.nonce) else {
             continue;
         };
         let addr = SocketAddr::new(from.ip(), answer.port);
         if a.answered.contains(&addr) {
             continue;
         }
-        a.answered.push(addr);
         let pc = a
             .secrets
             .iter()
             .find(|(_, s)| answer.from_pc(s))
             .map(|(k, _)| PcId::of(k));
+        if pc.is_none() {
+            if others >= ANSWERS_MAX {
+                continue;
+            }
+            others += 1;
+        }
+        a.answered.push(addr);
         shared.tell(NetEvent::Heard(FoundHost {
-            name: answer.name,
+            name: answer.name.to_owned(),
             addr,
             pc,
             pairing: answer.flags & flags::PAIRING != 0,
             heard: Instant::now(),
+            label: String::new(),
+            ip: String::new(),
         }));
     }
 }
@@ -441,30 +464,33 @@ fn ask_once(
 #[cfg(target_os = "android")]
 pub fn interface_broadcasts(out: &mut Vec<Ipv4Addr>) {
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: getifaddrs fills `list`, which is walked read-only and freed once.
-    unsafe {
-        if libc::getifaddrs(&raw mut list) != 0 {
-            return;
-        }
-        let mut cur = list;
-        while let Some(ifa) = cur.as_ref() {
-            let flags = ifa.ifa_flags;
-            let up = flags & libc::IFF_UP as u32 != 0
-                && flags & libc::IFF_BROADCAST as u32 != 0
-                && flags & libc::IFF_LOOPBACK as u32 == 0;
-            // The broadcast address, while IFF_BROADCAST is set.
-            let addr = ifa.ifa_ifu;
-            if up && !addr.is_null() && i32::from((*addr).sa_family) == libc::AF_INET {
-                let sin = &*addr.cast::<libc::sockaddr_in>();
-                let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-                if !out.contains(&ip) {
-                    out.push(ip);
-                }
-            }
-            cur = ifa.ifa_next;
-        }
-        libc::freeifaddrs(list);
+    // SAFETY: getifaddrs fills `list`, freed once below.
+    if unsafe { libc::getifaddrs(&raw mut list) } != 0 {
+        return;
     }
+    let mut cur = list;
+    // SAFETY: `cur` is null or a node of `list`, alive until it is freed below.
+    while let Some(ifa) = unsafe { cur.as_ref() } {
+        let flags = ifa.ifa_flags;
+        let up = flags & libc::IFF_UP as u32 != 0
+            && flags & libc::IFF_BROADCAST as u32 != 0
+            && flags & libc::IFF_LOOPBACK as u32 == 0;
+        // The broadcast address, while IFF_BROADCAST is set.
+        let addr = ifa.ifa_ifu;
+        // SAFETY: a non-null address the list owns.
+        let inet = !addr.is_null() && i32::from(unsafe { (*addr).sa_family }) == libc::AF_INET;
+        if up && inet {
+            // SAFETY: an AF_INET address is a `sockaddr_in`.
+            let sin = unsafe { &*addr.cast::<libc::sockaddr_in>() };
+            let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+            if !out.contains(&ip) {
+                out.push(ip);
+            }
+        }
+        cur = ifa.ifa_next;
+    }
+    // SAFETY: the list getifaddrs made, freed once; nothing of it is used after.
+    unsafe { libc::freeifaddrs(list) };
 }
 
 /// No interfaces to look at on this system: `255.255.255.255` only.

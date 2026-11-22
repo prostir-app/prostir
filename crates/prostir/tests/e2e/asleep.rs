@@ -99,6 +99,14 @@ fn the_pc_answers_everyone_until_paired_then_only_its_own() {
     // The PC's public key (anyone who connects sees it) makes no tag it answers.
     let with_public_key = Query::new([&dir.pc_key()], "");
     assert!(find::ask(to, &with_public_key, SILENCE).is_none());
+    // A paired headset without this PC's tag (right after an update, say) gives no
+    // name: it looks for no PC to pair with, so no notice and nothing nearby.
+    assert!(silent(to, &stranger, ""), "no tag, no answer");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(pc.count_log("notification: New headset nearby"), 0);
+    if let Some(s) = state(&pc) {
+        assert!(s.nearby.is_empty(), "{:?}", s.nearby);
+    }
     assert!(silent(to, &stranger, "Quest 3S"), "a stranger gets none");
     pc.wait_log(SOON, "notification: New headset nearby: Pair it? [Pair]");
     assert!(silent(to, &stranger, "Quest 3S"));
@@ -169,7 +177,7 @@ fn the_pairing_window_lets_strangers_find_the_pc() {
     };
     let mut pc = Pc::start(&dir, &options);
     let to = pc.discovery.unwrap();
-    assert!(silent(to, &stranger, ""));
+    assert!(silent(to, &stranger, "Quest 3S"));
     pc.wait_log(SOON, "notification: New headset nearby");
     pc.notice("click");
     pc.wait_log(SOON, "pairing a new headset: from the notice");
@@ -403,8 +411,14 @@ fn the_watcher_sleeps_until_a_headset_comes() {
     eprintln!("the watcher: {own} kB of its own memory, {rss} kB resident");
     assert!(own < 5 * 1024, "the watcher's own memory: {own} kB");
 
-    // A stranger: no answer, the notice, nothing started.
+    // A headset without the tag that looks for no PC to pair with (no name): no
+    // notice, nothing started.
     assert!(silent(to, &stranger, ""));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(pc.count_log("notification: New headset nearby"), 0);
+    assert_eq!(pc.program(), Some(pc.pid()));
+    // A stranger: no answer, the notice, nothing started.
+    assert!(silent(to, &stranger, "Quest 3S"));
     pc.wait_log(SOON, "notification: New headset nearby");
     pc.notice("close");
     assert_eq!(pc.program(), Some(pc.pid()));
@@ -420,7 +434,7 @@ fn the_watcher_sleeps_until_a_headset_comes() {
     wait_program(&pc, true);
     // The full program shows no second notice within the minute: the watcher's counts.
     pc.wait_log_after(START, "discovery on UDP port", 1);
-    assert!(silent(to, &stranger, ""));
+    assert!(silent(to, &stranger, "Quest 3S"));
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
         pc.count_log("notification: New headset nearby"),

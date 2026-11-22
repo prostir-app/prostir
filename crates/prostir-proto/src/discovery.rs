@@ -335,6 +335,32 @@ impl Answer {
     /// Reads a datagram: `None` for anything that is not an answer. Bytes after the
     /// name are a newer version's and are skipped.
     pub fn decode(buf: &[u8]) -> Option<Self> {
+        let a = AnswerRef::read(buf)?;
+        Some(Self {
+            nonce: a.nonce,
+            tag: a.tag,
+            port: a.port,
+            flags: a.flags,
+            name: a.name.to_owned(),
+        })
+    }
+}
+
+/// An answer as it lies in the datagram, read without copying (see [`Answer`] for the
+/// layout): what a headset looks at before it takes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnswerRef<'a> {
+    pub nonce: [u8; NONCE],
+    pub tag: [u8; TAG],
+    pub port: u16,
+    pub flags: u8,
+    pub name: &'a str,
+}
+
+impl<'a> AnswerRef<'a> {
+    /// Reads a datagram: `None` for anything that is not an answer. Bytes after the
+    /// name are a newer version's and are skipped.
+    pub fn read(buf: &'a [u8]) -> Option<Self> {
         let rest = buf.strip_prefix(ANSWER_MAGIC.as_slice())?;
         let (&version, rest) = rest.split_first()?;
         if version < 1 {
@@ -349,7 +375,7 @@ impl Answer {
         if len > MAX_PC_NAME {
             return None;
         }
-        let name = std::str::from_utf8(rest.get(4..4 + len)?).ok()?.to_owned();
+        let name = std::str::from_utf8(rest.get(4..4 + len)?).ok()?;
         Some(Self {
             nonce,
             tag,
@@ -357,6 +383,11 @@ impl Answer {
             flags,
             name,
         })
+    }
+
+    /// Whether it comes from the PC whose find secret is `secret`.
+    pub fn from_pc(&self, secret: &FindSecret) -> bool {
+        here_tag(secret, &self.nonce) == self.tag
     }
 }
 
