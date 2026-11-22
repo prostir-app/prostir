@@ -195,8 +195,18 @@ fn the_pairing_window_lets_strangers_find_the_pc() {
     };
     let mut pc = Pc::start(&dir, &short);
     let to = pc.discovery.unwrap();
-    pc.tray("pair");
-    pc.wait_log(SOON, "pairing a new headset: from the tray");
+    // Opened for that second (the local API says for how long; without a session
+    // bus, the tray's item opens it).
+    match pc.ctl(&["pair", "--json"]) {
+        Some(ctl) => {
+            assert_eq!(ctl.code, 0, "{ctl:?}");
+            assert_eq!(ctl.json()["seconds_left"], 1, "{ctl:?}");
+        }
+        None => {
+            pc.tray("pair");
+            pc.wait_log(SOON, "pairing a new headset: from the tray");
+        }
+    }
     until_silent(to, &stranger, "the window closed at its time");
     pc.quit();
 }
