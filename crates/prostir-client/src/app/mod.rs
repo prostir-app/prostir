@@ -1379,6 +1379,16 @@ impl Model {
         self.rev += 1;
     }
 
+    /// The person closes the menu (its ×, the menu button or its gesture): the
+    /// first-run tips count as read, or they would open again right away.
+    fn close_menu(&mut self) {
+        self.close_panel();
+        if !self.settings.intro_seen {
+            self.settings.intro_seen = true;
+            self.saves.mark(persist::File::Settings);
+        }
+    }
+
     /// Tells the PC whether the headset is worn (quietly: nothing to show the user),
     /// and keeps it for the next `Open`.
     fn tell_presence(&mut self) {

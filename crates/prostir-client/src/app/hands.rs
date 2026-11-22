@@ -82,7 +82,7 @@ impl Scene for Model {
 
     fn toggle_menu(&mut self) {
         if self.menu.open {
-            self.close_panel();
+            self.close_menu();
         } else {
             self.open_panel();
         }

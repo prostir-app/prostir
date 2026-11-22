@@ -83,14 +83,7 @@ impl Model {
                 self.settings.intro_seen = false;
                 self.saves.mark(persist::File::Settings);
             }
-            Action::Close => {
-                self.close_panel();
-                // Closing the tips counts as read, or they would open again right away.
-                if !self.settings.intro_seen {
-                    self.settings.intro_seen = true;
-                    self.saves.mark(persist::File::Settings);
-                }
-            }
+            Action::Close => self.close_menu(),
             // The others are not this part's (see `Model::act`).
             _ => {}
         }

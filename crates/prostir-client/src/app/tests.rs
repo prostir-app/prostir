@@ -1511,3 +1511,18 @@ fn a_refused_encoding_or_sound_shows_what_was() {
     });
     assert_eq!(to_headset(&sim), Some(true), "refused: as it was");
 }
+
+/// The menu button (or its gesture, or the round button) closes the first-run tips as
+/// their own × does: they count as read, and do not open again in front.
+#[test]
+fn the_menu_button_closes_the_tips() {
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    assert!(sim.m.menu().open, "the tips opened the menu");
+    assert!(!sim.m.settings().intro_seen);
+    crate::interaction::Scene::toggle_menu(&mut sim.m);
+    assert!(!sim.m.menu().open);
+    sim.frames(11 * MS);
+    assert!(!sim.m.menu().open, "closed, and it stays closed");
+    assert!(sim.m.settings().intro_seen);
+}
