@@ -860,13 +860,19 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             Duration::from_millis(100)
         };
         let mut input_waiting = false;
+        // The microphone hears each pause and return: its prompt's answer shows so.
+        let mic = &shell.mic;
         app.poll_events(Some(timeout), |event| match event {
             PollEvent::Main(MainEvent::Destroy) => destroy = true,
             PollEvent::Main(MainEvent::Pause) => {
                 paused = true;
                 activity = Some(true);
+                mic.activity(true);
             }
-            PollEvent::Main(MainEvent::Resume { .. }) => activity = Some(false),
+            PollEvent::Main(MainEvent::Resume { .. }) => {
+                activity = Some(false);
+                mic.activity(false);
+            }
             PollEvent::Main(MainEvent::InputAvailable) => input_waiting = true,
             _ => {}
         });
