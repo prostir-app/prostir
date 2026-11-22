@@ -196,6 +196,18 @@ impl CtlClient for Fake {
 struct NotRunning {
     asleep: bool,
     taken: bool,
+    /// How many times what sleeps for it was asked to quit.
+    quits: std::cell::Cell<u32>,
+}
+
+impl NotRunning {
+    fn new(asleep: bool, taken: bool) -> Self {
+        Self {
+            asleep,
+            taken,
+            quits: std::cell::Cell::new(0),
+        }
+    }
 }
 
 impl CtlClient for NotRunning {
@@ -222,6 +234,41 @@ impl CtlClient for NotRunning {
     fn port_taken(&self) -> bool {
         self.taken
     }
+
+    fn quit_asleep(&self) -> bool {
+        self.quits.set(self.quits.get() + 1);
+        self.asleep
+    }
+}
+
+/// `quit` while Prostir sleeps quits what sleeps for it (its sockets' watcher, or
+/// systemd's socket): done. Nothing sleeping, Prostir does not run.
+#[test]
+fn quit_ends_a_sleeping_prostir() {
+    let quit = |client: &NotRunning, line: &str| {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run(
+            &args(line),
+            Ok(client),
+            &mut Output {
+                out: &mut out,
+                err: &mut err,
+            },
+        );
+        (code, String::from_utf8(out).unwrap())
+    };
+    let asleep = NotRunning::new(true, false);
+    assert_eq!(quit(&asleep, "quit").0, DONE);
+    assert_eq!(asleep.quits.get(), 1);
+    let (code, out) = quit(&asleep, "quit --json");
+    assert_eq!(code, DONE);
+    assert!(out.contains("revision"), "{out}");
+    let gone = NotRunning::new(false, false);
+    assert_eq!(quit(&gone, "quit").0, NOT_RUNNING);
+    // Only quit does.
+    let asleep = NotRunning::new(true, false);
+    assert_eq!(quit(&asleep, "recenter").0, NOT_RUNNING);
+    assert_eq!(asleep.quits.get(), 0);
 }
 
 /// `status` without Prostir says whether it sleeps, or whether its port keeps it
@@ -233,7 +280,7 @@ fn status_says_asleep_or_port_taken() {
         let line = if json { "status --json" } else { "status" };
         let code = run(
             &args(line),
-            Ok(&NotRunning { asleep, taken }),
+            Ok(&NotRunning::new(asleep, taken)),
             &mut Output {
                 out: &mut out,
                 err: &mut err,

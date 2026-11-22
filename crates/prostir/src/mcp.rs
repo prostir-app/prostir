@@ -443,7 +443,7 @@ impl Server {
     }
 
     fn ask(&mut self, request: &Request) -> Result<Answer, Value> {
-        let asked = self.connected()?.call(request);
+        let asked = ctl::ask(self.connected()?, request);
         asked.map_err(|e| self.failed(&e, request.for_headset()))
     }
 

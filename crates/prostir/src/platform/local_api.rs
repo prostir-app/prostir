@@ -741,6 +741,19 @@ impl CtlClient for Client {
         crate::platform::watcher().is_some() || crate::platform::autostart::socket_waits()
     }
 
+    fn quit_asleep(&self) -> bool {
+        if let Some(pid) = crate::platform::watcher() {
+            // SAFETY: a signal to a process of this user, which quits on it (and ends
+            // the full program it started, if one starts meanwhile).
+            return unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0;
+        }
+        if crate::platform::autostart::socket_waits() {
+            crate::platform::autostart::quit_until_login();
+            return true;
+        }
+        false
+    }
+
     fn port_taken(&self) -> bool {
         // The tests' fake PC never uses the real port, whatever runs on this machine.
         if cfg!(feature = "fake-desktop") {

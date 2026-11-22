@@ -590,3 +590,30 @@ fn nothing_wakes_a_running_pc_that_nobody_asks() {
     assert!(asks(pc.discovery.unwrap(), &keys, "").is_some());
     pc.quit();
 }
+
+/// Asleep in its sockets' watcher, `prostir ctl quit` quits it, as the tray's Quit
+/// does while it runs: nothing waits for the headset afterwards.
+#[test]
+fn quit_ends_a_sleeping_pc() {
+    let dir = TestDir::new("quit-asleep");
+    dir.save_monitors(TWO_MONITORS);
+    let options = Options {
+        watcher: true,
+        ..Options::default()
+    };
+    let mut pc = Pc::start(&dir, &options);
+    if pc.bus.is_none() {
+        return;
+    }
+    // With the PC's own environment, where the fake desktop finds its watcher.
+    let asleep = pc.again(&["ctl", "status", "--json"]);
+    assert_eq!(asleep.json()["asleep"], true, "{asleep:?}");
+    let quit = pc.again(&["ctl", "quit"]);
+    assert_eq!(quit.code, 0, "{quit:?}");
+    let status = pc.wait_end(SOON);
+    assert!(status.success(), "the watcher quit with {status}");
+    assert_eq!(pc.count_log("starting Prostir"), 0, "nothing woke for it");
+    let status = pc.again(&["ctl", "status", "--json"]);
+    assert_eq!(status.code, 2, "{status:?}");
+    assert!(status.json().get("asleep").is_none(), "{status:?}");
+}
