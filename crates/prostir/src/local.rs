@@ -438,7 +438,7 @@ impl Brain {
                 }
             }
             Request::SetQuality { mbit } => {
-                if !(5..=100).contains(&mbit) {
+                if !crate::store::BITRATES.contains(&mbit) {
                     return CtlReply::failed(
                         ApiError::BadArgument,
                         t("Якість: від 5 до 100 Мбіт/с", "Quality: 5 to 100 Mbit/s"),

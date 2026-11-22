@@ -439,13 +439,19 @@ impl Displays {
     }
 
     /// Moves screen `id` on the desktop to about `x`, `y` (its top-left corner, in
-    /// logical pixels): into the row it then is in, between the neighbours left and
+    /// logical pixels, within [`PLACE_LIMIT`]): into the row it then is in, between the
+    /// neighbours left and
     /// right of it. The desktop's arrangement then lines it up (see `layout::desk`),
     /// until the main headset arranges the monitors again.
     pub fn move_to(&mut self, id: ScreenId, x: i32, y: i32) -> Result<()> {
         let Some(me) = self.desk_rect(id) else {
             bail!(UserError::UnknownDisplay);
         };
+        // Off the desktop by far, at most: the sums below stay in range.
+        let (x, y) = (
+            x.clamp(-PLACE_LIMIT, PLACE_LIMIT),
+            y.clamp(-PLACE_LIMIT, PLACE_LIMIT),
+        );
         if !self.rows.iter().flatten().any(|e| e.id == id) {
             bail!(UserError::UnknownDisplay);
         }

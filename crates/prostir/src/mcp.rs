@@ -975,6 +975,9 @@ const fn asks(name: &'static str, description: &'static str, args: &'static [Arg
     }
 }
 
+/// How far a monitor is placed at most, as the PC holds it.
+const PLACE: i64 = crate::displays::PLACE_LIMIT as i64;
+
 static TOOLS: &[Tool] = &[
     Tool {
         name: "get_state",
@@ -1042,8 +1045,8 @@ static TOOLS: &[Tool] = &[
                       the desktop.",
         args: &[
             ID,
-            Arg::of("x", "integer", "left edge, logical pixels").within(-65536, 65536),
-            Arg::of("y", "integer", "top edge, logical pixels").within(-65536, 65536),
+            Arg::of("x", "integer", "left edge, logical pixels").within(-PLACE, PLACE),
+            Arg::of("y", "integer", "top edge, logical pixels").within(-PLACE, PLACE),
         ],
         does: Does::Ask("place"),
         touch: Touch::Changes,
