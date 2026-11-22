@@ -44,7 +44,8 @@ use outputs::show_sharing_tip;
 /// without it.
 const ENCODER_START: Duration = Duration::from_secs(10);
 const ENCODER_STOP: Duration = Duration::from_secs(5);
-/// A source that failed is tried once more after this long (see `start_encoder`).
+/// A source that failed is tried once more after this long, as it is (see
+/// `start_encoder`).
 const SOURCE_AGAIN: Duration = Duration::from_millis(200);
 /// A screen that went on with the encoder it had, the one wanted not starting, tries
 /// the wanted one again after this.

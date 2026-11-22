@@ -715,12 +715,15 @@ impl Encoder {
                         match msg.view() {
                             gst::MessageView::Error(e) => {
                                 let text = format!("{} ({:?})", e.error(), e.debug());
-                                // The source (an element taking nothing in): its
-                                // stream failed, not the encoder.
-                                let by_source = msg
-                                    .src()
-                                    .and_then(|s| s.downcast_ref::<gst::Element>())
-                                    .is_some_and(|e| e.sink_pads().is_empty());
+                                // The source (an element taking nothing in) lost its
+                                // resource (its stream, a file): not the encoder's
+                                // doing. Not a stream error (not negotiated, the
+                                // data flow stopped), which may well be the encoder's.
+                                let by_source = e.error().is::<gst::ResourceError>()
+                                    && msg
+                                        .src()
+                                        .and_then(|s| s.downcast_ref::<gst::Element>())
+                                        .is_some_and(|e| e.sink_pads().is_empty());
                                 if by_source {
                                     gate.failed.store(true, Ordering::Relaxed);
                                     let mut state = gate.state.lock().unwrap();
@@ -1042,19 +1045,26 @@ impl Drop for Encoder {
         // A PipeWire source whose stream failed waits up to 30 s for a format that
         // never comes before it stops (gst-plugin-pipewire 1.6, `wait_negotiated`):
         // stopped on a thread of its own, holding nobody up; the graphics devices go
-        // after it.
+        // to it once it runs, and after the pipeline stopped.
         let stopper = self.gate.failed.load(Ordering::Relaxed).then(|| {
             let pipeline = self.pipeline.clone();
-            let devices = std::mem::take(&mut self.devices);
+            let (give, take) = std::sync::mpsc::channel::<gpu::Lease>();
             std::thread::Builder::new()
                 .name("gst-stop".into())
                 .spawn(move || {
                     let _ = pipeline.set_state(gst::State::Null);
-                    drop(devices);
+                    drop(take.recv());
                 })
+                .map(|_| give)
         });
-        if !matches!(stopper, Some(Ok(_))) {
-            let _ = self.pipeline.set_state(gst::State::Null);
+        match stopper {
+            Some(Ok(give)) => {
+                let _ = give.send(std::mem::take(&mut self.devices));
+            }
+            // No thread: stopped here, the devices after it (the fields drop later).
+            _ => {
+                let _ = self.pipeline.set_state(gst::State::Null);
+            }
         }
         if let Some(t) = self.bus_thread.take() {
             let _ = t.join();

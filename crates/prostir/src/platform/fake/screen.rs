@@ -51,9 +51,9 @@ fn keepalive() -> Option<std::time::Duration> {
 /// Screens by output name, for the sources to find theirs.
 static SCREENS: LazyLock<Mutex<HashMap<String, Arc<Screen>>>> = LazyLock::new(Default::default);
 
-/// How many of the next starts of a source fail, as when KWin's PipeWire node is gone
-/// (`fail-source N`, see `desktop.rs`).
-pub static FAIL_STARTS: Mutex<u32> = Mutex::new(0);
+/// How many of the next starts of each screen's source fail, by output name, as when
+/// KWin's PipeWire node is gone (`fail-source Fake-3 N`, see `desktop.rs`).
+pub static FAIL_STARTS: LazyLock<Mutex<HashMap<String, u32>>> = LazyLock::new(Default::default);
 
 /// What a fake monitor shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,12 +305,15 @@ mod imp {
     impl BaseSrcImpl for ScreenSrc {
         fn start(&self) -> Result<(), gst::ErrorMessage> {
             let name = self.name.lock().unwrap().clone();
-            let fails = {
-                let mut left = FAIL_STARTS.lock().unwrap();
-                let fails = *left > 0;
-                *left = left.saturating_sub(1);
-                fails
-            };
+            let fails = FAIL_STARTS
+                .lock()
+                .unwrap()
+                .get_mut(&name)
+                .is_some_and(|left| {
+                    let fails = *left > 0;
+                    *left = left.saturating_sub(1);
+                    fails
+                });
             if fails {
                 log::info!("fake screen {name}: its stream is gone (fail-source)");
                 return Err(gst::error_msg!(

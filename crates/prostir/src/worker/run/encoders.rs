@@ -238,6 +238,8 @@ impl Worker {
             let mut encoder = match started {
                 Ok(encoder) => encoder,
                 Err(e) if e.downcast_ref::<SourceFailed>().is_some() => {
+                    // Whatever of it is still running sends nothing.
+                    retired.store(true, Ordering::Relaxed);
                     let text = format!("{e:#}");
                     if source_again || output.health() == OutputHealth::Closed {
                         return Err(e.context(t(
@@ -247,7 +249,9 @@ impl Worker {
                     }
                     source_again = true;
                     warn!("{name}: its source failed ({text}); trying it once more");
-                    // A node made a moment ago may not be known everywhere yet.
+                    // A timed retry of the same source (on KDE the same PipeWire node:
+                    // KWin names it by its id only), in case it failed for a moment
+                    // (a node made just now, not yet known to WirePlumber).
                     std::thread::sleep(SOURCE_AGAIN);
                     source = output.source();
                     continue;

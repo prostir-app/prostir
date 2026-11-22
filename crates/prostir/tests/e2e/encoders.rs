@@ -277,8 +277,9 @@ fn a_source_that_fails_once_is_tried_again() {
     };
     let (_dir, mut pc, _keys, mut headset) = crate::session("source-fails-once", &options);
     let before = pc.count_log("encoding with fake hardware");
-    pc.desktop("fail-source 1");
-    pc.wait_log(SOON, "the next 1 source starts fail");
+    // The monitor added next.
+    pc.desktop("fail-source Fake-3 1");
+    pc.wait_log(SOON, "the next 1 source starts of Fake-3 fail");
     let asked = Instant::now();
     let added = headset
         .ask(Request::AddDisplay {
@@ -319,8 +320,8 @@ fn a_source_that_keeps_failing_gives_up_with_its_reason() {
         ..Options::default()
     };
     let (_dir, mut pc, _keys, mut headset) = crate::session("source-fails", &options);
-    pc.desktop("fail-source 2");
-    pc.wait_log(SOON, "the next 2 source starts fail");
+    pc.desktop("fail-source Fake-3 2");
+    pc.wait_log(SOON, "the next 2 source starts of Fake-3 fail");
     let asked = Instant::now();
     let added = headset
         .ask(Request::AddDisplay {

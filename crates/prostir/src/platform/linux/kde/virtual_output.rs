@@ -1065,9 +1065,11 @@ mod tests {
         use std::os::unix::net::UnixStream;
         use std::sync::mpsc;
 
-        // SAFETY: a new eventfd, owned from here on.
-        let wake = unsafe { OwnedFd::from_raw_fd(libc::eventfd(0, libc::EFD_CLOEXEC)) };
-        let wake = Arc::new(wake);
+        // SAFETY: plain call; the descriptor is checked below.
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
+        assert!(fd >= 0, "eventfd: {}", std::io::Error::last_os_error());
+        // SAFETY: a new eventfd, owned by nobody else.
+        let wake = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
         let (mut kwin, connection) = UnixStream::pair().unwrap();
         let sleeper = |connection: UnixStream, wake: Arc<OwnedFd>| {
             let (done, woke) = mpsc::channel();
@@ -1100,7 +1102,8 @@ mod tests {
         assert!(woke.recv_timeout(Duration::from_millis(200)).is_err());
         let one = 1u64;
         // SAFETY: an eventfd takes 8 bytes, which live through the call.
-        unsafe { libc::write(wake.as_raw_fd(), (&raw const one).cast(), 8) };
+        let wrote = unsafe { libc::write(wake.as_raw_fd(), (&raw const one).cast(), 8) };
+        assert_eq!(wrote, 8, "{}", std::io::Error::last_os_error());
         assert_eq!(woke.recv_timeout(Duration::from_secs(2)), Ok(false));
     }
 
