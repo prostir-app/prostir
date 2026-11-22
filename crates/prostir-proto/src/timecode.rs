@@ -94,6 +94,31 @@ mod tests {
         }
     }
 
+    /// The code is read in the middle of its cells: rows at the top and the bottom
+    /// that an encoder blurred do not count.
+    #[test]
+    fn blurred_top_and_bottom_rows_still_read() {
+        let (w, h) = (CELLS * CELL, CELL);
+        let mut luma = vec![0u8; w * h];
+        draw(&mut luma, w, w, h, 0x1234_5678);
+        for row in [0, CELL - 1] {
+            luma[row * w..(row + 1) * w].fill(128);
+        }
+        assert_eq!(read(&luma, w, w, h), Some(0x1234_5678));
+    }
+
+    /// A plane one byte short of the code's last row is left as it is.
+    #[test]
+    fn a_plane_too_short_for_the_code_is_untouched() {
+        let (w, h) = (CELLS * CELL, CELL);
+        let mut luma = vec![7u8; w * (CELL - 1) + CELLS * CELL - 1];
+        draw(&mut luma, w, w, h, 42);
+        assert!(luma.iter().all(|b| *b == 7));
+        let mut whole = vec![7u8; w * (CELL - 1) + CELLS * CELL];
+        draw(&mut whole, w, w, h, 42);
+        assert_eq!(read(&whole, w, w, h), Some(42));
+    }
+
     #[test]
     fn no_code_or_a_broken_one_reads_as_none() {
         let (w, h) = (CELLS * CELL, CELL);

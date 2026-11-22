@@ -389,6 +389,39 @@ mod tests {
         }
     }
 
+    /// The PC numbers its requests 1, 2, ...: an answer to an older one, while a
+    /// newer one is on its way, is not written to the device.
+    #[test]
+    fn requests_are_numbered_and_an_old_answer_waits() {
+        let start = Instant::now();
+        let mut pc = PcVolume::default();
+        let ask = |act: Option<Act>| match act {
+            Some(Act::Ask(ask)) => ask,
+            other => panic!("not a request: {other:?}"),
+        };
+        let first = ask(pc.device(30, false, start));
+        assert_eq!(first.ask, 1);
+        let later = start + ASK_EVERY;
+        let second = ask(pc.device(60, false, later));
+        assert_eq!(second.ask, 2);
+        let answer = |level, ask| Volume {
+            level,
+            muted: false,
+            seq: 0,
+            ask,
+        };
+        let rested = later + 2 * ASK_EVERY;
+        assert_eq!(pc.from_headset(&answer(27, 1), rested), None, "old");
+        assert_eq!(pc.tick(rested), None);
+        assert_eq!(
+            pc.from_headset(&answer(60, 2), rested),
+            Some(Act::Write {
+                level: 60,
+                muted: false
+            })
+        );
+    }
+
     /// The slider and the buttons at the same moment: the headset's level wins.
     #[test]
     fn at_the_same_time_the_headset_wins() {
