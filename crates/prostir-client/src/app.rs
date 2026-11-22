@@ -390,6 +390,8 @@ struct Scene {
     press_in_menu: bool,
     /// The user chose a language in the menu: said once it shows.
     language_asked: bool,
+    /// A PC being forgotten, until the network thread says it is (or why not).
+    forgetting: Option<Forgetting>,
     /// Head position and gaze this frame.
     head: (Vec3, Vec3),
     /// The head's right, rolled and tilted with it (where the right ear is).
@@ -1575,6 +1577,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         notes: Notes::default(),
         press_in_menu: false,
         language_asked: false,
+        forgetting: None,
         head: (Vec3::ZERO, -Vec3::Z),
         head_right: Vec3::X,
         view_eye: None,
@@ -3042,7 +3045,25 @@ fn handle_net_event(
             scene.session.incompatible(pc_newer, pc_app);
         }
         NetEvent::HostError(text) => scene.show_error(text),
-        NetEvent::Paired(list) => scene.session.paired_list(list),
+        NetEvent::Paired(list) => {
+            // A PC forgotten as asked: its places go, and the button says it.
+            if let Some(f) = scene
+                .forgetting
+                .take_if(|f| list.iter().all(|p| p.pc != f.pc))
+            {
+                scene.forget_pc(f.pc);
+                let text = scene
+                    .texts()
+                    .f("note-pc-forgotten", &[("pc", f.name.into())]);
+                scene.tell(Note::done(Some(f.on), &text), true, f.in_menu);
+            }
+            scene.session.paired_list(list);
+        }
+        NetEvent::ForgetFailed { pc, why } => {
+            if let Some(f) = scene.forgetting.take_if(|f| f.pc == pc) {
+                scene.tell(Note::failed(Some(f.on), &why), true, f.in_menu);
+            }
+        }
         NetEvent::Connected {
             pc,
             addr,
@@ -3389,6 +3410,15 @@ fn set_passthrough(scene: &mut Scene, passthrough: &mut Option<passthrough::Pass
             .f("error-cameras", &[("error", format!("{e:#}").into())]);
         scene.show_error(text);
     }
+}
+
+/// A PC the user asked to forget, and the press that asked it.
+struct Forgetting {
+    pc: PcId,
+    /// As the list of trusted PCs names it.
+    name: String,
+    on: Action,
+    in_menu: bool,
 }
 
 /// Where a press comes from.
@@ -3752,15 +3782,16 @@ fn handle_action(
                 info!("forgetting PC {pc}");
                 // The network thread leaves it if connected (by its key, not its name:
                 // two PCs may share one), drops it and says the new list; the places of
-                // its displays go here.
+                // its displays go once it did (see `NetEvent::Paired`), and the button
+                // says how it went then.
                 let name = scene.session.paired().get(i).map(|p| p.name.clone());
-                scene.forget_pc(pc);
                 scene.session.forget(pc);
-                let text = scene.texts().f(
-                    "note-pc-forgotten",
-                    &[("pc", name.unwrap_or_default().into())],
-                );
-                scene.tell_press(Note::done(Some(action), &text), true);
+                scene.forgetting = Some(Forgetting {
+                    pc,
+                    name: name.unwrap_or_default(),
+                    on: action,
+                    in_menu: scene.press_in_menu,
+                });
             }
         }
         Action::SetEncoding(change) => {

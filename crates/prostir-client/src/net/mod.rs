@@ -200,6 +200,9 @@ pub enum NetEvent {
     HostError(String),
     /// The trusted PCs: at the start and after each change.
     Paired(Vec<PairedPc>),
+    /// Forgetting PC `pc` failed (its file could not be written): it is still trusted,
+    /// and still connected if it was.
+    ForgetFailed { pc: PcId, why: String },
     /// The session with PC `pc` is open; the handle sends requests (add monitor…) to
     /// it. `opened_with`: the headset's state as `Open` carried it.
     Connected {
@@ -730,8 +733,29 @@ fn command(
             }
         }
         NetCmd::Forget(pc) => {
-            // Its address as the last PC's: not tried again on the next start (also
-            // while it is not connected: the file says whose address it is).
+            let keys: Vec<[u8; 32]> = trusted
+                .entries()
+                .iter()
+                .map(|(k, _)| *k)
+                .filter(|k| PcId::of(k) == pc)
+                .collect();
+            let mut failed = None;
+            for key in keys {
+                match trusted.remove(&key) {
+                    Ok(()) => info!("forgot PC {pc}"),
+                    Err(e) => {
+                        warn!("cannot forget PC {pc}: {e}");
+                        failed = Some(e.to_string());
+                    }
+                }
+            }
+            shared.tell(NetEvent::Paired(paired(trusted)));
+            if let Some(why) = failed {
+                // Still trusted: its session goes on, and the menu says why.
+                shared.tell(NetEvent::ForgetFailed { pc, why });
+                return;
+            }
+            // Its address as the last PC's: not tried again on the next start.
             let addrs: Vec<SocketAddr> = conns
                 .iter()
                 .filter(|c| c.pc == Some(pc))
@@ -740,19 +764,6 @@ fn command(
             if let Err(e) = discovery::forget_last_of(&config.last_host_file, pc, &addrs) {
                 warn!("cannot forget the last PC's address: {e}");
             }
-            let keys: Vec<[u8; 32]> = trusted
-                .entries()
-                .iter()
-                .map(|(k, _)| *k)
-                .filter(|k| PcId::of(k) == pc)
-                .collect();
-            for key in keys {
-                match trusted.remove(&key) {
-                    Ok(()) => info!("forgot PC {pc}"),
-                    Err(e) => warn!("cannot forget PC {pc}: {e}"),
-                }
-            }
-            shared.tell(NetEvent::Paired(paired(trusted)));
             // Connected to it (by its key, not its name: two PCs may share one): left,
             // telling it so (after the new list, which the core hears first).
             for c in conns.iter().filter(|c| c.pc == Some(pc)) {
