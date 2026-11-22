@@ -244,7 +244,7 @@ impl Worker {
             .make_monitor(id, number, &spec)
             .context(UserError::Desktop)?;
         let encoder = self
-            .start_encoder(id, &name, false, output.as_mut(), &wanted.encoding)
+            .start_encoder(id, &name, output.as_mut(), &wanted.encoding)
             .context(UserError::Encoder)
             .inspect_err(|_| self.shared.router.remove_stream(id))?;
         let key = output.key().clone();

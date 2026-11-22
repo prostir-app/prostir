@@ -77,6 +77,8 @@ pub struct Screen {
     /// The size another program gave the output, and whether it stays when the stream
     /// starts over.
     resized: Mutex<Option<((u32, u32), bool)>>,
+    /// The desktop closed its output (a test's `close`).
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl Screen {
@@ -96,6 +98,7 @@ impl Screen {
             changes: Mutex::new(0),
             changed: Condvar::new(),
             resized: Mutex::new(None),
+            closed: std::sync::atomic::AtomicBool::new(false),
         });
         SCREENS
             .lock()
@@ -129,6 +132,18 @@ impl Screen {
     /// the made size back, unless `sticky`.
     pub fn resize(&self, size: (u32, u32), sticky: bool) {
         *self.resized.lock().unwrap() = (size != self.size()).then_some((size, sticky));
+    }
+
+    /// The desktop closes the output, as KWin may (a crash of its own, a display
+    /// configuration that lost it): it stays closed.
+    pub fn close(&self) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the desktop closed it.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The size another program gave the output, while it has it.

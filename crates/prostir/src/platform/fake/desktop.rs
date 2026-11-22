@@ -20,6 +20,10 @@
 //!   dies;
 //! - `sound-gone`: the sound system loses Prostir's devices (the sound device and
 //!   the microphone), as when PipeWire restarts;
+//! - `close Fake-2`: the desktop closes that output, as KWin may;
+//! - `break-encoder Fake-2 3`: the next three fake hardware encoders of that output
+//!   (the one running now among them) break once they have sent a frame, as a
+//!   driver that fails in the middle of a stream;
 //! - `fail-source Fake-3 2`: the next two starts of that output's picture source fail
 //!   (it may not be made yet), as when KWin's PipeWire node of an output is gone;
 //! - `hang make 20`, `hang place 20`, `hang encoder-stop 20`, `hang sound-start 20`:
@@ -453,7 +457,7 @@ impl Output for FakeOutput {
 
     /// A display of the PC is closed once it is unplugged.
     fn health(&self) -> OutputHealth {
-        if !self.owned && !plugged(&self.name) {
+        if (!self.owned && !plugged(&self.name)) || self.screen.is_closed() {
             OutputHealth::Closed
         } else if let Some((w, h)) = self.screen.resized() {
             OutputHealth::Resized { w, h }
@@ -570,6 +574,21 @@ fn command(line: &str) -> Result<()> {
             return Ok(());
         }
         _ => {}
+    }
+    if let ["close", name] = words[..] {
+        Screen::find(name)
+            .with_context(|| format!("no output {name}"))?
+            .close();
+        info!("fake desktop: closed {name}");
+        return Ok(());
+    }
+    if let ["break-encoder", name, n] = words[..] {
+        super::BREAK_ENCODERS
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), n.parse()?);
+        info!("fake desktop: the next {n} fake hardware encoders of {name} break");
+        return Ok(());
     }
     if let ["fail-source", name, n] = words[..] {
         screen::FAIL_STARTS

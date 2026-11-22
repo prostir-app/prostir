@@ -501,6 +501,10 @@ impl Displays {
         // One too big for a headset waits for one it fits instead.
         let failed = matches!(screen.state, ScreenState::Failed { .. });
         if failed && screen.is_virtual() && !self.too_big.contains_key(&id) {
+            // Asked for: at once, and counted from the first pause again.
+            if let Some(s) = self.screens.get_mut(&id) {
+                s.failures = 0;
+            }
             self.try_again(id);
         }
         Ok(())

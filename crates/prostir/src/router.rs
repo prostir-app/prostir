@@ -10,7 +10,7 @@
 //! and a stream too big for one headset still goes to the rest.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -233,8 +233,6 @@ impl Tally {
 struct StreamSlot {
     /// The screen's name, for the log.
     name: String,
-    /// A display of the PC: a broken stream is started again, not the end of all.
-    physical: bool,
     size: Option<(u32, u32)>,
     /// What the encoder makes, announced with the stream.
     codec: Codec,
@@ -419,10 +417,9 @@ pub struct Router {
     /// A screenshot waiting for the next keyframe of stream `id` (see `screenshot`).
     pub snapshot: Mutex<Option<(ScreenId, std::sync::mpsc::SyncSender<Vec<u8>>)>>,
     inner: Mutex<RouterInner>,
-    /// A stream that is no display of the PC broke: the monitors are made anew.
-    pub failed: AtomicBool,
-    /// Displays of the PC whose stream broke, to start again.
-    broken: Mutex<Vec<ScreenId>>,
+    /// Streams whose encoder broke, with why: each is started again by itself (see
+    /// `Worker::check_closed`), the others go on.
+    broken: Mutex<Vec<(ScreenId, String)>>,
     /// Streams whose encoder did not open, with why: each goes on with the next
     /// encoder for it (see `Displays::tick`).
     unopened: Mutex<Vec<(ScreenId, crate::encoder::NotOpened)>>,
@@ -443,7 +440,6 @@ impl Router {
                 report: Period::new(REPORT_EVERY),
                 quiet: Quiet::default(),
             }),
-            failed: AtomicBool::new(false),
             broken: Mutex::new(Vec::new()),
             unopened: Mutex::new(Vec::new()),
             too_big: Mutex::new(Vec::new()),
@@ -813,16 +809,16 @@ impl Router {
             .is_some_and(|d| d.announced && d.generation == generation)
     }
 
-    /// Stream `id` (named `name`, a display of the PC with `physical`) starts, or
-    /// starts over with a new encoder making `codec`: every headset gets it announced
-    /// anew, and one that had it is told when it ends.
-    pub fn add_stream(&self, id: ScreenId, codec: Codec, name: String, physical: bool) {
+    /// Stream `id` (named `name`) starts, or starts over with a new encoder making
+    /// `codec`: every headset gets it announced anew, and one that had it is told when
+    /// it ends.
+    pub fn add_stream(&self, id: ScreenId, codec: Codec, name: String) {
         // What an encoder before this one said is no news of the new one.
         self.unopened.lock().unwrap().retain(|(i, _)| *i != id);
+        self.broken.lock().unwrap().retain(|(i, _)| *i != id);
         let mut inner = self.inner.lock().unwrap();
         let slot = StreamSlot {
             name,
-            physical,
             size: None,
             codec,
             keyframe_asked: None,
@@ -1015,8 +1011,8 @@ impl Router {
         }
     }
 
-    /// Displays of the PC whose stream broke since the last call.
-    pub fn take_broken(&self) -> Vec<ScreenId> {
+    /// Streams whose encoder broke since the last call, with why.
+    pub fn take_broken(&self) -> Vec<(ScreenId, String)> {
         std::mem::take(&mut *self.broken.lock().unwrap())
     }
 
@@ -1152,13 +1148,10 @@ impl Router {
             }
             EncoderEvent::Failed(reason) => {
                 error!("{}: {reason}", slot.name);
-                // A display of the PC is started again by `Displays::tick`; anything
-                // else ends the sessions.
-                if slot.physical {
-                    self.broken.lock().unwrap().push(id);
-                } else {
-                    self.failed.store(true, Ordering::Relaxed);
-                }
+                // Not the end of anything either: the desktop's worker starts this
+                // stream again by itself, after a pause (see `Worker::check_closed`),
+                // and the others go on.
+                self.broken.lock().unwrap().push((id, reason));
                 false
             }
             // Not the end of anything: `Displays` starts the next encoder for it.

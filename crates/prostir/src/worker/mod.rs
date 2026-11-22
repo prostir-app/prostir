@@ -256,12 +256,10 @@ pub enum Done {
     Stopped {
         id: ScreenId,
     },
-    /// The stream of display `id` of the PC stopped: it is shown again shortly.
+    /// Screen `id` lost its output and its stream: a display of the PC whose stream
+    /// stopped (it is shown again shortly), or a monitor that failed (made again
+    /// after its pause).
     Lost {
-        id: ScreenId,
-    },
-    /// The desktop closed the output of monitor `id`.
-    Closed {
         id: ScreenId,
     },
     /// The window of panel `id` closed or left it: the panel is gone.

@@ -8,7 +8,6 @@
 use crate::i18n::t;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -498,7 +497,8 @@ impl Displays {
                         info!("{}: streams, as tried before", s.name());
                     }
                     s.encoding = Some(encoding);
-                    s.closed = false;
+                    s.retry_at = None;
+                    s.running_since = Some(Instant::now());
                     if !matches!(s.state, ScreenState::Absent) {
                         s.state = ScreenState::Running;
                     }
@@ -522,6 +522,10 @@ impl Displays {
                     if s.is_physical() {
                         warn!("cannot show {}: {why}", s.name());
                     }
+                    // A monitor is tried again by itself, after its pause.
+                    if s.is_virtual() {
+                        s.failed_at(Instant::now());
+                    }
                     s.state = ScreenState::Failed { error, why };
                 }
             }
@@ -537,11 +541,6 @@ impl Displays {
                     if s.streaming {
                         s.state = ScreenState::Starting;
                     }
-                }
-            }
-            Done::Closed { id } => {
-                if let Some(s) = self.screens.get_mut(&id) {
-                    s.closed = true;
                 }
             }
             Done::PanelGone { id } => {
@@ -641,6 +640,9 @@ impl Displays {
             self.sync_audio();
         }
         self.stop_too_big();
+        if self.retry_due(Instant::now()) {
+            self.push();
+        }
         // A fresh picture asked of a stream that then stood still never came.
         let starved = self.router.starved(STARVED);
         if self.streaming && !starved.is_empty() {

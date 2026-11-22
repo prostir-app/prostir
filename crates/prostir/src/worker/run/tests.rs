@@ -372,7 +372,7 @@ fn a_monitor_that_cannot_be_made_again_ends_its_stream() {
     };
     router.attach(1, outbox.clone(), headset, true);
     router.publish(1, &std::collections::BTreeSet::from([id]));
-    router.add_stream(id, Codec::H264, "Prostir-1".into(), false);
+    router.add_stream(id, Codec::H264, "Prostir-1".into());
     router.on_event(
         id,
         crate::encoder::EncoderEvent::Size {

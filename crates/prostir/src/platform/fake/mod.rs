@@ -118,6 +118,26 @@ pub fn hang(point: &str) {
     }
 }
 
+/// How many of the fake hardware encoders of each output still break once they sent a
+/// frame (`break-encoder Fake-2 3`, see `desktop.rs`), by output name.
+static BREAK_ENCODERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, u32>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Whether a fake hardware encoder of output `name` that sent a frame breaks now (one
+/// of those a test asked for).
+pub fn encoder_breaks(name: &str) -> bool {
+    BREAK_ENCODERS
+        .lock()
+        .unwrap()
+        .get_mut(name)
+        .is_some_and(|left| {
+            let breaks = *left > 0;
+            *left = left.saturating_sub(1);
+            breaks
+        })
+}
+
 /// An encoder stops: it hangs, if a test said so (`hang encoder-stop 20`), and takes
 /// `PROSTIR_FAKE_ENCODER_STOP_MS` in any case, as a graphics driver letting its
 /// encoder go does.

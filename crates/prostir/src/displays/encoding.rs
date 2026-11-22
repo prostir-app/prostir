@@ -3,14 +3,42 @@
 
 use super::*;
 
+/// A monitor that failed this many times in a row no longer counts as on its way
+/// (see [`Displays::healthy`]); it is still tried again.
+const GIVE_UP_AFTER: u32 = 3;
+
 impl Displays {
     /// Monitor `id` is tried again (after a failure): `Starting` until the worker
     /// says what came of it.
     pub(super) fn try_again(&mut self, id: ScreenId) {
         if let Some(s) = self.screens.get_mut(&id) {
             s.attempt += 1;
+            s.retry_at = None;
             s.state = ScreenState::Starting;
         }
+    }
+
+    /// Tries again each monitor that failed once its pause is over (see
+    /// `screen::retry_pause`); the others go on meanwhile. Whether one was.
+    pub(super) fn retry_due(&mut self, now: Instant) -> bool {
+        let due: Vec<ScreenId> = self
+            .monitors()
+            .filter(|s| matches!(s.state, ScreenState::Failed { .. }))
+            .filter(|s| s.retry_at.is_some_and(|t| t <= now))
+            .filter(|s| !self.too_big.contains_key(&s.id))
+            .map(|s| s.id)
+            .collect();
+        for id in &due {
+            if let Some(s) = self.screens.get(id) {
+                info!(
+                    "{}: trying it again (failure {} in a row)",
+                    s.name(),
+                    s.failures
+                );
+            }
+            self.try_again(*id);
+        }
+        !due.is_empty()
     }
 
     /// Displays too big for the last headset or codec are tried again where they fit
@@ -48,6 +76,10 @@ impl Displays {
             .map(|s| s.id)
             .collect();
         for id in failed {
+            // Tried at once, and counted from the first pause again.
+            if let Some(s) = self.screens.get_mut(&id) {
+                s.failures = 0;
+            }
             self.try_again(id);
         }
     }
@@ -247,19 +279,18 @@ impl Displays {
         })
     }
 
-    /// Every monitor streams or is on its way, and one at least does or is; no stream
-    /// broke. Otherwise the screens are made anew for the next session.
+    /// Some monitor streams or is on its way: one that broke or did not start is
+    /// tried again by itself (see [`Displays::retry_due`]), and only when none can
+    /// stream at all (every one failed [`GIVE_UP_AFTER`] times in a row) do the
+    /// sessions end, the screens made anew for the next one.
     pub fn healthy(&self) -> bool {
         // Monitors too big for this headset are not broken: they wait for another.
         self.monitors().any(|s| {
             s.running()
                 || matches!(s.state, ScreenState::Starting)
                 || self.too_big.contains_key(&s.id)
-        }) && !self.router.failed.load(Ordering::Relaxed)
-            && !self
-                .screens
-                .values()
-                .any(|s| !s.is_physical() && s.running() && s.closed)
+                || (s.retry_at.is_some() && s.failures < GIVE_UP_AFTER)
+        })
     }
 }
 

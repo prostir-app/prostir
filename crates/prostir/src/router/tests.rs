@@ -99,7 +99,7 @@ fn a_restarted_stream_is_announced_and_ended() {
     let outbox = attach(&router, 1, headset());
     let (s0, s1) = (id(0), id(1));
     router.publish(1, &BTreeSet::from([s0, s1]));
-    router.add_stream(s0, Codec::H265, "test".into(), false);
+    router.add_stream(s0, Codec::H265, "test".into());
     keyframe(&router, s0);
     let [
         HostMsg::StreamStart {
@@ -118,7 +118,7 @@ fn a_restarted_stream_is_announced_and_ended() {
     };
     assert_eq!(first, g);
     assert!(router.is_current(1, s0, first));
-    router.add_stream(s0, Codec::H264, "test".into(), false);
+    router.add_stream(s0, Codec::H264, "test".into());
     keyframe(&router, s0);
     let [
         HostMsg::StreamStart {
@@ -133,7 +133,7 @@ fn a_restarted_stream_is_announced_and_ended() {
     };
     assert!(second > first, "a new generation");
     assert!(!router.is_current(1, s0, first), "the old one is over");
-    router.add_stream(s0, Codec::H265, "test".into(), false);
+    router.add_stream(s0, Codec::H265, "test".into());
     router.remove_stream(s0);
     assert_eq!(
         sent(&outbox),
@@ -143,7 +143,7 @@ fn a_restarted_stream_is_announced_and_ended() {
         }]
     );
     // Never shown: nothing to end.
-    router.add_stream(s1, Codec::H265, "test".into(), false);
+    router.add_stream(s1, Codec::H265, "test".into());
     router.remove_stream(s1);
     assert!(sent(&outbox).is_empty());
 }
@@ -157,7 +157,7 @@ fn a_shown_frame_is_timed_from_when_it_was_sent() {
     let outbox = attach(&router, 1, headset());
     let s = id(3);
     router.publish(1, &BTreeSet::from([s]));
-    router.add_stream(s, Codec::H264, "test".into(), false);
+    router.add_stream(s, Codec::H264, "test".into());
     keyframe(&router, s);
     for _ in 0..3 {
         frame(&router, s, false);
@@ -193,7 +193,7 @@ fn a_stream_too_big_for_the_headset_never_starts() {
     let outbox = attach(&router, 1, small());
     let s = id(5);
     router.publish(1, &BTreeSet::from([s]));
-    router.add_stream(s, Codec::H264, "test".into(), false);
+    router.add_stream(s, Codec::H264, "test".into());
     keyframe(&router, s);
     assert!(sent(&outbox).is_empty(), "nothing of it goes");
     assert!(router.still_too_big(s));
@@ -204,7 +204,7 @@ fn a_stream_too_big_for_the_headset_never_starts() {
     let outbox = attach(&router, 2, small());
     assert_eq!(router.take_too_big(), [(s, (64, 32), Codec::H264)]);
     // A stream started over is not too big until its encoder says its size.
-    router.add_stream(s, Codec::H264, "test".into(), false);
+    router.add_stream(s, Codec::H264, "test".into());
     assert!(!router.still_too_big(s));
     // The same stream fits another headset.
     router.detach(2);
@@ -223,7 +223,7 @@ fn a_stream_waits_for_its_display_in_the_list() {
     let router = Router::new();
     let outbox = attach(&router, 1, headset());
     let s = id(7);
-    router.add_stream(s, Codec::H264, "test".into(), false);
+    router.add_stream(s, Codec::H264, "test".into());
     keyframe(&router, s);
     assert!(sent(&outbox).is_empty(), "not listed yet");
     assert_eq!(
@@ -253,7 +253,7 @@ fn a_stream_fans_out_to_every_headset() {
     let s = id(1);
     let a = attach(&router, 1, headset());
     router.publish(1, &BTreeSet::from([s]));
-    router.add_stream(s, Codec::H264, "test".into(), false);
+    router.add_stream(s, Codec::H264, "test".into());
     keyframe(&router, s);
     frame(&router, s, false);
     assert_eq!(frames(&sent(&a)).len(), 2);
@@ -286,7 +286,7 @@ fn a_stream_too_big_for_one_headset_goes_to_the_other() {
     for session in [1, 2] {
         router.publish(session, &BTreeSet::from([s]));
     }
-    router.add_stream(s, Codec::H264, "test".into(), false);
+    router.add_stream(s, Codec::H264, "test".into());
     keyframe(&router, s);
     assert_eq!(frames(&sent(&big)).len(), 1);
     assert!(sent(&little).is_empty(), "nothing of it to the small one");
@@ -310,7 +310,7 @@ fn a_headset_taken_off_gets_nothing_and_a_fresh_picture_after() {
     for session in [1, 2] {
         router.publish(session, &BTreeSet::from([s]));
     }
-    router.add_stream(s, Codec::H264, "test".into(), false);
+    router.add_stream(s, Codec::H264, "test".into());
     keyframe(&router, s);
     assert!(router.set_worn(2, false).is_empty());
     let _ = (sent(&on), sent(&off));
@@ -380,7 +380,7 @@ fn a_headset_behind_asks_no_keyframe_for_the_others() {
     for session in [1, 2] {
         router.publish(session, &BTreeSet::from([s]));
     }
-    router.add_stream(s, Codec::H264, "test".into(), false);
+    router.add_stream(s, Codec::H264, "test".into());
     keyframe(&router, s);
     let _ = sent(&a);
     // The second one lost a frame; its keyframe is still queued, never sent.
@@ -411,7 +411,7 @@ fn a_headset_behind_asks_no_keyframe_for_the_others() {
 fn a_still_stream_starves_a_headset_that_waits_for_its_picture() {
     let router = Router::new();
     let s = id(8);
-    router.add_stream(s, Codec::H264, "test".into(), false);
+    router.add_stream(s, Codec::H264, "test".into());
     keyframe(&router, s);
     frame(&router, s, false);
     assert!(!router.live(s), "it goes to nobody");
@@ -445,7 +445,7 @@ fn a_keyframe_asked_again_soon_comes_after_the_window() {
     let s = id(4);
     let _outbox = attach(&router, 1, headset());
     router.publish(1, &BTreeSet::from([s]));
-    router.add_stream(s, Codec::H264, "test".into(), false);
+    router.add_stream(s, Codec::H264, "test".into());
     keyframe(&router, s);
     assert!(
         !frame(&router, s, false),
@@ -481,7 +481,7 @@ fn a_still_screen_gets_one_keyframe() {
     let s = id(5);
     let _outbox = attach(&router, 1, headset());
     router.publish(1, &BTreeSet::from([s]));
-    router.add_stream(s, Codec::H264, "test".into(), false);
+    router.add_stream(s, Codec::H264, "test".into());
     keyframe(&router, s);
     let still = Duration::from_millis(50);
     assert_eq!(
@@ -523,7 +523,7 @@ fn a_keyframe_the_router_needs_soon_after_another_is_not_lost() {
     let s = id(7);
     let _first = attach(&router, 1, headset());
     router.publish(1, &BTreeSet::from([s]));
-    router.add_stream(s, Codec::H264, "test".into(), false);
+    router.add_stream(s, Codec::H264, "test".into());
     keyframe(&router, s);
     // Taken off and put on again: the next frame asks for a keyframe for it.
     router.set_worn(1, false);
@@ -556,7 +556,7 @@ fn a_keyframe_going_out_answers_a_waiting_request() {
     let s = id(6);
     let _outbox = attach(&router, 1, headset());
     router.publish(1, &BTreeSet::from([s]));
-    router.add_stream(s, Codec::H264, "test".into(), false);
+    router.add_stream(s, Codec::H264, "test".into());
     keyframe(&router, s);
     router.keyframe_asked(s);
     router.keyframe_asked(s);

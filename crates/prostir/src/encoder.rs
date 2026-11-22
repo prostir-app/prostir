@@ -648,6 +648,14 @@ impl Encoder {
             let on_event = on_event.clone();
             let node = node.clone();
             let encoded = encoded.clone();
+            // A fake hardware encoder a test asked to break: once it sent a frame, it
+            // fails as a driver can in the middle of a stream.
+            #[cfg(feature = "fake-desktop")]
+            let breaker = (cfg.backend == Backend::Fake)
+                .then(|| pipeline.by_name("enc").map(|e| e.downgrade()))
+                .flatten();
+            #[cfg(feature = "fake-desktop")]
+            let broke = AtomicBool::new(false);
             sink.set_callbacks(
                 gst_app::AppSinkCallbacks::builder()
                     .new_sample(move |sink| {
@@ -684,6 +692,18 @@ impl Encoder {
                             timing,
                         }) {
                             request_keyframe(sink);
+                        }
+                        #[cfg(feature = "fake-desktop")]
+                        if let Some(enc) = breaker.as_ref().and_then(gst::glib::WeakRef::upgrade)
+                            && !broke.load(Ordering::Relaxed)
+                            && crate::platform::encoder_breaks(&node)
+                        {
+                            broke.store(true, Ordering::Relaxed);
+                            gst::element_error!(
+                                enc,
+                                gst::StreamError::Encode,
+                                ("broken on purpose (break-encoder)")
+                            );
                         }
                         Ok(gst::FlowSuccess::Ok)
                     })
