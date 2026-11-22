@@ -464,6 +464,7 @@ fn the_pc_is_found_by_asking_once_it_gave_its_secret() {
         ),
         (Some(id), pc.addr(), "Fake", false)
     );
+    assert!(heard[0].at_last, "from the address it was kept at");
     wait_pc(&pc, |h| {
         *h == Happened::Asked {
             ours: true,

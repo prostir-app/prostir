@@ -95,6 +95,9 @@ pub struct FoundHost {
     pub pairing: bool,
     /// When the answer came.
     pub heard: Instant,
+    /// It came from the address the trusted PC had its last session at (a copy of its
+    /// answer sent from elsewhere does not).
+    pub at_last: bool,
     /// What the menu's list shows for it (its name, and whether its pairing window is
     /// open), and its address as the user reads it: made once, when it answers
     /// ([`Session::heard`]), not for each frame.
@@ -612,10 +615,22 @@ impl Session {
             host.name.clone()
         };
         host.ip = host.addr.ip().to_string();
-        let (addr, pc) = (host.addr, host.pc);
+        let (mut addr, pc) = (host.addr, host.pc);
         let found = &mut self.search.found;
         let same = |h: &FoundHost| h.addr == addr || (pc.is_some() && h.pc == pc);
         match found.iter().position(same) {
+            // A trusted PC's answer from its last address stays before one from
+            // elsewhere (a copy of its answer, or another way to it): kept, as fresh.
+            Some(i)
+                if pc.is_some()
+                    && found[i].pc == pc
+                    && found[i].addr != addr
+                    && found[i].at_last
+                    && !host.at_last =>
+            {
+                found[i].heard = host.heard;
+                addr = found[i].addr;
+            }
             Some(i) => {
                 found[i] = host;
                 // Another entry of the same PC (it moved): one is enough.
@@ -713,6 +728,15 @@ impl Session {
     /// A PC this headset does not trust answered: the user is asked whether to pair
     /// with it (`why`); its connection is closed meanwhile.
     pub fn offered(&mut self, key: [u8; 32], addr: SocketAddr, why: OfferWhy, texts: &Texts) {
+        // Said "Not now" to already: let go without asking again.
+        if self
+            .search
+            .declined
+            .is_some_and(|(_, pc)| pc == PcId::of(&key))
+        {
+            self.cmds.push(NetCmd::Hangup);
+            return;
+        }
         let label = offer_label(&self.label(addr, texts), addr);
         self.search.approved = None;
         self.search.attempt = Some(Attempt::PairOffer {
@@ -1060,11 +1084,15 @@ impl Session {
             .map(|h| h.addr)
     }
 
-    /// Whether the user said "Not now" to the PC at `addr` (or to PC `pc`).
+    /// Whether the user said "Not now" to the PC that answered from `addr`: a trusted
+    /// PC's answer (by its tag, `pc`) by its number alone, so another PC at that
+    /// address later (or the declined one over USB) leaves it alone; an answer without
+    /// a tag by its address.
     fn is_declined(&self, addr: SocketAddr, pc: Option<PcId>) -> bool {
-        self.search
-            .declined
-            .is_some_and(|(a, p)| a == addr || pc == Some(p))
+        self.search.declined.is_some_and(|(a, p)| match pc {
+            Some(pc) => pc == p,
+            None => a == addr,
+        })
     }
 
     fn declined_addr(&self, addr: SocketAddr) -> bool {

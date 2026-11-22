@@ -55,6 +55,9 @@ pub const CONNECT_WITHIN: Duration = Duration::from_millis(400);
 pub const ANSWERS_WITHIN: Duration = Duration::from_millis(300);
 /// The most answers of PCs that answer everyone taken from one query.
 pub const ANSWERS_MAX: usize = 8;
+/// The most answers with one trusted PC's tag taken from one query (a copy of its
+/// answer from elsewhere, or several ways to it).
+pub const ANSWERS_OF_ONE_PC: u8 = 4;
 /// The interfaces' broadcast addresses and `host.txt` are looked up again after this.
 const LOOK_AGAIN_AFTER: Duration = Duration::from_secs(10);
 /// The first line of the files kept here.
@@ -302,7 +305,10 @@ struct Asking {
     looked_at: Option<Instant>,
     /// The addresses that answered the query in progress.
     answered: Vec<SocketAddr>,
-    secrets: Vec<([u8; 32], FindSecret)>,
+    /// Each trusted PC's key, find secret and last address.
+    secrets: Vec<([u8; 32], FindSecret, Option<SocketAddr>)>,
+    /// How many answers each trusted PC's tag had in the query in progress.
+    per_pc: Vec<(PcId, u8)>,
 }
 
 fn find(asks: &Receiver<Ask>, targets: &Targets, shared: &Shared, known: &Mutex<Known>) {
@@ -316,6 +322,7 @@ fn find(asks: &Receiver<Ask>, targets: &Targets, shared: &Shared, known: &Mutex<
         looked_at: None,
         answered: Vec::with_capacity(ANSWERS_MAX),
         secrets: Vec::new(),
+        per_pc: Vec::new(),
     };
     while let Ok(ask) = asks.recv() {
         // A socket of its own for each query: its port does not tie one query of this
@@ -396,7 +403,11 @@ fn ask_once(
     {
         let known = lock(known);
         a.secrets.clear();
-        a.secrets.extend(known.secrets().map(|(k, s)| (*k, *s)));
+        a.secrets.extend(
+            known
+                .secrets()
+                .map(|(k, s)| (*k, *s, known.last.get(k).copied())),
+        );
         targets_of(a, ask, targets, &known);
     }
     let name = if ask.pairing {
@@ -404,7 +415,7 @@ fn ask_once(
     } else {
         ""
     };
-    a.query.renew(a.secrets.iter().map(|(_, s)| s), name);
+    a.query.renew(a.secrets.iter().map(|(_, s, _)| s), name);
     a.query.encode_into(&mut a.bytes);
     for to in &a.to {
         if let Err(e) = socket.send_to(&a.bytes, to) {
@@ -412,6 +423,7 @@ fn ask_once(
         }
     }
     a.answered.clear();
+    a.per_pc.clear();
     // Answers of PCs that answer everyone, counted: a flood of made-up ones cannot keep
     // a trusted PC's out.
     let mut others = 0;
@@ -435,16 +447,17 @@ fn ask_once(
         if a.answered.contains(&addr) {
             continue;
         }
-        let pc = a
-            .secrets
-            .iter()
-            .find(|(_, s)| answer.from_pc(s))
-            .map(|(k, _)| PcId::of(k));
-        if pc.is_none() {
-            if others >= ANSWERS_MAX {
-                continue;
-            }
-            others += 1;
+        let trusted = a.secrets.iter().find(|(_, s, _)| answer.from_pc(s));
+        let pc = trusted.map(|(k, _, _)| PcId::of(k));
+        let at_last = trusted.is_some_and(|(_, _, last)| *last == Some(addr));
+        match pc {
+            None if others >= ANSWERS_MAX => continue,
+            None => others += 1,
+            Some(pc) => match a.per_pc.iter_mut().find(|(p, _)| *p == pc) {
+                Some((_, n)) if *n >= ANSWERS_OF_ONE_PC => continue,
+                Some((_, n)) => *n += 1,
+                None => a.per_pc.push((pc, 1)),
+            },
         }
         a.answered.push(addr);
         shared.tell(NetEvent::Heard(FoundHost {
@@ -453,6 +466,7 @@ fn ask_once(
             pc,
             pairing: answer.flags & flags::PAIRING != 0,
             heard: Instant::now(),
+            at_last,
             label: String::new(),
             ip: String::new(),
         }));

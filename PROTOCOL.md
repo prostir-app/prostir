@@ -153,9 +153,10 @@ Limits: a datagram that is not a whole query of 128 to 512 bytes is dropped unre
 (the host drops it in the kernel, with a socket filter); an answer is always smaller
 than the smallest query, so a forged sender address gets less than it sent and a PC
 cannot be used to amplify traffic. A query with the PC's own tag is always looked at
-and answered (once for each nonce); of the rest, a PC looks at 20 a second from one
-address and 200 in all at most (implementation-defined; the others are dropped) and
-answers 20 a second at most. Nothing a query says changes what a PC keeps: who is trusted, the find secrets and the pairing
+and answered once for each nonce, 100 a second at most; of the rest, a PC looks at 20
+a second from one address and 200 in all at most and answers 20 a second at most
+(implementation-defined; the others are dropped). A nonce answered is remembered for
+10 s whatever comes: with no room left to remember one, a query gets no answer. Nothing a query says changes what a PC keeps: who is trusted, the find secrets and the pairing
 window change only by the person at the PC or inside an encrypted session.
 
 Neither is encrypted: an answer is a hint where to connect, and trust comes from the
@@ -206,7 +207,11 @@ opened; never from an answer). A round of its search goes:
    only listed for the user to pick.
 
 "Not now" to a PC offered leaves that PC alone (it is not dialed on its own until the
-user picks something), while trusted PCs are still connected to by themselves. Each
+user picks something, and should it come again another way it is let go without
+asking), while trusted PCs are still connected to by themselves: a trusted PC's answer
+is matched to the PC declined by its tag, never by its address. Of the answers with
+one trusted PC's tag, a query takes 4 at most, and one from the address the PC had its
+last session at stays before one from elsewhere. Each
 query goes from a new UDP port, so the port does not tie one query to the next.
 
 A round goes once a second for the first 30 s of a search, then every 3 s. Nothing is

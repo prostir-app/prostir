@@ -134,6 +134,7 @@ fn found(name: String, addr: SocketAddr, pc: Option<PcId>, heard: Instant) -> Fo
         pc,
         pairing: false,
         heard,
+        at_last: false,
         label: String::new(),
         ip: String::new(),
     }
@@ -843,4 +844,61 @@ fn the_list_keeps_its_order() {
     sim.now += HEARD_WITHIN;
     assert!(sim.s.tick(sim.now), "the answers went: the menu changes");
     assert!(sim.s.search().found.is_empty());
+}
+
+/// A decline is the PC's, not its address's: a trusted PC's answer from the address of
+/// a PC declined is taken; the declined PC offered again is let go without asking.
+/// A trusted PC's answer from its last address stays before a copy from elsewhere.
+#[test]
+fn a_decline_is_the_pcs_and_the_last_address_wins() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.s.dialed(s, usb());
+    sim.s.offered(key(5), usb(), OfferWhy::New, &sim.texts);
+    sim.end(s, None, &Ended::default(), MS);
+    sim.s.answer_offer(false, sim.now);
+    // The declined PC comes again (another way): let go, nothing asked.
+    sim.s.offered(key(5), addr(9), OfferWhy::New, &sim.texts);
+    assert!(sim.s.search().attempt.is_none());
+    assert_eq!(sim.cmds(), [NetCmd::Hangup]);
+    // The trusted PC answers.
+    sim.after(ASK_FAST);
+    let (_, _) = sim.asked(None);
+    let mut at_last = found("PC 1".into(), addr(5), Some(pc(1)), sim.now);
+    at_last.at_last = true;
+    // First a copy of its answer from elsewhere, then from its last address.
+    sim.s.heard(
+        found("PC 1".into(), addr(6), Some(pc(1)), sim.now),
+        sim.now,
+        &sim.texts,
+    );
+    let (_, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(6)), "the only one so far");
+    sim.s.heard(at_last, sim.now, &sim.texts);
+    sim.s.heard(
+        found("PC 1".into(), addr(6), Some(pc(1)), sim.now),
+        sim.now,
+        &sim.texts,
+    );
+    let listed: Vec<_> = sim.s.search().found.iter().map(|h| h.addr).collect();
+    assert_eq!(listed, [addr(5)], "its last address kept");
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.s.dialed(s, usb());
+    sim.s.offered(key(5), usb(), OfferWhy::New, &sim.texts);
+    sim.end(s, None, &Ended::default(), MS);
+    sim.s.answer_offer(false, sim.now);
+    sim.after(ASK_FAST);
+    let (_, _) = sim.asked(None);
+    sim.answer(Some(1), usb());
+    let (_, cmd) = sim.step();
+    assert_eq!(
+        dest(&cmd),
+        Dest::Addr(usb()),
+        "a trusted PC at the declined address"
+    );
 }

@@ -30,10 +30,12 @@
 //!   the answer is a hint where to connect, trust comes from the handshake).
 //! - **Flooding.** The kernel drops what is not a whole query (a socket filter, see
 //!   `platform::sockets::filter_queries`). A query with this PC's tag is always looked
-//!   at and answered (once for each nonce: a flood of them needs the secret, and replays
-//!   are answered once). Of the rest, at most [`READ_PER_SOURCE`] a second from one
-//!   address and [`READ_PER_SECOND`] in all are looked at, and [`ANSWERS_PER_SECOND`]
-//!   answered; the rest are dropped. Nothing is allocated for a datagram. An answer is
+//!   at, and answered once for each nonce, [`OWN_ANSWERS_PER_SECOND`] a second at most
+//!   (a budget of their own: a flood of them needs the secret, and replays are answered
+//!   once). Of the rest, at most [`READ_PER_SOURCE`] a second from one address and
+//!   [`READ_PER_SECOND`] in all are looked at, and [`ANSWERS_PER_SECOND`] answered; the
+//!   rest are dropped. A nonce answered is remembered for [`NONCES_KEPT_FOR`] whatever
+//!   comes: with no room left to remember one, the query gets no answer. Nothing is allocated for a datagram. An answer is
 //!   always smaller than the query, so a forged sender address gets less than was sent:
 //!   no amplification.
 //! - **Changing state.** Nothing a query says changes anything kept: who is trusted,
@@ -66,8 +68,10 @@ use prostir_proto::discovery::{
 use crate::events::{Event, EventSink};
 use crate::pairing::Security;
 
-/// Answers sent in a second, at most, whoever asks.
+/// Answers to queries without this PC's tag sent in a second, at most.
 const ANSWERS_PER_SECOND: usize = 20;
+/// Answers to queries with its tag (its own headsets) sent in a second, at most.
+const OWN_ANSWERS_PER_SECOND: usize = 100;
 /// Queries without this PC's tag looked at in a second, at most: the rest are dropped.
 const READ_PER_SECOND: usize = 200;
 /// The same, from one address.
@@ -79,8 +83,9 @@ const SOURCES_KEPT: usize = 32;
 /// as a broadcast and straight to the PC, or someone sends a captured one again) gets
 /// no second answer within it.
 pub const NONCES_KEPT_FOR: Duration = Duration::from_secs(10);
-/// The most nonces remembered (a second's answers, ten times over).
-const NONCES_KEPT: usize = ANSWERS_PER_SECOND * 10;
+/// The most nonces remembered: every answer of [`NONCES_KEPT_FOR`] at the most there
+/// can be.
+const NONCES_KEPT: usize = (ANSWERS_PER_SECOND + OWN_ANSWERS_PER_SECOND) * 10;
 /// The most old find secrets that stay valid besides the current one (see the module):
 /// each is one more forgetting while some trusted headset was off. Beyond them, such a
 /// headset finds the PC by its last address.
@@ -217,6 +222,8 @@ pub struct Responder {
     name: String,
     /// When the last answers without a tag went, at most [`ANSWERS_PER_SECOND`].
     sent: VecDeque<Instant>,
+    /// When the last answers with its tag went, at most [`OWN_ANSWERS_PER_SECOND`].
+    sent_own: VecDeque<Instant>,
     /// When the last queries without a tag were looked at, [`READ_PER_SECOND`] at most.
     read: VecDeque<Instant>,
     /// The addresses that sent them lately.
@@ -275,6 +282,7 @@ impl Responder {
             port,
             name,
             sent: VecDeque::with_capacity(ANSWERS_PER_SECOND),
+            sent_own: VecDeque::with_capacity(OWN_ANSWERS_PER_SECOND),
             read: VecDeque::with_capacity(READ_PER_SECOND),
             sources: Vec::with_capacity(SOURCES_KEPT),
             nonces: VecDeque::with_capacity(NONCES_KEPT),
@@ -305,9 +313,16 @@ impl Responder {
             return None;
         }
         let again = self.seen(&query.nonce, now);
+        // Never a nonce forgotten before its time: no room to remember one, no answer.
+        let full = self.nonces.len() >= NONCES_KEPT;
         let answered = (ours || open.answers_all())
             && !again
-            && (ours || room(&mut self.sent, ANSWERS_PER_SECOND, now));
+            && !full
+            && if ours {
+                room(&mut self.sent_own, OWN_ANSWERS_PER_SECOND, now)
+            } else {
+                room(&mut self.sent, ANSWERS_PER_SECOND, now)
+            };
         if answered {
             let mut bits = 0;
             if open.pairing {
@@ -327,9 +342,6 @@ impl Responder {
                 &mut self.out,
             );
             debug_assert!(self.out.len() < datagram.len());
-            if self.nonces.len() == NONCES_KEPT {
-                self.nonces.pop_front();
-            }
             self.nonces.push_back((query.nonce, now));
         }
         let asker = Asker {
@@ -663,6 +675,49 @@ mod tests {
             r.consider(&bytes, from(), || PAIRED, now + Duration::from_secs(1))
                 .is_some()
         );
+    }
+
+    /// Its own headsets have their own budget, and a nonce is never forgotten within
+    /// its time: past what the budgets allow there is always room.
+    #[test]
+    fn its_own_headsets_have_a_budget_of_their_own() {
+        let mut r = responder();
+        let now = Instant::now();
+        let answered = (0..150)
+            .filter(|_| {
+                let own = Query::new([&PC], "").encode();
+                r.consider(&own, from(), || PAIRED, now)
+                    .is_some_and(|(a, _)| a.answered)
+            })
+            .count();
+        assert_eq!(answered, OWN_ANSWERS_PER_SECOND);
+        // Answers every second for ten seconds: the nonces of all of them are kept.
+        let mut r = responder();
+        let open = Open {
+            pairing: true,
+            ..PAIRED
+        };
+        let mut first = None;
+        for s in 0..10u64 {
+            let at = now + Duration::from_secs(s);
+            for i in 0..200u8 {
+                let q = Query::new([&PC], "");
+                first.get_or_insert_with(|| q.encode());
+                let from = SocketAddr::from(([10, 2, 0, i], 4000));
+                let mine = if i % 2 == 0 {
+                    q.encode()
+                } else {
+                    Query::new([&OTHER_PC], "").encode()
+                };
+                let _ = r.consider(&mine, from, || open, at);
+            }
+        }
+        assert!(r.nonces.len() <= NONCES_KEPT);
+        let first = first.unwrap();
+        let (_, again) = r
+            .consider(&first, from(), || open, now + Duration::from_secs(9))
+            .unwrap();
+        assert!(again.is_none(), "the first nonce is still remembered");
     }
 
     /// A name is kept in place, cut at a character's edge.
