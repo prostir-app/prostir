@@ -765,27 +765,33 @@ fn serve(args: Args, why: Why, moved: bool) -> Result<i32> {
         None if args.stay => {
             let args = window_at_first_start(args);
             let instance = match platform::single_instance("serve") {
-                Err(e) if platform::runs_already(&e) => return Ok(open_the_running_one()),
+                Err(e) if platform::runs_already(&e) => {
+                    return Ok(open_the_running_one(platform::held_by(&e)));
+                }
                 taken => taken?,
             };
+            the_one_prostir();
             let sockets = open_sockets(&args, discovery)?;
             full_with(&args, sockets, Origin::Own, None, Some(instance))
         }
         None => {
             let args = window_at_first_start(args);
             let instance = match platform::single_instance("watcher") {
-                Err(e) if platform::runs_already(&e) => return Ok(open_the_running_one()),
+                Err(e) if platform::runs_already(&e) => {
+                    return Ok(open_the_running_one(platform::held_by(&e)));
+                }
                 taken => taken?,
             };
             let sockets = match open_sockets(&args, discovery) {
                 // systemd's socket waits for the headset: Prostir is there, asleep.
                 Err(_) if platform::autostart::socket_waits() => {
                     drop(instance);
-                    return Ok(open_the_running_one());
+                    return Ok(open_the_running_one(None));
                 }
                 opened => opened?,
             };
             let _instance = instance;
+            the_one_prostir();
             if !args.no_adb {
                 platform::keep_adb_reverse(sockets.port());
             }
@@ -815,11 +821,27 @@ fn autostart_at_first_start(ran_before: bool, available: bool, enabled: bool) ->
 }
 
 /// The service started again while it runs (`prostir serve` by hand, or an autostart
-/// line while the menu started it): the running one opens its settings window, or
-/// brings it forward, as `prostir` does, and this one ends. Its exit code.
-fn open_the_running_one() -> i32 {
+/// line while the menu started it): the running one (`pid`, where known) opens its
+/// settings window, or brings it forward, as `prostir` does, and this one ends. Its
+/// exit code. Nothing is started: a Prostir that runs but is not on this session bus
+/// is only named.
+fn open_the_running_one(pid: Option<u32>) -> i32 {
     info!("Prostir runs already: its settings window opens");
-    open_window()
+    match platform::local_api::Client::connect(ctl::WAIT) {
+        Ok(client) => ctl::open(&client, &|| local::wake_running(pid)),
+        Err(e) => {
+            eprintln!("prostir: no session bus ({e:?})");
+            ctl::NOT_RUNNING
+        }
+    }
+}
+
+/// This program took the lock of the one Prostir of the user: what it starts from now
+/// on (the window, the full program again) may start Prostir.
+fn the_one_prostir() {
+    // SAFETY: no thread of this program runs yet (`serve` starts none before it took
+    // the lock), so none reads the environment meanwhile.
+    unsafe { std::env::remove_var(local::STARTED_TO_OPEN) };
 }
 
 /// Opens the sockets here; when systemd's socket holds the port, says so.

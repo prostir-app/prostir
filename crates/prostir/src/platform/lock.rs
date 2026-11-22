@@ -34,6 +34,12 @@ pub fn is_held(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.is::<Held>())
 }
 
+/// The process id of whoever holds the lock, where `e` says Prostir runs already.
+pub fn held_by(e: &anyhow::Error) -> Option<u32> {
+    let held = e.chain().find_map(|c| c.downcast_ref::<Held>())?;
+    held.0.split_once(' ')?.1.parse().ok()
+}
+
 /// The lock taken: held until it is dropped.
 #[derive(Debug)]
 pub struct Lock(std::fs::File);
@@ -103,7 +109,10 @@ mod tests {
         assert_eq!(holder(&path, "serve"), None, "another role");
         let again = take(&path, "serve").unwrap_err();
         assert!(format!("{again:#}").contains("watcher"), "{again:#}");
-        assert!(is_held(&again.context("Prostir is already running")));
+        let again = again.context("Prostir is already running");
+        assert!(is_held(&again));
+        assert_eq!(held_by(&again), Some(std::process::id()));
+        assert_eq!(held_by(&anyhow::anyhow!("another error")), None);
         drop(held);
         // Free at once, also while a program another test starts shares the file.
         assert_eq!(holder(&path, "watcher"), None, "let go");

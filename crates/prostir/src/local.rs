@@ -1223,6 +1223,27 @@ pub fn wake_for_window() -> std::io::Result<crate::ctl::Woken> {
     wake(|| start_detached(std::process::Stdio::inherit()).map(crate::ctl::Woken::Started))
 }
 
+/// Wakes the Prostir that holds the lock of this user (`pid`, where known) for the
+/// settings window: `prostir` or `prostir serve` while it runs, or sleeps. Never starts
+/// another: one that runs but is not on this session bus (started from another
+/// session, say) only says so, since a new one would find it running too, and start
+/// one more.
+pub fn wake_running(pid: Option<u32>) -> std::io::Result<crate::ctl::Woken> {
+    wake(|| {
+        let who = pid.map_or_else(String::new, |pid| {
+            format!(" ({} {pid})", t("процес", "process"))
+        });
+        Err(std::io::Error::other(format!(
+            "{}{who}{}",
+            t("Prostir уже працює", "Prostir runs already"),
+            t(
+                ", але не на цій сеансовій шині: його вікно відкривається з сеансу, де його запущено",
+                ", but not on this session bus: its window opens from the session it was started in",
+            ),
+        )))
+    })
+}
+
 /// Wakes Prostir for an agent (the tool `start` of `prostir mcp`), as for the window,
 /// but nothing it starts writes to the agent's pipes: a new Prostir starts in the
 /// user's systemd manager (`systemd-run --user`, its log in the journal) where there
@@ -1268,13 +1289,25 @@ fn wake(
     start()
 }
 
+/// Set on a Prostir started by [`start_detached`] until it takes the lock of the one
+/// Prostir of the user: one that finds the lock taken never starts another.
+pub const STARTED_TO_OPEN: &str = "PROSTIR_STARTED_TO_OPEN";
+
 /// Starts `prostir serve --open-settings` on its own, apart from this terminal, its
-/// stderr to `errors` (nothing goes to stdin and stdout).
+/// stderr to `errors` (nothing goes to stdin and stdout). Never from a Prostir started
+/// so that did not become the one Prostir of the user ([`STARTED_TO_OPEN`]): a chain of
+/// programs each starting the next would never end.
 fn start_detached(errors: std::process::Stdio) -> std::io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
+    if std::env::var_os(STARTED_TO_OPEN).is_some() {
+        return Err(std::io::Error::other(
+            "this Prostir was started by another one, which found none running: it starts no other",
+        ));
+    }
     let mut command = std::process::Command::new(this_program()?);
     command
         .args(["serve", "--open-settings"])
+        .env(STARTED_TO_OPEN, "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(errors);
