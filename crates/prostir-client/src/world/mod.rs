@@ -970,21 +970,58 @@ impl World {
     }
 
     /// The PC's own displays that show and have no place yet get one in the group: all
-    /// of them where none has one; else each where the group puts it next to one placed
-    /// already, wherever the person moved that one (see `layout::kept_to`). Those
-    /// placed stay where they are.
+    /// of them where none has one (under the primary monitor, and further down if a
+    /// monitor stands there: they go through none); else each where the group puts it
+    /// next to one placed already, wherever the person moved that one (see
+    /// `layout::kept_to`). Those placed stay where they are.
     fn place_new_physical(&mut self, s: &Settings) {
-        let laid = self.physical_laid(s);
-        let anchor = laid
+        let mut laid = self.physical_laid(s);
+        let placed = laid
             .iter()
-            .find_map(|(id, at)| Some((*at, *self.placements.get(id)?)));
+            .find_map(|(id, at)| Some((*id, *at, *self.placements.get(id)?)));
+        let anchor = placed.map(|(_, from, to)| (from, to));
+        let frame = layout::frame(self.center, self.tilt);
+        let height = |id: &DisplayKey, p: &Placement| self.height_at(*id, p).unwrap_or(0.0);
+        let others = self.placed_heights(&self.lineup);
+        let anchor_clear = placed.is_some_and(|(id, _, to)| {
+            let h = height(&id, &to);
+            !others.iter().any(|(o, oh)| layout::cuts(&to, h, o, *oh))
+        });
+        if anchor.is_none() {
+            let down = laid
+                .iter()
+                .map(|(id, p)| layout::clear_along_up(*p, height(id, p), &others, &frame, -1.0))
+                .fold(0.0f32, f32::max);
+            for (_, p) in &mut laid {
+                *p = layout::lifted(*p, &frame, -down);
+            }
+        }
         for (id, at) in laid {
             if self.placements.contains_key(&id) {
                 continue;
             }
-            let p = anchor.map_or(at, |(from, to)| layout::kept_to(at, from, to));
+            let mut p = anchor.map_or(at, |(from, to)| layout::kept_to(at, from, to));
+            // Next to one of the group that goes through no monitor, where a monitor
+            // stands: further down, out of its way. A group put over monitors by hand
+            // is the person's to move.
+            if anchor_clear {
+                let h = self.height_at(id, &p).unwrap_or(0.0);
+                let down = layout::clear_along_up(p, h, &others, &frame, -1.0);
+                p = layout::lifted(p, &frame, -down);
+            }
             self.placements.insert(id, p);
         }
+    }
+
+    /// Where each of `monitors` that has a place stands, and how high it is.
+    fn placed_heights(&self, monitors: &[(DisplayKey, u32, u32)]) -> Vec<(Placement, f32)> {
+        monitors
+            .iter()
+            .filter_map(|m| {
+                let p = *self.placements.get(&m.0)?;
+                Some((p, self.height_at(m.0, &p)?))
+            })
+            .collect()
     }
 
     /// Lays the monitors of this session's PC (and its own display shown) out by the
@@ -1583,9 +1620,10 @@ impl World {
     }
 
     /// Brings the monitors closer (`steps` below 0) or further, a step at a time, as
-    /// they stand around the user: each keeps its size, the arrangement its shape. Each
-    /// row is lined up at its new distance (see `layout::line_up`): nearer the eye a
-    /// monitor of the same size is seen larger, and would reach into its neighbours.
+    /// they stand around the user: the arrangement as a whole, made as much smaller or
+    /// larger, so each monitor keeps its size to the eye and the arrangement its shape.
+    /// Glued monitors stay glued and none goes into another: a monitor brought nearer
+    /// at its own width would be seen larger, and reach into its neighbours.
     pub fn closer(&mut self, steps: i8, now: Instant) {
         const STEP: f32 = 1.15;
         let (center, _) = self.center;
@@ -1594,10 +1632,8 @@ impl World {
         for (id, p) in &mut self.placements {
             if !window(&self.listed, *id) {
                 p.position = center + (p.position - center) * k;
+                p.width *= k;
             }
-        }
-        if !self.cinema {
-            self.line_up_rows();
         }
         self.radius *= k;
         self.save_layout();

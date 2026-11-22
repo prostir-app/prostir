@@ -1025,8 +1025,8 @@ fn following_the_head() {
     );
 }
 
-/// Closer and further a step at a time, each keeping its size and the arrangement its
-/// shape; in front: the arrangement turned and carried to the head as it stood.
+/// Closer and further a step at a time, each keeping its size to the eye and the
+/// arrangement its shape; in front: the arrangement turned and carried to the head as it stood.
 #[test]
 fn closer_further_and_in_front() {
     let mut sim = Sim::at_desk();
@@ -1035,7 +1035,10 @@ fn closer_further_and_in_front() {
     for (k, p) in &before {
         let q = sim.place(*k);
         assert!((q.position.length() - p.position.length() / 1.15).abs() < 1e-4);
-        assert!((q.width - p.width).abs() < 1e-6, "its size kept");
+        assert!(
+            (q.width - p.width / 1.15).abs() < 1e-4,
+            "its size to the eye kept"
+        );
     }
     sim.world.closer(1, sim.now);
     assert!(same_places(&sim.places(), &before), "and back");
@@ -1572,7 +1575,10 @@ fn closer_keeps_glued_monitors_apart() {
         let k_ = 1.15f32.powi(i32::from(steps));
         for n in 1..=3 {
             let (a, b) = (before[&k(n)], sim.place(k(n)));
-            assert!((b.width - a.width).abs() < 1e-6, "{steps}: its size kept");
+            assert!(
+                (b.width / a.width - k_).abs() < 1e-4,
+                "{steps}: its size to the eye"
+            );
             assert!(
                 (b.position.length() / a.position.length() - k_).abs() < 1e-4,
                 "{steps}: as far as asked"

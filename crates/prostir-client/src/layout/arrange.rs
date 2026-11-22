@@ -398,6 +398,8 @@ pub fn make_room<K: Key>(
     ) else {
         return;
     };
+    // It, and every monitor pushed along the row: what may go through another now.
+    let mut moved = vec![id];
     for side in [1.0f32, -1.0] {
         let beyond: Vec<&Seen<K>> = seen
             .iter()
@@ -430,7 +432,94 @@ pub fn make_room<K: Key>(
         for s in beyond {
             if let Some(p) = placements.get_mut(&s.id) {
                 *p = along_row(*p, &frame, wall, angle, metres);
+                moved.push(s.id);
             }
+        }
+    }
+    clear_above_and_below(placements, monitors, &frame, moved);
+}
+
+/// `p` carried up (`up` above 0) or down along the frame's up by `up` metres.
+pub fn lifted(p: Placement, frame: &Frame, up: f32) -> Placement {
+    Placement {
+        position: p.position + frame.turn * Vec3::Y * up,
+        ..p
+    }
+}
+
+/// How far `p` (`ph` high) must go along the frame's up (`dir` 1) or down (-1) to cut
+/// into none of `others` (place, height), to a tenth of a millimetre: none of them
+/// further than both heights together.
+pub fn clear_along_up(
+    p: Placement,
+    ph: f32,
+    others: &[(Placement, f32)],
+    frame: &Frame,
+    dir: f32,
+) -> f32 {
+    let cut_any = |t: f32| {
+        let at = lifted(p, frame, dir * t);
+        others.iter().any(|(o, oh)| cuts(&at, ph, o, *oh))
+    };
+    if !cut_any(0.0) {
+        return 0.0;
+    }
+    let mut hi = ph + others.iter().map(|o| o.1).fold(0.0, f32::max);
+    while cut_any(hi) && hi < 100.0 {
+        hi *= 2.0;
+    }
+    let mut lo = 0.0;
+    while hi - lo > 1e-4 {
+        let mid = (lo + hi) / 2.0;
+        if cut_any(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    hi
+}
+
+/// The monitors those of `moved` go through now (over or under them, or beside them
+/// still) are carried up or down out of their way, and so on for the monitors those
+/// then go through. A row glued over a row may be seen over it a little, as "Line up" leaves
+/// it: only going through it is undone.
+fn clear_above_and_below<K: Key>(
+    placements: &mut HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    frame: &Frame,
+    moved: Vec<K>,
+) {
+    let height = |k: K, p: &Placement| {
+        monitors
+            .iter()
+            .find(|m| m.0 == k)
+            .map(|&(_, w, h)| p.width * h as f32 / w.max(1) as f32)
+    };
+    let mut fixed = moved;
+    let mut i = 0;
+    while let Some(&m) = fixed.get(i) {
+        i += 1;
+        let Some(mp) = placements.get(&m).copied() else {
+            continue;
+        };
+        let Some(mh) = height(m, &mp) else { continue };
+        for &(o, ..) in monitors {
+            if fixed.contains(&o) {
+                continue;
+            }
+            let Some(op) = placements.get(&o).copied() else {
+                continue;
+            };
+            let Some(oh) = height(o, &op) else { continue };
+            if !cuts(&mp, mh, &op, oh) {
+                continue;
+            }
+            let up = frame.to_local(op.position).y >= frame.to_local(mp.position).y;
+            let dir = if up { 1.0 } else { -1.0 };
+            let t = clear_along_up(op, oh, &[(mp, mh)], frame, dir);
+            placements.insert(o, lifted(op, frame, dir * t));
+            fixed.push(o);
         }
     }
 }
