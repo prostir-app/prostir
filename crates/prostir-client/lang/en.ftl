@@ -62,6 +62,7 @@ welcome-finds-wifi = On the same Wi‑Fi network.
 welcome-finds-wifi-usb = On the same Wi‑Fi network, or over a USB cable.
 connect-searching = Looking for PCs on the network…
 connect-found = Found
+found-cable = cable
 connect-blocked = is on the network, but the connection is blocked.
 connect-allow-port = Allow TCP port 47830 in the PC's firewall.
 connect-type-ip = Type an IP address

@@ -23,7 +23,7 @@ use prostir_proto::{HeadsetGoodbye, HostMsg};
 use prostir_testkit::pc::{Clip, FakePc, Happened, PcConfig, trust_each_other};
 
 use super::*;
-use crate::session::{AskTo, Dest};
+use crate::session::{AskTo, Dest, Takes};
 
 /// What the fake media did, for the checks.
 #[derive(Default)]
@@ -158,6 +158,7 @@ fn dial(net: &Net, step: u32, addr: SocketAddr) {
         to: Dest::Addr(addr),
         pair: None,
         pc_shows_code: false,
+        takes: Takes::Any,
     });
 }
 
@@ -294,6 +295,51 @@ fn until_ended(rx: &Receiver<NetEvent>, step: u32) -> Vec<NetEvent> {
             return seen;
         }
     }
+}
+
+/// A dial that takes another PC (the cable leads elsewhere than the PC wanted): the
+/// PC it reaches is let go after the handshake, before a word, and said so; the next
+/// dial that takes it opens its session.
+#[test]
+fn a_dial_lets_go_a_pc_it_does_not_take() {
+    let dir = temp_dir("let-go");
+    let (pc, mut net, rx, _) = start(&dir, false, false);
+    let id = PcId::of(&pc.key());
+    wait(&rx, |e| matches!(e, NetEvent::Paired(_)).then_some(()));
+    net.send(NetCmd::Dial {
+        step: StepId(1),
+        to: Dest::Addr(pc.addr()),
+        pair: None,
+        pc_shows_code: false,
+        takes: Takes::Only(vec![PcId::of(&[42; 32])]),
+    });
+    let seen = until_ended(&rx, 1);
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, NetEvent::Reached { .. } | NetEvent::PairOffer { .. })),
+        "not taken"
+    );
+    let let_go = seen.iter().find_map(|e| match e {
+        NetEvent::Ended {
+            ended, pc: None, ..
+        } => ended.let_go,
+        _ => None,
+    });
+    assert_eq!(let_go, Some(id));
+    net.send(NetCmd::Dial {
+        step: StepId(2),
+        to: Dest::Addr(pc.addr()),
+        pair: None,
+        pc_shows_code: false,
+        takes: Takes::AllBut(vec![PcId::of(&[42; 32])]),
+    });
+    wait(&rx, |e| {
+        matches!(e, NetEvent::Connected { .. }).then_some(())
+    });
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.stop();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Forgotten while its dial is still on the way (before the PC said who it is): no
@@ -540,6 +586,7 @@ fn a_pc_that_refuses_to_pair_is_not_asked_again() {
             to: Dest::Addr(addr),
             pair: Some(key),
             pc_shows_code,
+            takes: Takes::Any,
         });
         let seen = until_ended(&rx, 1);
         let said = seen
@@ -624,6 +671,7 @@ fn nothing_there_is_missed() {
         to: Dest::HostFile,
         pair: None,
         pc_shows_code: false,
+        takes: Takes::Any,
     });
     wait(&rx, |e| {
         matches!(e, NetEvent::Missed { step: StepId(8) }).then_some(())
@@ -742,6 +790,7 @@ fn the_pc_is_found_by_asking_once_it_gave_its_secret() {
         to: Dest::LastOf(id),
         pair: None,
         pc_shows_code: false,
+        takes: Takes::Any,
     });
     wait(&rx, |e| {
         matches!(e, NetEvent::Connected { pc: p, .. } if p == id).then_some(())
@@ -769,6 +818,7 @@ fn the_pc_is_found_by_asking_once_it_gave_its_secret() {
         to: Dest::LastOf(id),
         pair: None,
         pc_shows_code: false,
+        takes: Takes::Any,
     });
     wait(&rx, |e| {
         matches!(e, NetEvent::Missed { step: StepId(8) }).then_some(())

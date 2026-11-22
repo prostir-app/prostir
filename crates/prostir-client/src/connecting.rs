@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use prostir_proto::PcGoodbye;
 
+use crate::ids::PcId;
+
 /// Between attempts to connect.
 pub const RETRY_PAUSE: Duration = Duration::from_millis(300);
 /// A session must have run this long for the next attempt to go at once: one that
@@ -29,6 +31,9 @@ pub struct Ended {
     pub incompatible: bool,
     /// The user paired with the PC in this connection.
     pub paired: bool,
+    /// The handshake showed this PC, which the dial was not to take (see
+    /// `session::Takes`): let go before a word, and nothing opened.
+    pub let_go: Option<PcId>,
 }
 
 impl Ended {

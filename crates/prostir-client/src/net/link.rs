@@ -33,7 +33,7 @@ use crate::connecting::Ended;
 use crate::frames::{Frame, FrameQueue, KeyframeWait, Pushed};
 use crate::ids::PcId;
 use crate::lang::Lang;
-use crate::session::{Dest, StepId};
+use crate::session::{Dest, StepId, Takes};
 use crate::ui::OfferWhy;
 
 /// While the user types a code, the connection is looked at this often.
@@ -63,6 +63,8 @@ pub(super) struct Dial {
     pub last: Option<SocketAddr>,
     /// The key of the PC the user agreed to pair with.
     pub pair: Option<[u8; 32]>,
+    /// Which PCs it takes once the handshake shows whose it is.
+    pub takes: Takes,
     pub pc_shows_code: bool,
     pub host_file: Option<PathBuf>,
     /// The addresses of the connections already open: never dialed twice (a second
@@ -244,6 +246,14 @@ fn before_trust(conn: &mut Conn, stream: TcpStream) -> io::Result<Option<(Wire, 
     // before anything is asked of the PC.
     let pc = PcId::of(&peer.key);
     if shared.quitting() {
+        noise_closer.close();
+        return Ok(None);
+    }
+    // Not a PC this dial is for (the cable leads to another one than the one wanted):
+    // let go before a word, so the PC sets nothing up for it.
+    if !conn.d.takes.takes(pc) {
+        info!("PC {pc} at {}: not the one this dial is for", conn.addr);
+        conn.ended.let_go = Some(pc);
         noise_closer.close();
         return Ok(None);
     }

@@ -760,6 +760,7 @@ impl Here<'_> {
                 to,
                 pair,
                 pc_shows_code,
+                takes,
             } => {
                 let last = match to {
                     crate::session::Dest::LastOf(pc) => lock(self.known).last_of(pc),
@@ -770,6 +771,7 @@ impl Here<'_> {
                     to,
                     last,
                     pair,
+                    takes,
                     pc_shows_code,
                     host_file: config.host_file.clone(),
                     busy: conns.iter().map(|c| c.addr).collect(),

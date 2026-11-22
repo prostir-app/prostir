@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use headset::net::{Config, Disconnect, Feedback, FoundHost, Media, MediaSource, Net, NetEvent};
-use headset::session::{AskTo, Dest, NetCmd, StepId};
+use headset::session::{AskTo, Dest, NetCmd, StepId, Takes};
 use headset::ui::OfferWhy;
 use prostir_proto::state::HeadsetState;
 use prostir_proto::{HeadsetGoodbye, HostMsg, PcGoodbye};
@@ -123,6 +123,7 @@ fn dial(net: &Net, step: u32, pc: &Pc) {
         to: Dest::Addr(pc.addr),
         pair: None,
         pc_shows_code: false,
+        takes: Takes::Any,
     });
 }
 
@@ -274,6 +275,7 @@ fn dial_to_pair(net: &Net, step: u32, pc: &Pc, key: [u8; 32], pc_shows_code: boo
         to: Dest::Addr(pc.addr),
         pair: Some(key),
         pc_shows_code,
+        takes: Takes::Any,
     });
 }
 
@@ -549,6 +551,7 @@ fn the_headset_finds_its_pc_by_asking() {
         to: Dest::Addr(heard[0].addr),
         pair: None,
         pc_shows_code: false,
+        takes: Takes::Any,
     });
     wait(&rx, START, |e| {
         matches!(e, NetEvent::Connected { pc, .. } if pc == id).then_some(())
@@ -676,6 +679,7 @@ fn a_sleeping_pc_wakes_for_its_headsets_query() {
         to: Dest::Addr(heard[0].addr),
         pair: None,
         pc_shows_code: false,
+        takes: Takes::Any,
     });
     wait(&rx, START, |e| {
         matches!(e, NetEvent::Connected { pc, .. } if pc == id).then_some(())

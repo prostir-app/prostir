@@ -137,6 +137,7 @@ fn found(name: String, addr: SocketAddr, pc: Option<PcId>, heard: Instant) -> Fo
         at_last: false,
         label: String::new(),
         ip: String::new(),
+        usb: false,
     }
 }
 
@@ -611,10 +612,18 @@ fn the_users_picks_steer_the_search() {
     assert_eq!(sim.cmds(), [NetCmd::Leave(pc(2), HeadsetGoodbye::OtherPc)]);
     sim.end(s, Some(2), &Ended::default(), Duration::from_secs(9));
     sim.after(ASK_FAST);
+    // A cable is a choice of its own: tried first, as at the start (nothing there).
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    assert_eq!(takes(&cmd), Takes::AllBut(Vec::new()));
+    sim.missed(s);
     let (s, pairing) = sim.asked(None);
     assert!(pairing, "picking another PC: the query carries the name");
     sim.missed(s);
-    assert!(sim.cmds().is_empty(), "picking: no USB, nothing dialed");
+    assert!(
+        sim.cmds().is_empty(),
+        "picking: nothing dialed on the network"
+    );
     sim.s.connect_to(usb(), sim.now);
     sim.after(Duration::ZERO);
     let (s, cmd) = sim.step();
@@ -625,6 +634,10 @@ fn the_users_picks_steer_the_search() {
     assert_eq!(sim.cmds(), [NetCmd::Forget(pc(1))]);
     sim.end(s, Some(1), &Ended::default(), Duration::from_secs(9));
     sim.after(ASK_FAST);
+    // USB still, but never for the PC just forgotten (it would ask to pair again).
+    let (s, cmd) = sim.step();
+    assert_eq!(takes(&cmd), Takes::AllBut(vec![pc(1)]));
+    sim.missed(s);
     let (s, _) = sim.asked(None);
     // Even should it still answer (its answer has no trusted tag now): not dialed.
     sim.answer(None, usb());
@@ -1095,16 +1108,208 @@ fn a_pick_holds_after_its_session() {
     };
     sim.end(s, Some(2), &opened, Duration::from_secs(60));
     sim.after(Duration::ZERO);
+    // USB first, for the PC picked alone: the other PC is there, and let go.
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    assert_eq!(takes(&cmd), Takes::Only(vec![pc(2)]));
+    sim.s.dialed(s, usb());
+    sim.end(s, None, &let_go(1), MS);
+    assert!(!sim.s.connected(pc(1)), "not taken instead");
     let (s, cmd) = sim.step();
     assert!(
         matches!(cmd, NetCmd::Ask { .. }),
-        "not USB, where the other PC is: {cmd:?}"
+        "the round goes on: {cmd:?}"
     );
-    // The other PC answers: listed, not dialed; the one picked is.
+    // The other PC answers: listed with the cable's mark, not dialed; the one picked is.
     sim.answer(Some(1), addr(5));
     assert!(sim.cmds().is_empty(), "the other PC is not taken instead");
+    let marked = &sim.s.search().found[0];
+    assert!(
+        marked.usb && marked.ip == "192.168.1.5 · cable",
+        "{marked:?}"
+    );
     sim.answer(Some(2), addr(8));
-    let (_, cmd) = sim.step();
+    assert!(!sim.s.search().found[1].usb);
+    let (d, cmd) = sim.step();
     assert_eq!(dest(&cmd), Dest::Addr(addr(8)), "the PC picked, moved");
+    sim.missed(d);
     sim.missed(s);
+    // The PC let go is not knocked on over USB every second.
+    sim.after(ASK_FAST);
+    let cmds = miss_all(&mut sim);
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, NetCmd::Dial { to: Dest::Usb, .. }))
+    );
+    sim.after(LAST_EVERY);
+    let cmds = miss_all(&mut sim);
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, NetCmd::Dial { to: Dest::Usb, .. }))
+    );
+}
+
+fn takes(cmd: &NetCmd) -> Takes {
+    match cmd {
+        NetCmd::Dial { takes, .. } => takes.clone(),
+        other => panic!("not a dial: {other:?}"),
+    }
+}
+
+/// How the network thread ends a dial whose PC (`n`) it was not to take.
+fn let_go(n: u8) -> Ended {
+    Ended {
+        let_go: Some(pc(n)),
+        ..Ended::default()
+    }
+}
+
+/// A PC picked over Wi-Fi whose session ends while the cable reaches it: the next
+/// dial is USB, and it is taken there (the steadier link); while its session runs
+/// over Wi-Fi nothing is dialed at all, so it is never moved by itself. Another PC at
+/// the cable's end is let go instead.
+#[test]
+fn a_picked_pc_comes_back_over_usb() {
+    for at_cable in [1, 2] {
+        let mut sim = Sim::new(MAX_PCS);
+        sim.paired(&[1, 2]);
+        sim.s.change_pc();
+        sim.s.connect_to(addr(7), sim.now);
+        sim.after(MS);
+        let (s, cmd) = sim.step();
+        assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
+        sim.reach(s, 1, addr(7));
+        let _ = sim.cmds();
+        sim.after(Duration::from_secs(30));
+        assert!(
+            sim.cmds().is_empty(),
+            "a running Wi-Fi session stays as it is"
+        );
+        let opened = Ended {
+            opened: true,
+            ..Ended::default()
+        };
+        sim.end(s, Some(1), &opened, Duration::from_secs(60));
+        sim.after(Duration::ZERO);
+        let (s, cmd) = sim.step();
+        assert_eq!(dest(&cmd), Dest::Usb, "USB first");
+        assert_eq!(takes(&cmd), Takes::Only(vec![pc(1)]));
+        sim.s.dialed(s, usb());
+        if at_cable == 1 {
+            sim.reach(s, 1, usb());
+            assert!(sim.s.connected(pc(1)));
+            assert!(matches!(&sim.s.links()[&pc(1)], Link::Connected(p) if p.addr == usb()));
+        } else {
+            sim.end(s, None, &let_go(2), MS);
+            assert!(
+                sim.s.links().get(&pc(2)).is_none(),
+                "the other PC is not taken"
+            );
+            let (_, cmd) = sim.step();
+            assert!(
+                matches!(cmd, NetCmd::Ask { .. }),
+                "the round goes on: {cmd:?}"
+            );
+        }
+    }
+}
+
+/// Connected over Wi-Fi with the cable in: "Change PC" and no pick, and the next
+/// round tries USB first, as a fresh start does, taking any PC there; from a session
+/// over USB, not the PC just left there.
+#[test]
+fn change_pc_tries_usb_first() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.missed(s);
+    let (_, _) = sim.asked(None);
+    sim.answer(Some(1), addr(7));
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
+    sim.reach(s, 1, addr(7));
+    let _ = sim.cmds();
+    sim.s.change_pc();
+    assert_eq!(sim.cmds(), [NetCmd::Leave(pc(1), HeadsetGoodbye::OtherPc)]);
+    sim.end(s, Some(1), &Ended::default(), Duration::from_secs(9));
+    sim.after(RETRY_PAUSE);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb, "USB first after Change PC");
+    assert_eq!(takes(&cmd), Takes::AllBut(Vec::new()));
+    sim.reach(s, 1, usb());
+    assert!(sim.s.connected(pc(1)), "now over the cable");
+    let _ = sim.cmds();
+    // Changing again from the cable: USB is still tried, but not for this PC.
+    sim.s.change_pc();
+    let _ = sim.cmds();
+    sim.end(s, Some(1), &Ended::default(), Duration::from_secs(9));
+    sim.after(RETRY_PAUSE);
+    let (_, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    assert_eq!(takes(&cmd), Takes::AllBut(vec![pc(1)]));
+}
+
+/// A PC listed that the cable reaches is marked so, and picking it goes over USB,
+/// taking that PC alone: here the PC "Change PC" left over the cable, which the USB
+/// dial does not take back on its own.
+#[test]
+fn a_pc_at_the_cable_is_picked_over_usb() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.reach(s, 1, usb());
+    let _ = sim.cmds();
+    sim.s.change_pc();
+    let _ = sim.cmds();
+    sim.end(s, Some(1), &Ended::default(), Duration::from_secs(9));
+    sim.after(RETRY_PAUSE);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    assert_eq!(takes(&cmd), Takes::AllBut(vec![pc(1)]));
+    sim.s.dialed(s, usb());
+    sim.end(s, None, &let_go(1), MS);
+    let (a, _) = sim.asked(None);
+    sim.answer(Some(1), addr(9));
+    sim.missed(a);
+    assert!(sim.s.search().found[0].usb);
+    assert!(sim.cmds().is_empty(), "picking: the user picks");
+    sim.s.pick_found(0, sim.now);
+    sim.after(Duration::ZERO);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb, "picked at the cable: over USB");
+    assert_eq!(takes(&cmd), Takes::Only(vec![pc(1)]));
+    // The cable pulled: the mark goes.
+    sim.missed(s);
+    assert!(!sim.s.search().found[0].usb);
+}
+
+/// Two PCs allowed: PC 1 at the cable and PC 2 on Wi-Fi, both trusted and wanted,
+/// both end up linked, PC 1 over USB.
+#[test]
+fn two_pcs_one_over_usb() {
+    let mut sim = Sim::new(2);
+    sim.paired(&[1, 2]);
+    sim.after(MS);
+    let (s1, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    assert_eq!(takes(&cmd), Takes::Any);
+    sim.reach(s1, 1, usb());
+    let _ = sim.cmds();
+    sim.after(RETRY_PAUSE);
+    // USB again: the network thread does not dial a busy address twice.
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    sim.missed(s);
+    let (_, _) = sim.asked(None);
+    sim.answer(Some(2), addr(7));
+    let (s2, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
+    sim.reach(s2, 2, addr(7));
+    assert!(matches!(&sim.s.links()[&pc(1)], Link::Connected(p) if p.addr == usb()));
+    assert!(matches!(&sim.s.links()[&pc(2)], Link::Connected(p) if p.addr == addr(7)));
+    sim.after(Duration::from_secs(10));
+    assert!(sim.cmds().is_empty(), "two links: no more search");
 }

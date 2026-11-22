@@ -144,11 +144,7 @@ impl Model {
                     _ => {}
                 }
             }
-            Action::ConnectTo(i) => {
-                if let Some(addr) = self.session.search().found.get(i).map(|h| h.addr) {
-                    self.session.connect_to(addr, self.now);
-                }
-            }
+            Action::ConnectTo(i) => self.session.pick_found(i, self.now),
             Action::ShowKeypad => self.menu.ip_input = Some(String::new()),
             Action::Key(c) if self.session.pairing_mut().is_some() => {
                 if let Some(p) = self.session.pairing_mut()

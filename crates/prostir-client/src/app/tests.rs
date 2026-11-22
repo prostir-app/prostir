@@ -841,6 +841,7 @@ fn the_search_screen_follows_the_time() {
         at_last: false,
         label: String::new(),
         ip: String::new(),
+        usb: false,
     }));
     let view = crate::view::build(&sim.m);
     assert_eq!(view.hint, None);
