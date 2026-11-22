@@ -1053,9 +1053,15 @@ impl Model {
                 let text = self.texts().f("error-cameras", &[("error", error.into())]);
                 self.show_error(text);
             }
+            // Not offered for the rest of this run, and said; the setting stays as
+            // chosen, and the next start tries again.
             PlatformEvent::KeyboardWindowFailed => {
-                self.settings.keyboard_window = false;
+                if let Some(room) = &mut self.headset.caps.room {
+                    room.keyboard_window = false;
+                }
                 self.keyboard_window = None;
+                let text = self.texts().t("error-keyboard-window").to_owned();
+                self.show_error(text);
             }
             PlatformEvent::CustomPanorama(there) => self.headset.custom_panorama = there,
         }

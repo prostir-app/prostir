@@ -1526,3 +1526,31 @@ fn the_menu_button_closes_the_tips() {
     assert!(!sim.m.menu().open, "closed, and it stays closed");
     assert!(sim.m.settings().intro_seen);
 }
+
+/// The keyboard window cannot be shown (the runtime refused it): the menu says so,
+/// it is not offered for the rest of this run, and the setting stays as chosen, so the
+/// next start tries again.
+#[test]
+fn a_keyboard_window_that_fails_is_said_and_kept() {
+    let mut caps = test_caps();
+    caps.room = Some(crate::caps::RoomCaps {
+        keyboard_window: true,
+    });
+    let mut sim = Sim::of(caps);
+    sim.connect(&[1]);
+    sim.menu(Action::KeyboardWindow(true));
+    sim.saves();
+    sim.frames(11 * MS);
+    assert!(sim.m.keyboard_window().is_some(), "shown");
+    sim.handle(Event::Platform(PlatformEvent::KeyboardWindowFailed));
+    sim.frames(11 * MS);
+    assert!(sim.m.keyboard_window().is_none(), "not shown");
+    let view = crate::view::build(&sim.m);
+    assert_eq!(
+        view.error.as_deref(),
+        Some(sim.m.texts().t("error-keyboard-window"))
+    );
+    assert!(!view.keyboard_available, "not offered now");
+    assert!(sim.m.settings().keyboard_window, "kept as chosen");
+    assert_eq!(sim.saves(), [], "nothing changed to save");
+}

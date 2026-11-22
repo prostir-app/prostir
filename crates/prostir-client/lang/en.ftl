@@ -357,6 +357,7 @@ error-too-big = { $name }: { $size } ({ $codec }) is too large for this headset 
 # $error (String): what went wrong, as the system says it
 error-cameras = Cameras unavailable: { $error }
 error-cameras-lost = The cameras stopped working: "Room" and "Dimmed" come back once the app starts again.
+error-keyboard-window = The keyboard window cannot be shown now: it is tried again when the app starts next.
 # $typed (String): what was typed
 error-not-ip = «{ $typed }»: is not an IP address
 # $error (String): what went wrong, as the system says it
