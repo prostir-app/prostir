@@ -1,15 +1,19 @@
-//! Quest 3 client: shows each virtual monitor of the PC as an OpenXR quad layer.
+//! The headset's app: shows each monitor of the PC as an OpenXR layer, on any headset
+//! with OpenXR on Android.
 //!
-//! Video frames are decoded by MediaCodec directly into Android surfaces owned
-//! by the Quest compositor (XR_KHR_android_surface_swapchain), so pixels never
-//! pass through this app's GPU code and text stays as sharp as the compositor
-//! can make it.
+//! Video frames are decoded by MediaCodec directly into Android surfaces owned by the
+//! headset's compositor (XR_KHR_android_surface_swapchain), so pixels never pass
+//! through this app's GPU code and text stays as sharp as the compositor can make it.
+//!
+//! The core (the model and its rules, what the menu shows) builds and is tested on any
+//! system; the shell (`main_loop`, `platform`, the decoders) is Android's.
 
 // Every unsafe block says why it is sound.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod app;
 pub mod background;
+pub mod caps;
 pub mod commands;
 pub mod connecting;
 pub mod device;
@@ -24,13 +28,13 @@ pub mod outbox;
 pub mod pending;
 pub mod persist;
 pub mod physical;
+pub mod platform;
 pub mod presence;
 pub mod profiles;
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 pub mod selftest;
 pub mod session;
 pub mod settings;
-pub mod store;
 pub mod ui;
 pub mod view;
 pub mod world;
@@ -38,24 +42,6 @@ pub mod world;
 #[cfg(target_os = "android")]
 mod alloc_count;
 #[cfg(target_os = "android")]
-mod audio;
-#[cfg(target_os = "android")]
 mod decoder;
 #[cfg(target_os = "android")]
-mod egl;
-#[cfg(target_os = "android")]
-mod input;
-#[cfg(target_os = "android")]
 mod main_loop;
-#[cfg(target_os = "android")]
-mod media;
-#[cfg(target_os = "android")]
-mod mic;
-#[cfg(target_os = "android")]
-mod overlay;
-#[cfg(target_os = "android")]
-mod passthrough;
-#[cfg(target_os = "android")]
-mod system;
-#[cfg(target_os = "android")]
-mod xrutil;

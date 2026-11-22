@@ -31,32 +31,34 @@ use openxr as xr;
 use openxr::sys::Handle as _;
 
 use crate::app::{
-    Can, Effect, Event, MicCmd, Model, PlatformEvent, SoundCmd, Start, SystemCmd, TOAST_WIDTH,
-    VideoCmd, XrCmd, headset_state,
+    Effect, Event, MicCmd, Model, PlatformEvent, SoundCmd, Start, SystemCmd, TOAST_WIDTH, VideoCmd,
+    XrCmd, headset_state,
 };
-use crate::audio::Gains;
 use crate::ids::{DisplayKey, PcId, Target, Thing};
-use crate::input::Controls;
 use crate::interaction::{FrameInput, Hands, Head, INDEX_TIP, Menu, Menus, POKE_HOVER};
 use crate::lang::{Moment, Texts};
 use crate::layout::{self, Cylinder};
-use crate::mic::Mic;
 use crate::net::{Feedback, NetEvent};
-use crate::overlay::{self, Overlay, Sphere};
 use crate::persist::PersistEvent;
+use crate::platform::android::system::{System, SystemEvent};
+use crate::platform::meta::{self, passthrough};
+use crate::platform::openxr::input::Controls;
+use crate::platform::openxr::overlay::{self, Overlay, Sphere};
+use crate::platform::openxr::{self as xrutil, Gfx, ImageLayer, as_layer, egl, pose, posef, vec3};
+use crate::platform::sound::audio::Gains;
+use crate::platform::sound::mic::Mic;
+use crate::platform::store::StoreCheck;
+use crate::platform::{self, android};
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 use crate::selftest::device::{self as selftest, Act, Selftest};
 use crate::settings::{Background, HandMode};
-use crate::store::StoreCheck;
-use crate::system::{System, SystemEvent};
 use crate::ui::{self, Action, Panel, Tab};
 use crate::view::View;
 use crate::world::{
     ATTACH_PX, ATTACH_WIDTH, BUTTON_SIZE, KEYBOARD_ASPECT, WRIST_MENU_WIDTH, attach_height,
     panel_height, panel_width, wrist_menu_height,
 };
-use crate::xrutil::{self, Gfx, ImageLayer, as_layer, pose, posef, vec3};
-use crate::{app, background, decoder, egl, net, passthrough, persist};
+use crate::{app, background, decoder, net, persist};
 #[cfg(not(all(feature = "selftest", not(feature = "store"))))]
 use no_selftest::{self as selftest, Act, Selftest};
 
@@ -69,8 +71,6 @@ const TOAST_PX: (u32, u32) = (1024, 132);
 const SCREEN_EVERY: Duration = Duration::from_millis(250);
 /// How often the wall clock is read for the menu's clock.
 const WALL_EVERY: Duration = Duration::from_secs(1);
-/// The layers the compositor takes at most.
-const LAYERS_MAX: usize = 16;
 /// Width of the placeholder's picture, in pixels (its height follows the monitor's
 /// shape).
 const PLACEHOLDER_PX: u32 = 1024;
@@ -112,20 +112,6 @@ pub fn android_main(app: AndroidApp) {
                     unsafe { libc::_exit(code) };
                 });
         }
-    }
-}
-
-/// 90 Hz (or the nearest below), or 72 Hz to save battery.
-fn set_refresh_rate(session: &xr::Session<Gfx>, saver: bool) {
-    let limit = if saver { 72.0 } else { 90.0 };
-    let rates = session
-        .enumerate_display_refresh_rates()
-        .unwrap_or_default();
-    info!("display rates offered: {rates:?}");
-    let best = rates.into_iter().filter(|&r| r <= limit).reduce(f32::max);
-    if let Some(rate) = best {
-        info!("display at {rate} Hz");
-        let _ = session.request_display_refresh_rate(rate);
     }
 }
 
@@ -260,8 +246,6 @@ impl Menus for Panels {
 struct Shell<'s> {
     model: Model,
     session: &'s xr::Session<Gfx>,
-    /// The runtime lets the app choose the display rate.
-    refresh_rates: bool,
     /// The streams shown, each with its surface and decoder.
     monitors: HashMap<DisplayKey, Monitor>,
     /// Messages to each PC in a session.
@@ -345,11 +329,7 @@ impl Shell<'_> {
                 self.saver.save(file, |out| model.write_file(file, out));
             }
             Effect::Haptic(hand) => self.controls.pulse(self.session, hand),
-            Effect::Xr(XrCmd::RefreshRate { saver }) => {
-                if self.refresh_rates {
-                    set_refresh_rate(self.session, saver);
-                }
-            }
+            Effect::Xr(XrCmd::RefreshRate(hz)) => meta::set_display_rate(self.session, hz),
             Effect::Xr(XrCmd::Room { on, opacity }) => {
                 if let Some(pt) = &mut self.passthrough
                     && let Err(e) = pt.set_room(on).and_then(|()| pt.set_room_opacity(opacity))
@@ -480,7 +460,7 @@ impl Shell<'_> {
             *screen_read = None;
         } else if screen_read.is_none_or(|at| now.saturating_duration_since(at) >= SCREEN_EVERY) {
             *screen_read = Some(now);
-            if let Some(on) = crate::system::interactive() {
+            if let Some(on) = android::interactive() {
                 self.handle(now, Event::Platform(PlatformEvent::Interactive(on)));
                 return;
             }
@@ -524,25 +504,15 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     if !available.khr_android_surface_swapchain {
         bail!("the runtime lacks XR_KHR_android_surface_swapchain");
     }
-    let mut exts = xr::ExtensionSet::default();
-    exts.khr_android_create_instance = true;
-    exts.khr_opengl_es_enable = true;
-    exts.khr_android_surface_swapchain = true;
-    exts.fb_passthrough = available.fb_passthrough;
-    exts.fb_display_refresh_rate = available.fb_display_refresh_rate;
-    exts.fb_composition_layer_settings = available.fb_composition_layer_settings;
-    exts.fb_composition_layer_image_layout = available.fb_composition_layer_image_layout;
-    exts.khr_composition_layer_cylinder = available.khr_composition_layer_cylinder;
-    exts.khr_composition_layer_equirect2 = available.khr_composition_layer_equirect2;
-    exts.ext_hand_interaction = available.ext_hand_interaction;
-    exts.ext_hand_tracking = available.ext_hand_tracking;
-    exts.fb_hand_tracking_aim = available.fb_hand_tracking_aim;
-    exts.fb_triangle_mesh = available.fb_triangle_mesh;
-    exts.khr_composition_layer_color_scale_bias = available.khr_composition_layer_color_scale_bias;
-    exts.khr_android_thread_settings = available.khr_android_thread_settings;
-    // Taken off, said at once by the headset's sensor (the session may stay shown
-    // until the system sleeps).
-    exts.ext_user_presence = available.ext_user_presence;
+    // `caps=minimal` (the selftest's, or the intent's own extra for a check by hand):
+    // the instance with only the extensions the app cannot do without, so the app runs
+    // as on a headset without the others.
+    let minimal = test.as_deref().is_some_and(Selftest::caps_minimal)
+        || android::intent_extra(app, "caps").as_deref() == Some("minimal");
+    if minimal {
+        info!("caps=minimal: no optional extension is turned on");
+    }
+    let exts = xrutil::extensions(&available, minimal);
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
             application_name: "Prostir",
@@ -567,11 +537,15 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let _ = instance.graphics_requirements::<Gfx>(system)?;
     // As the system names the headset: only shown (the PC's list of headsets,
     // pairing) and logged.
-    let model = crate::system::model();
+    let model = android::model();
     info!("headset: {model:?}");
     if let Some(t) = test.as_deref_mut() {
-        t.runtime(app, &instance, system, &available);
-        t.headset_caps(&crate::device::headset_caps(&model));
+        t.runtime(
+            &instance,
+            &available,
+            minimal,
+            exts.fb_composition_layer_image_layout,
+        );
     }
 
     let egl = egl::EglContext::new()?;
@@ -634,7 +608,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let local =
         session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
     let view = session.create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)?;
-    let mut controls = Controls::new(&instance, &session, exts.ext_hand_interaction)?;
+    let mut controls = Controls::new(&instance, &session, &exts)?;
     controls.hands_enabled = settings.hands == HandMode::Control;
 
     let format = xrutil::color_format(&session);
@@ -684,7 +658,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     // The menu's language, before the first frame: the headset's own language once,
     // the files there are, and the language to show. From here on the system thread
     // reads the files.
-    let system_lang = crate::system::language();
+    let system_lang = android::language();
     #[expect(
         clippy::disallowed_methods,
         reason = "the start, before the first frame, reads the language files once"
@@ -700,8 +674,26 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
 
     // The battery once now, for the first `Open`; from here on the system thread reads
     // it, away from the frame.
-    let battery = crate::system::battery();
+    let battery = android::battery();
     let system_thread = System::start(lang_loader);
+
+    // What this headset can do, asked once: the extensions, the runtime, the cameras
+    // and hands made above, the system's decoders and volume. The core decides by
+    // nothing else.
+    let caps = platform::caps(
+        &exts,
+        &instance,
+        system,
+        &session,
+        passthrough.as_ref(),
+        hand_trackers.is_some(),
+        model.clone(),
+    );
+    if let Some(t) = test.as_deref_mut() {
+        t.caps(&caps);
+        t.set_perf(&session);
+    }
+    let layers_max = usize::from(caps.layers_max);
 
     let (net_tx, net_rx) = mpsc::channel();
     // A selftest connects to its fake PC and nothing else, never to a real PC.
@@ -712,34 +704,24 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let network = net::Net::start(
         net::Config::in_dir(&data_dir, external_dir.as_deref(), &model),
         net_tx,
-        Arc::new(crate::media::Sound {
+        Arc::new(platform::sound::Sound {
             gains: gains.clone(),
             mic: mic.clone(),
         }),
         // What the first `Open` says, before the core says more.
-        headset_state(&settings, true, battery, mic.permission(), &model),
+        headset_state(&settings, true, battery, mic.permission(), &caps),
     )?;
 
     // SAFETY: the VM pointer is valid for the life of the process.
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
-    let _wifi_lock = xrutil::acquire_low_latency_wifi(app, &vm)
+    let _wifi_lock = android::acquire_low_latency_wifi(app, &vm)
         .inspect(|_| info!("Wi-Fi low-latency mode on"))
         .inspect_err(|e| warn!("Wi-Fi low-latency lock unavailable: {e:#}"))
         .ok();
 
     // Where this build comes from. A store build checks the user owns the app, as its
     // store requires at launch; a build from GitHub has nothing to check.
-    let mut store = crate::store::of_this_build(app);
-    let can = Can {
-        room: passthrough.is_some(),
-        keyboard_window: passthrough
-            .as_ref()
-            .is_some_and(passthrough::Passthrough::window_supported),
-        panorama: exts.khr_composition_layer_equirect2,
-        curve: exts.khr_composition_layer_cylinder,
-        custom_panorama: custom_pano,
-        update_from: store.update_hint(),
-    };
+    let mut store = platform::store::of_this_build(app);
     let mic_permission = mic.permission();
     let mut shell = Shell {
         model: Model::new(Start {
@@ -751,13 +733,14 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             lang,
             system_lang,
             battery,
-            model,
-            can,
+            caps,
+            refresh_hz: meta::display_rate(&session),
+            custom_panorama: custom_pano,
+            update_from: store.update_hint(),
             mic_permission,
             only: fake_pc,
         }),
         session: &session,
-        refresh_rates: exts.fb_display_refresh_rate,
         monitors: HashMap::new(),
         outboxes: BTreeMap::new(),
         saver,
@@ -897,16 +880,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         xr::SessionState::READY => {
                             session.begin(xr::ViewConfigurationType::PRIMARY_STEREO)?;
                             session_running = true;
-                            if exts.fb_display_refresh_rate {
-                                set_refresh_rate(&session, shell.model.settings().battery_saver);
+                            // The rate by the rule, from those the runtime offers.
+                            if let Some(hz) = shell.model.wanted_rate() {
+                                meta::set_display_rate(&session, hz);
                             }
-                            if let Some(t) = test.as_deref_mut()
-                                && exts.fb_display_refresh_rate
-                            {
-                                t.refresh(
-                                    session.enumerate_display_refresh_rates().ok(),
-                                    session.get_display_refresh_rate().ok(),
-                                );
+                            if let Some(t) = test.as_deref_mut() {
+                                let (offered, now) = meta::display_rates(&session);
+                                t.refresh(&offered, now);
                             }
                         }
                         xr::SessionState::STOPPING => {
@@ -918,15 +898,83 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         xr::SessionState::IDLE => {
                             shell.flush(now, "idle");
                         }
-                        xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => break 'main,
+                        xr::SessionState::EXITING => break 'main,
+                        // The runtime is going: only out, as for EXITING (what waits is
+                        // written, the PC told goodbye); no new session is tried.
+                        xr::SessionState::LOSS_PENDING => {
+                            warn!("the OpenXR session is being lost: the app closes");
+                            break 'main;
+                        }
                         _ => {}
+                    }
+                }
+                xr::Event::ReferenceSpaceChangePending(e) => {
+                    let space = e.reference_space_type();
+                    info!(
+                        "the {space:?} space moves (pose in the old one {}given)",
+                        if e.pose_valid() { "" } else { "not " }
+                    );
+                    if space == xr::ReferenceSpaceType::LOCAL {
+                        // A drag cannot go on with the room moving under it.
+                        if hands.busy() {
+                            hands.cancel_all(&mut shell.model);
+                            shell.apply(now);
+                        }
+                        shell.handle(now, Event::Platform(PlatformEvent::SpaceMoved));
+                    }
+                }
+                xr::Event::InteractionProfileChanged(_) => {
+                    // Controllers put down or picked up: what a hand held is let go,
+                    // and the rays come from the new profile.
+                    info!("interaction profile changed");
+                    shell.controls.refresh_profiles(&session);
+                    if hands.busy() {
+                        hands.cancel_all(&mut shell.model);
+                        shell.apply(now);
+                    }
+                }
+                xr::Event::PassthroughStateChangedFB(e) => {
+                    let flags = e.flags();
+                    if flags.contains(xr::PassthroughStateChangedFlagsFB::NON_RECOVERABLE_ERROR) {
+                        error!("the cameras failed for good");
+                        shell.passthrough = None;
+                        shell.handle(now, Event::Platform(PlatformEvent::CamerasLost));
+                    } else if flags.contains(xr::PassthroughStateChangedFlagsFB::RECOVERABLE_ERROR)
+                    {
+                        warn!("the cameras stopped for a moment");
+                    } else if flags.contains(xr::PassthroughStateChangedFlagsFB::RESTORED_ERROR) {
+                        info!("the cameras work again");
+                    }
+                }
+                xr::Event::DisplayRefreshRateChangedFB(e) => {
+                    let hz = e.to_display_refresh_rate();
+                    info!(
+                        "display rate {} Hz to {hz} Hz",
+                        e.from_display_refresh_rate()
+                    );
+                    shell.handle(now, Event::Platform(PlatformEvent::RefreshRate(hz)));
+                }
+                xr::Event::EventsLost(e) => {
+                    // What may have been lost is read again: the display rate and the
+                    // controllers (the session's state comes again with its next
+                    // change).
+                    warn!("the runtime lost {} events", e.lost_event_count());
+                    if let Some(hz) = meta::display_rate(&session) {
+                        shell.handle(now, Event::Platform(PlatformEvent::RefreshRate(hz)));
+                    }
+                    if shell.controls.refresh_profiles(&session) && hands.busy() {
+                        hands.cancel_all(&mut shell.model);
+                        shell.apply(now);
                     }
                 }
                 xr::Event::UserPresenceChangedEXT(e) => {
                     let present = e.is_user_present();
                     shell.handle(now, Event::Platform(PlatformEvent::UserPresent(present)));
                 }
-                xr::Event::InstanceLossPending(_) => break 'main,
+                xr::Event::InstanceLossPending(_) => {
+                    warn!("the OpenXR instance is being lost: the app closes");
+                    break 'main;
+                }
                 _ => {}
             }
         }
@@ -1040,7 +1088,12 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // This frame's input.
         let hand_mode = shell.model.settings().hands;
         shell.controls.hands_enabled = hand_mode == HandMode::Control;
-        shell.controls.sync(&session, &local, time)?;
+        // A profile changed without its event (a runtime does not always say): let go
+        // of what was held, as for the event.
+        if shell.controls.sync(&session, &local, time)? && hands.busy() {
+            hands.cancel_all(&mut shell.model);
+            shell.apply(now);
+        }
         if !focused {
             shell.controls.state = Default::default();
         }
@@ -1067,7 +1120,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // The left hand's menu gesture counts as the menu button.
         let menu_gesture = match &hand_trackers {
             Some(t) if exts.fb_hand_tracking_aim => {
-                xrutil::hand_menu_gesture(&instance, &t[0], &local, time)
+                meta::hand_menu_gesture(&instance, &t[0], &local, time)
             }
             _ => false,
         };
@@ -1200,10 +1253,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             )?;
             placeholder = Some((layer, a.size, model.texts().clone()));
         }
-        if world.wrist().is_some()
-            && let Some(pixels) = panels.palm.render_if_dirty()
-        {
-            wrist_layer.upload(&gl, pixels)?;
+        // Only what changed is uploaded: pointing at another button changes its part.
+        if world.wrist().is_some() && panels.palm.render_if_dirty().is_some() {
+            wrist_layer.upload_part(&gl, panels.palm.pixels(), panels.palm.damage())?;
         }
         if model.menu().open {
             let rev = Some(model.rev());
@@ -1212,9 +1264,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 panels.main_rev = rev;
             }
             let drawing = test.is_some().then(Instant::now);
-            if let Some(pixels) = panels.main.render_if_dirty() {
+            if panels.main.render_if_dirty().is_some() {
                 menu_drawn = drawing.map(|t| t.elapsed());
-                panel_layer.upload(&gl, pixels)?;
+                panel_layer.upload_part(&gl, panels.main.pixels(), panels.main.damage())?;
             }
         }
 
@@ -1352,26 +1404,15 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             .map(|v| overlay::projection_layer(&local, v));
 
         // ---- Layers, back to front ----
-        // Desktop text is denser than the display, so ask the compositor to supersample
-        // and sharpen instead of shimmering through plain bilinear sampling.
-        let quality = xr::sys::CompositionLayerSettingsFB {
-            ty: xr::sys::CompositionLayerSettingsFB::TYPE,
-            next: ptr::null(),
-            layer_flags: xr::sys::CompositionLayerSettingsFlagsFB::QUALITY_SUPER_SAMPLING
-                | xr::sys::CompositionLayerSettingsFlagsFB::QUALITY_SHARPENING,
-        };
+        // Supersampled and sharpened, and the stream's picture the right way up, where
+        // the runtime can.
+        let quality = meta::sharper();
         let quality_next: *const std::ffi::c_void = if exts.fb_composition_layer_settings {
             (&raw const quality).cast()
         } else {
             ptr::null()
         };
-        // Android surfaces store rows top-down while the compositor samples them
-        // GL-style (bottom-up), which shows the desktop upside down.
-        let flip = xr::sys::CompositionLayerImageLayoutFB {
-            ty: xr::sys::CompositionLayerImageLayoutFB::TYPE,
-            next: quality_next.cast_mut(),
-            flags: xr::sys::CompositionLayerImageLayoutFlagsFB::VERTICAL_FLIP,
-        };
+        let flip = meta::flipped(quality_next);
         let video_next = if exts.fb_composition_layer_image_layout {
             (&raw const flip).cast()
         } else {
@@ -1606,8 +1647,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         layers.extend(hands_layer.iter().map(as_layer));
         layers.extend(cursors.iter().map(as_layer));
         let layers_wanted = layers.len();
-        // The compositor supports 16 layers at most.
-        layers.truncate(LAYERS_MAX);
+        // As many layers as the compositor takes.
+        layers.truncate(layers_max);
         let ended = frame_stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &layers);
         buffers.layers = reuse(layers);
         match ended {
@@ -1648,9 +1689,11 @@ mod no_selftest {
 
     use android_activity::AndroidApp;
     use openxr as xr;
-    use prostir_proto::state::{DisplayId, HeadsetCaps};
+    use prostir_proto::state::DisplayId;
 
+    use crate::caps::Caps;
     use crate::net::NetEvent;
+    use crate::platform::openxr::Gfx;
 
     pub fn count_run() -> u32 {
         0
@@ -1685,17 +1728,19 @@ mod no_selftest {
             match self {}
         }
 
-        pub fn runtime(
-            &self,
-            _: &AndroidApp,
-            _: &xr::Instance,
-            _: xr::SystemId,
-            _: &xr::ExtensionSet,
-        ) {
+        pub fn caps_minimal(&self) -> bool {
             match *self {}
         }
 
-        pub fn headset_caps(&self, _: &HeadsetCaps) {
+        pub fn runtime(&self, _: &xr::Instance, _: &xr::ExtensionSet, _: bool, _: bool) {
+            match *self {}
+        }
+
+        pub fn caps(&self, _: &Caps) {
+            match *self {}
+        }
+
+        pub fn set_perf(&self, _: &xr::Session<Gfx>) {
             match *self {}
         }
 
@@ -1715,7 +1760,7 @@ mod no_selftest {
             match *self {}
         }
 
-        pub fn refresh(&self, _: Option<Vec<f32>>, _: Option<f32>) {
+        pub fn refresh(&self, _: &[f32], _: Option<f32>) {
             match *self {}
         }
 

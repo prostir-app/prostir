@@ -214,6 +214,7 @@ impl Mock {
                 charging: false,
             }),
             profile: Some("1".into()),
+            profiles: Vec::new(),
             mic_allowed: Some(true),
             mic_on: true,
             main: true,
@@ -545,6 +546,26 @@ impl Inner {
                     return Err(refused(ApiError::NotConnected, "Шолом не підключено."));
                 };
                 session.no_limits = Some(*on);
+            }
+            Request::RenameProfile { profile, name } => {
+                let Some(session) = s.headsets.iter_mut().find_map(|h| h.session.as_mut()) else {
+                    return Err(refused(ApiError::NotConnected, "Шолом не підключено."));
+                };
+                let at = session
+                    .profiles
+                    .iter()
+                    .position(|p| p == profile)
+                    .or_else(|| {
+                        profile
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|n| n.checked_sub(1))
+                            .filter(|i| *i < session.profiles.len())
+                    });
+                let Some(at) = at else {
+                    return Err(refused(ApiError::NoSuchProfile, "Такого профілю немає."));
+                };
+                session.profiles[at].clone_from(name);
             }
             Request::AddMonitor { w, h, scale } => {
                 if s.limits.displays_max.is_some_and(|m| virtuals as u32 >= m) {

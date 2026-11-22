@@ -214,6 +214,24 @@ fn each_state_of_the_other_pages() {
     let (mut h, _) = window(dark(Mock::no_headsets()), shot());
     open(&mut h, Page::Headsets);
     picture(&mut h, &mut all, "headsets-empty");
+    // The headset's profiles, one of them in use; one being renamed.
+    let profiles = |s: &mut prostir_window::api::State| {
+        let session = s.headsets[0].session.as_mut().unwrap();
+        session.profiles = vec![String::new(), "Робота".into(), "Ігри й кіно".into()];
+        session.profile = Some("Робота".into());
+    };
+    let (mut h, _) = window(dark(Mock::connected().edit(profiles)), shot());
+    open(&mut h, Page::Headsets);
+    h.get_by_label("Перейменувати Ігри й кіно").scroll_to_me();
+    h.run_steps(6);
+    picture(&mut h, &mut all, "headsets-profiles");
+    press(&mut h, "Перейменувати Профіль 1");
+    h.get_by_label("Нова назва для Профіль 1").focus();
+    h.run_steps(1);
+    h.get_by_label("Нова назва для Профіль 1")
+        .type_text("Вдома");
+    h.run_steps(2);
+    picture(&mut h, &mut all, "headsets-profile-rename");
 
     // Sound with no headset.
     let (mut h, _) = window(dark(Mock::waiting()), shot());

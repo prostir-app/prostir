@@ -176,6 +176,15 @@ hs-empty-title = Ще немає сполучених шоломів
 hs-empty-body = Відкрийте Prostir у шоломі поруч із цим ПК і сполучіть їх кодом.
 hs-pair-hint = Щоб сполучити новий шолом, відкрийте в ньому Prostir поруч із цим ПК: ПК покаже тут код, який треба ввести в шоломі.
 hs-guest-name = { $name } (гість)
+hs-profiles = Профілі в { $name }
+hs-profile-n = Профіль { $n }
+hs-profile-in-use = Увімкнено зараз
+hs-profile-rename = Перейменувати
+hs-profile-rename-named = Перейменувати { $name }
+hs-profile-name = Нова назва для { $name }
+hs-profile-save = Зберегти
+hs-profile-number = Назва не може бути лише числом: число означає місце профілю.
+hs-profiles-note = Назва з’являється в меню шолома. Порожня назва повертає номер.
 
 ## Сполучення
 

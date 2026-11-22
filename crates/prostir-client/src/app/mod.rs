@@ -33,21 +33,22 @@ use prostir_proto::state::{
     self, Battery, DisplayId, HeadsetState, PcState, Prefs, Presence, ReqId, caps,
 };
 
+use crate::caps::{Caps, Offer};
 use crate::ids::{DisplayKey, PcId};
 use crate::interaction::{FrameInput, Head};
 use crate::lang::{Known, Lang, LangState, Moment, Texts};
 use crate::layout::{self, Desk, Placement, Ray};
 use crate::net::NetEvent;
 use crate::note::{self, Note, Notes};
+use crate::pending;
 use crate::persist::{self, PersistEvent};
+use crate::platform::store::UpdateHint;
 use crate::presence;
 use crate::profiles::{self, Profile};
 use crate::session::{Attempt, NetCmd, Session};
 use crate::settings::Settings;
-use crate::store::UpdateHint;
 use crate::ui::{self, Action, Tab};
 use crate::world::World;
-use crate::{pending, physical};
 
 pub use actions::By;
 use actions::Forgetting;
@@ -72,25 +73,6 @@ const REST_OFF: Duration = Duration::from_secs(5 * 60);
 /// app closes.
 const NOT_OWNED_FOR: Duration = Duration::from_secs(6);
 
-/// What the headset can show, as the shell found it at the start (step 7.8a makes this
-/// the headset's `Caps`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Can {
-    /// The cameras: the "Room" backgrounds.
-    pub room: bool,
-    /// A window onto the real keyboard.
-    pub keyboard_window: bool,
-    /// Panoramas (equirect layers).
-    pub panorama: bool,
-    /// Curved layers.
-    pub curve: bool,
-    /// The person put a picture of their own for the background on the headset (looked
-    /// for again each time the menu opens).
-    pub custom_panorama: bool,
-    /// Where this build is updated from (its store's).
-    pub update_from: UpdateHint,
-}
-
 /// What the model starts with: what the files held, what the system said, what the
 /// headset can.
 pub struct Start {
@@ -104,9 +86,14 @@ pub struct Start {
     /// The headset's own system language.
     pub system_lang: Option<Lang>,
     pub battery: Option<(u8, bool)>,
-    /// The headset's model as the system names it, for `HeadsetCaps`.
-    pub model: String,
-    pub can: Can,
+    /// What the headset can do (its model among it), as the shell found it.
+    pub caps: Caps,
+    /// The display rate now, as the runtime says (`None`: it does not).
+    pub refresh_hz: Option<f32>,
+    /// The person's own picture for the background is on the headset.
+    pub custom_panorama: bool,
+    /// Where this build is updated from (its store's).
+    pub update_from: UpdateHint,
     /// Whether the system lets the app record (see `prostir_proto::state::permission`).
     pub mic_permission: u8,
     /// The selftest's fake PC: the only address ever dialed.
@@ -161,6 +148,14 @@ pub enum PlatformEvent {
     Mic { permission: u8, denied: bool },
     /// The battery was read.
     Battery(Option<(u8, bool)>),
+    /// The system moved the room's origin to where the person is now (its "recenter"):
+    /// what stands in the room moves with it, as it always did.
+    SpaceMoved,
+    /// The display rate is now this, changed by the system or as asked.
+    RefreshRate(f32),
+    /// The cameras broke for good (the runtime said so): the "Room" backgrounds and the
+    /// window onto the keyboard go for this start.
+    CamerasLost,
     /// A language loaded, ready for the menu.
     Texts(Texts),
     /// The languages there are files for, listed again.
@@ -204,8 +199,9 @@ pub enum Effect {
 /// For OpenXR and the runtime's extensions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum XrCmd {
-    /// The display rate: to save the battery, or the usual one.
-    RefreshRate { saver: bool },
+    /// The display rate to ask for (one of `Caps::refresh_rates`, by the rule of
+    /// `Caps::rate`).
+    RefreshRate(f32),
     /// The cameras: on or off, and how opaque.
     Room { on: bool, opacity: f32 },
 }
@@ -272,9 +268,20 @@ pub struct Menu {
     pub error: Option<(String, Instant)>,
     /// "×" pressed once on this monitor; a second press within a few seconds removes it.
     pub confirm_remove: Option<(DisplayKey, Instant)>,
-    /// "Save current" pressed once for this profile.
+    /// "Save here" pressed once for this profile.
     pub confirm_save: Option<(usize, Instant)>,
+    /// "×" pressed once for this profile.
+    pub confirm_delete: Option<(usize, Instant)>,
     pub confirm_forget: Option<(usize, Instant)>,
+    /// Which profiles the Profiles tab shows, when there are many.
+    pub profile_page: u8,
+    /// Which displays of the PC the Monitors tab shows, when there are more than fit.
+    pub physical_page: u8,
+    /// The scale a monitor added gets, percent.
+    pub add_scale: u16,
+    /// Displays of the PC itself asked to be shown or hidden, the last ask of each
+    /// first: their switches show it until the PC answers.
+    pub physical_asked: Vec<(DisplayKey, bool)>,
     /// What the open menu says under the button pressed (see `note`).
     pub notes: Notes,
     /// Which languages the Language page shows, when there are many.
@@ -289,17 +296,21 @@ pub struct Menu {
 pub struct Headset {
     /// Percent and whether it is charging, read once a minute.
     pub battery: Option<(u8, bool)>,
-    /// The model as the system names it.
-    pub model: String,
-    pub can: Can,
+    /// What it can do, as the shell found it at the start (the cameras may go later).
+    pub caps: Caps,
+    /// The display rate now, as the runtime says.
+    pub refresh_hz: Option<f32>,
+    /// The person put a picture of their own for the background on the headset (looked
+    /// for again each time the menu opens).
+    pub custom_panorama: bool,
+    /// Where this build is updated from (its store's).
+    pub update_from: UpdateHint,
     /// Whether the system lets the app record, as last found.
     pub mic_permission: u8,
     /// Access to the microphone was refused in the system.
     pub mic_denied: bool,
     /// The microphone's switch, as the menu shows it.
     pub mic_wanted: bool,
-    /// The switch of the PC's own display, as the menu shows it.
-    pub mirror_wanted: bool,
 }
 
 /// The time and the date on the palm menu, written again only when the minute, the
@@ -376,6 +387,8 @@ pub struct Model {
     sessions: BTreeSet<PcId>,
     /// The microphone permission the PC was last told.
     mic_told: u8,
+    /// The profiles or the one in use changed: the PCs hear at the end of the pass.
+    profiles_changed: bool,
     /// The palm menu showed when last looked at.
     palm_shown: bool,
 
@@ -446,12 +459,14 @@ impl Model {
             lang,
             system_lang,
             battery,
-            model,
-            can,
+            caps,
+            refresh_hz,
+            custom_panorama,
+            update_from,
             mic_permission,
             only,
         } = start;
-        let world = World::new(desk, keyboard, can.curve, &settings);
+        let world = World::new(desk, keyboard, caps.cylinder, &settings);
         let mut m = Self {
             now,
             rev: 0,
@@ -468,7 +483,12 @@ impl Model {
                 error: None,
                 confirm_remove: None,
                 confirm_save: None,
+                confirm_delete: None,
                 confirm_forget: None,
+                profile_page: 0,
+                physical_page: 0,
+                add_scale: 100,
+                physical_asked: Vec::new(),
                 notes: Notes::default(),
                 language_page: 0,
                 active_profile: None,
@@ -476,16 +496,18 @@ impl Model {
             },
             headset: Headset {
                 battery,
-                model,
-                can,
+                caps,
+                refresh_hz,
+                custom_panorama,
+                update_from,
                 mic_permission,
                 mic_denied: false,
                 mic_wanted: settings.mic,
-                mirror_wanted: true,
             },
             settings,
             sessions: BTreeSet::new(),
             mic_told: mic_permission,
+            profiles_changed: false,
             palm_shown: false,
             head: (Vec3::ZERO, -Vec3::Z),
             head_right: Vec3::X,
@@ -603,16 +625,21 @@ impl Model {
         self.key(self.pc().focus.as_ref()?.display?)
     }
 
-    /// The display of the PC itself the switch shows or hides: one connected now,
-    /// never a closed laptop's panel (see [`physical::switch`]).
-    pub fn physical_id(&self) -> Option<DisplayKey> {
-        self.key(physical::switch(self.pc().displays.as_ref()?)?.id)
+    /// The PC makes monitors at another scale (its capability 10).
+    pub fn can_scale(&self) -> bool {
+        self.pc()
+            .caps
+            .as_ref()
+            .is_some_and(|c| c.has(caps::pc::SCALE))
     }
 
-    /// What the switch of the PC's own display is called, if a display of the PC is
-    /// connected.
-    pub fn physical_name(&self) -> Option<String> {
-        physical::switch(self.pc().displays.as_ref()?).map(|d| physical::label(d, self.texts()))
+    /// Profile `i` as the menu names it: by the name it was given, else by its number
+    /// ("Profile 2").
+    pub fn profile_name(&self, i: usize) -> String {
+        match self.profiles.get(i).and_then(|p| p.name.as_ref()) {
+            Some(name) => name.clone(),
+            None => self.texts().f("profile-n", &[("n", (i + 1).into())]),
+        }
     }
 
     /// What the user reads for display `id`: as the PC's desktop names it.
@@ -679,12 +706,25 @@ impl Model {
         std::mem::swap(&mut self.effects, out);
     }
 
-    /// The end of a pass of the loop: each file changed in it is to be saved, once.
+    /// The end of a pass of the loop: each file changed in it is to be saved, once; the
+    /// PCs hear of the profiles if they changed.
     pub fn end_pass(&mut self) {
         self.saves.add(self.world.take_saves());
         for file in self.saves.take() {
             self.effects.push(Effect::Save(file));
         }
+        if self.profiles_changed {
+            self.tell_profiles();
+        }
+    }
+
+    /// The PCs hear of the profiles now, and the next session starts with them.
+    fn tell_profiles(&mut self) {
+        self.profiles_changed = false;
+        let state = self.headset_state();
+        self.session.set_headset(state);
+        let part = self.profiles_part();
+        self.tell_all(&ClientMsg::Profiles { part });
     }
 
     // ---- What changes it ----
@@ -792,7 +832,8 @@ impl Model {
         }
         // The window onto the keyboard: in front of the user at desk height the first
         // time, then wherever it was moved.
-        self.keyboard_window = (self.headset.can.keyboard_window && self.settings.keyboard_window)
+        let keyboard = self.headset.caps.offers(Offer::KeyboardWindow);
+        self.keyboard_window = (keyboard && self.settings.keyboard_window)
             .then(|| self.world.keyboard_here(self.head));
         // Far monitors first so nearer (and grabbed) ones draw on top.
         self.world.animate(&self.settings, input.dt);
@@ -909,10 +950,16 @@ impl Model {
         let error = m.error.take_if(|(_, at)| over(*at, ERROR_SHOWN_FOR));
         let remove = m.confirm_remove.take_if(|(_, at)| over(*at, CONFIRM_FOR));
         let save = m.confirm_save.take_if(|(_, at)| over(*at, CONFIRM_FOR));
+        let delete = m.confirm_delete.take_if(|(_, at)| over(*at, CONFIRM_FOR));
         let forget = m.confirm_forget.take_if(|(_, at)| over(*at, CONFIRM_FOR));
         m.toast
             .take_if(|t| now.saturating_duration_since(t.since) > TOAST_FOR);
-        if error.is_some() || remove.is_some() || save.is_some() || forget.is_some() {
+        if error.is_some()
+            || remove.is_some()
+            || save.is_some()
+            || delete.is_some()
+            || forget.is_some()
+        {
             self.rev += 1;
         }
     }
@@ -959,6 +1006,17 @@ impl Model {
                 }
             }
             PlatformEvent::Battery(battery) => self.battery_read(battery),
+            PlatformEvent::SpaceMoved => {
+                // In the room's terms nothing moved: the arrangement went with the
+                // origin. The menu's map is drawn from the eyes again.
+                info!("the room's origin moved: the arrangement moves with it");
+                self.view_eye = None;
+            }
+            PlatformEvent::RefreshRate(hz) => {
+                info!("display at {hz} Hz");
+                self.headset.refresh_hz = Some(hz);
+            }
+            PlatformEvent::CamerasLost => self.cameras_lost(),
             PlatformEvent::Texts(texts) => {
                 if self.lang.loaded(texts) {
                     self.language_shown();
@@ -976,8 +1034,26 @@ impl Model {
                 self.settings.keyboard_window = false;
                 self.keyboard_window = None;
             }
-            PlatformEvent::CustomPanorama(there) => self.headset.can.custom_panorama = there,
+            PlatformEvent::CustomPanorama(there) => self.headset.custom_panorama = there,
         }
+    }
+
+    /// The cameras broke for good: the "Room" backgrounds and the window onto the
+    /// keyboard are no longer offered (the background chosen is kept for the next
+    /// start; until then nothing shows behind the monitors), said once.
+    fn cameras_lost(&mut self) {
+        if self.headset.caps.room.take().is_none() {
+            return;
+        }
+        self.keyboard_window = None;
+        let text = self.texts().t("error-cameras-lost").to_owned();
+        self.show_error(text);
+    }
+
+    /// The display rate to ask for as the settings say, if the runtime lets the app
+    /// choose (see `Caps::rate`).
+    pub fn wanted_rate(&self) -> Option<f32> {
+        self.headset.caps.rate(self.settings.battery_saver)
     }
 
     /// The store says the app is not the person's: the menu says so in front of the
@@ -1212,9 +1288,26 @@ impl Model {
         });
     }
 
-    /// Profile `i` as the menu names it ("Profile 2").
-    fn profile_name(&self, i: usize) -> String {
-        self.texts().f("profile-n", &[("n", (i + 1).into())])
+    /// The profiles or the one in use changed: the PCs hear of it once this pass ends
+    /// (see [`Model::end_pass`]).
+    fn profiles_changed(&mut self) {
+        self.profiles_changed = true;
+        self.rev += 1;
+    }
+
+    /// The profiles as the PCs are told: their names (empty for one without), and the
+    /// one in use.
+    fn profiles_part(&self) -> state::Profiles {
+        state::Profiles {
+            list: self
+                .profiles
+                .iter()
+                .map(|p| state::ProfileName {
+                    name: p.name.clone().unwrap_or_default(),
+                })
+                .collect(),
+            active: self.menu.active_profile.and_then(|a| u8::try_from(a).ok()),
+        }
     }
 
     /// The monitor most straight ahead of the head (not a window panel).
@@ -1298,13 +1391,16 @@ impl Model {
 
     /// What the headset says about itself when it opens a session.
     pub fn headset_state(&self) -> HeadsetState {
-        headset_state(
-            &self.settings,
-            self.presence.worn(),
-            self.headset.battery,
-            self.headset.mic_permission,
-            &self.headset.model,
-        )
+        HeadsetState {
+            profiles: Some(self.profiles_part()),
+            ..headset_state(
+                &self.settings,
+                self.presence.worn(),
+                self.headset.battery,
+                self.headset.mic_permission,
+                &self.headset.caps,
+            )
+        }
     }
 
     /// The microphone's switch or permission changed: the PC hears at once (it makes
@@ -1386,6 +1482,11 @@ impl Model {
             );
             return None;
         };
+        // A display of the PC asked to be shown or hidden: its switch shows what the
+        // PC says again.
+        if let ui::Asked::Physical(k) = what {
+            self.menu.physical_asked.retain(|(a, _)| *a != k);
+        }
         let took = answered.took.unwrap_or_default().as_millis();
         info!("request {} answered in {took} ms", req.0);
         if let Outcome::Failed { error, detail } = outcome {
@@ -1519,6 +1620,8 @@ fn tab_code(tab: Tab) -> u8 {
         Tab::Settings(Section::Pc) => 5,
         Tab::Settings(Section::Help) => 6,
         Tab::Settings(Section::Controls) => 7,
+        Tab::Profiles => 8,
+        Tab::Settings(Section::Paired) => 9,
     }
 }
 
@@ -1532,6 +1635,8 @@ fn tab_from_code(code: u8) -> Tab {
         5 => Tab::Settings(Section::Pc),
         6 => Tab::Settings(Section::Help),
         7 => Tab::Settings(Section::Controls),
+        8 => Tab::Profiles,
+        9 => Tab::Settings(Section::Paired),
         _ => Tab::Quick,
     }
 }
@@ -1551,23 +1656,25 @@ fn prefs_of(s: &Settings) -> Prefs {
 
 /// What the headset says about itself when it opens a session: what it can do, its
 /// settings, whether it is worn, its battery, the microphone's switch and `permission`;
-/// `model` as the system names it.
+/// what it can do as `caps` says.
 pub fn headset_state(
     settings: &Settings,
     worn: bool,
     battery: Option<(u8, bool)>,
     permission: u8,
-    model: &str,
+    caps: &Caps,
 ) -> HeadsetState {
     let mic = mic_state(settings, permission);
     HeadsetState {
-        caps: Some(crate::device::headset_caps(model)),
+        caps: Some(caps.headset_caps()),
         prefs: Some(prefs_of(settings)),
         presence: Some(Presence { worn }),
         battery: battery.map(|(percent, charging)| Battery { percent, charging }),
         // The headset's own volume follows the PC's slider from 0.2.0 step 7.11.
         volume: None,
         up: std::iter::once((mic.kind, mic)).collect(),
+        // The model adds them (see `Model::headset_state`).
+        profiles: None,
     }
 }
 

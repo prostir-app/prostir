@@ -19,9 +19,10 @@ impl Displays {
 
     /// Follows the PC's own displays (`seen`, as the desktop listed them): each
     /// connected one is matched to one known (see [`match_physical`]); one seen for the
-    /// first time gets a number from `new_id` and is shown if it is the one the desktop
-    /// shows by default and the laptop screen is wanted. Shown ones that are connected
-    /// stream; one not connected is `Absent`, keeping its number and place.
+    /// first time gets a number from `new_id` and is shown while the PC's displays are
+    /// wanted in the headset and fewer than the headset may show are (see
+    /// [`Displays::found_physical`]). Shown ones that are connected stream; one not
+    /// connected is `Absent`, keeping its number and place.
     pub(super) fn sync_physical(
         &mut self,
         seen: &[PhysicalDisplay],
@@ -138,9 +139,12 @@ impl Displays {
     }
 
     /// A display of the PC seen for the first time: a new number (the laptop screen of
-    /// earlier versions keeps 100 and its place), shown if it is the one the desktop
-    /// shows by default and the laptop screen is wanted. Known by its EDID where no
-    /// other connected display says the same, else by its connector.
+    /// earlier versions keeps 100 and its place), shown while the PC's displays are
+    /// wanted in the headset (`mirror`), fewer than the headset may show without "No
+    /// limits" are shown and connected, and a headset connected now decodes one more
+    /// stream (`HeadsetCaps.streams_max`): every display of the PC shows at first, as
+    /// it stands on the desktop, and the person hides those not needed. Known by its
+    /// EDID where no other connected display says the same, else by its connector.
     fn found_physical(
         &mut self,
         display: &PhysicalDisplay,
@@ -168,7 +172,21 @@ impl Displays {
             edid: display.edid.clone().filter(unique),
             connector: display.key.to_string(),
         };
-        let shown = is_default && self.settings.mirror;
+        let shown_now = self
+            .physical()
+            .filter(|s| s.is_shown_physical() && !matches!(s.state, ScreenState::Absent))
+            .count();
+        // Nor more streams than a headset connected now decodes at once.
+        let streams = self
+            .router
+            .headsets()
+            .iter()
+            .map(streams_max)
+            .min()
+            .unwrap_or(usize::MAX);
+        let shown = self.settings.mirror
+            && shown_now < usize::from(crate::publish::PHYSICAL_MAX)
+            && self.stream_count() < streams;
         self.physical_seen.insert(id, now_secs());
         info!(
             "{} is {id} ({}), {}",

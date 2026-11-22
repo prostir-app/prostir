@@ -2,7 +2,7 @@ use super::*;
 use crate::request::Request;
 use crate::state::{
     Decoder, DeskRect, Display, DisplayKind, DisplayState, Feature, HeadsetState, MicDevice, Mode,
-    PcState, Placed, Wanted,
+    PcState, Placed, ProfileName, Wanted,
 };
 
 /// A message as it goes on the wire: tag, length, payload.
@@ -222,6 +222,15 @@ pub(crate) fn headset_state() -> HeadsetState {
         .into_iter()
         .map(|u| (u.kind, u))
         .collect(),
+        profiles: Some(Profiles {
+            list: vec![
+                ProfileName::default(),
+                ProfileName {
+                    name: "Робота".into(),
+                },
+            ],
+            active: Some(1),
+        }),
     }
 }
 
@@ -329,6 +338,13 @@ pub(crate) fn client_samples() -> Vec<ClientMsg> {
             ReqId(1),
             Request::AddDisplay {
                 mode: Mode::new(3440, 1440),
+            },
+        ),
+        ClientMsg::request(
+            ReqId(4),
+            Request::SetScale {
+                id: DisplayId(3),
+                scale: 150,
             },
         ),
         ClientMsg::request(

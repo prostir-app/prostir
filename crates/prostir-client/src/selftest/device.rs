@@ -32,18 +32,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use android_activity::AndroidApp;
-use jni::objects::{JObject, JString, JValue};
-use jni::{Env, jni_sig, jni_str};
 use log::{info, warn};
 use openxr as xr;
-use prostir_proto::state::{DisplayId, Gen, HeadsetCaps};
+use prostir_proto::state::{DisplayId, Gen};
 use prostir_testkit::pc::{Clip, Event, FakePc, Happened, PcConfig, trust_each_other};
 
 use super::{
-    Exit, Measured, Options, Probe, Report, Samples, check, check_usb, end_to_end_ms,
+    Exit, Measured, Options, Perf, Probe, Report, Samples, check, check_usb, end_to_end_ms,
     is_app_thread, lock,
 };
+use crate::caps::Caps;
 use crate::net::NetEvent;
+use crate::platform::openxr::{self as xrutil, Gfx};
 
 /// How many times `android_main` started in this process (the first is 1).
 static RUNS: AtomicU32 = AtomicU32::new(0);
@@ -69,9 +69,6 @@ const EXTRA: Duration = Duration::from_secs(60);
 /// Frames kept for percentiles: two minutes at 120 Hz (a longer run keeps its first
 /// two minutes of frames; the counts go on).
 const FRAMES_KEPT: usize = 120 * 120;
-/// `Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY`: started again from the recent apps,
-/// with the intent of the last start, which must not run a selftest again.
-const FROM_HISTORY: i32 = 0x0010_0000;
 /// The monitors the fake PC streams (it picks clips for each).
 const MONITORS: usize = 2;
 /// Where the script's clock of the PC answers, over `adb reverse` (`pc=usb`).
@@ -93,7 +90,10 @@ const KEYS: &[&str] = &[
     "runtime",
     "extensions",
     "caps",
+    "caps.off",
+    "flip",
     "decoders",
+    "decoders.said",
     "streams_max",
     "layers_max",
     "volume_steps",
@@ -161,6 +161,7 @@ const KEYS: &[&str] = &[
     "menu_redraw_ms.max",
     "menu_redraw_share.p95",
     "menu_redraw_share.max",
+    "menu_redraw_over_share",
     "image_uploads",
     "image_upload_ms.p95",
     "image_upload_ms.max",
@@ -325,6 +326,10 @@ pub struct Selftest {
     command_ms: Option<f64>,
     /// The real PC's virtual monitors as its list says now.
     listed: Vec<DisplayId>,
+    /// `caps=minimal`: only the extensions the app cannot do without.
+    minimal: bool,
+    /// The runtime has performance levels.
+    perf_levels: bool,
 }
 
 /// The PC's clock less the headset's, in µs, from the script's clock on the PC
@@ -358,91 +363,13 @@ fn clock_offset_us() -> Option<(i64, u64)> {
     Some((offset, round))
 }
 
-/// Runs `f` with the running activity (the Activity object of the NativeActivity,
-/// not the Application `ndk_context` holds), in a local frame of its own.
-fn with_activity<T>(
-    app: &AndroidApp,
-    f: impl FnOnce(&mut Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
-) -> Option<T> {
-    // SAFETY: the VM of the running NativeActivity.
-    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
-    // A Java exception on the way is caught and cleared, and comes back as the error.
-    vm.attach_current_thread(|env| {
-        let raw: jni::sys::jobject = app.activity_as_ptr().cast();
-        // SAFETY: the activity's object, valid while the activity runs (this start);
-        // the cast only borrows it, it never deletes it.
-        let activity = unsafe { env.as_cast_raw::<JObject<'static>>(&raw) }?;
-        f(env, &activity)
-    })
-    .inspect_err(|e| warn!("selftest: a call into Android failed: {e}"))
-    .ok()
-}
-
-/// The `selftest` extra of the intent that started the activity, if there is one
-/// (not when it was started again from the recent apps with an old intent).
-fn intent_extra(app: &AndroidApp) -> Option<String> {
-    with_activity(app, |env, activity| {
-        let intent = env
-            .call_method(
-                activity,
-                jni_str!("getIntent"),
-                jni_sig!("()Landroid/content/Intent;"),
-                &[],
-            )?
-            .l()?;
-        if intent.is_null() {
-            return Ok(None);
-        }
-        let flags = env
-            .call_method(&intent, jni_str!("getFlags"), jni_sig!("()I"), &[])?
-            .i()?;
-        if flags & FROM_HISTORY != 0 {
-            return Ok(None);
-        }
-        let key = env.new_string("selftest")?;
-        let value = env
-            .call_method(
-                &intent,
-                jni_str!("getStringExtra"),
-                jni_sig!("(Ljava/lang/String;)Ljava/lang/String;"),
-                &[JValue::Object(&key)],
-            )?
-            .l()?;
-        if value.is_null() {
-            return Ok(None);
-        }
-        let value = env.cast_local::<JString<'_>>(value)?;
-        Ok(Some(value.try_to_string(env)?))
-    })
-    .flatten()
-}
-
-/// `AudioManager.getStreamMaxVolume(STREAM_MUSIC)`: steps above silence.
-fn volume_steps(app: &AndroidApp) -> Option<i32> {
-    with_activity(app, |env, activity| {
-        let name = env.new_string("audio")?;
-        let manager = env
-            .call_method(
-                activity,
-                jni_str!("getSystemService"),
-                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
-                &[JValue::Object(&name)],
-            )?
-            .l()?;
-        if manager.is_null() {
-            return Ok(None);
-        }
-        let steps = env
-            .call_method(
-                &manager,
-                jni_str!("getStreamMaxVolume"),
-                jni_sig!("(I)I"),
-                &[JValue::Int(3)],
-            )?
-            .i()?;
-        Ok(Some(steps))
-    })
-    .flatten()
+/// A codec as the report writes it.
+fn codec_name(codec: prostir_proto::Codec) -> &'static str {
+    match codec {
+        prostir_proto::Codec::H264 => "h264",
+        prostir_proto::Codec::H265 => "h265",
+        prostir_proto::Codec::Av1 => "av1",
+    }
 }
 
 /// A system property (`ro.product.model`), empty when there is none.
@@ -563,14 +490,16 @@ fn ms(d: Duration) -> f64 {
 }
 
 fn battery() -> String {
-    crate::system::battery().map_or_else(|| "none".into(), |(p, _)| p.to_string())
+    crate::platform::android::battery().map_or_else(|| "none".into(), |(p, _)| p.to_string())
 }
 
 impl Selftest {
     /// A selftest, if the intent that started the app asks for one; `run` is which
     /// start in this process this is.
     pub fn requested(app: &AndroidApp, run: u32) -> Option<Self> {
-        let extra = intent_extra(app)?;
+        // Not from the recent apps: the intent of the last start must not run a
+        // selftest again.
+        let extra = crate::platform::android::intent_extra(app, "selftest")?;
         let now = Instant::now();
         let mut test = Self {
             options: Options::default(),
@@ -633,6 +562,8 @@ impl Selftest {
             removed_ms: None,
             command_ms: None,
             listed: Vec::new(),
+            minimal: false,
+            perf_levels: false,
         };
         let r = &mut test.report;
         r.lay_out(KEYS);
@@ -642,7 +573,6 @@ impl Selftest {
         r.set("run", run);
         r.set("manufacturer", property(c"ro.product.manufacturer"));
         r.set("model", property(c"ro.product.model"));
-        r.set("perf", "default");
         r.set("threads_left", threads_left());
         r.set("battery.start", battery());
         match Options::parse(&extra) {
@@ -650,6 +580,7 @@ impl Selftest {
             Err(e) => test.end_early(Exit::NoStart, &e),
         }
         test.report.set("seconds", test.options.seconds);
+        test.report.set("perf", test.options.perf.name());
         let max = test.options.decoder_rate_max;
         super::set_decoder_rate_max(max);
         test.report
@@ -783,15 +714,24 @@ impl Selftest {
         }
     }
 
+    /// `caps=minimal`: the instance with only the extensions the app cannot do
+    /// without.
+    pub fn caps_minimal(&self) -> bool {
+        self.options.caps_minimal
+    }
+
     /// What the OpenXR runtime is and offers (every extension it lists, not only the
-    /// ones the app turns on), and the system's volume steps.
+    /// ones the app turns on), and whether the app turns on only what it needs.
     pub fn runtime(
         &mut self,
-        app: &AndroidApp,
         instance: &xr::Instance,
-        system: xr::SystemId,
         available: &xr::ExtensionSet,
+        minimal: bool,
+        flip: bool,
     ) {
+        // Whether the stream's picture is turned over by the runtime's extension, or
+        // shown as the surface keeps it (rows top down).
+        self.report.set("flip", if flip { "ext" } else { "none" });
         if let Ok(p) = instance.properties() {
             self.report.set(
                 "runtime",
@@ -804,39 +744,62 @@ impl Selftest {
             .map(|n| String::from_utf8_lossy(n.strip_suffix(&[0]).unwrap_or(n)).into_owned())
             .collect();
         self.report.set("extensions", names.join(","));
-        // The app turns on every optional extension the runtime has.
-        self.report.set("caps", "full");
-        if let Ok(p) = instance.system_properties(system) {
-            self.report
-                .set("layers_max", p.graphics_properties.max_layer_count);
-        }
-        if let Some(steps) = volume_steps(app) {
-            self.report.set("volume_steps", steps);
-        }
+        // Every optional extension the runtime has, or (`caps=minimal`) none.
+        self.minimal = minimal;
     }
 
-    /// What the app says it decodes (fixed in this build).
-    pub fn headset_caps(&mut self, caps: &HeadsetCaps) {
-        let decoders: Vec<String> = caps
-            .decoders
-            .iter()
-            .map(|d| {
-                let codec = match d.codec {
-                    0 => "h264",
-                    1 => "h265",
-                    _ => "other",
-                };
-                format!("{codec}:{}x{}", d.max_w, d.max_h)
-            })
-            .collect();
-        self.report.set("decoders", decoders.join(","));
-        self.report.set("streams_max", caps.streams_max);
+    /// What the headset can do, as the app found it: what the PC is told and the menu
+    /// shows.
+    pub fn caps(&mut self, caps: &Caps) {
+        let r = &mut self.report;
+        // `minimal`, or the fields that came out off (`full`: none).
+        let missing = caps.missing();
+        r.set("caps", if self.minimal { "minimal" } else { &missing });
+        r.set("caps.off", missing);
+        let list = |decoders: &[crate::caps::Decoder]| -> String {
+            let each: Vec<String> = decoders
+                .iter()
+                .map(|d| format!("{}:{}x{}", codec_name(d.codec), d.max_w, d.max_h))
+                .collect();
+            each.join(",")
+        };
+        // As told to the PC (decoding at 60 frames a second), and as the system's
+        // ranges said.
+        r.set("decoders", list(&caps.decoders));
+        r.set("decoders.said", list(&caps.decoders_said));
+        r.set("streams_max", caps.streams_max);
+        r.set("layers_max", caps.layers_max);
+        match caps.volume_steps {
+            Some(steps) => r.set("volume_steps", steps),
+            None => r.set("volume_steps", "none"),
+        }
+        self.perf_levels = caps.perf_levels;
+    }
+
+    /// The performance level asked for (`perf=low|high`; `default` asks nothing): a
+    /// runtime without performance levels cannot run that test.
+    pub fn set_perf(&mut self, session: &xr::Session<Gfx>) {
+        let level = match self.options.perf {
+            Perf::Default => return,
+            Perf::Low => xrutil::PerfLevel::Low,
+            Perf::High => xrutil::PerfLevel::High,
+        };
+        if !self.perf_levels {
+            let why = format!(
+                "perf={}: the runtime has no performance levels",
+                self.options.perf.name()
+            );
+            self.end_early(Exit::NoStart, &why);
+        } else if !xrutil::set_perf_level(session, level) {
+            let why = format!("perf={}: the runtime refused it", self.options.perf.name());
+            self.end_early(Exit::NoStart, &why);
+        }
     }
 
     /// The display's refresh rates, once the session runs.
-    pub fn refresh(&mut self, offered: Option<Vec<f32>>, now: Option<f32>) {
-        if let Some(rates) = offered {
-            let rates: Vec<String> = rates.iter().map(|r| format!("{r:.0}")).collect();
+    pub fn refresh(&mut self, offered: &[f32], now: Option<f32>) {
+        if !offered.is_empty() {
+            let rates: Vec<String> = offered.iter().map(|r| format!("{r:.0}")).collect();
             self.report.set("refresh_rates", rates.join(","));
         }
         if let Some(hz) = now {
@@ -1479,6 +1442,13 @@ impl Selftest {
         r.set_ms("menu_redraw_ms.max", self.menu_ms.max());
         r.set_share("menu_redraw_share.p95", self.menu_share.percentile(0.95));
         r.set_share("menu_redraw_share.max", self.menu_share.max());
+        // Only written down: over the share, the menu is to be drawn on a thread of its
+        // own (a later step decides by this).
+        let over = self
+            .menu_share
+            .max()
+            .is_some_and(|s| s > super::MENU_REDRAW_SHARE);
+        r.set("menu_redraw_over_share", u8::from(over));
         if let Some(p) = &probe {
             r.set("image_uploads", p.upload.count());
             if p.upload.count() > 0 {

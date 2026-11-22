@@ -1,5 +1,5 @@
-//! The monitors: adding, removing, the order, the window panels, "Line up" and
-//! "In front".
+//! The monitors: adding (at a scale), removing, another scale, the order, the window
+//! panels, "Line up" and "In front".
 
 use prostir_proto::request::Request;
 use prostir_proto::state::Mode;
@@ -12,9 +12,18 @@ impl Model {
     pub(super) fn act_monitors(&mut self, action: Action) {
         match action {
             Action::Add { width, height } => {
+                // At the scale chosen, where the PC makes it.
+                let offered =
+                    self.pc().limits.as_ref().is_some_and(|l| {
+                        self.can_scale() && l.scales.contains(&self.menu.add_scale)
+                    });
+                let scale = if offered { self.menu.add_scale } else { 100 };
                 let req = self.request(
                     Request::AddDisplay {
-                        mode: Mode::new(width, height),
+                        mode: Mode {
+                            scale,
+                            ..Mode::new(width, height)
+                        },
                     },
                     ui::Asked::AddMonitor,
                 );
@@ -22,6 +31,14 @@ impl Model {
                 // its picture comes (not in cinema, where new monitors are not placed).
                 self.world
                     .adding_started(req, (width, height), self.head.1, self.now);
+            }
+            Action::AddScale(scale) => self.menu.add_scale = scale,
+            Action::SetScale(id, scale) => {
+                self.request_for(
+                    id,
+                    |id| Request::SetScale { id, scale },
+                    ui::Asked::Scale(id),
+                );
             }
             Action::Remove(id) => {
                 let confirmed = self.menu.confirm_remove.is_some_and(|(c, at)| {

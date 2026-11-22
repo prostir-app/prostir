@@ -50,8 +50,14 @@ const SOURCES: &[(&str, &str)] = &[
     ("physical.rs", include_str!("../src/physical.rs")),
     ("session/mod.rs", include_str!("../src/session/mod.rs")),
     ("lang.rs", include_str!("../src/lang.rs")),
-    ("store/mod.rs", include_str!("../src/store/mod.rs")),
-    ("store/meta.rs", include_str!("../src/store/meta.rs")),
+    (
+        "platform/store/mod.rs",
+        include_str!("../src/platform/store/mod.rs"),
+    ),
+    (
+        "platform/store/meta.rs",
+        include_str!("../src/platform/store/meta.rs"),
+    ),
 ];
 
 /// The rest of the code, for the dash check.
@@ -59,18 +65,29 @@ const OTHER_CODE: &[(&str, &str)] = &[
     ("alloc_count.rs", include_str!("../src/alloc_count.rs")),
     ("app/tests.rs", include_str!("../src/app/tests.rs")),
     ("frame_allocations.rs", include_str!("frame_allocations.rs")),
+    ("neutrality.rs", include_str!("neutrality.rs")),
     (
         "interaction/tests.rs",
         include_str!("../src/interaction/tests.rs"),
     ),
-    ("audio.rs", include_str!("../src/audio.rs")),
+    (
+        "platform/sound/audio.rs",
+        include_str!("../src/platform/sound/audio.rs"),
+    ),
     ("background.rs", include_str!("../src/background.rs")),
+    ("caps.rs", include_str!("../src/caps.rs")),
     ("commands.rs", include_str!("../src/commands.rs")),
     ("decoder.rs", include_str!("../src/decoder.rs")),
     ("device.rs", include_str!("../src/device.rs")),
-    ("egl.rs", include_str!("../src/egl.rs")),
+    (
+        "platform/openxr/egl.rs",
+        include_str!("../src/platform/openxr/egl.rs"),
+    ),
     ("ids.rs", include_str!("../src/ids.rs")),
-    ("input.rs", include_str!("../src/input.rs")),
+    (
+        "platform/openxr/input.rs",
+        include_str!("../src/platform/openxr/input.rs"),
+    ),
     (
         "layout/arrange.rs",
         include_str!("../src/layout/arrange.rs"),
@@ -88,13 +105,42 @@ const OTHER_CODE: &[(&str, &str)] = &[
     ("layout/stick.rs", include_str!("../src/layout/stick.rs")),
     ("layout/tests.rs", include_str!("../src/layout/tests.rs")),
     ("lib.rs", include_str!("../src/lib.rs")),
-    ("media.rs", include_str!("../src/media.rs")),
-    ("mic.rs", include_str!("../src/mic.rs")),
+    (
+        "platform/sound/mod.rs",
+        include_str!("../src/platform/sound/mod.rs"),
+    ),
+    (
+        "platform/sound/mic.rs",
+        include_str!("../src/platform/sound/mic.rs"),
+    ),
     ("net/tests.rs", include_str!("../src/net/tests.rs")),
     ("outbox.rs", include_str!("../src/outbox.rs")),
-    ("overlay.rs", include_str!("../src/overlay.rs")),
-    ("passthrough.rs", include_str!("../src/passthrough.rs")),
+    (
+        "platform/openxr/overlay.rs",
+        include_str!("../src/platform/openxr/overlay.rs"),
+    ),
+    (
+        "platform/meta/passthrough.rs",
+        include_str!("../src/platform/meta/passthrough.rs"),
+    ),
     ("pending.rs", include_str!("../src/pending.rs")),
+    ("platform/mod.rs", include_str!("../src/platform/mod.rs")),
+    (
+        "platform/controllers.rs",
+        include_str!("../src/platform/controllers.rs"),
+    ),
+    (
+        "platform/android/mod.rs",
+        include_str!("../src/platform/android/mod.rs"),
+    ),
+    (
+        "platform/android/codecs.rs",
+        include_str!("../src/platform/android/codecs.rs"),
+    ),
+    (
+        "platform/meta/mod.rs",
+        include_str!("../src/platform/meta/mod.rs"),
+    ),
     ("presence.rs", include_str!("../src/presence.rs")),
     ("profiles.rs", include_str!("../src/profiles.rs")),
     ("selftest.rs", include_str!("../src/selftest.rs")),
@@ -104,10 +150,16 @@ const OTHER_CODE: &[(&str, &str)] = &[
     ),
     ("session/tests.rs", include_str!("../src/session/tests.rs")),
     ("settings.rs", include_str!("../src/settings.rs")),
-    ("system.rs", include_str!("../src/system.rs")),
+    (
+        "platform/android/system.rs",
+        include_str!("../src/platform/android/system.rs"),
+    ),
     ("world/mod.rs", include_str!("../src/world/mod.rs")),
     ("world/tests.rs", include_str!("../src/world/tests.rs")),
-    ("xrutil.rs", include_str!("../src/xrutil.rs")),
+    (
+        "platform/openxr/mod.rs",
+        include_str!("../src/platform/openxr/mod.rs"),
+    ),
     (
         "panel_preview.rs",
         include_str!("../examples/panel_preview.rs"),

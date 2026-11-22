@@ -25,6 +25,20 @@ fn commands_read_as_requests() {
             name: "Робота вдома".into()
         }
     );
+    assert_eq!(
+        asks("profile rename 2 Робота вдома"),
+        Request::RenameProfile {
+            profile: "2".into(),
+            name: "Робота вдома".into()
+        }
+    );
+    assert_eq!(
+        asks("profile rename Ігри"),
+        Request::RenameProfile {
+            profile: "Ігри".into(),
+            name: String::new()
+        }
+    );
     assert_eq!(asks("cinema on"), Request::Cinema { on: true });
     assert_eq!(asks("focus off"), Request::Focus { on: false });
     assert_eq!(asks("follow on"), Request::Follow { on: true });
@@ -148,6 +162,7 @@ fn wrong_arguments() {
         "pair now",
         "forget",
         "profile",
+        "profile rename",
         "status --cpu",
         "recenter --all",
         "autostart maybe",

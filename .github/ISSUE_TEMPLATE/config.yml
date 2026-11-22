@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
   - name: Troubleshooting
-    url: https://github.com/OlexiyOdarchuk/prostir#troubleshooting-and-faq
+    url: https://github.com/prostir-app/prostir#troubleshooting-and-faq
     about: Common problems (Wi-Fi discovery, black captures, logs) and how to check them.

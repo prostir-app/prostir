@@ -105,7 +105,9 @@ impl Player {
         let _ = std::thread::Builder::new()
             .name("audio".into())
             .spawn(move || {
-                crate::xrutil::raise_thread_priority(crate::xrutil::Priority::Audio);
+                crate::platform::android::raise_thread_priority(
+                    crate::platform::android::Priority::Audio,
+                );
                 // An AAudio stream dies when the audio route changes (headphones in or
                 // out): open a new one and keep playing.
                 let mut failures = 0;

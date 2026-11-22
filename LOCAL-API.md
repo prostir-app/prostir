@@ -15,10 +15,10 @@ contract for clients written in any language; the tests of `prostir-api` pin the
 | | |
 |---|---|
 | Bus | the **session bus** (D-Bus) |
-| Name | `io.github.OlexiyOdarchuk.Prostir` |
-| Object | `/io/github/OlexiyOdarchuk/Prostir` |
-| Interface | `io.github.OlexiyOdarchuk.Prostir1` |
-| Errors | `io.github.OlexiyOdarchuk.Prostir1.Error.<Name>` |
+| Name | `io.github.prostir_app.Prostir` |
+| Object | `/io/github/prostir_app/Prostir` |
+| Interface | `io.github.prostir_app.Prostir1` |
+| Errors | `io.github.prostir_app.Prostir1.Error.<Name>` |
 
 Only programs of the same user reach the session bus, which is the whole access rule:
 the same trust as the tray icon, which shows the same things (the pairing code among
@@ -27,7 +27,7 @@ owner, with every right; see [Commands for the headset](#commands-for-the-headse
 what goes to a headset.
 
 The digit in the interface name is its version: an incompatible change adds
-`io.github.OlexiyOdarchuk.Prostir2` next to it. If the project gets a domain of its own,
+`io.github.prostir_app.Prostir2` next to it. If the project gets a domain of its own,
 a new bus name is added and this one stays as a second name until the next major
 version, so scripts keep working.
 
@@ -61,7 +61,8 @@ so) and does not look for one later.
 | `Call` | `s request_json` | `s answer_json` | any [request](#requests), at most 64 KiB; the window and `ctl` use it |
 | `GetState` | | `u revision, s state_json` | the whole [state](#state) |
 | `Recenter`, `LineUp`, `ShowMouse`, `ResetArrangement` | | | commands for the headset |
-| `Profile` | `s name` | | `name`: the profile's number, 1 to 3, as the headset menu shows it |
+| `Profile` | `s name` | | `name`: the profile's name, or its number from 1 as the headset's menu lists them (`headsets[].session.profiles`) |
+| `RenameProfile` | `s profile, s name` | | gives `profile` (its name or number) the name `name`; an empty one: called by its number again |
 | `Cinema`, `Focus`, `Follow`, `NoLimits`, `SetMic` | `b on` | | `SetMic` is refused, see below |
 | `Distance` | `n steps` | | closer (below 0) or further |
 | `Preset` | `y preset` | | |
@@ -82,11 +83,11 @@ then answers `TimedOut`. `busctl` and `gdbus` give up after 25 s by default, so 
 them more:
 
 ```
-busctl --user --timeout=35 call io.github.OlexiyOdarchuk.Prostir \
-    /io/github/OlexiyOdarchuk/Prostir io.github.OlexiyOdarchuk.Prostir1 Recenter
-gdbus call --session --timeout 35 --dest io.github.OlexiyOdarchuk.Prostir \
-    --object-path /io/github/OlexiyOdarchuk/Prostir \
-    --method io.github.OlexiyOdarchuk.Prostir1.Profile 2
+busctl --user --timeout=35 call io.github.prostir_app.Prostir \
+    /io/github/prostir_app/Prostir io.github.prostir_app.Prostir1 Recenter
+gdbus call --session --timeout 35 --dest io.github.prostir_app.Prostir \
+    --object-path /io/github/prostir_app/Prostir \
+    --method io.github.prostir_app.Prostir1.Profile 2
 ```
 
 (`busctl` needs `--` before a negative number: `... call -- io.github... Distance n -2`.)
@@ -129,7 +130,7 @@ Prostir appears and after it restarts. After it appears, call `GetState`.
 
 ## Errors
 
-The D-Bus error name is `io.github.OlexiyOdarchuk.Prostir1.Error.` and one of:
+The D-Bus error name is `io.github.prostir_app.Prostir1.Error.` and one of:
 
 | Name | |
 |---|---|
@@ -145,7 +146,7 @@ The D-Bus error name is `io.github.OlexiyOdarchuk.Prostir1.Error.` and one of:
 | `Capture` | the picture could not be taken |
 | `Sound` | the sound could not be switched |
 | `NotOnDisplays` | the mouse is on none of the displays |
-| `NoSuchProfile` | no profile saved in that slot |
+| `NoSuchProfile` | the headset has no such profile |
 | `BadArgument` | a value out of range, or a request that does not read |
 | `NotConnected` | no headset is connected (for a command for the headset) |
 | `TimedOut` | the headset did not answer within 30 s |
@@ -177,7 +178,8 @@ only guests are connected, commands are refused with `NotAllowed`. Without a hea
 | `request` | Arguments |
 |---|---|
 | `recenter`, `line_up`, `show_mouse`, `reset_arrangement` | |
-| `profile` | `name` (string): the profile's number, 1 to 3, as the headset menu shows it |
+| `profile` | `name` (string): the profile's name, or its number from 1 as the headset's menu lists them |
+| `rename_profile` | `profile` (string, its name or number), `name` (string, 64 bytes at most; empty: called by its number again; a number only is `BadArgument`): the new name shows in `headsets[].session.profiles` before the answer |
 | `cinema`, `focus`, `follow`, `no_limits` | `on` (bool) |
 | `distance` | `steps` (-128 to 127; below 0 is closer) |
 | `preset` | `preset` (0 to 255) |
@@ -262,7 +264,7 @@ change older clients would misread.
       "role": "main", "rights": ["input", "mic"],
       "session": {
         "via": "wifi", "worn": true, "battery": {"percent": 80, "charging": false},
-        "profile": null, "mic_allowed": true, "mic_on": false,
+        "profile": "Work", "profiles": ["", "Work"], "mic_allowed": true, "mic_on": false,
         "main": true, "commands": true, "no_limits": false
       }
     }
@@ -321,7 +323,7 @@ change older clients would misread.
 | `headsets[].app` | its Prostir app's version as it last connected (`0.2.0`), empty where not known: two apps on one headset (a release and a test build) are two headsets, each with its own key |
 | `headsets[].last_seen` | when it last connected or left, Unix seconds; `null` where not known (it has not connected since the PC began to keep this) |
 | `headsets[].role`, `rights` | from its line in `settings.txt` (`main` with every right without one); rights: `input`, `mic`, `camera`, `clipboard`, `changes`, `private` |
-| `headsets[].session` | while connected: `via` (`wifi`, `usb`; from 127.0.0.1 counts as USB), `worn`, `battery`, `profile` (not yet), `mic_allowed` (whether the headset's system lets it record; `null`: not known), `mic_on` (its switch), `main` (the main headset now: its arrangement is the desktop's, commands go to it), `commands` (it takes commands), `no_limits` (where it takes commands) |
+| `headsets[].session` | while connected: `via` (`wifi`, `usb`; from 127.0.0.1 counts as USB), `worn`, `battery`, `profiles` (the profiles saved in the headset, in its menu's order: the name each was given, empty for one called by its number; empty where the headset does not say), `profile` (the one in use: its name, else its number; `null`: none, or not said), `mic_allowed` (whether the headset's system lets it record; `null`: not known), `mic_on` (its switch), `main` (the main headset now: its arrangement is the desktop's, commands go to it), `commands` (it takes commands), `no_limits` (where it takes commands) |
 | `connecting` | a headset being connected now, by name (not yet) |
 | `displays` | in the order of the rows, then the rest |
 | `displays[].kind` | `virtual` (a monitor made for the headset), `physical` (a display of the PC), `window` (a window panel) |
@@ -365,7 +367,8 @@ Prostir leaves and comes back on the bus (it keeps watching).
 prostir ctl status [--json]
 prostir ctl watch [--json]                 # what happens, a line each, until Ctrl+C
 prostir ctl recenter | lineup | showmouse | reset
-prostir ctl profile N                      # the profile's number, 1 to 3, as the headset menu shows it
+prostir ctl profile N|NAME                 # a profile of the headset: its number, or its name
+prostir ctl profile rename N NEW NAME      # profile N (a number or a one-word name) named NEW NAME
 prostir ctl cinema|focus|follow|mic|nolimits on|off
 prostir ctl closer [N] | farther [N]       # Distance -N / +N, 1 by default
 prostir ctl preset N
@@ -446,7 +449,7 @@ a tool does not take is refused with `BadArgument`.
 | `place_monitor` | `id`, `x`, `y` | `place` |
 | `set_scale` | `id`, `scale` | |
 | `show_pc_display` | `id`, `shown` | `show_physical` |
-| `recenter`, `line_up`, `show_mouse`, `reset_arrangement`, `profile`, `cinema`, `focus`, `follow`, `no_limits`, `distance`, `preset` | as the requests | commands for the headset |
+| `recenter`, `line_up`, `show_mouse`, `reset_arrangement`, `profile`, `rename_profile`, `cinema`, `focus`, `follow`, `no_limits`, `distance`, `preset` | as the requests | commands for the headset |
 | `set_quality`, `set_sharp`, `set_codec`, `sound_to_headset`, `autostart` | as the requests | |
 | `set_counting` | `counting`: `no` or `unasked` | as the request, but never `yes`: counting needs the person's own yes (the settings window, the tray, `prostir ctl count yes`), so `yes` is `BadArgument`, also through `call` |
 | `pair_new_headset`, `stop_pairing`, `forget_headset`, `forget_all`, `show_settings`, `quit` | as the requests | |
@@ -481,7 +484,7 @@ once a second: `progress` the seconds waited, `total` its timeout.
 ## `prostir` and the settings window
 
 One program, `prostir`, in two processes. `prostir` without a command (the menu entry,
-`io.github.OlexiyOdarchuk.Prostir.desktop`) opens the settings window. `prostir serve`
+`io.github.prostir_app.Prostir.desktop`) opens the settings window. `prostir serve`
 is the service: the sockets' watcher, which sleeps until a headset comes and then
 starts the full program (`prostir serve --stay` runs the full program all along
 instead, with its sockets opened itself). Autostart entries, systemd's
@@ -503,11 +506,11 @@ the same item ("Settings…").
 The window is a process of its own: the service starts its own program again as
 `prostir window` (a hidden command), so a window that crashes takes nothing else down
 and the service never loads the window's graphics libraries (EGL, X11). The
-window's app id is `io.github.OlexiyOdarchuk.Prostir`, the desktop entry's name.
+window's app id is `io.github.prostir_app.Prostir`, the desktop entry's name.
 
-The settings window owns `io.github.OlexiyOdarchuk.Prostir.Settings` on the session
+The settings window owns `io.github.prostir_app.Prostir.Settings` on the session
 bus (one window per user: a second start calls `Present` on
-`io.github.OlexiyOdarchuk.Prostir.Settings1` of the first and quits). Prostir stays
+`io.github.prostir_app.Prostir.Settings1` of the first and quits). Prostir stays
 running while that name is on the bus, and a headset showing its pairing code then
 waits for the code to be typed in the window (`pairing.code_for`, `pairing_code`)
 instead of a dialog. `ctl watch` does not keep it running.

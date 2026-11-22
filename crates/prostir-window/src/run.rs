@@ -18,8 +18,8 @@ use crate::{App, NoBus, Options, dbus, theme};
 use eframe::egui;
 
 /// The window's app id: the name of Prostir's one desktop entry
-/// (`io.github.OlexiyOdarchuk.Prostir.desktop`), so the desktop shows its name and icon.
-pub const APP_ID: &str = "io.github.OlexiyOdarchuk.Prostir";
+/// (`io.github.prostir_app.Prostir.desktop`), so the desktop shows its name and icon.
+pub const APP_ID: &str = "io.github.prostir_app.Prostir";
 
 /// The window with the time it took to show, for the log.
 struct Timed {

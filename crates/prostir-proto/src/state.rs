@@ -40,6 +40,8 @@ pub const MAX_SCALES: usize = 32;
 pub const MAX_SHORT: usize = 32;
 /// Longest language code, in bytes.
 pub const MAX_LANGUAGE: usize = 8;
+/// Most profiles the headset lists ([`Profiles`]).
+pub const MAX_PROFILES: usize = 32;
 
 /// The text `text` cut to at most `max` bytes, on a character boundary: what the PC
 /// puts into its state (window titles, error details, names), so a long text never
@@ -779,6 +781,29 @@ pub mod permission {
 }
 
 wire_struct! {
+    /// A profile saved in the headset: its name as the person gave it, or, empty, none
+    /// (the headset's menu then names it by its number, "Profile 2").
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ProfileName {
+        #[wire(max = MAX_DISPLAY_NAME)]
+        pub name: String,
+    }
+}
+
+wire_struct! {
+    /// The profiles saved in the headset (a part, from 0.2.0 step 7.10), in the order
+    /// its menu lists them, and the one in use (switched to or saved last, until
+    /// something is changed by hand), by its place in `list`. Commands name a profile
+    /// by its name or its number from 1 in this order.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct Profiles {
+        #[wire(max = MAX_PROFILES)]
+        pub list: Vec<ProfileName>,
+        pub active: Option<u8>,
+    }
+}
+
+wire_struct! {
     /// The headset's switch for a kind of up stream, and whether the system lets it
     /// record (a part for each kind).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -995,10 +1020,12 @@ pub struct HeadsetState {
     pub volume: Option<Volume>,
     /// A part for each kind of up stream.
     pub up: std::collections::BTreeMap<UpKind, UpState>,
+    /// The profiles saved in the headset (from 0.2.0 step 7.10).
+    pub profiles: Option<Profiles>,
 }
 
 /// Tags of the headset's parts, in the order they go.
-const HEADSET_PARTS: &[u8] = &[138, 134, 115, 119, 135, 136];
+const HEADSET_PARTS: &[u8] = &[138, 134, 115, 119, 135, 136, 143];
 
 impl HeadsetState {
     /// Whether messages with `tag` are parts of the headset's state.
@@ -1016,6 +1043,7 @@ impl HeadsetState {
         out.extend(self.battery.map(|part| M::Battery { part }));
         out.extend(self.volume.map(|part| M::Volume { part }));
         out.extend(self.up.values().map(|part| M::UpState { part: *part }));
+        out.extend(self.profiles.clone().map(|part| M::Profiles { part }));
         out
     }
 
@@ -1041,6 +1069,7 @@ impl HeadsetState {
             M::UpState { part } => {
                 self.up.insert(part.kind, part);
             }
+            M::Profiles { part } => self.profiles = Some(part),
             other => return Some(other),
         }
         None

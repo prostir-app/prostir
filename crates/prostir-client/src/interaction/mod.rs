@@ -276,6 +276,8 @@ pub struct Hands {
     /// Touches that just happened: where, when; drawn as a ring spreading out. Kept
     /// to be filled again.
     rings: Vec<(Vec3, Instant)>,
+    /// Whether each side was a tracked hand (not a controller) in its last frame.
+    was_hand: [Option<bool>; 2],
 }
 
 impl Default for Hands {
@@ -299,6 +301,7 @@ impl Hands {
             menu_gesture_held: false,
             attach_for: None,
             rings: Vec::new(),
+            was_hand: [None, None],
         }
     }
 
@@ -358,6 +361,15 @@ impl Hands {
     }
 
     // ---- From outside ----
+
+    /// A hand holds something, resizes, or waits on a pinch: what
+    /// [`Hands::cancel_all`] would end.
+    pub fn busy(&self) -> bool {
+        self.grabs.iter().any(Option::is_some)
+            || self.scaling.is_some()
+            || self.pending_click.iter().any(Option::is_some)
+            || self.hold_since.iter().any(Option::is_some)
+    }
 
     /// The hands are not the app's any more (the system menu over it, another way of
     /// input): what they held is let go where it is, a drag and a resize end, and a
@@ -602,6 +614,16 @@ impl Hands {
         menus: &mut impl Menus,
     ) {
         let mut input = frame.hands[hand];
+        // The controller put down and the hand taking over (or the other way): the
+        // button or pinch that held something will never be seen let go, so what it
+        // held is let go now, as letting go would, and a pinch waiting to click is
+        // forgotten.
+        let switched = self.was_hand[hand].is_some_and(|was| was != input.is_hand);
+        self.was_hand[hand] = Some(input.is_hand);
+        if switched {
+            self.pending_click[hand] = None;
+            self.hold_since[hand] = None;
+        }
         // A hand that just touched the menu: its next pinch is the hand pulling back,
         // not a click.
         if input.is_hand
@@ -689,6 +711,7 @@ impl Hands {
         } else {
             (input.grab.pressed, input.grab.released)
         };
+        let end_grab = end_grab || switched;
 
         if end_grab && self.scaling.is_some_and(|s| s.hand == hand) {
             self.scaling = None;

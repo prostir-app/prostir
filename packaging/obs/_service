@@ -6,18 +6,18 @@
 -->
 <services>
   <service name="download_url">
-    <param name="url">https://github.com/OlexiyOdarchuk/prostir/releases/latest/download/prostir-vendored.tar.gz</param>
+    <param name="url">https://github.com/prostir-app/prostir/releases/latest/download/prostir-vendored.tar.gz</param>
   </service>
   <service name="download_url">
-    <param name="url">https://github.com/OlexiyOdarchuk/prostir/releases/latest/download/prostir-obs.spec</param>
+    <param name="url">https://github.com/prostir-app/prostir/releases/latest/download/prostir-obs.spec</param>
     <param name="filename">prostir.spec</param>
   </service>
   <service name="download_url">
-    <param name="url">https://github.com/OlexiyOdarchuk/prostir/releases/latest/download/prostir-obs.dsc</param>
+    <param name="url">https://github.com/prostir-app/prostir/releases/latest/download/prostir-obs.dsc</param>
     <param name="filename">prostir.dsc</param>
   </service>
   <service name="download_url">
-    <param name="url">https://github.com/OlexiyOdarchuk/prostir/releases/latest/download/prostir-obs-debian.tar.gz</param>
+    <param name="url">https://github.com/prostir-app/prostir/releases/latest/download/prostir-obs-debian.tar.gz</param>
     <param name="filename">debian.tar.gz</param>
   </service>
 </services>
