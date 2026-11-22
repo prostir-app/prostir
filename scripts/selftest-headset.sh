@@ -108,12 +108,16 @@ restore() {
     if [[ ${#PROX_OFF[@]} -gt 0 ]]; then
         shell "${PROX_OFF[@]}" >/dev/null || true
     fi
-    (( PC )) && pc_restore
+    if (( PC )); then
+        pc_restore
+    fi
 }
 
 # ---- Against a real PC app (--pc) ----
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PC_DIR="" PC_PID="" BUS_PID="" BUS_DIR="" CLOCK_PID="" REVERSE_BEFORE="" PC_ASKED=""
+# Which of the headset's ports this script pointed elsewhere (and so puts back).
+REVERSED_USB=0 REVERSED_CLOCK=0
 # The test PC app's environment: nothing of the person's (settings, bus, desktop).
 pc_env() {
     env -u WAYLAND_DISPLAY -u DISPLAY -u HYPRLAND_INSTANCE_SIGNATURE -u DESKTOP_AUTOSTART_ID \
@@ -124,11 +128,14 @@ pc_env() {
         PROSTIR_FAKE_PICTURE=bands LANGUAGE=en RUST_LOG=info "$@"
 }
 pc_start() {
+    # Only what this start logs counts (a start before it said the same).
+    local from
+    from=$(( $(wc -l <"$OUT/pc.log") + 1 ))
     pc_env "$PROSTIR" serve --port "$PC_PORT" --no-adb --no-discovery --stay --time-code \
         >>"$OUT/pc.log" 2>&1 &
     PC_PID=$!
     local until=$(( $(date +%s) + 60 ))
-    while ! grep -q "waiting for the headset on port $PC_PORT" "$OUT/pc.log" 2>/dev/null; do
+    while ! tail -n +"$from" "$OUT/pc.log" | grep -q "waiting for the headset on port $PC_PORT"; do
         kill -0 "$PC_PID" 2>/dev/null || { echo "!! the test PC app ended (see $OUT/pc.log)" >&2; return 1; }
         (( $(date +%s) < until )) || { echo "!! the test PC app did not start in 60 s" >&2; return 1; }
         sleep 0.5
@@ -145,9 +152,12 @@ pc_stop() {
 pc_setup() {
     command -v python3 >/dev/null || { echo "!! --pc needs python3 (for the PC's clock)" >&2; exit 2; }
     echo ">> building the PC app with the fake desktop, and prostir-trust"
-    (cd "$ROOT" && cargo build -q -p prostir --no-default-features --features fake-desktop \
-        && cargo build -q -p prostir-testkit --bin prostir-trust) || exit 2
-    local target="${CARGO_TARGET_DIR:-$ROOT/target}"
+    # A target directory of its own: the fake desktop's build never replaces the
+    # prostir built for the desktop in the usual one.
+    local target="${PROSTIR_SELFTEST_TARGET:-$ROOT/target/selftest-pc}"
+    (cd "$ROOT" && CARGO_TARGET_DIR="$target" cargo build -q -p prostir \
+        --no-default-features --features fake-desktop \
+        && CARGO_TARGET_DIR="$target" cargo build -q -p prostir-testkit --bin prostir-trust) || exit 2
     PROSTIR="$target/debug/prostir"
     PC_DIR="$OUT/pc"
     mkdir -p "$PC_DIR"/{config/prostir,run,home,cache,headset}
@@ -182,13 +192,28 @@ while True:
     threading.Thread(target=serve, args=(s.accept()[0],), daemon=True).start()
 ' "$CLOCK_PORT" &
     CLOCK_PID=$!
-    REVERSE_BEFORE="$(adb reverse --list 2>/dev/null | tr -d '\r')"
+    local listening=0
+    for _ in $(seq 1 50); do
+        kill -0 "$CLOCK_PID" 2>/dev/null || break
+        if python3 -I -c 'import socket, sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1).close()' \
+            "$CLOCK_PORT" 2>/dev/null; then
+            listening=1
+            break
+        fi
+        sleep 0.1
+    done
+    (( listening )) || { echo "!! the PC's clock does not listen on $CLOCK_PORT (taken?)" >&2; exit 2; }
+    # How the headset's ports pointed before, so only what this script changed is put
+    # back, and as it was.
+    REVERSE_BEFORE="$(adb reverse --list 2>/dev/null | tr -d '\r')" || exit 2
     if grep -q "tcp:47830" <<<"$REVERSE_BEFORE"; then
         echo ">> the headset's 127.0.0.1:47830 pointed at a prostir here; it points at the test one" \
             "for now and back afterwards (a prostir without --no-adb may take it back meanwhile)"
     fi
     adb reverse tcp:47830 "tcp:$PC_PORT" >/dev/null || exit 2
+    REVERSED_USB=1
     adb reverse "tcp:$CLOCK_PORT" "tcp:$CLOCK_PORT" >/dev/null || exit 2
+    REVERSED_CLOCK=1
     : >"$OUT/pc.log"
     pc_start || exit 2
 }
@@ -210,17 +235,20 @@ pc_tick() {
 }
 pc_restore() {
     pc_stop
-    [[ -n "$CLOCK_PID" ]] && kill "$CLOCK_PID" 2>/dev/null
-    [[ -n "$BUS_PID" ]] && kill "$BUS_PID" 2>/dev/null
-    [[ -n "$BUS_DIR" ]] && rm -rf "$BUS_DIR"
-    adb reverse --remove "tcp:$CLOCK_PORT" >/dev/null 2>&1 || true
-    adb reverse --remove tcp:47830 >/dev/null 2>&1 || true
-    # Back as it was: what pointed the headset's ports somewhere before.
-    local line remote local_
-    while read -r _ remote local_; do
-        [[ "$remote" == tcp:47830 || "$remote" == "tcp:$CLOCK_PORT" ]] || continue
-        adb reverse "$remote" "$local_" >/dev/null 2>&1 || true
-    done <<<"$REVERSE_BEFORE"
+    if [[ -n "$CLOCK_PID" ]]; then kill "$CLOCK_PID" 2>/dev/null || true; fi
+    if [[ -n "$BUS_PID" ]]; then kill "$BUS_PID" 2>/dev/null || true; fi
+    if [[ -n "$BUS_DIR" ]]; then rm -rf "$BUS_DIR" || true; fi
+    # Only a port this script pointed elsewhere is put back, as it was before (a
+    # reverse of someone else's is never removed).
+    local remote local_ port
+    for port in 47830 "$CLOCK_PORT"; do
+        if [[ "$port" == 47830 ]]; then (( REVERSED_USB )) || continue; else (( REVERSED_CLOCK )) || continue; fi
+        adb reverse --remove "tcp:$port" >/dev/null 2>&1 || true
+        while read -r _ remote local_; do
+            [[ "$remote" == "tcp:$port" ]] || continue
+            adb reverse "$remote" "$local_" >/dev/null 2>&1 || true
+        done <<<"$REVERSE_BEFORE"
+    done
     shell rm -rf "/sdcard/Android/data/$PACKAGE/files/selftest-usb" \
         "/sdcard/Android/data/$PACKAGE/files/selftest-ask.txt" >/dev/null 2>&1 || true
 }

@@ -6,12 +6,23 @@
 //! `HEADSET_DIR` gets the headset's `identity` and `paired_hosts` (as the headset app
 //! keeps them), `PC_DIR` the PC app's `identity` and `paired_headsets` (as in its
 //! settings directory, `prostir/` under `XDG_CONFIG_HOME`). Keys there are kept; missing
-//! ones are made. Prints both fingerprints.
+//! ones are made. Prints both fingerprints. The PC app's own settings of this user are
+//! refused: a test's headset is never made trusted there.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use prostir_proto::secure::{self, Identity, TrustStore};
+
+/// This user's own settings directory of the PC app (`prostir/` under
+/// `XDG_CONFIG_HOME`, or `~/.config`).
+fn own_settings() -> Option<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(config.join("prostir"))
+}
 
 fn main() -> Result<()> {
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
@@ -20,6 +31,14 @@ fn main() -> Result<()> {
     };
     for dir in [headset_dir, pc_dir] {
         std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
+    }
+    if let Some(own) = own_settings()
+        && std::fs::canonicalize(pc_dir).ok() == std::fs::canonicalize(&own).ok()
+    {
+        bail!(
+            "{} is this user's own Prostir settings: give a test's directory",
+            pc_dir.display()
+        );
     }
     let headset =
         Identity::load_or_create(&headset_dir.join("identity")).context("the headset's key")?;
