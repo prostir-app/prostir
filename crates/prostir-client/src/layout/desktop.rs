@@ -95,15 +95,20 @@ impl<K: Key> Desktop<K> {
     /// The monitors for the map in the menu: centre and half size in pixels, up
     /// positive.
     pub fn spots(&self) -> HashMap<K, [f32; 4]> {
-        self.plan
-            .iter()
-            .map(|s| {
-                let (w, h) = (s.w as f32, s.h as f32);
-                let (x, y) = (s.x as f32 + w / 2.0, s.y as f32 + h / 2.0);
-                (s.id, [x, -y, w / 2.0, h / 2.0])
-            })
-            .collect()
+        self.plan.iter().map(|s| (s.id, map_spot(s))).collect()
     }
+
+    /// Monitor `id` on the map in the menu (see [`Desktop::spots`]), looked up in place.
+    pub fn spot(&self, id: K) -> Option<[f32; 4]> {
+        self.plan.iter().find(|s| s.id == id).map(map_spot)
+    }
+}
+
+/// A monitor of the desktop on the map: centre and half size in pixels, up positive.
+fn map_spot<K>(s: &Spot<K>) -> [f32; 4] {
+    let (w, h) = (s.w as f32, s.h as f32);
+    let (x, y) = (s.x as f32 + w / 2.0, s.y as f32 + h / 2.0);
+    [x, -y, w / 2.0, h / 2.0]
 }
 
 /// What a [`Desktop`] is made of.
@@ -197,6 +202,16 @@ impl<K> Default for DesktopMemo<K> {
 }
 
 impl<K: Key> DesktopMemo<K> {
+    /// The desktop as last made, if one was.
+    pub fn last(&self) -> Option<Ref<'_, Desktop<K>>> {
+        let memo = self.0.borrow();
+        if memo.0.made {
+            Some(Ref::map(memo, |m| &m.1))
+        } else {
+            None
+        }
+    }
+
     /// [`Desktop::of`] these.
     pub fn get(
         &self,

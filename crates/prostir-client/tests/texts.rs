@@ -58,6 +58,7 @@ const SOURCES: &[(&str, &str)] = &[
 const OTHER_CODE: &[(&str, &str)] = &[
     ("alloc_count.rs", include_str!("../src/alloc_count.rs")),
     ("app/tests.rs", include_str!("../src/app/tests.rs")),
+    ("frame_allocations.rs", include_str!("frame_allocations.rs")),
     (
         "interaction/tests.rs",
         include_str!("../src/interaction/tests.rs"),

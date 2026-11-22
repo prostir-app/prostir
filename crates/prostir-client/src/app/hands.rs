@@ -99,16 +99,21 @@ impl Scene for Model {
     }
 
     fn hold(&mut self, thing: Thing) -> Option<Placement> {
+        // Taken: the map waits for the hand to let go; where each monitor stands now is
+        // what the drag is compared with.
         self.rev += 1;
-        self.world.hold(thing, &self.settings)
+        let at = self.world.hold(thing, &self.settings);
+        self.map_moved();
+        at
     }
 
     fn drag(&mut self, thing: Thing, place: Placement, head: Vec3) {
-        // The menu's map shows where monitors are.
-        if thing.display().is_some() {
+        self.world.drag(&self.settings, thing, place, head);
+        // The menu shows on which side each monitor stands (its map waits for the hand
+        // to let go): changed only when that does, so a drag makes nothing anew.
+        if thing.display().is_some() && self.map_moved() {
             self.rev += 1;
         }
-        self.world.drag(&self.settings, thing, place, head);
     }
 
     fn let_go(&mut self, now: Instant, thing: Thing) -> bool {
@@ -120,15 +125,22 @@ impl Scene for Model {
     }
 
     fn resize_start(&mut self, id: DisplayKey) -> Option<f32> {
-        self.world.resize_start(id)
+        self.rev += 1;
+        let width = self.world.resize_start(id);
+        self.map_moved();
+        width
     }
 
     fn resize(&mut self, width: f32) {
-        self.rev += 1;
         self.world.resize(&self.settings, width);
+        if self.map_moved() {
+            self.rev += 1;
+        }
     }
 
     fn resize_end(&mut self) {
+        // The map shows the desktop anew.
+        self.rev += 1;
         self.world.resize_end();
     }
 

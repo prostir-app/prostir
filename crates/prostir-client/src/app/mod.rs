@@ -391,6 +391,9 @@ pub struct Model {
     hands_in_view: bool,
     /// Where the window onto the keyboard is this frame (`None`: not shown).
     keyboard_window: Option<Placement>,
+    /// Where each monitor stands for the menu (`World::place_of`), as last looked at
+    /// in a drag: kept to be filled again.
+    map_places: Vec<(DisplayKey, ui::Place)>,
 
     // The menu's helpers.
     /// The press being done is the main menu's (not the palm menu's, nor a command of
@@ -489,6 +492,7 @@ impl Model {
             view_eye: None,
             hands_in_view: false,
             keyboard_window: None,
+            map_places: Vec::new(),
             press_in_menu: false,
             language_asked: false,
             forgetting: None,
@@ -868,6 +872,29 @@ impl Model {
                 self.send_to(pc, ClientMsg::Arrange { rows });
             }
         }
+    }
+
+    /// Whether a monitor of the menu's map stands elsewhere (left, right, above...) than
+    /// when last looked at: in a drag that is all the menu shows of it, the map itself
+    /// waits for the hand to let go (see `World::map_spots`). Nothing is allocated once
+    /// the list is long enough.
+    fn map_moved(&mut self) -> bool {
+        let (world, eye) = (&self.world, self.view_eye);
+        let monitors = world.monitors();
+        let mut moved = self.map_places.len() != monitors.len();
+        self.map_places.resize(
+            monitors.len(),
+            (
+                DisplayKey::new(PcId([0; 8]), DisplayId(0)),
+                ui::Place::Unknown,
+            ),
+        );
+        for (kept, &(id, _, _)) in self.map_places.iter_mut().zip(monitors) {
+            let now = (id, world.place_of(id, eye));
+            moved |= *kept != now;
+            *kept = now;
+        }
+        moved
     }
 
     /// Errors, questions and toasts shown long enough go.

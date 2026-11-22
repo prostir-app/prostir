@@ -637,3 +637,67 @@ fn following_tells_the_menu_to_its_last_step() {
     );
     assert!(sim.saves().contains(&persist::File::Desk));
 }
+
+/// A drag with the menu open: the menu says on which side the monitor stands as soon
+/// as that changes, and nothing else while the hand moves it (its map shows the PC's
+/// desktop as it was until the hand lets go, then the new one).
+#[test]
+fn a_drag_tells_the_menu_only_what_it_shows() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::Close);
+    let at = sim.m.world().shown(k(1)).expect("drawn").position;
+    let origin = Vec3::new(0.0, -0.3, 0.0);
+    let mut right = HandState {
+        ray: Some(Ray {
+            origin,
+            dir: (at - origin).normalize(),
+        }),
+        ..HandState::default()
+    };
+    let mut hands = Hands::new();
+    let mut step = |sim: &mut Sim, hands: &mut Hands, grab: f32, dir: Vec3| -> u64 {
+        sim.now += 11 * MS;
+        right.grab.update(grab);
+        right.ray = Some(Ray { origin, dir });
+        let input = frame(right);
+        let rev = sim.m.rev();
+        sim.m.tick(sim.now, &input);
+        hands.buttons(sim.now, &input, &mut sim.m);
+        hands.step(sim.now, &input, &mut sim.m, &mut Pictures(None));
+        sim.m.animate(sim.now, &input);
+        sim.check_view();
+        sim.m.rev() - rev
+    };
+    let straight = (at - origin).normalize();
+    step(&mut sim, &mut hands, 1.0, straight);
+    assert!(sim.m.world().holds(Thing::Display(k(1))));
+    sim.menu(Action::OpenMenu);
+    let place = |sim: &Sim| {
+        crate::view::build(&sim.m)
+            .monitors
+            .iter()
+            .find(|m| m.id == k(1))
+            .map(|m| m.place)
+    };
+    let before = place(&sim);
+    // A little to and fro: the menu shows nothing new.
+    for i in 0..20 {
+        let wobble = Vec3::new((i as f32 * 0.3).sin() * 0.01, 0.0, 0.0);
+        assert_eq!(
+            step(&mut sim, &mut hands, 1.0, (straight + wobble).normalize()),
+            0
+        );
+    }
+    // Far to the left: it says so.
+    let left = Vec3::new(-1.0, 0.1, -0.4).normalize();
+    let mut told = 0;
+    for _ in 0..30 {
+        told += step(&mut sim, &mut hands, 1.0, left);
+    }
+    assert!(told > 0);
+    assert_ne!(place(&sim), before);
+    // Let go: the map shows the desktop anew.
+    assert!(step(&mut sim, &mut hands, 0.0, left) > 0);
+    assert!(!sim.m.world().holding());
+}

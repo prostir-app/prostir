@@ -42,7 +42,8 @@ pub fn build(m: &Model) -> UiState {
     let headset = m.headset();
     let now = m.now();
     let shown_for = |at: std::time::Instant, d| now.saturating_duration_since(at) < d;
-    let spots = world.map_spots();
+    let map = world.map_spots();
+    let spot = |id| map.as_ref().and_then(|d| d.spot(id));
     let search = session.search();
     let mut windows: Vec<MonitorEntry> = world
         .windows()
@@ -86,7 +87,7 @@ pub fn build(m: &Model) -> UiState {
                 width,
                 height,
                 place: world.place_of(id, m.view_eye()),
-                seen: spots.get(&id).copied(),
+                seen: spot(id),
             })
             .collect(),
         windows,
@@ -96,7 +97,7 @@ pub fn build(m: &Model) -> UiState {
         mirror_seen: world
             .mirror()
             .filter(|id| world.streams(*id))
-            .and_then(|id| spots.get(&id).copied()),
+            .and_then(spot),
         mirror_wanted: headset.mirror_wanted,
         audio_wanted: m.pc().sound.as_ref().is_none_or(|s| s.to_headset),
         mic_wanted: headset.mic_wanted,
