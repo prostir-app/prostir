@@ -366,7 +366,7 @@ impl MicIn {
         // Needed for each recording; missing, the microphone waits and tries later.
         run(Command::new("pacat").arg("--version"), TIMEOUT)
             .context("pacat is needed for the microphone")?;
-        let mut loopback = spawn_tied(&mut pw_loopback(mic, feed))
+        let mut loopback = spawn_tied(pw_loopback(mic, feed))
             .context("pw-loopback is needed for the microphone")?;
         let ready = (0..40).any(|_| {
             std::thread::sleep(Duration::from_millis(50));
@@ -396,9 +396,10 @@ impl MicIn {
         })
     }
 
-    /// Whether the microphone is still there: its `pw-loopback` runs (it ends when the
-    /// sound system goes away or its devices are removed). Looked at now and then:
-    /// nothing else tells (see `worker/sound.rs`).
+    /// Whether the microphone is still there: its `pw-loopback` runs. PipeWire removes
+    /// its devices when it ends, and it ends when the sound system goes away or one of
+    /// its devices is removed, so it runs exactly while the microphone is there.
+    /// Looked at now and then: nothing else tells (see `worker/sound.rs`).
     pub fn alive(&self) -> bool {
         self.loopback
             .lock()
@@ -489,11 +490,11 @@ struct Feed {
 
 impl Feed {
     fn start(sink: &str) -> Result<Self> {
-        Self::spawn(&mut pacat(sink)).context("pacat is needed for the microphone")
+        Self::spawn(pacat(sink)).context("pacat is needed for the microphone")
     }
 
     /// Starts `cmd`, which plays what comes on its standard input.
-    fn spawn(cmd: &mut Command) -> Result<Self> {
+    fn spawn(mut cmd: Command) -> Result<Self> {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -516,6 +517,11 @@ impl Feed {
     /// `false` once `pacat` is gone.
     fn write(&mut self, pcm: &[u8]) -> bool {
         use std::io::Write;
+        // While as much waits in the pipe as may, nothing is written, so no write error
+        // would tell that `pacat` stopped (and one that stopped leaves its pipe full).
+        if let Ok(Some(_)) = self.pacat.try_wait() {
+            return false;
+        }
         // Whole samples only, in pieces the pipe takes whole or not at all.
         for piece in pcm[..pcm.len() & !1].chunks(FEED_PIPE) {
             let mut queued: libc::c_int = 0;

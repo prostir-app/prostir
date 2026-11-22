@@ -304,8 +304,8 @@ impl SoundSystem for Pactl {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        // Started from the watcher's thread: it dies with that thread, and with Prostir.
-        let mut child = spawn_tied(&mut cmd)?;
+        // Ended by the watcher, or with Prostir.
+        let mut child = spawn_tied(cmd)?;
         let out = child
             .stdout
             .take()

@@ -2,6 +2,13 @@ use std::time::Instant;
 
 use super::*;
 
+/// A stand-in for `pacat`: `program` with one argument.
+fn player(program: &str, arg: &str) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.arg(arg);
+    cmd
+}
+
 fn args(cmd: &Command) -> Vec<String> {
     cmd.get_args()
         .map(|a| a.to_string_lossy().into_owned())
@@ -39,7 +46,7 @@ fn the_sound_device_is_not_remembered() {
 /// waits, and the rest is dropped in whole slices.
 #[test]
 fn a_full_feed_drops_instead_of_waiting() {
-    let mut feed = Feed::spawn(Command::new("sleep").arg("10")).unwrap();
+    let mut feed = Feed::spawn(player("sleep", "10")).unwrap();
     let slice = vec![1u8; 960];
     let started = Instant::now();
     for _ in 0..100 {
@@ -56,7 +63,7 @@ fn a_full_feed_drops_instead_of_waiting() {
 #[test]
 fn a_burst_keeps_three_pieces_and_a_large_one_goes() {
     for burst in 3..=5 {
-        let mut feed = Feed::spawn(Command::new("sleep").arg("10")).unwrap();
+        let mut feed = Feed::spawn(player("sleep", "10")).unwrap();
         let piece = vec![1u8; 960];
         for _ in 0..burst {
             assert!(feed.write(&piece));
@@ -67,22 +74,53 @@ fn a_burst_keeps_three_pieces_and_a_large_one_goes() {
             "a burst of {burst}"
         );
     }
-    let mut feed = Feed::spawn(Command::new("sleep").arg("10")).unwrap();
+    let mut feed = Feed::spawn(player("sleep", "10")).unwrap();
     assert!(feed.write(&[1u8; FEED_QUEUED + 960]));
     assert_eq!(feed.dropped, 0, "into an empty pipe");
 }
 
+/// A player that stops once its pipe holds all that may wait there is noticed: no
+/// sound is written to it then, so no write error tells.
+#[test]
+fn a_player_that_stops_with_a_full_pipe_is_noticed() {
+    let mut feed = Feed::spawn(player("sleep", "30")).unwrap();
+    for _ in 0..4 {
+        assert!(feed.write(&[0; 960]));
+    }
+    let _ = feed.pacat.kill();
+    let _ = feed.pacat.wait();
+    assert!(!feed.write(&[0; 960]), "the stopped player was not noticed");
+}
+
+/// Noticed at once, though a child another test forks at that moment may hold the
+/// pipe's other end for a while (no write error then, and the pipe soon full).
 #[test]
 fn a_stopped_player_is_noticed() {
-    let mut feed = Feed::spawn(&mut Command::new("true")).unwrap();
+    let mut feed = Feed::spawn(Command::new("true")).unwrap();
     let _ = feed.pacat.wait();
-    // Another test's child forked at the same moment may hold the pipe's other end
-    // (the other tests' players live up to 10 s): give it that long.
-    let until = Instant::now() + Duration::from_secs(12);
-    while feed.write(&[0; 960]) {
-        assert!(Instant::now() < until, "the stopped player was not noticed");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert!(!feed.write(&[0; 960]), "the stopped player was not noticed");
+}
+
+/// The microphone stays after the thread that made it ends, as the sound thread's
+/// calls with a time limit do (its `pw-loopback` was stopped with that thread). By
+/// hand, on this PC's PipeWire: `cargo test -p prostir -- --ignored
+/// a_microphone_made_on`. It makes only devices of its own (`prostir_test_stays*`),
+/// leaves the default input alone, and removes them.
+#[test]
+#[ignore = "by hand: makes PipeWire nodes of its own"]
+fn a_microphone_made_on_a_passing_thread_stays() {
+    const MIC: &str = "prostir_test_stays";
+    let mic = std::thread::spawn(|| MicIn::start_as(MIC, "prostir_test_stays_feed", false))
+        .join()
+        .unwrap()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let (alive, there) = (mic.alive(), source_state(MIC).is_some());
+    drop(mic);
+    let removed = within_3_s(|| source_state(MIC).is_none());
+    assert!(alive, "its pw-loopback ended with the thread that made it");
+    assert!(there, "the microphone is gone from the PC");
+    assert!(removed, "the microphone stays after it is let go");
 }
 
 /// `pw-cli info` of a node: its number, serial and name.
