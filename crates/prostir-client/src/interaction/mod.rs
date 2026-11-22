@@ -798,8 +798,6 @@ impl Hands {
         }
     }
 
-    /// A hand lets go of what the room no longer has it hold (laid out anew, or gone),
-    /// and resizing ends when the room ended it.
     /// A press was made (a button, the menu toggled): what the menu showed changed, so a
     /// pinch waiting to click on it clicks nothing.
     fn pressed(&mut self, scene: &impl Scene) {
@@ -807,6 +805,8 @@ impl Hands {
         self.sync(scene);
     }
 
+    /// A hand lets go of what the room no longer has it hold (laid out anew, or gone),
+    /// and resizing ends when the room ended it.
     fn sync(&mut self, scene: &impl Scene) {
         for grab in &mut self.grabs {
             if grab.is_some_and(|g| !scene.holds(g.id)) {

@@ -1489,6 +1489,33 @@ fn a_refused_encoding_or_sound_shows_what_was() {
         outcome: Outcome::failed(ErrorCode::ENCODER, "no"),
     });
     assert_eq!(bitrate(&sim), Some(40), "refused: as it was");
+    // The PC says how it stands before refusing: that is what shows.
+    sim.menu(Action::SetEncoding(ui::EncodingChange {
+        bitrate: Some(80),
+        codec: None,
+        software: None,
+        sharp: None,
+    }));
+    let req = requests(&sim.take()).first().expect("asked").0;
+    sim.net(NetEvent::Part(
+        PC,
+        HostMsg::Encoding {
+            part: Encoding {
+                wanted: Wanted {
+                    bitrate: 60,
+                    ..wanted
+                },
+                using: None,
+                choices: Vec::new(),
+            },
+        },
+    ));
+    sim.net(NetEvent::Reply {
+        pc: PC,
+        req,
+        outcome: Outcome::failed(ErrorCode::ENCODER, "no"),
+    });
+    assert_eq!(bitrate(&sim), Some(60), "as the PC said last");
 
     let to_headset = |sim: &Sim| sim.m.pc().sound.as_ref().map(|s| s.to_headset);
     sim.net(NetEvent::Part(

@@ -1309,8 +1309,6 @@ impl Model {
         });
     }
 
-    /// The profiles or the one in use changed: the PCs hear of it once this pass ends
-    /// (see [`Model::end_pass`]).
     /// The setup changed where it is made (a monitor moved, added, removed...): no
     /// profile is the one in use.
     fn leave_profile(&mut self) {
@@ -1319,6 +1317,8 @@ impl Model {
         }
     }
 
+    /// The profiles or the one in use changed: the PCs hear of it once this pass ends
+    /// (see [`Model::end_pass`]).
     fn profiles_changed(&mut self) {
         self.profiles_changed = true;
         self.rev += 1;
@@ -1585,7 +1585,7 @@ impl Model {
             .and_then(|p| p.asks.take_command_after(req))
         {
             let detail = format!(
-                "no answer from the PC in {} s",
+                "the headset got no answer in {} s",
                 pending::ANSWER_WITHIN.as_secs()
             );
             self.send_to(

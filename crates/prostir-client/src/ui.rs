@@ -5676,13 +5676,15 @@ mod tests {
                 states.push(pairing);
             }
         }
-        // Each page with the error line too, the longest one there is.
+        // Each page with the error line too, the longest ones there are.
         let with_error: Vec<UiState> = states
             .iter()
             .filter(|st| st.error.is_none())
-            .map(|st| UiState {
-                error: Some(st.texts.f("monitors-at-most", &[("count", 6.into())])),
-                ..st.clone()
+            .flat_map(|st| {
+                ["error-cameras-lost", "error-keyboard-window"].map(|id| UiState {
+                    error: Some(st.texts.t(id).to_owned()),
+                    ..st.clone()
+                })
             })
             .collect();
         states.extend(with_error);

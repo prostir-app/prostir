@@ -248,6 +248,17 @@ impl Model {
         if let M::HostCaps { part } = &part {
             info!("the PC can: {:?}", part.features);
         }
+        // What the PC says of its encoding or sound is how it stands: what was shown
+        // before a request about it is not put back any more.
+        match &part {
+            M::Encoding { .. } => {
+                self.menu.encoding_before.take_if(|(p, ..)| *p == pc);
+            }
+            M::Sound { .. } => {
+                self.menu.sound_before.take_if(|(p, ..)| *p == pc);
+            }
+            _ => {}
+        }
         // Checked by the network thread already: a part of the PC's state.
         if let Err(e) = self.session.part(pc, part) {
             warn!("a part of the PC's state: {e}");
