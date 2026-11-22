@@ -365,6 +365,70 @@ impl ImageLayer {
     }
 }
 
+/// Where both eyes are at `time` in `space`, written into `views` (kept by the caller:
+/// `Session::locate_views` makes two lists at each call, this nothing). Whether both
+/// were found; a part of a pose the runtime says is not valid is left as the default,
+/// as `Session::locate_views` leaves it.
+pub fn locate_views(
+    session: &xr::Session<Gfx>,
+    time: xr::Time,
+    space: &xr::Space,
+    views: &mut [xr::View; 2],
+) -> bool {
+    let info = xr::sys::ViewLocateInfo {
+        ty: xr::sys::ViewLocateInfo::TYPE,
+        next: ptr::null(),
+        view_configuration_type: xr::ViewConfigurationType::PRIMARY_STEREO,
+        display_time: time,
+        space: space.as_raw(),
+    };
+    let mut state = xr::sys::ViewState {
+        ty: xr::sys::ViewState::TYPE,
+        next: ptr::null_mut(),
+        view_state_flags: xr::ViewStateFlags::EMPTY,
+    };
+    let empty = xr::sys::View {
+        ty: xr::sys::View::TYPE,
+        next: ptr::null_mut(),
+        pose: xr::Posef::IDENTITY,
+        fov: xr::Fovf::default(),
+    };
+    let mut raw = [empty; 2];
+    let mut count = 0;
+    // SAFETY: the session and the space are alive; `info` and `state` are valid for
+    // the call, and `raw` has room for the two views it is said to have.
+    let result = unsafe {
+        (session.instance().fp().locate_views)(
+            session.as_raw(),
+            &raw const info,
+            &raw mut state,
+            2,
+            &raw mut count,
+            raw.as_mut_ptr(),
+        )
+    };
+    if result.into_raw() < 0 || count < 2 {
+        return false;
+    }
+    let flags = state.view_state_flags;
+    for (view, raw) in views.iter_mut().zip(&raw) {
+        view.pose = xr::Posef {
+            orientation: if flags.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
+                raw.pose.orientation
+            } else {
+                xr::Quaternionf::default()
+            },
+            position: if flags.contains(xr::ViewStateFlags::POSITION_VALID) {
+                raw.pose.position
+            } else {
+                xr::Vector3f::default()
+            },
+        };
+        view.fov = raw.fov;
+    }
+    true
+}
+
 /// How urgent a thread of this app is to the scheduler, as Android ranks its own
 /// threads of the same kind.
 #[derive(Debug, Clone, Copy)]

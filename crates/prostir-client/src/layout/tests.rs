@@ -1701,7 +1701,7 @@ fn owners_stack() -> (Vec<(u32, u32, u32)>, Placements) {
 }
 
 /// The profile of `placements` seen from `center` with the rows the PC has
-/// (`Scene::current_profile`), written to its file and read back.
+/// (`Model::current_profile`), written to its file and read back.
 fn saved_profile(
     m: &[(u32, u32, u32)],
     primary: Option<u32>,
@@ -1725,7 +1725,7 @@ fn saved_profile(
 
 /// `profile` switched to with the user's center at `now`, the PC giving its
 /// monitors the numbers they had (as it does for monitors of the same size): the
-/// placements and the rows the headset then has (`Scene::profile_made`).
+/// placements and the rows the headset then has (`World::profile_made`).
 fn switched_to(
     profile: &crate::profiles::Profile,
     m: &[(u32, u32, u32)],
@@ -2291,7 +2291,7 @@ fn a_long_follow_leaves_a_glued_seam_glued() {
     let (mut p, mut center) = (kept.clone(), origin);
     let mut rng = Rng(0xf011);
     for _ in 0..60_000 {
-        // As `Scene::follow_head` steps: a turn and a shift of a frame's easing.
+        // As `World::follow_head` steps: a turn and a shift of a frame's easing.
         let turn = rng.float(-0.01, 0.01);
         let shift = Vec3::new(rng.float(-0.003, 0.003), 0.0, rng.float(-0.003, 0.003));
         let next = (center.0 + shift, center.1 + turn);

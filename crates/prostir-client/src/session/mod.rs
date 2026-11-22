@@ -649,6 +649,8 @@ impl Session {
                 found.push(host);
             }
         }
+        // An answer ends the hint at once, not at the next pass.
+        self.search.hint = self.hint(now);
         let Round::Waiting { at: Plan::Ask, .. } = self.search.round else {
             return;
         };

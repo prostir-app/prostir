@@ -8,12 +8,14 @@
 // Every unsafe block says why it is sound.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+pub mod app;
 pub mod background;
 pub mod commands;
 pub mod connecting;
 pub mod device;
 pub mod frames;
 pub mod ids;
+pub mod interaction;
 pub mod lang;
 pub mod layout;
 pub mod net;
@@ -30,12 +32,11 @@ pub mod session;
 pub mod settings;
 pub mod store;
 pub mod ui;
+pub mod view;
 pub mod world;
 
 #[cfg(target_os = "android")]
 mod alloc_count;
-#[cfg(target_os = "android")]
-mod app;
 #[cfg(target_os = "android")]
 mod audio;
 #[cfg(target_os = "android")]
@@ -44,6 +45,8 @@ mod decoder;
 mod egl;
 #[cfg(target_os = "android")]
 mod input;
+#[cfg(target_os = "android")]
+mod main_loop;
 #[cfg(target_os = "android")]
 mod media;
 #[cfg(target_os = "android")]

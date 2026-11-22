@@ -190,6 +190,9 @@ pub struct Overlay {
     height: u32,
     /// Whether the last frame drew something (and the layer should be shown).
     drawn: bool,
+    /// The spheres as the shader takes them, kept from frame to frame and filled
+    /// again.
+    data: Vec<f32>,
 }
 
 impl Overlay {
@@ -298,6 +301,7 @@ impl Overlay {
                 width,
                 height,
                 drawn: false,
+                data: Vec::new(),
             })
         }
     }
@@ -320,26 +324,25 @@ impl Overlay {
                 vec3(view.pose.position),
             )
             .inverse();
-            // Far to near: correct overlap without a depth buffer.
-            spheres.sort_by(|a, b| {
+            // Far to near: correct overlap without a depth buffer (sorted in place:
+            // a stable sort would take memory every frame).
+            spheres.sort_unstable_by(|a, b| {
                 let za = view_matrix.transform_point3(a.center).z;
                 let zb = view_matrix.transform_point3(b.center).z;
                 za.total_cmp(&zb)
             });
-            let data: Vec<f32> = spheres
-                .iter()
-                .flat_map(|s| {
-                    let kind = match s.kind {
-                        Kind::Ball => 0.0,
-                        Kind::Glow => 1.0,
-                        Kind::Ring => 2.0,
-                    };
-                    [
-                        s.center.x, s.center.y, s.center.z, s.radius, s.color[0], s.color[1],
-                        s.color[2], s.color[3], kind,
-                    ]
-                })
-                .collect();
+            self.data.clear();
+            self.data.extend(spheres.iter().flat_map(|s| {
+                let kind = match s.kind {
+                    Kind::Ball => 0.0,
+                    Kind::Glow => 1.0,
+                    Kind::Ring => 2.0,
+                };
+                [
+                    s.center.x, s.center.y, s.center.z, s.radius, s.color[0], s.color[1],
+                    s.color[2], s.color[3], kind,
+                ]
+            }));
             let index = eye.swapchain.acquire_image()? as usize;
             eye.swapchain.wait_image(xr::Duration::INFINITE)?;
             // SAFETY: framebuffer of the acquired image; GL context current on this thread.
@@ -365,7 +368,7 @@ impl Overlay {
                 );
                 gl.bind_vertex_array(Some(self.vao));
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.instances));
-                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes(&data), glow::STREAM_DRAW);
+                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes(&self.data), glow::STREAM_DRAW);
                 gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, spheres.len() as i32);
                 gl.bind_vertex_array(None);
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
