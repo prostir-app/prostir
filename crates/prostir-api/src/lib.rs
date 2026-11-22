@@ -46,15 +46,15 @@ lenient!(MicState: Off, Ready, Failed);
 lenient!(Counting: Unasked, Yes, No);
 
 /// The service's name on the session bus.
-pub const BUS_NAME: &str = "io.github.OlexiyOdarchuk.Prostir";
+pub const BUS_NAME: &str = "io.github.prostir_app.Prostir";
 /// Its object.
-pub const OBJECT_PATH: &str = "/io/github/OlexiyOdarchuk/Prostir";
+pub const OBJECT_PATH: &str = "/io/github/prostir_app/Prostir";
 /// Its interface. An incompatible change gets `Prostir2` next to it.
-pub const INTERFACE: &str = "io.github.OlexiyOdarchuk.Prostir1";
+pub const INTERFACE: &str = "io.github.prostir_app.Prostir1";
 /// Prefix of the service's D-Bus errors: `<prefix>NotConnected` and so on.
-pub const ERROR_PREFIX: &str = "io.github.OlexiyOdarchuk.Prostir1.Error.";
+pub const ERROR_PREFIX: &str = "io.github.prostir_app.Prostir1.Error.";
 /// The settings window's name on the bus (one window per user).
-pub const SETTINGS_NAME: &str = "io.github.OlexiyOdarchuk.Prostir.Settings";
+pub const SETTINGS_NAME: &str = "io.github.prostir_app.Prostir.Settings";
 
 /// How long the service waits for the headset to answer a command.
 pub const COMMAND_SECONDS: u64 = 30;

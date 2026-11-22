@@ -36,8 +36,8 @@ provides=('prostir-bin')
 conflicts=('prostir-bin')
 # The release's THIRD-PARTY-LICENSES.txt lists the crates compiled into the program;
 # the same file ships with every release build.
-source=("${pkgname}-${pkgver}.tar.gz::https://github.com/OlexiyOdarchuk/prostir/archive/refs/tags/v${pkgver}.tar.gz"
-        "THIRD-PARTY-LICENSES-${pkgver}.txt::https://github.com/OlexiyOdarchuk/prostir/releases/download/v${pkgver}/THIRD-PARTY-LICENSES.txt")
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/prostir-app/prostir/archive/refs/tags/v${pkgver}.tar.gz"
+        "THIRD-PARTY-LICENSES-${pkgver}.txt::https://github.com/prostir-app/prostir/releases/download/v${pkgver}/THIRD-PARTY-LICENSES.txt")
 sha256sums=('@SOURCE_SHA256@'
             '@LICENSES_SHA256@')
 
@@ -70,7 +70,7 @@ check() {
 package() {
   cd "prostir-${pkgver}"
   install -Dm755 target/release/prostir "${pkgdir}/usr/bin/prostir"
-  install -Dm644 packaging/io.github.OlexiyOdarchuk.Prostir.desktop "${pkgdir}/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.desktop"
+  install -Dm644 packaging/io.github.prostir_app.Prostir.desktop "${pkgdir}/usr/share/applications/io.github.prostir_app.Prostir.desktop"
   install -Dm644 packaging/prostir.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/prostir.svg"
   # Not enabled here: Prostir's first start enables the socket for its user (and the
   # preset for new users, where presets apply); the tray turns it off for good.

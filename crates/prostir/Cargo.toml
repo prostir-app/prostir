@@ -95,7 +95,7 @@ headset = { package = "prostir-client", path = "../prostir-client" }
 # too (its own Wayland connections), so they are listed by hand.
 [package.metadata.deb]
 name = "prostir"
-maintainer = "Prostir contributors <https://github.com/OlexiyOdarchuk/prostir>"
+maintainer = "Prostir contributors <https://github.com/prostir-app/prostir>"
 section = "utils"
 priority = "optional"
 extended-description = """\
@@ -109,7 +109,7 @@ recommends = "mesa-va-drivers | intel-media-va-driver-non-free | intel-media-va-
 suggests = "adb, grim, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxkbcommon-x11-0, libxrandr2, libxrender1"
 assets = [
     ["target/release/prostir", "usr/bin/", "755"],
-    ["../../packaging/io.github.OlexiyOdarchuk.Prostir.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/io.github.prostir_app.Prostir.desktop", "usr/share/applications/", "644"],
     ["../../packaging/prostir.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
     # Installed, not enabled: the first start of Prostir enables the socket for its user
     # (and the preset for new users); the tray turns it off for good.
@@ -135,7 +135,7 @@ license = "GPL-3.0-or-later"
 auto-req = "no"
 assets = [
     { source = "target/release/prostir", dest = "/usr/bin/prostir", mode = "755" },
-    { source = "../../packaging/io.github.OlexiyOdarchuk.Prostir.desktop", dest = "/usr/share/applications/io.github.OlexiyOdarchuk.Prostir.desktop", mode = "644" },
+    { source = "../../packaging/io.github.prostir_app.Prostir.desktop", dest = "/usr/share/applications/io.github.prostir_app.Prostir.desktop", mode = "644" },
     { source = "../../packaging/prostir.svg", dest = "/usr/share/icons/hicolor/scalable/apps/prostir.svg", mode = "644" },
     { source = "../../packaging/systemd/prostir.socket", dest = "/usr/lib/systemd/user/prostir.socket", mode = "644" },
     { source = "../../packaging/systemd/prostir.service", dest = "/usr/lib/systemd/user/prostir.service", mode = "644" },

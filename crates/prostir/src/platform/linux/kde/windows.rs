@@ -1,5 +1,5 @@
 //! KDE's windows. KWin has no query for them, so a small KWin script does the work
-//! and reports back over D-Bus to `io.github.OlexiyOdarchuk.Prostir.Host`.
+//! and reports back over D-Bus to `io.github.prostir_app.Prostir.Host`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -361,12 +361,12 @@ fn put_back(w: &ActiveWindow, output: &str) -> Result<()> {
     kwin_run("prostir-put-back", &script, true)
 }
 
-const BUS: &str = "io.github.OlexiyOdarchuk.Prostir.Host";
-const PATH: &str = "/io/github/OlexiyOdarchuk/Prostir/Host";
+const BUS: &str = "io.github.prostir_app.Prostir.Host";
+const PATH: &str = "/io/github/prostir_app/Prostir/Host";
 
 struct Host(SyncSender<Report>);
 
-#[zbus::interface(name = "io.github.OlexiyOdarchuk.Prostir.Host")]
+#[zbus::interface(name = "io.github.prostir_app.Prostir.Host")]
 impl Host {
     /// The active window: KWin id (empty: none), logical size, the output's scale in
     /// thousandths (a whole number: KWin sends a scale of 1 as an integer, which

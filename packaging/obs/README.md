@@ -22,7 +22,7 @@ package `prostir`, download root
 3. The workflow calls `https://api.opensuse.org/trigger/runservice` with the token in
    the `OBS_TOKEN` secret.
 4. OBS runs `_service` in the package: `download_url` fetches the four files from
-   `https://github.com/OlexiyOdarchuk/prostir/releases/latest/download/`, and every
+   `https://github.com/prostir-app/prostir/releases/latest/download/`, and every
    repository rebuilds. The rpm repositories build `prostir.spec`; the deb ones build
    `prostir.dsc`, which OBS's debtransform turns into a Debian source package from
    `prostir-vendored.tar.gz` and `debian.tar.gz`. `DEBTRANSFORM-RELEASE` adds the OBS
@@ -224,7 +224,7 @@ workflow again for the latest tag.
 Make the sources, the same way the workflow does:
 
 ```sh
-curl -fLO https://github.com/OlexiyOdarchuk/prostir/releases/download/v0.1.3/THIRD-PARTY-LICENSES.txt
+curl -fLO https://github.com/prostir-app/prostir/releases/download/v0.1.3/THIRD-PARTY-LICENSES.txt
 packaging/obs/make-sources.sh v0.1.3 THIRD-PARTY-LICENSES.txt /tmp/obs
 ```
 
