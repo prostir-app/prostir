@@ -232,6 +232,22 @@ fn a_look_chosen_before_prostir_runs_is_kept_once_it_does() {
     assert_eq!(handle.state().window.theme, ThemeMode::Light);
 }
 
+/// A look chosen before Prostir ran, then another once it answers: the later one
+/// holds, never the earlier one sent again.
+#[test]
+fn the_look_chosen_last_holds() {
+    let (mut h, handle) = window(Mock::not_running(), Setup::default());
+    open(&mut h, Page::Look);
+    press(&mut h, "Світла");
+    handle.set_running_quietly(true);
+    press(&mut h, "Темна");
+    handle.set_running(true);
+    h.run_steps(4);
+    assert!(matches!(h.state().conn, Conn::Live { .. }));
+    assert_eq!(handle.state().window.theme, ThemeMode::Dark);
+    assert_eq!(h.state().look().theme, ThemeMode::Dark);
+}
+
 #[test]
 fn starting_prostir_from_the_window() {
     let setup = Setup::default();

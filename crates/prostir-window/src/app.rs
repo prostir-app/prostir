@@ -471,6 +471,8 @@ impl App {
                 self.ui.forget_ask = None;
             }
             Action::Look(look) => {
+                // Chosen now: one chosen before Prostir ran is not sent after it.
+                self.unsent_look = None;
                 self.look = look.clone();
                 self.link.send(Request::WindowLook {
                     theme: look.theme,
