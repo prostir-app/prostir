@@ -140,6 +140,21 @@ fn the_look_is_chosen_and_kept_by_the_service() {
     h.get_by_label("Theme");
 }
 
+/// A look chosen while Prostir does not run holds for the window, and once Prostir
+/// starts it is kept there too, not replaced by the look Prostir had.
+#[test]
+fn a_look_chosen_before_prostir_runs_is_kept_once_it_does() {
+    let (mut h, handle) = window(Mock::not_running(), Setup::default());
+    open(&mut h, Page::Look);
+    press(&mut h, "Світла");
+    assert_eq!(h.state().look().theme, ThemeMode::Light);
+    handle.set_running(true);
+    h.run_steps(4);
+    assert!(matches!(h.state().conn, Conn::Live { .. }));
+    assert_eq!(h.state().look().theme, ThemeMode::Light);
+    assert_eq!(handle.state().window.theme, ThemeMode::Light);
+}
+
 #[test]
 fn starting_prostir_from_the_window() {
     let setup = Setup::default();

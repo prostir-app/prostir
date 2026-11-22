@@ -153,6 +153,9 @@ pub struct App {
     link: Link,
     pub conn: Conn,
     look: WindowLook,
+    /// A look chosen while Prostir did not run: sent once it does, rather than
+    /// replaced by the look Prostir kept.
+    unsent_look: Option<WindowLook>,
     catalog: Catalog,
     pub languages: Vec<Language>,
     strings: Strings,
@@ -201,6 +204,7 @@ impl App {
             link,
             conn: Conn::Loading,
             look,
+            unsent_look: None,
             catalog,
             languages,
             strings,
@@ -284,7 +288,14 @@ impl App {
         match u {
             Update::State(snap) => {
                 let prev = self.state().cloned();
-                if prev.as_ref().is_none_or(|p| p.window != snap.state.window) {
+                if let Some(look) = self.unsent_look.take() {
+                    self.link.send(Request::WindowLook {
+                        theme: look.theme,
+                        palette: look.palette.clone(),
+                        language: look.language.clone(),
+                    });
+                    self.look = look;
+                } else if prev.as_ref().is_none_or(|p| p.window != snap.state.window) {
                     self.look = snap.state.window.clone();
                 }
                 self.watch_pairing(prev.as_ref(), &snap.state, now);
@@ -336,6 +347,17 @@ impl App {
                 match request {
                     Request::Place { .. } => self.ui.pending_place = None,
                     Request::PairingCode { .. } => self.ui.submitted = None,
+                    Request::WindowLook {
+                        theme,
+                        palette,
+                        language,
+                    } if matches!(e, ClientError::NotRunning) => {
+                        self.unsent_look = Some(WindowLook {
+                            theme,
+                            palette,
+                            language,
+                        });
+                    }
                     _ => {}
                 }
             }
