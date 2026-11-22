@@ -282,6 +282,10 @@ pub struct Menu {
     /// Displays of the PC itself asked to be shown or hidden, the last ask of each
     /// first: their switches show it until the PC answers.
     pub physical_asked: Vec<(DisplayKey, bool)>,
+    /// The encoding and the PC's sound shown at once as asked: as they were before the
+    /// last request about them, with its PC and number, put back if it fails.
+    pub encoding_before: Option<(PcId, ReqId, state::Wanted)>,
+    pub sound_before: Option<(PcId, ReqId, bool)>,
     /// What the open menu says under the button pressed (see `note`).
     pub notes: Notes,
     /// Which languages the Language page shows, when there are many.
@@ -489,6 +493,8 @@ impl Model {
                 physical_page: 0,
                 add_scale: 100,
                 physical_asked: Vec::new(),
+                encoding_before: None,
+                sound_before: None,
                 notes: Notes::default(),
                 language_page: 0,
                 active_profile: None,
@@ -1504,6 +1510,7 @@ impl Model {
         if let ui::Asked::Physical(k) = what {
             self.menu.physical_asked.retain(|(a, _)| *a != k);
         }
+        self.shown_as_asked(pc, req, matches!(outcome, Outcome::Failed { .. }));
         let took = answered.took.unwrap_or_default().as_millis();
         info!("request {} answered in {took} ms", req.0);
         if let Outcome::Failed { error, detail } = outcome {
@@ -1516,6 +1523,35 @@ impl Model {
         Some(what)
     }
 
+    /// Request `req` of PC `pc` was answered (`failed`: refused, or no answer will
+    /// come): the encoding or the sound it showed at once as asked shows what it was
+    /// before when it failed, and what the PC says from then on either way.
+    fn shown_as_asked(&mut self, pc: PcId, req: ReqId, failed: bool) {
+        if let Some((_, _, before)) = self
+            .menu
+            .encoding_before
+            .take_if(|(p, r, _)| *p == pc && *r == req)
+            && failed
+            && let Some(e) = self
+                .session
+                .pc_mut(pc)
+                .and_then(|p| p.state.encoding.as_mut())
+        {
+            e.wanted = before;
+            self.rev += 1;
+        }
+        if let Some((_, _, before)) = self
+            .menu
+            .sound_before
+            .take_if(|(p, r, _)| *p == pc && *r == req)
+            && failed
+            && let Some(s) = self.session.pc_mut(pc).and_then(|p| p.state.sound.as_mut())
+        {
+            s.to_headset = before;
+            self.rev += 1;
+        }
+    }
+
     /// A request was not sent, for `why`: said under the button pressed for it.
     fn ask_failed(&mut self, why: ui::Failure) {
         let note = Note::failure(self.menu.notes.pressed(), why, "", self.texts());
@@ -1525,6 +1561,7 @@ impl Model {
     /// Request `req` of PC `pc` got no answer and never will (`why`: no answer in time,
     /// the connection broke): said under the button that asked.
     fn given_up(&mut self, pc: PcId, req: ReqId, why: ui::Failure) {
+        self.shown_as_asked(pc, req, true);
         // A command of the PC waiting for it gets its answer: none came.
         if let Some(command) = self
             .session

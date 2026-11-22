@@ -29,18 +29,32 @@ impl Model {
                 self.tell_press(note, false);
             }
             Action::SetAudio(enabled) => {
-                // Shown at once; the PC confirms (or corrects) with its `Sound`.
-                if let Some(p) = self.session.main().and_then(|pc| self.session.pc_mut(pc))
+                // Shown at once; the PC confirms (or corrects) with its `Sound`, and a
+                // refusal puts it back.
+                let pc = self.session.main();
+                let mut before = None;
+                if let Some(p) = pc.and_then(|pc| self.session.pc_mut(pc))
                     && let Some(sound) = &mut p.state.sound
                 {
+                    before = Some(sound.to_headset);
                     sound.to_headset = enabled;
                 }
-                self.request(
+                let req = self.request(
                     Request::SetSound {
                         to_headset: enabled,
                     },
                     ui::Asked::Sound,
                 );
+                if let (Some(pc), Some(req), Some(before)) = (pc, req, before) {
+                    self.menu.sound_before = Some((pc, req, before));
+                } else if let (Some(pc), Some(before)) = (pc, before) {
+                    // Not sent: as it was.
+                    if let Some(sound) =
+                        self.session.pc_mut(pc).and_then(|p| p.state.sound.as_mut())
+                    {
+                        sound.to_headset = before;
+                    }
+                }
             }
             Action::ShowPhysical(k, shown) => {
                 // The switch moves at once; the PC's list says how it stands after.
@@ -89,20 +103,22 @@ impl Model {
                 }
             }
             Action::SetEncoding(change) => {
-                // Shown at once; the PC confirms (or corrects) with its `Encoding`.
-                if let Some(pc) = self
-                    .session
-                    .main()
+                // Shown at once; the PC confirms (or corrects) with its `Encoding`, and a
+                // refusal puts it back.
+                let pc = self.session.main();
+                let mut before = None;
+                if let Some(e) = pc
                     .and_then(|pc| self.session.pc_mut(pc))
                     .and_then(|p| p.state.encoding.as_mut())
                 {
-                    let w = &mut pc.wanted;
+                    let w = &mut e.wanted;
+                    before = Some(*w);
                     w.bitrate = change.bitrate.unwrap_or(w.bitrate);
                     w.codec = change.codec.or(w.codec);
                     w.software = change.software.unwrap_or(w.software);
                     w.sharp = change.sharp.unwrap_or(w.sharp);
                 }
-                self.request(
+                let req = self.request(
                     Request::SetEncoding {
                         bitrate: change.bitrate,
                         codec: change.codec,
@@ -111,6 +127,22 @@ impl Model {
                     },
                     ui::Asked::Encoding,
                 );
+                match (pc, req, before) {
+                    (Some(pc), Some(req), Some(before)) => {
+                        self.menu.encoding_before = Some((pc, req, before));
+                    }
+                    // Not sent: as it was.
+                    (Some(pc), None, Some(before)) => {
+                        if let Some(e) = self
+                            .session
+                            .pc_mut(pc)
+                            .and_then(|p| p.state.encoding.as_mut())
+                        {
+                            e.wanted = before;
+                        }
+                    }
+                    _ => {}
+                }
             }
             Action::ConnectTo(i) => {
                 if let Some(addr) = self.session.search().found.get(i).map(|h| h.addr) {

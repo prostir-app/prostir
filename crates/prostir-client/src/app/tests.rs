@@ -1448,3 +1448,66 @@ fn off_the_head_without_frames_is_a_rest() {
         );
     }
 }
+
+/// The encoding and the PC's sound show at once as asked; the PC refuses: they show
+/// what they were before, as the PC has them.
+#[test]
+fn a_refused_encoding_or_sound_shows_what_was() {
+    use prostir_proto::Codec;
+    use prostir_proto::state::{Encoding, MicDevice, Sound, Wanted};
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    let wanted = Wanted {
+        bitrate: 40,
+        codec: Some(Codec::H264),
+        software: false,
+        sharp: false,
+    };
+    sim.net(NetEvent::Part(
+        PC,
+        HostMsg::Encoding {
+            part: Encoding {
+                wanted,
+                using: None,
+                choices: Vec::new(),
+            },
+        },
+    ));
+    sim.take();
+    sim.menu(Action::SetEncoding(ui::EncodingChange {
+        bitrate: Some(80),
+        codec: None,
+        software: None,
+        sharp: None,
+    }));
+    let bitrate = |sim: &Sim| sim.m.pc().encoding.as_ref().map(|e| e.wanted.bitrate);
+    assert_eq!(bitrate(&sim), Some(80), "shown at once");
+    let req = requests(&sim.take()).first().expect("asked").0;
+    sim.net(NetEvent::Reply {
+        pc: PC,
+        req,
+        outcome: Outcome::failed(ErrorCode::ENCODER, "no"),
+    });
+    assert_eq!(bitrate(&sim), Some(40), "refused: as it was");
+
+    let to_headset = |sim: &Sim| sim.m.pc().sound.as_ref().map(|s| s.to_headset);
+    sim.net(NetEvent::Part(
+        PC,
+        HostMsg::Sound {
+            part: Sound {
+                to_headset: true,
+                mic: MicDevice::Off,
+            },
+        },
+    ));
+    sim.take();
+    sim.menu(Action::SetAudio(false));
+    assert_eq!(to_headset(&sim), Some(false), "shown at once");
+    let req = requests(&sim.take()).first().expect("asked").0;
+    sim.net(NetEvent::Reply {
+        pc: PC,
+        req,
+        outcome: Outcome::failed(ErrorCode::SOUND, "no"),
+    });
+    assert_eq!(to_headset(&sim), Some(true), "refused: as it was");
+}
