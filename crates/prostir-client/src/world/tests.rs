@@ -82,6 +82,8 @@ struct Sim {
     head: (Vec3, Vec3),
     pc: PcId,
     arranged: Vec<Vec<Row>>,
+    /// Every PC told its rows, in order.
+    told: Vec<PcId>,
 }
 
 impl Sim {
@@ -101,6 +103,7 @@ impl Sim {
             head: (Vec3::ZERO, -Vec3::Z),
             pc: PC,
             arranged: Vec::new(),
+            told: Vec::new(),
         }
     }
 
@@ -117,7 +120,7 @@ impl Sim {
             primary: None,
         };
         self.world
-            .listed(&displays, &self.s, self.head, self.now)
+            .listed(self.pc, &displays, &self.s, self.head, self.now)
             .to_vec()
     }
 
@@ -145,8 +148,11 @@ impl Sim {
         self.world.place_button(&self.s);
         self.world.animate(&self.s, dt);
         self.world.settle(self.now);
-        if let Some(rows) = self.world.take_arrange() {
-            self.arranged.push(rows);
+        while let Some((pc, rows)) = self.world.take_arrange() {
+            self.told.push(pc);
+            if pc == self.pc {
+                self.arranged.push(rows);
+            }
         }
         self.world.order_drawing(self.head.0, |_| false);
     }
@@ -291,7 +297,7 @@ fn a_new_monitor_takes_its_placeholders_place() {
         }
     );
     // The PC made display 4; its list says so before its stream starts.
-    sim.world.adding_made(ReqId(5), Some(k(4)));
+    sim.world.adding_made(PC, ReqId(5), Some(k(4)));
     let mut list = three();
     list.push(starting(monitor(4, QHD)));
     sim.list(list.clone());
@@ -310,7 +316,7 @@ fn a_new_monitor_takes_its_placeholders_place() {
     // Display 5 never streams: its placeholder waits 15 s, then goes.
     sim.world
         .adding_started(Some(ReqId(6)), QHD, sim.head.1, sim.now);
-    sim.world.adding_made(ReqId(6), Some(k(5)));
+    sim.world.adding_made(PC, ReqId(6), Some(k(5)));
     list.push(starting(monitor(5, QHD)));
     sim.list(list.clone());
     let asked = sim.now;
@@ -327,7 +333,7 @@ fn a_new_monitor_takes_its_placeholders_place() {
     sim.list(list);
     sim.world.adding_due(sim.now, true);
     assert!(sim.world.adding().is_some(), "waits for the PC's answer");
-    sim.world.adding_made(ReqId(7), Some(k(6)));
+    sim.world.adding_made(PC, ReqId(7), Some(k(6)));
     sim.world.adding_due(sim.now, false);
     assert!(sim.world.adding().is_none(), "failed");
 
@@ -459,7 +465,7 @@ fn a_disconnect_keeps_the_places() {
     );
     let before = sim.places();
 
-    sim.world.disconnected();
+    sim.world.disconnected(sim.pc);
     for n in [1, 2, 3, 9] {
         sim.world.stream_ended(k(n));
     }
@@ -509,12 +515,19 @@ fn a_profile_places_its_monitors_by_their_numbers() {
     let order: Vec<DisplayKey> = sim.world.monitors().iter().map(|m| m.0).collect();
 
     // Switched to: the PC makes three new monitors, 11, 12 and 13.
-    sim.world.switch_to(Some(ProfileSwitch {
-        frame: saved.frame,
-        rows: saved.rows,
-        ..ProfileSwitch::new(ReqId(3), saved.places)
-    }));
-    assert!(sim.world.switching_with(ReqId(3)));
+    sim.world.switch_to(Some((
+        PC,
+        ProfileSwitch {
+            frame: saved.frame,
+            rows: saved.rows,
+            ..ProfileSwitch::new(ReqId(3), saved.places)
+        },
+    )));
+    assert!(sim.world.switching_with(PC, ReqId(3)));
+    assert!(
+        !sim.world.switching_with(OTHER_PC, ReqId(3)),
+        "another PC's number 3"
+    );
     sim.world
         .profile_made(vec![k(11), k(12), k(13)], &sim.s, sim.head.1, sim.now);
     assert!(!sim.world.switching());
@@ -536,7 +549,7 @@ fn a_profile_places_its_monitors_by_their_numbers() {
     // A profile saved before its monitors had places: laid out once they stream, or
     // after 8 s with what streams then.
     sim.world
-        .switch_to(Some(ProfileSwitch::new(ReqId(4), Vec::new())));
+        .switch_to(Some((PC, ProfileSwitch::new(ReqId(4), Vec::new()))));
     sim.list(vec![starting(monitor(21, QHD)), starting(monitor(22, QHD))]);
     sim.world
         .profile_made(vec![k(21), k(22)], &sim.s, sim.head.1, sim.now);
@@ -762,7 +775,7 @@ fn two_pcs_with_one_number_have_two_places() {
     sim.stream(1, QHD);
     sim.settled();
     let first = sim.place(k(1));
-    sim.world.disconnected();
+    sim.world.disconnected(sim.pc);
     sim.world.stream_ended(k(1));
 
     let theirs = DisplayKey::new(OTHER_PC, DisplayId(1));
@@ -785,6 +798,112 @@ fn two_pcs_with_one_number_have_two_places() {
         kept.contains_key(&k(1)) && kept.contains_key(&theirs),
         "both kept"
     );
+}
+
+/// Scenario 14 (step 7 note, 10.1), the world's part: two PCs in a session at once each
+/// have their own list and are told the rows of their own displays only; one ending
+/// leaves the other's list as it is.
+#[test]
+fn two_pcs_at_once_keep_their_own_desktops() {
+    let mut sim = Sim::new(None);
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    sim.stream(1, QHD);
+    sim.stream(2, QHD);
+    sim.connect(OTHER_PC);
+    sim.list(vec![monitor(1, QHD)]);
+    sim.stream(1, QHD);
+    sim.settled();
+    assert_eq!(
+        sim.world.pc(),
+        Some(PC),
+        "the first PC in a session is the main one"
+    );
+    let mut told = sim.told.clone();
+    told.sort();
+    told.dedup();
+    assert_eq!(told, [PC, OTHER_PC], "each PC told its desktop");
+    let theirs = DisplayKey::new(OTHER_PC, DisplayId(1));
+    // Each PC's monitors in its own order (the desktop it was told), by PC.
+    let all: Vec<DisplayKey> = sim.world.monitors().iter().map(|m| m.0).collect();
+    assert_eq!(all.len(), 3);
+    assert!(
+        all[..2].contains(&k(1)) && all[..2].contains(&k(2)),
+        "{all:?}"
+    );
+    assert_eq!(all[2], theirs);
+    // The second ends: the first's displays stay listed and placed.
+    sim.world.disconnected(OTHER_PC);
+    sim.world.stream_ended(theirs);
+    assert_eq!(sim.world.pc(), Some(PC));
+    sim.pc = PC;
+    let gone = sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    assert!(gone.is_empty(), "{gone:?}");
+    assert!(sim.world.placement(theirs).is_some(), "its place kept");
+    let all: Vec<DisplayKey> = sim.world.monitors().iter().map(|m| m.0).collect();
+    assert!(all.len() == 2 && all.iter().all(|m| m.pc == PC), "{all:?}");
+}
+
+/// Two PCs number their requests each on their own: an answer of the other PC with
+/// the same number neither takes the placeholder's monitor nor ends the profile being
+/// switched to.
+#[test]
+fn answers_are_known_by_their_pc() {
+    let mut sim = Sim::new(None);
+    sim.connect(OTHER_PC);
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD)]);
+    sim.stream(1, QHD);
+    sim.settled();
+    sim.world
+        .adding_started(Some(ReqId(5)), QHD, sim.head.1, sim.now);
+    let theirs = DisplayKey::new(OTHER_PC, DisplayId(4));
+    // The world's main PC is the first in a session, by number.
+    let main = sim.world.pc().unwrap();
+    let other = if main == PC { OTHER_PC } else { PC };
+    sim.world.adding_made(other, ReqId(5), Some(theirs));
+    assert_eq!(
+        sim.world.adding().and_then(|a| a.id),
+        None,
+        "not the other PC's"
+    );
+    let ours = DisplayKey::new(main, DisplayId(4));
+    sim.world.adding_made(main, ReqId(5), Some(ours));
+    assert_eq!(sim.world.adding().and_then(|a| a.id), Some(ours));
+    sim.world
+        .switch_to(Some((main, ProfileSwitch::new(ReqId(7), Vec::new()))));
+    sim.world.switch_given_up(other, ReqId(7));
+    assert!(
+        sim.world.switching(),
+        "another PC's request 7 timed out, not ours"
+    );
+    sim.world.switch_given_up(main, ReqId(7));
+    assert!(!sim.world.switching());
+}
+
+/// Scenario 16 (step 7 note, 10.1), the world's part: the desktop's arrangement is told
+/// once it stood, also with no frame drawn (the headset off the head): the passes of
+/// the main loop without frames settle it.
+#[test]
+fn the_desktop_is_told_without_frames() {
+    let mut sim = Sim::new(None);
+    sim.connect(PC);
+    sim.list(three());
+    for n in 1..=3 {
+        sim.stream(n, QHD);
+    }
+    let mut told = None;
+    for _ in 0..20 {
+        sim.now += Duration::from_millis(100);
+        sim.world.settle(sim.now);
+        if let Some(t) = sim.world.take_arrange() {
+            told = Some(t);
+            break;
+        }
+    }
+    let (pc, rows) = told.expect("told without a frame");
+    assert_eq!(pc, PC);
+    assert_eq!(rows.iter().map(|r| r.entries.len()).sum::<usize>(), 3);
 }
 
 /// Scenario 17. A monitor moved by a hand is drawn at its new place in the same pass
@@ -954,11 +1073,14 @@ fn a_profile_switched_to_in_cinema() {
     sim.settled();
 
     cinema(&mut sim, true);
-    sim.world.switch_to(Some(ProfileSwitch {
-        frame: saved.frame,
-        rows: saved.rows,
-        ..ProfileSwitch::new(ReqId(3), saved.places)
-    }));
+    sim.world.switch_to(Some((
+        PC,
+        ProfileSwitch {
+            frame: saved.frame,
+            rows: saved.rows,
+            ..ProfileSwitch::new(ReqId(3), saved.places)
+        },
+    )));
     sim.list(vec![monitor(11, QHD), monitor(12, QHD), monitor(13, QHD)]);
     sim.world
         .profile_made(vec![k(11), k(12), k(13)], &sim.s, sim.head.1, sim.now);

@@ -16,6 +16,7 @@ pub mod frames;
 pub mod ids;
 pub mod lang;
 pub mod layout;
+pub mod net;
 pub mod note;
 pub mod outbox;
 pub mod pending;
@@ -25,6 +26,7 @@ pub mod presence;
 pub mod profiles;
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 pub mod selftest;
+pub mod session;
 pub mod settings;
 pub mod store;
 pub mod ui;
@@ -43,9 +45,9 @@ mod egl;
 #[cfg(target_os = "android")]
 mod input;
 #[cfg(target_os = "android")]
-mod mic;
+mod media;
 #[cfg(target_os = "android")]
-mod net;
+mod mic;
 #[cfg(target_os = "android")]
 mod overlay;
 #[cfg(target_os = "android")]

@@ -11,6 +11,7 @@ mod desk;
 mod encoders;
 mod failures;
 mod goodbye;
+mod headset_net;
 mod headsets;
 mod keyframes;
 mod link;

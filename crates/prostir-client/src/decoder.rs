@@ -56,6 +56,55 @@ pub struct DecoderJob {
     pub stop: Arc<AtomicBool>,
 }
 
+/// A reader of the pictures of one stream that reads the PC's time code out of each
+/// (`prostir_proto::timecode`) as it comes, for the selftest against a real PC; its
+/// window, which the codec decodes into instead of the compositor's.
+#[cfg(all(feature = "selftest", not(feature = "store")))]
+fn time_code_reader(
+    width: u32,
+    height: u32,
+) -> Result<(ndk::media::image_reader::ImageReader, NativeWindow)> {
+    use ndk::media::image_reader::{AcquireResult, ImageFormat, ImageReader};
+    let (w, h) = (i32::try_from(width)?, i32::try_from(height)?);
+    let mut reader = ImageReader::new(w, h, ImageFormat::YUV_420_888, 3)
+        .context("an image reader for the time code")?;
+    reader
+        .set_image_listener(Box::new(|reader: &ImageReader| {
+            let at_us = monotonic_us();
+            let Ok(AcquireResult::Image(image)) = reader.acquire_latest_image() else {
+                return;
+            };
+            let (Ok(luma), Ok(stride)) = (image.plane_data(0), image.plane_row_stride(0)) else {
+                return;
+            };
+            let (Ok(w), Ok(h)) = (image.width(), image.height()) else {
+                return;
+            };
+            let size = |v: i32| usize::try_from(v).unwrap_or(0);
+            if let Some(pc_ms) = prostir_proto::timecode::read(luma, size(stride), size(w), size(h))
+            {
+                crate::selftest::time_code(pc_ms, at_us);
+            }
+        }))
+        .context("the image reader's listener")?;
+    let window = reader.window().context("the image reader's window")?;
+    info!("decoder: reading the time code of a {width}x{height} stream");
+    Ok((reader, window))
+}
+
+/// The headset's `CLOCK_MONOTONIC` in microseconds (as the selftest's clock offset to
+/// the PC is measured).
+#[cfg(all(feature = "selftest", not(feature = "store")))]
+pub fn monotonic_us() -> u64 {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: a timespec to fill, valid through the call.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut t) };
+    t.tv_sec as u64 * 1_000_000 + t.tv_nsec as u64 / 1000
+}
+
 /// Frames that wait this long without a free input buffer: the codec is stuck, and
 /// one of them is dropped (and a keyframe asked for).
 const STALLED: Duration = Duration::from_secs(1);
@@ -144,6 +193,17 @@ fn run(job: &DecoderJob) -> Result<()> {
         ref feedback,
         ref stop,
     } = *job;
+    // The selftest against a real PC reads the time code out of one stream's pictures
+    // (the PC's time of their capture): they go to a reader instead of the compositor,
+    // so that monitor shows nothing.
+    #[cfg(all(feature = "selftest", not(feature = "store")))]
+    let reader = crate::selftest::reads_time_code(stream.id.0)
+        .then(|| time_code_reader(width, height))
+        .transpose()?;
+    #[cfg(all(feature = "selftest", not(feature = "store")))]
+    let reader_window = reader.as_ref().map(|(_, w)| w.clone());
+    #[cfg(all(feature = "selftest", not(feature = "store")))]
+    let window = reader_window.as_ref().unwrap_or(window);
     // From here on the network wakes this thread for each frame.
     frames.wake(std::thread::current());
     let mut gate = KeyframeGate::new(stream, feedback.clone());

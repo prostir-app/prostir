@@ -62,7 +62,14 @@ struct State {
     /// A goodbye is queued: control messages go out up to it, nothing else does.
     leaving: bool,
     closed: bool,
+    /// Bodies of microphone slices sent, to be filled again (see
+    /// [`Outbox::up_buffer`]).
+    spare: Vec<Vec<u8>>,
 }
+
+/// How many bodies of microphone slices sent are kept to be filled again: as many as
+/// may wait, and a few more on their way.
+const SPARE_UP: usize = MAX_LOSSY + 4;
 
 #[derive(Default)]
 pub struct Outbox {
@@ -85,8 +92,9 @@ pub struct Lanes {
 }
 
 impl Lanes {
-    /// Sends the next packet in `pick`'s lane.
-    pub fn send(&mut self, pick: Pick, tx: &mut dyn RecordSender) -> io::Result<()> {
+    /// Sends the next packet in `pick`'s lane: the message, once that was its last
+    /// packet (its body can be filled again, see [`Outbox::sent`]).
+    pub fn send(&mut self, pick: Pick, tx: &mut dyn RecordSender) -> io::Result<Option<Encoded>> {
         let out = match pick {
             Pick::Control => &mut self.control,
             Pick::Lossy => &mut self.lossy,
@@ -94,9 +102,9 @@ impl Lanes {
         if let Some(o) = out
             && o.send_next(tx, FRAGMENT)?
         {
-            *out = None;
+            return Ok(out.take().map(Outgoing::into_message));
         }
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -128,6 +136,31 @@ impl Outbox {
         }
         self.ready.notify_one();
         Ok(())
+    }
+
+    /// An empty buffer for a slice of the microphone of `bytes`: one of the slices sent
+    /// before when there is one, so recording needs no new memory for each.
+    pub fn up_buffer(&self, bytes: usize) -> Vec<u8> {
+        let spare = self.state.lock().unwrap().spare.pop();
+        match spare {
+            Some(mut b) => {
+                b.clear();
+                b.reserve(bytes);
+                b
+            }
+            None => Vec::with_capacity(bytes),
+        }
+    }
+
+    /// Message `msg` was sent: the body of a slice of the microphone is kept to be
+    /// filled again.
+    pub fn sent(&self, msg: Encoded) {
+        if msg.tag() == ClientMsg::UP_TAG {
+            let mut s = self.state.lock().unwrap();
+            if s.spare.len() < SPARE_UP {
+                s.spare.push(msg.into_body());
+            }
+        }
     }
 
     /// The session is open: pings start.
@@ -173,6 +206,13 @@ impl Outbox {
         }
         s.leaving = true;
         self.ready.notify_all();
+    }
+
+    /// Waits until the session is over (the reader saw the PC close the connection),
+    /// at most `within`.
+    pub fn wait_closed(&self, within: Duration) {
+        let s = self.state.lock().unwrap();
+        let _ = self.ready.wait_timeout_while(s, within, |s| !s.closed);
     }
 
     /// The writer sent the goodbye.
@@ -285,11 +325,33 @@ mod tests {
             loop {
                 let pick = self.state.lock().unwrap().pick(lanes);
                 match pick {
-                    Some(pick) => lanes.send(pick, tx).unwrap(),
+                    Some(pick) => {
+                        if let Some(done) = lanes.send(pick, tx).unwrap() {
+                            self.sent(done);
+                        }
+                    }
                     None => break,
                 }
             }
         }
+    }
+
+    /// A slice of the microphone sent is filled again: no new memory for each.
+    #[test]
+    fn microphone_slices_are_filled_again() {
+        let o = Outbox::default();
+        let first = o.up_buffer(960);
+        assert!(first.capacity() >= 960);
+        let at = first.as_ptr();
+        o.push(ClientMsg::Up { up: 0, data: first }).unwrap();
+        o.push(worn(true)).unwrap();
+        assert_eq!(sent(&o).len(), 2);
+        let again = o.up_buffer(960);
+        assert_eq!(again.as_ptr(), at, "the same memory");
+        assert!(again.is_empty());
+        // Only the microphone's: a control message's body is not kept.
+        let fresh = o.up_buffer(960);
+        assert_ne!(fresh.as_ptr(), at);
     }
 
     #[test]

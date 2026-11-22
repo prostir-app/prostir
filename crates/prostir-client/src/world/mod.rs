@@ -20,7 +20,8 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ops::Bound;
 use std::time::{Duration, Instant};
 
 use glam::{Quat, Vec2, Vec3};
@@ -103,6 +104,33 @@ struct Listed {
     failed: bool,
 }
 
+/// What the world keeps of one PC (step 7 note, 4.5: what belongs to each PC): whether
+/// it is in a session, its list in that session, its monitors' order and its primary as
+/// it says, its own display shown, and the desktop it was told and is to be told.
+#[derive(Default)]
+struct PcView {
+    /// In a session with it.
+    connected: bool,
+    /// It said its list in this session.
+    has_list: bool,
+    /// Its monitors left to right, shared with its desktop.
+    order: Vec<DisplayKey>,
+    primary: Option<DisplayKey>,
+    /// Its display shown (see [`physical::mirror`]).
+    mirror: Option<DisplayKey>,
+    /// Its monitors and its display shown that stream, left to right, with their
+    /// stream sizes: what its desktop is made of (see `relist`).
+    sizes: Vec<(DisplayKey, u32, u32)>,
+    /// The desktop last sent to it.
+    sent_layout: Option<Desktop<DisplayKey>>,
+    /// A changed desktop waiting to settle before it is sent.
+    pending_layout: Option<(Desktop<DisplayKey>, Instant)>,
+    /// The desktop for the arrangement now, kept while nothing moves.
+    desktop_memo: DesktopMemo<DisplayKey>,
+    /// The rows it is to be told, until the app sends them.
+    arrange: Option<Vec<Row>>,
+}
+
 /// A monitor being added: where it will appear (shown at once as a placeholder), its
 /// size, its request, and its number once the PC made it.
 #[derive(Debug, Clone, Copy)]
@@ -151,30 +179,23 @@ pub struct Pickable {
 
 /// Everything that stands in the room and how it is arranged (see the module).
 pub struct World {
-    // What there is, as the PC and the streams say.
-    /// The PC of this session, or of the last one. Its displays are known by it and
-    /// their numbers (see [`World::key`]).
-    pc: Option<PcId>,
-    /// In a session with it.
-    connected: bool,
+    // What there is, as the PCs and the streams say.
+    /// Each PC's own (see [`PcView`]).
+    pcs: BTreeMap<PcId, PcView>,
+    /// The PC of the last session that began: the main one while none is connected
+    /// (see [`World::pc`]).
+    last: Option<PcId>,
     /// Cinema: one screen shown, the desk arrangement kept aside (see `set_cinema`).
     cinema: bool,
-    /// The PC's displays as its list last said (none outside a session).
+    /// The PCs' displays as their lists last said (none of a PC outside its session).
     listed: HashMap<DisplayKey, Listed>,
-    /// The PC said its list in this session.
-    has_list: bool,
-    /// The PC's monitors left to right, shared with its desktop.
-    order: Vec<DisplayKey>,
-    primary: Option<DisplayKey>,
-    /// The display of the PC itself shown (see [`physical::mirror`]).
-    mirror: Option<DisplayKey>,
     /// Every stream shown, and its size in pixels.
     streams: HashMap<DisplayKey, PixelSize>,
     /// The runtime draws curved layers.
     curve_supported: bool,
-    /// The monitors left to right (`order` first, those it does not have after, by
-    /// number), and the same with the laptop screen: made again whenever what they
-    /// are made of changes, read every frame.
+    /// The monitors left to right (each PC's order first, by PC, those no order has
+    /// after, by number), and the same with the main PC's laptop screen: made again
+    /// whenever what they are made of changes, read every frame.
     lineup: Vec<(DisplayKey, u32, u32)>,
     sizes: Vec<(DisplayKey, u32, u32)>,
 
@@ -201,14 +222,6 @@ pub struct World {
     /// The desk arrangement as last kept, in memory (`layout.txt` follows it and is
     /// never read again); see `save_layout`. In cinema it waits here under the view.
     desk: Desk,
-    /// The desktop last sent to the PC.
-    sent_layout: Option<Desktop<DisplayKey>>,
-    /// A changed desktop waiting to settle before it is sent.
-    pending_layout: Option<(Desktop<DisplayKey>, Instant)>,
-    /// The desktop for the arrangement now, kept while nothing moves.
-    desktop_memo: DesktopMemo<DisplayKey>,
-    /// The rows the PC is to be told, until the app sends them.
-    arrange: Option<Vec<Row>>,
     /// The monitors far to near as drawn this frame and the frame before (see
     /// `layout::draw_order`), kept to be filled again rather than made anew.
     draw_order: Vec<(f32, DisplayKey)>,
@@ -224,6 +237,8 @@ pub struct World {
     adding: Option<Adding>,
     /// A profile being switched to, until its monitors stand where it says.
     switch: Option<ProfileSwitch>,
+    /// The PC its request went to: its answers are known by that PC and the number.
+    switch_pc: Option<PcId>,
 
     // The person's things.
     menu: Placement,
@@ -264,14 +279,10 @@ impl World {
         s: &Settings,
     ) -> Self {
         let mut world = Self {
-            pc: None,
-            connected: false,
+            pcs: BTreeMap::new(),
+            last: None,
             cinema: s.cinema,
             listed: HashMap::new(),
-            has_list: false,
-            order: Vec::new(),
-            primary: None,
-            mirror: None,
             streams: HashMap::new(),
             curve_supported,
             lineup: Vec::new(),
@@ -285,10 +296,6 @@ impl World {
             tilt: layout::tilt(s.preset),
             placed_for: HashMap::new(),
             desk,
-            sent_layout: None,
-            pending_layout: None,
-            desktop_memo: DesktopMemo::default(),
-            arrange: None,
             draw_order: Vec::new(),
             drawn: Vec::new(),
             moving: Vec::new(),
@@ -296,6 +303,7 @@ impl World {
             follow_hold: false,
             adding: None,
             switch: None,
+            switch_pc: None,
             menu: Placement {
                 position: Vec3::new(0.0, -0.12, -0.7),
                 rotation: Quat::IDENTITY,
@@ -320,20 +328,28 @@ impl World {
 
     // ---- What there is ----
 
-    /// The PC of this session, or of the last one.
+    /// The main PC: the first one in a session, else the one of the last session.
+    /// Its primary and its own display shown are those the presets lay out around.
     pub fn pc(&self) -> Option<PcId> {
-        self.pc
+        self.pcs
+            .iter()
+            .find(|(_, v)| v.connected)
+            .map(|(pc, _)| *pc)
+            .or(self.last)
     }
 
-    /// Display `id` of the PC of this session (or of the last one).
-    pub fn key(&self, id: DisplayId) -> Option<DisplayKey> {
-        self.pc.map(|pc| DisplayKey::new(pc, id))
+    fn main(&self) -> Option<&PcView> {
+        self.pcs.get(&self.pc()?)
     }
 
-    /// The number display `k` has on the PC of this session; none for a display of
-    /// another PC.
-    pub fn on_pc(&self, k: DisplayKey) -> Option<DisplayId> {
-        (self.pc == Some(k.pc)).then_some(k.id)
+    fn main_mut(&mut self) -> Option<&mut PcView> {
+        let pc = self.pc()?;
+        self.pcs.get_mut(&pc)
+    }
+
+    /// PC `pc` is in a session and said its list in it.
+    fn has_list(&self, pc: PcId) -> bool {
+        self.pcs.get(&pc).is_some_and(|v| v.has_list)
     }
 
     /// A window panel.
@@ -344,12 +360,12 @@ impl World {
     /// The display of the PC itself shown in the headset, if one is (see
     /// [`physical::mirror`]).
     pub fn mirror(&self) -> Option<DisplayKey> {
-        self.mirror
+        self.main()?.mirror
     }
 
-    /// The primary display, as the PC says.
+    /// The main PC's primary display, as it says.
     pub fn primary(&self) -> Option<DisplayKey> {
-        self.primary
+        self.main()?.primary
     }
 
     /// A stream of display `id` shows.
@@ -365,7 +381,7 @@ impl World {
 
     /// The laptop screen with its stream size, while it streams.
     fn mirror_size(&self) -> Option<(DisplayKey, u32, u32)> {
-        let id = self.mirror?;
+        let id = self.mirror()?;
         self.streams.get(&id).map(|&(w, h)| (id, w, h))
     }
 
@@ -373,9 +389,11 @@ impl World {
     /// are made of changed (nothing is allocated once their buffers are large enough).
     fn relist(&mut self) {
         self.lineup.clear();
-        for &id in &self.order {
-            if let Some(&(w, h)) = self.streams.get(&id) {
-                self.lineup.push((id, w, h));
+        for view in self.pcs.values() {
+            for &id in &view.order {
+                if let Some(&(w, h)) = self.streams.get(&id) {
+                    self.lineup.push((id, w, h));
+                }
             }
         }
         let known = self.lineup.len();
@@ -384,7 +402,7 @@ impl World {
                 .listed
                 .get(&id)
                 .is_some_and(|l| l.kind == Kind::Monitor)
-                && !self.order.contains(&id)
+                && !self.pcs.get(&id.pc).is_some_and(|v| v.order.contains(&id))
             {
                 self.lineup.push((id, w, h));
             }
@@ -392,27 +410,44 @@ impl World {
         if let Some(rest) = self.lineup.get_mut(known..) {
             rest.sort_unstable();
         }
+        let mirror = self.mirror_size();
         self.sizes.clear();
         self.sizes.extend_from_slice(&self.lineup);
-        self.sizes.extend(self.mirror_size());
+        self.sizes.extend(mirror);
+        // Each PC's desktop is made of its own displays.
+        for (pc, view) in &mut self.pcs {
+            view.sizes.clear();
+            view.sizes
+                .extend(self.lineup.iter().filter(|m| m.0.pc == *pc).copied());
+            if let Some(id) = view.mirror
+                && let Some(&(w, h)) = self.streams.get(&id)
+            {
+                view.sizes.push((id, w, h));
+            }
+        }
     }
 
     /// A session with PC `pc` began: its desktop is told afresh.
     pub fn connected(&mut self, pc: PcId) {
-        self.pc = Some(pc);
-        self.connected = true;
-        self.sent_layout = None;
+        let view = self.pcs.entry(pc).or_default();
+        view.connected = true;
+        view.sent_layout = None;
+        self.last = Some(pc);
     }
 
-    /// The session ended. The places stay (the same PC comes back with the same
-    /// numbers); the next session's list is news, not displays removed, and a profile
-    /// being switched to is not any more.
-    pub fn disconnected(&mut self) {
-        self.connected = false;
-        self.order.clear();
-        self.listed.clear();
-        self.has_list = false;
-        self.mirror = None;
+    /// The session with PC `pc` ended. The places stay (the same PC comes back with
+    /// the same numbers); its next session's list is news, not displays removed, and a
+    /// profile being switched to is not any more.
+    pub fn disconnected(&mut self, pc: PcId) {
+        if let Some(view) = self.pcs.get_mut(&pc) {
+            view.connected = false;
+            view.order.clear();
+            view.has_list = false;
+            view.mirror = None;
+            view.pending_layout = None;
+            view.arrange = None;
+        }
+        self.listed.retain(|k, _| k.pc != pc);
         self.switch = None;
         self.relist();
     }
@@ -426,22 +461,23 @@ impl World {
     /// displays gone, whose streams the app ends.
     pub fn listed(
         &mut self,
+        pc: PcId,
         displays: &Displays,
         s: &Settings,
         head: (Vec3, Vec3),
         now: Instant,
     ) -> &[DisplayKey] {
         self.gone.clear();
-        let Some(pc) = self.pc else {
+        if !self.pcs.get(&pc).is_some_and(|v| v.connected) {
             return &self.gone;
-        };
+        }
         let key = |id: DisplayId| DisplayKey::new(pc, id);
         for (k, l) in &self.listed {
-            if l.kind != Kind::Physical && displays.get(k.id).is_none() {
+            if k.pc == pc && l.kind != Kind::Physical && displays.get(k.id).is_none() {
                 self.gone.push(*k);
             }
         }
-        self.listed.clear();
+        self.listed.retain(|k, _| k.pc != pc);
         for d in &displays.displays {
             let kind = match &d.kind {
                 DisplayKind::Virtual => Kind::Monitor,
@@ -451,10 +487,11 @@ impl World {
             let failed = matches!(d.state, DisplayState::Failed { .. });
             self.listed.insert(key(d.id), Listed { kind, failed });
         }
-        self.has_list = true;
-        self.mirror = physical::mirror(displays).map(key);
-        self.order.clear();
-        self.order.extend(
+        let view = self.pcs.entry(pc).or_default();
+        view.has_list = true;
+        view.mirror = physical::mirror(displays).map(key);
+        view.order.clear();
+        view.order.extend(
             displays
                 .displays
                 .iter()
@@ -474,9 +511,9 @@ impl World {
             }
         }
         let primary = displays.primary.map(key);
-        if primary != self.primary {
+        if primary != view.primary {
             info!("primary display: {primary:?}");
-            self.primary = primary;
+            view.primary = primary;
         }
         self.relist();
         if !self.gone.is_empty() {
@@ -624,9 +661,12 @@ impl World {
         std::mem::take(&mut self.saves)
     }
 
-    /// The rows the PC is to be told now (see [`World::settle`]), once.
-    pub fn take_arrange(&mut self) -> Option<Vec<Row>> {
-        self.arrange.take()
+    /// The rows a PC is to be told now (see [`World::settle`]), once: which PC, and
+    /// the rows of its own displays.
+    pub fn take_arrange(&mut self) -> Option<(PcId, Vec<Row>)> {
+        self.pcs
+            .iter_mut()
+            .find_map(|(pc, v)| v.arrange.take().map(|rows| (*pc, rows)))
     }
 
     /// The monitors in the order they are drawn this frame, far to near, as
@@ -672,51 +712,87 @@ impl World {
     /// one is, sideways, up or down. Only an arrangement that held for
     /// [`ARRANGE_AFTER`], and only when it changed (see [`World::take_arrange`]).
     fn send_layout(&mut self, now: Instant) {
-        let Some(pc) = self.pc.filter(|_| !self.cinema && self.connected) else {
+        if self.cinema {
             return;
+        }
+        // Each PC in a session in turn, by number (nothing allocated in the frame).
+        let mut changed = false;
+        let mut after = None;
+        loop {
+            let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+            let Some(pc) = self
+                .pcs
+                .range((from, Bound::Unbounded))
+                .find(|(_, v)| v.connected)
+                .map(|(pc, _)| *pc)
+            else {
+                break;
+            };
+            changed |= self.send_layout_of(pc, now);
+            after = Some(pc);
+        }
+        if changed {
+            self.relist();
+        }
+    }
+
+    /// [`World::send_layout`] for PC `pc`, with its own displays: whether its order
+    /// changed.
+    fn send_layout_of(&mut self, pc: PcId, now: Instant) -> bool {
+        let Self {
+            pcs,
+            placements,
+            streams,
+            center,
+            tilt,
+            listed,
+            ..
+        } = self;
+        let Some(view) = pcs.get_mut(&pc) else {
+            return false;
         };
         // Wait until every monitor the PC has is placed: a partial picture would make
         // the desktop rearrange (and blink) once per arriving monitor. One whose stream could
         // not start keeps its place and does not hold the others up.
-        let complete = self.order.iter().any(|id| self.streams.contains_key(id))
-            && self.order.iter().all(|id| self.placements.contains_key(id));
+        let complete = view.order.iter().any(|id| streams.contains_key(id))
+            && view.order.iter().all(|id| placements.contains_key(id));
         if !complete {
-            return;
+            return false;
         }
         // The laptop screen too: the PC puts it where it stands here. Monitors stay in
         // the rows the PC has until clearly moved out of them, and its desktop stays
         // while it fits as well as a new one would.
         let desktop = {
-            let desktop = self.desktop_memo.get_ref(
-                &self.placements,
-                &self.sizes,
-                self.center,
-                self.tilt,
-                self.primary,
-                self.sent_layout.as_ref(),
+            let desktop = view.desktop_memo.get_ref(
+                placements,
+                &view.sizes,
+                *center,
+                *tilt,
+                view.primary,
+                view.sent_layout.as_ref(),
             );
-            if desktop.rows.is_empty() || self.sent_layout.as_ref() == Some(&*desktop) {
-                self.pending_layout = None;
-                return;
+            if desktop.rows.is_empty() || view.sent_layout.as_ref() == Some(&*desktop) {
+                view.pending_layout = None;
+                return false;
             }
             // Only an arrangement that has held for a moment.
-            match &self.pending_layout {
+            match &view.pending_layout {
                 Some((pending, since)) if *pending == *desktop => {
                     if now.saturating_duration_since(*since) < ARRANGE_AFTER {
-                        return;
+                        return false;
                     }
                 }
                 _ => {
-                    self.pending_layout = Some((desktop.clone(), now));
-                    return;
+                    view.pending_layout = Some((desktop.clone(), now));
+                    return false;
                 }
             }
             desktop.clone()
         };
-        self.pending_layout = None;
+        view.pending_layout = None;
         let rows = desktop.wire(|k| (k.pc == pc).then_some(k.id));
         info!(
-            "desktop arrangement: {}",
+            "desktop arrangement of PC {pc}: {}",
             rows.iter()
                 .map(|r| {
                     let ids: Vec<u32> = r.ids().map(|id| id.0).collect();
@@ -726,21 +802,20 @@ impl World {
                 .collect::<Vec<_>>()
                 .join(" / ")
         );
-        self.order.clear();
-        let listed = &self.listed;
-        self.order.extend(
+        view.order.clear();
+        view.order.extend(
             rows.iter()
                 .flat_map(Row::ids)
                 .map(|id| DisplayKey::new(pc, id))
                 .filter(|id| listed.get(id).is_some_and(|l| l.kind == Kind::Monitor)),
         );
-        self.relist();
-        self.sent_layout = Some(desktop);
-        self.arrange = Some(rows);
+        view.sent_layout = Some(desktop);
+        view.arrange = Some(rows);
+        true
     }
 
-    /// Keeps the desktop's arrangement in step once nothing is being moved: no monitor
-    /// in a hand, none resized, no profile being switched to.
+    /// Keeps the desktops' arrangements in step once nothing is being moved: no
+    /// monitor in a hand, none resized, no profile being switched to.
     pub fn settle(&mut self, now: Instant) {
         let carried = self.held.iter().flatten().any(|t| t.display().is_some());
         if !carried && self.resizing.is_none() && !self.switching() {
@@ -748,33 +823,41 @@ impl World {
         }
     }
 
-    /// The monitors on the map: the desktop the PC gets (see `layout::Desktop`).
+    /// The monitors on the map: the desktop the main PC gets (see `layout::Desktop`).
     pub fn map_spots(&self) -> HashMap<DisplayKey, [f32; 4]> {
-        self.desktop_memo
+        let Some(view) = self.main() else {
+            return HashMap::new();
+        };
+        view.desktop_memo
             .get_ref(
                 &self.placements,
-                &self.sizes,
+                &view.sizes,
                 self.center,
                 self.tilt,
-                self.primary,
-                self.sent_layout.as_ref(),
+                view.primary,
+                view.sent_layout.as_ref(),
             )
             .spots()
     }
 
-    /// The rows the PC's desktop is laid out by, by id: those last sent, or those a
-    /// profile switched to was saved with until its desktop is sent (see `rows_from`).
-    /// Their neighbours stay neighbours until clearly moved apart (`rows::rows_of`).
+    /// The rows the main PC's desktop is laid out by, by id: those last sent, or those
+    /// a profile switched to was saved with until its desktop is sent (see
+    /// `rows_from`). Their neighbours stay neighbours until clearly moved apart
+    /// (`rows::rows_of`).
     fn sent_rows(&self) -> &[Vec<DisplayKey>] {
-        self.sent_layout.as_ref().map_or(&[], |d| &d.rows)
+        self.main()
+            .and_then(|v| v.sent_layout.as_ref())
+            .map_or(&[], |d| &d.rows)
     }
 
     /// A profile switched to is another arrangement: its rows are those it was saved
     /// with (by the PC's numbers now), or, for a profile without them, start afresh
     /// (see `layout::Desktop::history`).
     fn rows_from(&mut self, rows: Vec<Vec<DisplayKey>>) {
-        self.sent_layout = Desktop::history(rows);
-        self.pending_layout = None;
+        if let Some(view) = self.main_mut() {
+            view.sent_layout = Desktop::history(rows);
+            view.pending_layout = None;
+        }
     }
 
     // ---- Laying out ----
@@ -796,11 +879,11 @@ impl World {
         let all = self.around_user(layout::arrange(
             s.preset,
             &self.lineup,
-            self.primary,
+            self.primary(),
             self.mirror_size(),
             self.curve_factor(s),
         ));
-        if let Some(id) = self.mirror
+        if let Some(id) = self.mirror()
             && let Some(p) = all.get(&id)
         {
             self.placements.insert(id, *p);
@@ -819,7 +902,7 @@ impl World {
             // The view takes the place of the monitors here, which it does not show (the
             // desk keeps theirs).
             let view = self.around_user(layout::cinema(&self.lineup, self.desk.cinema()));
-            let (listed, pc) = (&self.listed, self.pc);
+            let (listed, pc) = (&self.listed, self.pc());
             self.placements
                 .retain(|k, _| window(listed, *k) || pc.is_some_and(|pc| pc != k.pc));
             self.placements.extend(view);
@@ -834,7 +917,7 @@ impl World {
         let laid = self.around_user(layout::arrange(
             s.preset,
             &self.lineup,
-            self.primary,
+            self.primary(),
             self.mirror_size(),
             self.curve_factor(s),
         ));
@@ -895,7 +978,7 @@ impl World {
             self.placements.insert(m.0, at);
             placed = true;
         }
-        if let Some(id) = self.mirror
+        if let Some(id) = self.mirror()
             && self.streams.contains_key(&id)
             && !self.placements.contains_key(&id)
         {
@@ -1058,10 +1141,11 @@ impl World {
     /// built once every monitor the PC has is here, so the chosen screen is among
     /// them. A view that exists, moved by hand perhaps, is left alone.
     fn build_cinema_view_if_due(&mut self, s: &Settings, now: Instant) {
+        let order = self.main().map_or(&[][..], |v| &v.order);
         let due = self.cinema
-            && !self.order.is_empty()
-            && self.order.iter().all(|id| self.streams.contains_key(id))
-            && !self.order.iter().any(|id| self.placements.contains_key(id));
+            && !order.is_empty()
+            && order.iter().all(|id| self.streams.contains_key(id))
+            && !order.iter().any(|id| self.placements.contains_key(id));
         if due {
             self.arrange_all(s, now);
         }
@@ -1074,6 +1158,10 @@ impl World {
         let of_pc = |k: &DisplayKey| k.pc == pc;
         self.placements.retain(|k, _| !of_pc(k));
         self.placed_for.retain(|k, _| !of_pc(k));
+        self.pcs.remove(&pc);
+        if self.last == Some(pc) {
+            self.last = None;
+        }
         let gone: Vec<DisplayKey> = self
             .desk
             .arrangement()
@@ -1118,7 +1206,7 @@ impl World {
             .collect();
         Profile::of(
             &monitors,
-            self.primary,
+            self.primary(),
             shown,
             &live,
             self.cinema.then(|| self.desk.arrangement()),
@@ -1128,8 +1216,11 @@ impl World {
 
     /// A profile is being switched to (`None`: none any more): the monitors are not
     /// laid out one by one, nor the desktop's arrangement sent, until it stands.
-    pub fn switch_to(&mut self, switch: Option<ProfileSwitch>) {
+    /// `switch`: the PC asked, and how it stands.
+    pub fn switch_to(&mut self, switch: Option<(PcId, ProfileSwitch)>) {
+        let (pc, switch) = switch.unzip();
         self.switch = switch;
+        self.switch_pc = pc;
     }
 
     /// A profile is being switched to.
@@ -1137,9 +1228,10 @@ impl World {
         self.switch.is_some()
     }
 
-    /// The profile being switched to is the one of request `req`.
-    pub fn switching_with(&self, req: ReqId) -> bool {
-        self.switch.as_ref().is_some_and(|s| s.req == req)
+    /// The profile being switched to is the one of request `req` to PC `pc` (two
+    /// PCs number their requests each on their own).
+    pub fn switching_with(&self, pc: PcId, req: ReqId) -> bool {
+        self.switch_pc == Some(pc) && self.switch.as_ref().is_some_and(|s| s.req == req)
     }
 
     /// The PC made a profile's monitors (`ids`, in the order of its monitors): they
@@ -1193,8 +1285,8 @@ impl World {
 
     /// The request of the profile being switched to went without an answer: it is not
     /// switched to.
-    pub fn switch_given_up(&mut self, req: ReqId) {
-        if self.switching_with(req) {
+    pub fn switch_given_up(&mut self, pc: PcId, req: ReqId) {
+        if self.switching_with(pc, req) {
             self.switch = None;
         }
     }
@@ -1213,7 +1305,7 @@ impl World {
     fn profile_streams(&mut self, s: &Settings, now: Instant) {
         let settled = |k: DisplayKey| {
             self.streams.contains_key(&k)
-                || (self.has_list && self.listed.get(&k).is_none_or(|l| l.failed))
+                || (self.has_list(k.pc) && self.listed.get(&k).is_none_or(|l| l.failed))
         };
         let stands = self
             .switch
@@ -1242,7 +1334,7 @@ impl World {
         self.adding = req.filter(|_| !self.cinema).and_then(|req| {
             Some(Adding {
                 req,
-                pc: self.pc?,
+                pc: self.pc()?,
                 place: self.place_for_new(size, gaze),
                 size,
                 id: None,
@@ -1251,9 +1343,10 @@ impl World {
         });
     }
 
-    /// The PC made the monitor of request `req`: display `id`.
-    pub fn adding_made(&mut self, req: ReqId, id: Option<DisplayKey>) {
+    /// PC `pc` made the monitor of its request `req`: display `id`.
+    pub fn adding_made(&mut self, pc: PcId, req: ReqId, id: Option<DisplayKey>) {
         if let Some(a) = &mut self.adding
+            && a.pc == pc
             && a.req == req
         {
             a.id = id;
@@ -1267,14 +1360,15 @@ impl World {
         let Some(a) = &self.adding else {
             return;
         };
-        let failed =
-            a.id.is_some_and(|k| self.has_list && self.listed.get(&k).is_none_or(|l| l.failed));
+        let failed = a
+            .id
+            .is_some_and(|k| self.has_list(k.pc) && self.listed.get(&k).is_none_or(|l| l.failed));
         let shown = a.id.is_some_and(|id| self.streams.contains_key(&id));
         let asked = waits || a.id.is_some();
         if shown
             || failed
             || !asked
-            || !self.connected
+            || !self.pcs.get(&a.pc).is_some_and(|v| v.connected)
             || now.saturating_duration_since(a.since) >= PLACEHOLDER_FOR
         {
             self.adding = None;
@@ -1354,7 +1448,7 @@ impl World {
         // Straight ahead goes the primary monitor (else the middle of the monitors).
         let ids: Vec<DisplayKey> = self.lineup.iter().map(|m| m.0).collect();
         let ahead =
-            layout::ahead(&self.placements, &ids, self.primary, old_pos).unwrap_or(self.center.1);
+            layout::ahead(&self.placements, &ids, self.primary(), old_pos).unwrap_or(self.center.1);
         for p in self.placements.values_mut() {
             *p = layout::carried(p, (old_pos, ahead), (head, yaw));
         }
@@ -1389,13 +1483,13 @@ impl World {
             self.arrange_all(s, now);
             return;
         }
-        let lid = self.mirror.filter(|id| self.placements.contains_key(id));
+        let lid = self.mirror().filter(|id| self.placements.contains_key(id));
         let lined = layout::line_up(
             &self.placements,
             &self.sizes,
             self.center,
             self.tilt,
-            self.primary,
+            self.primary(),
             self.sent_rows(),
             lid,
         );
@@ -1731,11 +1825,11 @@ impl World {
         }
         let shown = |id: &DisplayKey| self.placements.contains_key(id);
         let anchor = self
-            .primary
+            .primary()
             .filter(shown)
             .or_else(|| self.lineup.iter().map(|m| m.0).find(|id| shown(id)));
         let mirror = self
-            .mirror
+            .mirror()
             .filter(|id| self.streams.contains_key(id))
             .and_then(|id| Some((*self.placements.get(&id)?, self.height_of(id))));
         self.button = anchor.and_then(|id| {

@@ -1,7 +1,9 @@
 //! What the headset is, as the system says it: only shown and logged (the PC's list
 //! of headsets, pairing), never used to decide anything.
 
-use prostir_proto::state::{MAX_SHORT, clip};
+use prostir_proto::Codec;
+use prostir_proto::state::caps;
+use prostir_proto::state::{self, HeadsetCaps, MAX_SHORT, clip};
 
 /// The headset's name from its maker and model as the system gives them
 /// (`Build.MANUFACTURER`, `Build.MODEL`): "Maker Model 3", or the model alone when it
@@ -24,6 +26,32 @@ pub fn model_name(manufacturer: &str, model: &str) -> String {
     let mut name = clip(&name, MAX_SHORT);
     name.truncate(name.trim_end().len());
     name
+}
+
+/// What this headset can do, for the PC: the displays it shows, the codecs it decodes
+/// and how large (for now fixed: H.264 up to 4K, HEVC up to 8K), how many streams and
+/// compositor layers at once; and its model, as the system names it.
+pub fn headset_caps(model: &str) -> HeadsetCaps {
+    let decoder = |codec: Codec, max_w, max_h| state::Decoder {
+        codec: prostir_proto::wire::encode(&codec).map_or(0, |b| b[0]),
+        max_w,
+        max_h,
+    };
+    HeadsetCaps {
+        features: vec![
+            caps::headset::PHYSICAL,
+            caps::headset::WINDOWS,
+            caps::headset::COMMANDS,
+            caps::headset::MIC,
+        ],
+        decoders: vec![
+            decoder(Codec::H264, 4096, 4096),
+            decoder(Codec::H265, 8192, 4320),
+        ],
+        streams_max: 16,
+        layers_max: 16,
+        model: model.to_owned(),
+    }
 }
 
 #[cfg(test)]

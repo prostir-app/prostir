@@ -1242,10 +1242,13 @@ it, so both sides agree; the format:
   code (a picture made of two frames, a monitor too small for 672 pixels across).
 
 To turn the PC's time into the headset's, the client needs the offset of the two
-clocks (for example from a ping whose answer carries the PC's time, an extension for
-this mode that is not part of the protocol yet). The PC's half (drawing) is in the
-host; the headset's half (reading, the offset, the time of the shown frame) comes with
-the client's selftest.
+clocks. The current client's selftest against a real host (`pc=usb`,
+`scripts/selftest-headset.sh --pc`) takes it from a small clock the script serves on
+the PC (`CLOCK_MONOTONIC` in microseconds, one line for each line asked, reversed to
+the headset's `127.0.0.1:47931` over USB), outside this protocol; it decodes one
+stream into a reader instead of the compositor, reads the code of each picture as it
+comes out of the decoder, and reports `end_to_end_ms` from the capture on the PC to
+there (the compositor's own part, about one display period, is not in it).
 
 ## 7. Layout
 

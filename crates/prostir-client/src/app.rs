@@ -5,7 +5,7 @@
 //! a quad or cylinder layer. The menu, its button, pointer dots and the
 //! panorama are small CPU-drawn images; nothing is rendered per frame.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
@@ -20,12 +20,11 @@ use glam::{Vec2, Vec3};
 use log::{error, info, warn};
 use openxr as xr;
 use openxr::sys::Handle as _;
+use prostir_proto::ClientMsg;
 use prostir_proto::request::{Asked, Command, Outcome, Primary, Request};
 use prostir_proto::state::{
-    self, Battery, DisplayId, HeadsetCaps, HeadsetState, Mode, PcState, Prefs, Presence, ReqId,
-    caps,
+    self, Battery, DisplayId, HeadsetState, Mode, PcState, Prefs, Presence, ReqId, caps,
 };
-use prostir_proto::{ClientMsg, Codec};
 
 use crate::audio::Gains;
 use crate::ids::{DisplayKey, PcId, Target, Thing};
@@ -36,11 +35,12 @@ use crate::mic::Mic;
 use crate::net::{Feedback, NetEvent};
 use crate::note::{self, Note, Notes};
 use crate::overlay::{self, Overlay, Sphere};
-use crate::pending::{self, Asks, ProfileSwitch};
+use crate::pending::{self, ProfileSwitch};
 use crate::presence;
 use crate::profiles::{self, Profile};
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 use crate::selftest::device::{self as selftest, Act, Selftest};
+use crate::session::{self, Attempt, Session};
 use crate::settings::{Background, HandMode, Settings};
 use crate::store::{StoreCheck, UpdateHint};
 use crate::system::SystemEvent;
@@ -66,8 +66,6 @@ const SCREEN_EVERY: Duration = Duration::from_millis(250);
 const TOAST_FOR: Duration = Duration::from_secs(4);
 const ERROR_SHOWN_FOR: Duration = Duration::from_secs(8);
 const CONFIRM_FOR: Duration = Duration::from_secs(4);
-/// How long the app, closing, waits for the network thread to end.
-const NET_STOPS_WITHIN: Duration = Duration::from_secs(1);
 /// How long a pinch must be held on a monitor before it starts dragging it.
 const HOLD_TO_DRAG: Duration = Duration::from_millis(300);
 
@@ -333,10 +331,7 @@ struct Scene {
     /// Where everything stands in the room, and the rules it is arranged by.
     world: World,
     mirror_wanted: bool,
-    audio_wanted: bool,
     mic_wanted: bool,
-    /// The monitor the mouse is on (from the PC).
-    focus: Option<DisplayKey>,
     /// Resizing a monitor with both hands.
     scaling: Option<Scaling>,
     /// Whether the headset is on the head, from the session, the activity and the
@@ -345,42 +340,24 @@ struct Scene {
     settings: Settings,
     panel_open: bool,
     grabs: [Option<Grab>; 2],
-    host: Option<String>,
-    /// PCs announcing themselves while not connected.
-    found: Vec<net::FoundHost>,
     /// IP typed on the menu keypad.
     ip_input: Option<String>,
-    /// Pairing with a new PC in progress.
-    pairing: Option<ui::PairingView>,
-    /// A PC on the network that refuses the connection (a firewall).
-    unreachable: Option<String>,
-    /// The connected PC's state, as it last said it in this session: its displays,
-    /// encoding, sound, limits, what it can do.
-    pc: PcState,
-    /// The menu's requests to the PC in this session: waiting, failed lately, and
-    /// the PC's commands waiting for one of them (see `pending`).
-    asks: Asks,
+    /// The connections to PCs: the search, and each PC's link with its state and the
+    /// menu's requests to it (see `session`).
+    session: Session,
+    /// Messages to each PC in a session.
+    outboxes: BTreeMap<PcId, Feedback>,
     /// The microphone permission the PC was last told.
     mic_permission: u8,
     /// The microphone's switch and permission, shared with the network thread.
     mic: Arc<Mic>,
     /// Where the PC's sound comes from, for the audio thread.
     gains: Arc<Gains>,
-    /// An unknown PC waiting for "Pair" or "Not now" (survives the disconnect that
-    /// follows the question).
-    pair_offer: Option<(String, ui::OfferWhy)>,
-    steering: net::Steering,
-    /// When the connection was lost (or the app started without one).
-    offline_since: Option<Instant>,
-    feedback: Option<Feedback>,
     error: Option<(String, Instant)>,
     /// "×" pressed once on this monitor; a second press within a few seconds removes it.
     confirm_remove: Option<(DisplayKey, Instant)>,
     /// "Save current" pressed once for this profile.
     confirm_save: Option<(usize, Instant)>,
-    /// Paired PCs (key, name), read from the trust file when the menu opens.
-    paired: Vec<([u8; 32], String)>,
-    trust_file: PathBuf,
     confirm_forget: Option<(usize, Instant)>,
     /// Menu page shown.
     tab: Tab,
@@ -392,8 +369,6 @@ struct Scene {
     headset_battery: Option<(u8, bool)>,
     /// The headset's model as the system names it, for `HeadsetCaps`.
     model: String,
-    /// The monitor the sound comes from, as the PC says.
-    sound_from: Option<DisplayKey>,
     /// The display rate setting changed: apply it.
     refresh_due: bool,
     /// Time worn since the last rest reminder.
@@ -415,8 +390,8 @@ struct Scene {
     press_in_menu: bool,
     /// The user chose a language in the menu: said once it shows.
     language_asked: bool,
-    /// The PC speaks another protocol: (the PC is newer, its app version).
-    update_needed: Option<(bool, String)>,
+    /// A PC being forgotten, until the network thread says it is (or why not).
+    forgetting: Option<Forgetting>,
     /// Head position and gaze this frame.
     head: (Vec3, Vec3),
     /// The head's right, rolled and tilted with it (where the right ear is).
@@ -456,47 +431,55 @@ impl Drop for Scene {
 }
 
 impl Scene {
-    /// Display `id` of the PC of this session (or of the last one).
+    /// Display `id` of the PC the menu acts on (see `Session::main`).
     fn key(&self, id: DisplayId) -> Option<DisplayKey> {
-        self.world.key(id)
+        self.session.main().map(|pc| DisplayKey::new(pc, id))
     }
 
-    /// The number display `k` has on the PC of this session; none for a display of
-    /// another PC.
-    fn on_pc(&self, k: DisplayKey) -> Option<DisplayId> {
-        self.world.on_pc(k)
+    /// The main PC's state (see `Session::state`).
+    fn pc(&self) -> &PcState {
+        self.session.state()
     }
 
-    /// Display `id` as its PC's list says (`None`: not listed, or another PC's).
+    /// Display `id` as its PC's list says (`None`: not listed, or no session with its
+    /// PC).
     fn display(&self, id: DisplayKey) -> Option<&state::Display> {
-        self.pc.displays.as_ref()?.get(self.on_pc(id)?)
+        self.session.pc(id.pc)?.state.displays.as_ref()?.get(id.id)
     }
 
     /// The PC can move the mouse (for following the gaze).
     fn can_move_mouse(&self) -> bool {
-        self.pc
+        self.pc()
             .caps
             .as_ref()
             .is_some_and(|c| c.has(caps::pc::MOVE_MOUSE))
     }
 
+    /// The monitor the mouse is on, as the PC says.
+    fn focus(&self) -> Option<DisplayKey> {
+        self.key(self.pc().focus.as_ref()?.display?)
+    }
+
     /// The display of the PC itself the switch shows or hides: one connected now,
     /// never a closed laptop's panel (see [`physical::switch`]).
     fn physical_id(&self) -> Option<DisplayKey> {
-        self.key(physical::switch(self.pc.displays.as_ref()?)?.id)
+        self.key(physical::switch(self.pc().displays.as_ref()?)?.id)
     }
 
     /// What the switch's display is called, if a display of the PC is connected.
     fn physical_name(&self) -> Option<String> {
-        physical::switch(self.pc.displays.as_ref()?).map(|d| physical::label(d, self.texts()))
+        physical::switch(self.pc().displays.as_ref()?).map(|d| physical::label(d, self.texts()))
     }
 
     /// What the world asks for after it changed: the PC is told the rows of its
     /// desktop (see `World::settle`), and a hand lets go of what the world no longer
     /// has it hold (laid out anew, or gone).
     fn world_done(&mut self) {
-        if let Some(rows) = self.world.take_arrange() {
-            self.send(ClientMsg::Arrange { rows });
+        while let Some((pc, rows)) = self.world.take_arrange() {
+            // Only to a PC in a session: the world sends nothing otherwise.
+            if self.session.connected(pc) {
+                self.send_to(pc, ClientMsg::Arrange { rows });
+            }
         }
         for grab in &mut self.grabs {
             if grab.is_some_and(|g| !self.world.holds(g.id)) {
@@ -516,7 +499,7 @@ impl Scene {
     /// cinema, the desk arrangement as kept before it).
     fn current_profile(&self) -> Profile {
         let shown = self
-            .pc
+            .pc()
             .displays
             .iter()
             .flat_map(|d| &d.displays)
@@ -534,7 +517,7 @@ impl Scene {
         reason = "until step 7.7 passes the time in and moves the threads to the shell"
     )]
     fn adding_due(&mut self) {
-        let waits = self.asks.waits(ui::Asked::AddMonitor);
+        let waits = self.session.waits(ui::Asked::AddMonitor);
         self.world.adding_due(Instant::now(), waits);
     }
 
@@ -646,7 +629,8 @@ impl Scene {
     )]
     fn follow_gaze(&mut self) {
         let busy = self.world.wrist().is_some() || self.world.holding() || self.settings.cinema;
-        if !self.settings.gaze_mouse || !self.can_move_mouse() || self.feedback.is_none() || busy {
+        let main = self.session.main();
+        if !self.settings.gaze_mouse || !self.can_move_mouse() || main.is_none() || busy {
             self.gaze_on = None;
             return;
         }
@@ -655,17 +639,17 @@ impl Scene {
             origin: head,
             dir: forward.normalize_or(-Vec3::Z),
         };
-        let asks = &self.asks;
+        let session = &self.session;
         let looked = self
             .world
             .looked_at(ray, &self.settings, self.panel_open, |k| {
-                asks.waits(ui::Asked::Remove(k))
+                session.waits(ui::Asked::Remove(k))
             });
         let Some((id, uv)) = looked else {
             self.gaze_on = None;
             return;
         };
-        if self.focus == Some(id) {
+        if self.focus() == Some(id) {
             self.gaze_on = None;
             return;
         }
@@ -677,14 +661,20 @@ impl Scene {
                 if since.elapsed() >= GAZE_DWELL && !recently {
                     let f = |v: f32| (v * 65535.0) as u16;
                     info!("gaze: mouse to monitor {id} at {:.2},{:.2}", uv.x, uv.y);
-                    if let Some(display) = self.on_pc(id) {
-                        self.send(ClientMsg::MouseTo {
-                            id: display,
+                    self.send_to(
+                        id.pc,
+                        ClientMsg::MouseTo {
+                            id: id.id,
                             u: f(uv.x),
                             v: f(uv.y),
+                        },
+                    );
+                    // Where the mouse is now, until the PC says it.
+                    if let Some(p) = self.session.pc_mut(id.pc) {
+                        p.state.focus = Some(state::Focus {
+                            display: Some(id.id),
                         });
                     }
-                    self.focus = Some(id);
                     self.gaze_moved = Some(Instant::now());
                     self.gaze_on = None;
                 }
@@ -732,8 +722,9 @@ impl Scene {
     /// "Sound from the screen": the sound placed towards the monitor whose window plays
     /// it, as the head turns.
     fn place_sound(&self) {
-        let angle = self
-            .sound_from
+        let from = self.pc().sound_from.as_ref().and_then(|s| s.display);
+        let angle = from
+            .and_then(|id| self.key(id))
             .filter(|_| self.settings.sound_from_screen)
             .and_then(|id| self.world.shown(id))
             .map(|p| {
@@ -765,9 +756,9 @@ impl Scene {
 
     /// The monitor most straight ahead of the head (not a window panel).
     fn monitor_in_front(&self) -> Option<DisplayKey> {
-        let asks = &self.asks;
+        let session = &self.session;
         self.world
-            .monitor_in_front(self.head, |k| asks.waits(ui::Asked::Remove(k)))
+            .monitor_in_front(self.head, |k| session.waits(ui::Asked::Remove(k)))
     }
 
     /// Turns the whole arrangement around the user (see `World::recenter`).
@@ -812,14 +803,21 @@ impl Scene {
 
     /// Tells the PC whether the headset is worn (quietly: nothing to show the user),
     /// and keeps it for the next `Open`.
-    fn tell_presence(&self) {
-        self.steering.set_headset(self.headset_state());
-        if let Some(f) = &self.feedback {
-            let _ = f.send(ClientMsg::Presence {
-                part: Presence {
-                    worn: self.presence.worn(),
-                },
-            });
+    fn tell_presence(&mut self) {
+        let state = self.headset_state();
+        self.session.set_headset(state);
+        self.tell_all(&ClientMsg::Presence {
+            part: Presence {
+                worn: self.presence.worn(),
+            },
+        });
+    }
+
+    /// Tells every PC in a session `msg` (about the headset itself, the same to each),
+    /// quietly.
+    fn tell_all(&self, msg: &ClientMsg) {
+        for f in self.outboxes.values() {
+            let _ = f.send(msg.clone());
         }
     }
 
@@ -832,12 +830,10 @@ impl Scene {
         };
         info!("headset {state:?}");
         self.tell_presence();
-        if state == presence::State::Asleep
-            && let Some(f) = &self.feedback
-        {
-            let _ = f.send(ClientMsg::Asleep);
+        if state == presence::State::Asleep {
+            self.tell_all(&ClientMsg::Asleep);
         }
-        self.steering.set_worn(self.presence.worn());
+        self.session.set_worn(self.presence.worn());
     }
 
     /// Reads the screen where presence wants it (only while the app is put away, at
@@ -859,11 +855,10 @@ impl Scene {
     /// shows it, the PC's tray hears it, and the next `Open` says it.
     fn battery_read(&mut self, battery: Option<(u8, bool)>) {
         self.headset_battery = battery;
-        self.steering.set_headset(self.headset_state());
-        if let Some((percent, charging)) = battery
-            && self.feedback.is_some()
-        {
-            self.send(ClientMsg::Battery {
+        let state = self.headset_state();
+        self.session.set_headset(state);
+        if let Some((percent, charging)) = battery {
+            self.tell_all(&ClientMsg::Battery {
                 part: Battery { percent, charging },
             });
         }
@@ -889,22 +884,20 @@ impl Scene {
     /// its end of the microphone, or says there is no permission), and the next session
     /// starts with it.
     fn mic_changed(&mut self) {
-        self.steering.set_headset(self.headset_state());
+        let state = self.headset_state();
+        self.session.set_headset(state);
         self.mic_permission = self.mic.permission();
         let part = mic_state(&self.settings, &self.mic);
-        if self.feedback.is_some() {
-            self.send(ClientMsg::UpState { part });
-        }
+        self.tell_all(&ClientMsg::UpState { part });
     }
 
     /// The settings the PC acts on changed: it hears at once, and the next session
     /// starts with them.
     fn prefs_changed(&mut self) {
-        self.steering.set_headset(self.headset_state());
+        let state = self.headset_state();
+        self.session.set_headset(state);
         let part = self.prefs();
-        if self.feedback.is_some() {
-            self.send(ClientMsg::Prefs { part });
-        }
+        self.tell_all(&ClientMsg::Prefs { part });
     }
 
     /// Control `what` asks the PC to change something: one reply comes with its
@@ -912,43 +905,45 @@ impl Scene {
     /// is said there, see `note`). Without a connection
     /// nothing is sent (and nothing kept to send later: repeating "add a monitor"
     /// after reconnecting could add two).
+    fn request(&mut self, asked: Request, what: ui::Asked) -> Option<ReqId> {
+        let pc = self.session.main();
+        self.request_of(pc, asked, what)
+    }
+
+    /// [`Scene::request`] of PC `pc` (none: no PC, which fails as not connected).
     #[expect(
         clippy::disallowed_methods,
         reason = "until step 7.7 passes the time in and moves the threads to the shell"
     )]
-    fn request(&mut self, asked: Request, what: ui::Asked) -> Option<ReqId> {
-        if self.feedback.is_none() {
+    fn request_of(&mut self, pc: Option<PcId>, asked: Request, what: ui::Asked) -> Option<ReqId> {
+        let Some((pc, req)) = pc.zip(self.session.ask(pc, what, Instant::now())) else {
             self.ask_failed(ui::Failure::NotConnected);
             return None;
-        }
-        let req = self.asks.ask(what, Instant::now());
+        };
         info!("request {}: {asked:?}", req.0);
-        self.send(ClientMsg::request(req, asked));
-        if let Some(on) = self.notes.asked(req, what) {
+        self.send_to(pc, ClientMsg::request(req, asked));
+        if let Some(on) = self.notes.asked(pc, req, what) {
             let waiting = Note::waiting(Some(on), self.texts());
             self.tell(waiting, false, true);
         }
         Some(req)
     }
 
-    /// [`Scene::request`] about display `k`, made with the number `k` has on its PC:
-    /// failed as not connected when `k` is not of the PC of this session.
+    /// [`Scene::request`] about display `k`, of its PC with the number `k` has there:
+    /// failed as not connected without a session with that PC.
     fn request_for(
         &mut self,
         k: DisplayKey,
         asked: impl FnOnce(DisplayId) -> Request,
         what: ui::Asked,
     ) -> Option<ReqId> {
-        let Some(id) = self.on_pc(k) else {
-            self.ask_failed(ui::Failure::NotConnected);
-            return None;
-        };
-        self.request(asked(id), what)
+        let pc = self.session.connected(k.pc).then_some(k.pc);
+        self.request_of(pc, asked(k.id), what)
     }
 
     /// What the user reads for display `id`: as the PC's desktop names it.
     fn label_of(&self, id: DisplayKey) -> Option<String> {
-        let d = self.pc.displays.as_ref()?.get(self.on_pc(id)?)?;
+        let d = self.display(id)?;
         Some(ui::display_label(&d.name))
     }
 
@@ -959,14 +954,17 @@ impl Scene {
         clippy::disallowed_methods,
         reason = "until step 7.7 passes the time in and moves the threads to the shell"
     )]
-    fn answered(&mut self, req: ReqId, outcome: &Outcome) -> Option<ui::Asked> {
-        let answered = self.asks.answered(req, outcome, Instant::now());
+    fn answered(&mut self, pc: PcId, req: ReqId, outcome: &Outcome) -> Option<ui::Asked> {
+        let answered = self.session.answered(pc, req, outcome, Instant::now());
         // A command of the PC that waited for this answer gets it, with the same code.
         if let Some((command, outcome)) = answered.command {
-            self.send(ClientMsg::Reply {
-                req: command,
-                outcome,
-            });
+            self.send_to(
+                pc,
+                ClientMsg::Reply {
+                    req: command,
+                    outcome,
+                },
+            );
         }
         let Some(what) = answered.what else {
             info!(
@@ -981,7 +979,7 @@ impl Scene {
         if let Outcome::Failed { error, detail } = outcome {
             warn!("request {} failed (code {}): {detail}", req.0, error.code());
         }
-        let asker = self.notes.answered(req);
+        let asker = self.notes.answered(pc, req);
         if let Some(told) = note::answer(what, asker, outcome, self.texts()) {
             self.tell(told.note, told.toast, asker.on.is_some());
         }
@@ -994,10 +992,10 @@ impl Scene {
         self.tell_press(note, true);
     }
 
-    /// Request `req` got no answer and never will (`why`: no answer in time, the
-    /// connection broke): said under the button that asked.
-    fn given_up(&mut self, req: ReqId, why: ui::Failure) {
-        let on = self.notes.answered(req).on;
+    /// Request `req` of PC `pc` got no answer and never will (`why`: no answer in time,
+    /// the connection broke): said under the button that asked.
+    fn given_up(&mut self, pc: PcId, req: ReqId, why: ui::Failure) {
+        let on = self.notes.answered(pc, req).on;
         let note = Note::failure(on, why, "", self.texts());
         self.tell(note, true, on.is_some());
     }
@@ -1057,17 +1055,18 @@ impl Scene {
     )]
     fn expire_asks(&mut self) {
         let now = Instant::now();
-        for (req, _) in self.asks.expire(now) {
-            self.world.switch_given_up(req);
-            self.given_up(req, ui::Failure::TimedOut);
+        for (pc, req, _) in self.session.expire(now) {
+            self.world.switch_given_up(pc, req);
+            self.given_up(pc, req, ui::Failure::TimedOut);
         }
         self.notes.expire(now);
         self.world.switch_due(&self.settings, now);
         self.world_done();
     }
 
-    fn send(&mut self, msg: ClientMsg) {
-        let sent = self.feedback.as_ref().map(|f| f.send(msg));
+    /// Sends `msg` to PC `pc`; the menu says when it cannot.
+    fn send_to(&mut self, pc: PcId, msg: ClientMsg) {
+        let sent = self.outboxes.get(&pc).map(|f| f.send(msg));
         match sent {
             Some(Ok(())) => {}
             Some(Err(e)) => {
@@ -1133,19 +1132,26 @@ impl Scene {
         update_from: UpdateHint,
     ) -> UiState {
         let spots = self.world.map_spots();
+        let search = self.session.search();
         UiState {
-            host: self.host.clone(),
-            found: self
+            host: self.session.host().map(str::to_owned),
+            found: search
                 .found
                 .iter()
                 .map(|h| (h.name.clone(), h.addr.ip().to_string()))
                 .collect(),
             ip_input: self.ip_input.clone(),
-            pairing: self.pairing.clone(),
-            pair_offer: self.pair_offer.clone(),
-            unreachable: self.unreachable.clone(),
-            pc: self.pc.encoding.clone(),
-            limits: self.pc.limits.clone(),
+            pairing: match &search.attempt {
+                Some(Attempt::Pairing { view, .. }) => Some(view.clone()),
+                _ => None,
+            },
+            pair_offer: match &search.attempt {
+                Some(Attempt::PairOffer { label, why, .. }) => Some((label.clone(), *why)),
+                _ => None,
+            },
+            unreachable: search.unreachable.clone(),
+            pc: self.pc().encoding.clone(),
+            limits: self.pc().limits.clone(),
             can_move_mouse: self.can_move_mouse(),
             monitors: self
                 .world
@@ -1183,7 +1189,7 @@ impl Scene {
                 .filter(|id| self.monitors.contains_key(id))
                 .and_then(|id| spots.get(&id).copied()),
             mirror_wanted: self.mirror_wanted,
-            audio_wanted: self.audio_wanted,
+            audio_wanted: self.pc().sound.as_ref().is_none_or(|s| s.to_headset),
             mic_wanted: self.mic_wanted,
             mic_denied: self.mic_wanted && self.mic.denied(),
             mirror_name: self.physical_name(),
@@ -1206,7 +1212,12 @@ impl Scene {
                 .confirm_save
                 .filter(|(_, at)| at.elapsed() < CONFIRM_FOR)
                 .map(|(i, _)| i),
-            paired: self.paired.iter().map(|(_, n)| n.clone()).collect(),
+            paired: self
+                .session
+                .paired()
+                .iter()
+                .map(|p| p.name.clone())
+                .collect(),
             battery: self.headset_battery,
             clock: self.clock.clock.clone(),
             date: self.clock.date.clone(),
@@ -1219,7 +1230,7 @@ impl Scene {
             languages: self.lang.known().clone(),
             language_page: self.language_page,
             intro: !self.settings.intro_seen,
-            update: self.update_needed.clone(),
+            update: search.update.clone(),
             update_from,
             saved_profiles: self.profiles.each_ref().map(Option::is_some),
             active_profile: self.active_profile,
@@ -1366,7 +1377,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     info!("headset: {model:?}");
     if let Some(t) = test.as_deref_mut() {
         t.runtime(app, &instance, system, &available);
-        t.headset_caps(&headset_caps(&model));
+        t.headset_caps(&crate::device::headset_caps(&model));
     }
 
     let egl = egl::EglContext::new()?;
@@ -1495,8 +1506,6 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     );
     // A language chosen once whose file is gone is "like the PC" again.
     settings.language = crate::lang::kept(settings.language, lang.known());
-    // What the network thread was last told (it names a PC over USB).
-    let mut told_texts = lang.texts().clone();
 
     // The battery once now, for the first `Open`; from here on the system thread reads
     // it, away from the frame.
@@ -1504,41 +1513,21 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let system_thread = crate::system::System::start(lang_loader);
 
     let (net_tx, net_rx) = mpsc::channel();
-    let steering = net::Steering::default();
-    steering.set_texts(told_texts.clone());
-    // What the first `Open` says, before the network thread can connect.
-    steering.set_headset(headset_state(&settings, true, battery, &mic, &model));
-    // However this function ends, the network thread and its session end with it, and
-    // the thread is waited for (up to a second): a new start in the same process must
-    // not find this one's still connected to the PC.
-    struct StopNetwork(net::Steering, Option<JoinHandle<()>>);
-    impl Drop for StopNetwork {
-        fn drop(&mut self) {
-            self.0.shut_down();
-            if let Some(thread) = self.1.take() {
-                crate::system::join_within("net", thread, NET_STOPS_WITHIN);
-            }
-        }
-    }
     // A selftest connects to its fake PC and nothing else, never to a real PC.
     debug_assert!(test.is_none() || fake_pc.is_some());
-    let network = net::spawn(
+    // However this function ends, the network thread and its sessions end with it, and
+    // the thread is waited for (up to a second, see `Net`'s `Drop`): a new start in the
+    // same process must not find this one's still connected to the PC.
+    let network = net::Net::start(
+        net::Config::in_dir(&data_dir, external_dir.as_deref(), &model),
         net_tx,
-        net::Discovery {
-            identity_file: data_dir.join("identity"),
-            trust_file: data_dir.join("paired_hosts"),
-            host_file: external_dir.as_ref().map(|p| p.join("host.txt")),
-            last_host_file: data_dir.join("last_host"),
-            only: fake_pc,
-            name: model.clone(),
-        },
-        steering.clone(),
-        net::Sound {
+        Arc::new(crate::media::Sound {
             gains: gains.clone(),
             mic: mic.clone(),
-        },
-    );
-    let _stop_network = StopNetwork(steering.clone(), Some(network));
+        }),
+        // What the first `Open` says, before the core says more.
+        headset_state(&settings, true, battery, &mic, &model),
+    )?;
 
     // SAFETY: the VM pointer is valid for the life of the process.
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
@@ -1557,41 +1546,27 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         monitors: HashMap::new(),
         world,
         mirror_wanted: true,
-        audio_wanted: true,
         mic_wanted: settings.mic,
-        focus: None,
         scaling: None,
         presence: presence::Presence::new(),
         settings,
         panel_open: false,
         grabs: [None, None],
-        host: None,
-        found: Vec::new(),
         ip_input: None,
-        pairing: None,
-        pair_offer: None,
-        unreachable: None,
-        pc: PcState::default(),
-        asks: Asks::default(),
+        session: Session::new(session::MAX_PCS, fake_pc, Instant::now()),
+        outboxes: BTreeMap::new(),
         mic_permission: mic.permission(),
         mic,
         gains,
-        steering,
-        offline_since: Some(Instant::now()),
-        feedback: None,
         error: None,
         confirm_remove: None,
         confirm_save: None,
-        paired: Vec::new(),
-        trust_file: data_dir.join("paired_hosts"),
         confirm_forget: None,
         tab: tab_from_code(settings.last_tab),
-        update_needed: None,
         attach_for: None,
         selected: None,
         headset_battery: battery,
         model,
-        sound_from: None,
         refresh_due: false,
         worn_for: Duration::ZERO,
         off_since: None,
@@ -1602,6 +1577,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         notes: Notes::default(),
         press_in_menu: false,
         language_asked: false,
+        forgetting: None,
         head: (Vec3::ZERO, -Vec3::Z),
         head_right: Vec3::X,
         view_eye: None,
@@ -1655,8 +1631,12 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if let Some(t) = test.as_deref_mut() {
             t.loop_top();
         }
-        // What the last pass changed goes to the files' writer, however the pass ended.
+        // What the last pass changed goes to the files' writer, and what the core asked
+        // of the network to its thread, however the pass ended.
         scene.save_due();
+        for cmd in scene.session.take_cmds() {
+            network.send(cmd);
+        }
         let mut destroy = false;
         let mut paused = false;
         // Paused (true) or resumed (false), the last one of this pass.
@@ -1813,13 +1793,15 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 t.net_event(&event);
             }
             match event {
-                NetEvent::Command { req, asked } => {
-                    take_command(&mut scene, req, &asked, &mut passthrough, &mut controls);
+                NetEvent::Command { pc, req, asked } => {
+                    take_command(&mut scene, pc, req, &asked, &mut passthrough, &mut controls);
                 }
                 event => handle_net_event(&mut scene, &session, &vm, event),
             }
             scene.world_done();
         }
+        // The search goes on with or without frames (see `Session::tick`).
+        scene.session.tick(Instant::now());
         // Only the newest battery reading matters (several wait after a pause).
         let mut newest = None;
         while let Some(event) = system_thread.try_recv() {
@@ -1879,6 +1861,14 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 act => selftest_act = act,
             }
         }
+
+        // The core's time goes on with or without frames (the session not running, the
+        // headset off the head, nothing to render): requests time out, a placeholder
+        // goes, and the desktop's arrangement is told once it stood.
+        scene.expire_asks();
+        scene.adding_due();
+        scene.world.settle(Instant::now());
+        scene.world_done();
 
         if !session_running {
             continue;
@@ -1954,20 +1944,23 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
 
         // Pairing needs the menu, and so do the first-run tips: open it where the
         // user is looking.
-        let first_run =
-            (!scene.settings.intro_seen && scene.host.is_some()) || scene.update_needed.is_some();
-        if (scene.pairing.is_some() || scene.pair_offer.is_some() || first_run) && !scene.panel_open
-        {
+        let search = scene.session.search();
+        let first_run = (!scene.settings.intro_seen && scene.session.host().is_some())
+            || search.update.is_some();
+        let asking = matches!(
+            search.attempt,
+            Some(Attempt::Pairing { .. } | Attempt::PairOffer { .. })
+        );
+        if (asking || first_run) && !scene.panel_open {
             scene.open_panel(head, forward, hands_in_view);
         }
         // Without a PC there is nothing to see: show the connection screen.
         if !scene.panel_open
             && scene
-                .offline_since
-                .is_some_and(|t| t.elapsed() > Duration::from_secs(4))
+                .session
+                .offline_for(Instant::now(), Duration::from_secs(4))
         {
             scene.open_panel(head, forward, hands_in_view);
-            scene.offline_since = None;
         }
         // The left hand's menu gesture counts as the menu button.
         let gesture = match &hand_trackers {
@@ -2037,11 +2030,34 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     &mut controls,
                 );
             }
+            Act::AddMonitor(width, height) => {
+                let add = Action::Add { width, height };
+                handle_action(
+                    &mut scene,
+                    add,
+                    By::Elsewhere,
+                    &mut passthrough,
+                    &mut controls,
+                );
+            }
+            Act::RemoveMonitor(id) => {
+                // Pressed twice, as the menu asks to confirm.
+                if let Some(k) = scene.key(id) {
+                    for _ in 0..2 {
+                        let remove = Action::Remove(k);
+                        handle_action(
+                            &mut scene,
+                            remove,
+                            By::Elsewhere,
+                            &mut passthrough,
+                            &mut controls,
+                        );
+                    }
+                }
+            }
             Act::Nothing | Act::Finish => {}
         }
         scene.world.place_button(&scene.settings);
-        scene.expire_asks();
-        scene.adding_due();
         // The system may let the app record now, or not any more.
         if scene.mic.permission() != scene.mic_permission {
             scene.mic_changed();
@@ -2064,10 +2080,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             attach: scene.attach_for.map(|(id, _)| id),
         };
         let mut picks: [Option<Target>; 2] = std::array::from_fn(|h| {
-            let asks = &scene.asks;
+            let session = &scene.session;
             controls.state[h].ray.and_then(|r| {
                 scene.world.pick(r, &scene.settings, can, |k| {
-                    asks.waits(ui::Asked::Remove(k))
+                    session.waits(ui::Asked::Remove(k))
                 })
             })
         });
@@ -2460,18 +2476,6 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
             // Or a language file: listed again on the system thread.
             system_thread.list_languages();
-            // And paired with another PC.
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "the trusted PCs are read here until step 7.6 gives them to the network thread"
-            )]
-            let paired = prostir_proto::secure::TrustStore::load(&scene.trust_file);
-            scene.paired = paired.entries().to_vec();
-        }
-        // The network thread names a PC over USB in the menu's language.
-        if *scene.texts() != told_texts {
-            told_texts = scene.texts().clone();
-            scene.steering.set_texts(told_texts.clone());
         }
         panel_was_open = scene.panel_open;
         // A new toast: drawn once, placed where the user looks now.
@@ -2769,16 +2773,17 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // Keep the desktop's arrangement in step once nothing is being moved.
         scene.world.settle(Instant::now());
         scene.world_done();
-        let asks = &scene.asks;
+        let session = &scene.session;
         // Gone from view as soon as asked to go; back if the PC does not remove it. Far
         // to near, two at about one distance (a monitor glued over a row and that row)
         // in the order they had, so where they overlap never flickers.
         scene
             .world
-            .order_drawing(head, |k| asks.waits(ui::Asked::Remove(k)));
+            .order_drawing(head, |k| session.waits(ui::Asked::Remove(k)));
         // Focus mode: monitors without the mouse fade to a dim level (colour scale on
         // the compositor layer, no extra rendering).
-        scene.world.brighten(&scene.settings, dt, scene.focus);
+        let focus = scene.focus();
+        scene.world.brighten(&scene.settings, dt, focus);
         let curve = scene.world.curve_radius(&scene.settings);
         let order = scene.world.draw_list();
         let dims: Vec<xr::sys::CompositionLayerColorScaleBiasKHR> = order
@@ -2990,20 +2995,8 @@ fn take(world: &mut World, thing: Thing, hit: Hit, s: &Settings) -> Option<Grab>
         .map(|at| Grab::start(thing, hit.t, hit.local, &at))
 }
 
-/// What to tell the user about a connection that ended; nothing where there is
-/// nothing to say (the headset was off the head, or the PC already said why).
-fn disconnect_text(why: net::Disconnect) -> Option<&'static str> {
-    use prostir_proto::PcGoodbye;
-    Some(match why {
-        net::Disconnect::Goodbye(PcGoodbye::Quit) => "bye-pc-quit",
-        net::Disconnect::Goodbye(PcGoodbye::Forgotten) => "bye-forgotten",
-        net::Disconnect::Goodbye(PcGoodbye::Other) => "bye-pc-ended",
-        net::Disconnect::Silence => "bye-silence",
-        net::Disconnect::Goodbye(PcGoodbye::TakenOff | PcGoodbye::Replaced | PcGoodbye::Failed)
-        | net::Disconnect::Closed => return None,
-    })
-}
-
+/// What the network thread said: the handles it brings (a session's outbox, a stream's
+/// frames) stay here, the facts go to the core (`session`, `world`).
 #[expect(
     clippy::disallowed_methods,
     reason = "until step 7.7 passes the time in and moves the threads to the shell"
@@ -3014,33 +3007,80 @@ fn handle_net_event(
     vm: &jni::JavaVM,
     event: NetEvent,
 ) {
+    let now = Instant::now();
     match event {
+        NetEvent::Dialed { step, addr } => scene.session.dialed(step, addr),
+        NetEvent::Missed { step } => scene.session.missed(step, now),
+        NetEvent::Hosts(hosts) => scene.session.hosts(hosts),
+        NetEvent::Reached { step, pc, addr } => {
+            // Reached through pairing: said once.
+            let paired = match &scene.session.search().attempt {
+                Some(Attempt::Pairing { step: s, view, .. }) if *s == step => {
+                    Some(view.host.clone())
+                }
+                _ => None,
+            };
+            scene.session.reached(step, pc, addr, now);
+            if let Some(host) = paired {
+                let text = scene.texts().f("note-paired", &[("pc", host.into())]);
+                scene.tell(Note::done(None, &text), true, true);
+            }
+        }
+        NetEvent::PairOffer { key, addr, why } => {
+            let texts = scene.texts().clone();
+            scene.session.offered(key, addr, why, &texts);
+        }
+        NetEvent::Pairing {
+            step,
+            key,
+            addr,
+            code,
+        } => {
+            let texts = scene.texts().clone();
+            scene.session.pairing(step, key, addr, code, &texts);
+        }
+        NetEvent::PairingFailed => scene.session.pairing_failed(),
+        NetEvent::Incompatible { pc_newer, pc_app } => {
+            warn!("the PC runs Prostir {pc_app}: versions differ");
+            scene.session.incompatible(pc_newer, pc_app);
+        }
+        NetEvent::HostError(text) => scene.show_error(text),
+        NetEvent::Paired(list) => {
+            // A PC forgotten as asked: its places go, and the button says it.
+            if let Some(f) = scene
+                .forgetting
+                .take_if(|f| list.iter().all(|p| p.pc != f.pc))
+            {
+                scene.forget_pc(f.pc);
+                let text = scene
+                    .texts()
+                    .f("note-pc-forgotten", &[("pc", f.name.into())]);
+                scene.tell(Note::done(Some(f.on), &text), true, f.in_menu);
+            }
+            scene.session.paired_list(list);
+        }
+        NetEvent::ForgetFailed { pc, why } => {
+            if let Some(f) = scene.forgetting.take_if(|f| f.pc == pc) {
+                scene.tell(Note::failed(Some(f.on), &why), true, f.in_menu);
+            }
+        }
         NetEvent::Connected {
             pc,
             addr,
-            name,
             feedback,
             language,
             opened_with,
         } => {
-            info!("connected to {addr} ({name:?}), PC {pc}, language {language:?}");
+            info!("connected to {addr}, PC {pc}, language {language:?}");
+            let texts = scene.texts().clone();
+            scene.session.connected_to(pc, addr, &texts);
+            scene.outboxes.insert(pc, feedback);
             scene.world.connected(pc);
             if language.is_some() && language != scene.settings.pc_language {
                 scene.settings.pc_language = language;
                 scene.saves.mark(persist::File::Settings);
             }
-            let host = name.unwrap_or_else(|| {
-                if addr.ip().is_loopback() {
-                    scene.texts().t("pc-usb").to_owned()
-                } else {
-                    addr.ip().to_string()
-                }
-            });
-            scene.host = Some(host);
-            scene.feedback = Some(feedback);
-            scene.asks.new_session();
-            scene.notes.forget_requests();
-            scene.update_needed = None;
+            scene.notes.forget_requests(pc);
             // Whether the system lets the app record (the PC shows when it does not).
             scene.mic.refresh_permission();
             // What changed since `Open` went (it carried the state of that moment).
@@ -3055,55 +3095,53 @@ fn handle_net_event(
                 scene.tell_presence();
             }
             // Asleep already as the session opened (`Open` says only "not worn").
-            if scene.presence.state() == presence::State::Asleep
-                && let Some(f) = &scene.feedback
-            {
-                let _ = f.send(ClientMsg::Asleep);
+            if scene.presence.state() == presence::State::Asleep {
+                scene.tell_all(&ClientMsg::Asleep);
             }
-            scene.offline_since = None;
             scene.ip_input = None;
-            scene.unreachable = None;
         }
-        NetEvent::Hosts(hosts) => scene.found = hosts,
-        NetEvent::Unreachable(name) => scene.unreachable = name,
-        NetEvent::Part(part) => part_came(scene, part),
+        NetEvent::Part(pc, part) => part_came(scene, pc, part),
         // Taken in the frame loop, where the menu's actions are done (see `take_command`).
         NetEvent::Command { .. } => {}
-        NetEvent::Notice(text) => scene.show_toast(text),
-        NetEvent::Reply { req, outcome } => match (scene.answered(req, &outcome), outcome) {
-            (Some(ui::Asked::Profile(_)), Outcome::Failed { .. }) => scene.world.switch_to(None),
-            // Said by `answered`.
-            (None, _) | (_, Outcome::Failed { .. } | Outcome::Saved { .. }) => {}
-            (_, Outcome::Pointer { id, u, v }) => {
-                let f = |v: u16| f32::from(v) / 65535.0;
-                scene.finder = scene
-                    .key(id)
-                    .map(|k| (k, Vec2::new(f(u), f(v)), Instant::now()));
-            }
-            (Some(ui::Asked::Profile(slot)), Outcome::Ids { ids }) => {
-                if scene.world.switching_with(req) {
-                    // Switched to: the PC made its monitors (which it shows comes with
-                    // its list of displays). The menu is closed by now: a toast says it.
-                    scene.active_profile = Some(slot);
-                    let name = scene.profile_name(slot);
-                    let text = scene
-                        .texts()
-                        .f("toast-profile-switched", &[("name", name.into())]);
-                    let note = Note::done(Some(Action::ApplyProfile(slot)), &text);
-                    scene.tell(note, true, true);
-                    let keys = ids.into_iter().filter_map(|id| scene.key(id)).collect();
+        NetEvent::Notice(_, text) => scene.show_toast(text),
+        NetEvent::Reply { pc, req, outcome } => {
+            match (scene.answered(pc, req, &outcome), outcome) {
+                (Some(ui::Asked::Profile(_)), Outcome::Failed { .. }) => {
+                    scene.world.switch_to(None);
+                }
+                // Said by `answered`.
+                (None, _) | (_, Outcome::Failed { .. } | Outcome::Saved { .. }) => {}
+                (_, Outcome::Pointer { id, u, v }) => {
+                    let f = |v: u16| f32::from(v) / 65535.0;
+                    scene.finder = Some((DisplayKey::new(pc, id), Vec2::new(f(u), f(v)), now));
+                }
+                (Some(ui::Asked::Profile(slot)), Outcome::Ids { ids }) => {
+                    if scene.world.switching_with(pc, req) {
+                        // Switched to: the PC made its monitors (which it shows comes
+                        // with its list of displays). The menu is closed by now: a toast
+                        // says it.
+                        scene.active_profile = Some(slot);
+                        let name = scene.profile_name(slot);
+                        let text = scene
+                            .texts()
+                            .f("toast-profile-switched", &[("name", name.into())]);
+                        let note = Note::done(Some(Action::ApplyProfile(slot)), &text);
+                        scene.tell(note, true, true);
+                        let keys = ids.into_iter().map(|id| DisplayKey::new(pc, id)).collect();
+                        scene
+                            .world
+                            .profile_made(keys, &scene.settings, scene.head.1, now);
+                    }
+                }
+                (Some(ui::Asked::AddMonitor), Outcome::Added { id }) => {
                     scene
                         .world
-                        .profile_made(keys, &scene.settings, scene.head.1, Instant::now());
+                        .adding_made(pc, req, Some(DisplayKey::new(pc, id)));
                 }
+                (_, Outcome::Done | Outcome::Added { .. } | Outcome::Ids { .. }) => {}
             }
-            (Some(ui::Asked::AddMonitor), Outcome::Added { id }) => {
-                let key = scene.key(id);
-                scene.world.adding_made(req, key);
-            }
-            (_, Outcome::Done | Outcome::Added { .. } | Outcome::Ids { .. }) => {}
-        },
-        NetEvent::Problem { error, detail } => {
+        }
+        NetEvent::Problem { error, detail, .. } => {
             warn!("a problem on the PC (code {})", error.code());
             scene.show_error(detail);
         }
@@ -3111,6 +3149,7 @@ fn handle_net_event(
             name,
             size: (w, h),
             codec,
+            ..
         } => {
             let text = scene.texts().f(
                 "error-too-big",
@@ -3122,55 +3161,34 @@ fn handle_net_event(
             );
             scene.show_error(text);
         }
-        NetEvent::Pairing { host, code } => {
-            let failed = scene.pairing.as_ref().is_some_and(|p| p.failed);
-            scene.pairing = Some(ui::PairingView {
-                host,
-                code,
-                typed: String::new(),
-                failed,
-            });
-        }
-        NetEvent::PairingFailed => {
-            if let Some(p) = &mut scene.pairing {
-                p.failed = true;
-                p.typed.clear();
-            }
-        }
-        NetEvent::Paired => {
-            if let Some(p) = scene.pairing.take() {
-                let text = scene.texts().f("note-paired", &[("pc", p.host.into())]);
-                scene.tell(Note::done(None, &text), true, true);
-            }
-        }
-        NetEvent::PairOffer { host, why } => {
-            scene.pairing = None;
-            scene.pair_offer = Some((host, why));
-        }
-        NetEvent::Incompatible { pc_newer, pc_app } => {
-            warn!("the PC runs Prostir {pc_app}: versions differ");
-            scene.update_needed = Some((pc_newer, pc_app));
-        }
-        NetEvent::Disconnected { why } => {
+        NetEvent::Ended {
+            step,
+            pc,
+            why,
+            ended,
+            lasted,
+        } => {
+            let gone = scene.session.ended(step, pc, &ended, lasted, now);
+            let Some(pc) = pc else {
+                return;
+            };
             // What waited for an answer gets none, nor do the commands of that PC.
-            for (req, _) in scene.asks.disconnected() {
-                scene.given_up(req, ui::Failure::Disconnected);
+            for (req, _) in gone.waited {
+                scene.given_up(pc, req, ui::Failure::Disconnected);
             }
-            scene.notes.forget_requests();
-            scene.offline_since = Some(Instant::now());
-            scene.pairing = None;
-            scene.host = None;
-            scene.feedback = None;
+            scene.notes.forget_requests(pc);
+            scene.outboxes.remove(&pc);
             // The next session's list is news, not displays removed.
-            scene.world.disconnected();
-            scene.pc = PcState::default();
-            if let Some(id) = disconnect_text(why) {
+            scene.world.disconnected(pc);
+            if ended.opened
+                && let Some(id) = session::disconnect_text(why)
+            {
                 let note = Note::info(scene.texts().t(id));
                 scene.tell(note, true, true);
             }
         }
-        NetEvent::HostError(text) => scene.show_error(text),
         NetEvent::StreamStart {
+            pc,
             id,
             generation,
             width,
@@ -3180,10 +3198,7 @@ fn handle_net_event(
             feedback,
         } => {
             let stream = decoder::Stream { id, generation };
-            let Some(id) = scene.key(id) else {
-                warn!("a stream of {id} before the session");
-                return;
-            };
+            let id = DisplayKey::new(pc, id);
             scene.monitors.remove(&id);
             match xrutil::create_surface_swapchain(session, vm, width, height) {
                 Ok((swapchain, window)) => {
@@ -3213,7 +3228,7 @@ fn handle_net_event(
                         (width, height),
                         &scene.settings,
                         scene.head,
-                        Instant::now(),
+                        now,
                     );
                 }
                 Err(e) => {
@@ -3223,75 +3238,57 @@ fn handle_net_event(
             }
         }
         // The stream stopped; the display keeps its place (only the list says it is gone).
-        NetEvent::StreamEnd { id } => {
-            if let Some(k) = scene.key(id) {
-                scene.monitors.remove(&k);
-                scene.world.stream_ended(k);
-            }
+        NetEvent::StreamEnd { pc, id } => {
+            let k = DisplayKey::new(pc, id);
+            scene.monitors.remove(&k);
+            scene.world.stream_ended(k);
         }
     }
 }
 
-/// The PC listed its displays anew (see `World::listed`): the displays gone end their
+/// PC `pc` listed its displays anew (see `World::listed`): the displays gone end their
 /// streams, and the switch of the PC's own displays shows how it stands.
 #[expect(
     clippy::disallowed_methods,
     reason = "until step 7.7 passes the time in and moves the threads to the shell"
 )]
-fn displays_changed(scene: &mut Scene) {
-    let Some(displays) = scene.pc.displays.as_ref() else {
+fn displays_changed(scene: &mut Scene, pc: PcId) {
+    let Some(displays) = scene.session.pc(pc).and_then(|p| p.state.displays.as_ref()) else {
         return;
     };
-    if scene.world.pc().is_none() {
-        return;
-    }
     // As the switch says: its display shown; with none connected, any one kept shown.
-    scene.mirror_wanted = physical::switch(displays).map_or_else(
-        || {
-            displays
-                .displays
-                .iter()
-                .any(state::Display::is_shown_physical)
-        },
-        state::Display::is_shown_physical,
-    );
+    if scene.session.main() == Some(pc) {
+        scene.mirror_wanted = physical::switch(displays).map_or_else(
+            || {
+                displays
+                    .displays
+                    .iter()
+                    .any(state::Display::is_shown_physical)
+            },
+            state::Display::is_shown_physical,
+        );
+    }
     let gone = scene
         .world
-        .listed(displays, &scene.settings, scene.head, Instant::now());
+        .listed(pc, displays, &scene.settings, scene.head, Instant::now());
     for id in gone {
         scene.monitors.remove(id);
     }
 }
 
-/// A part of the PC's state came: kept, and what follows from it done.
-fn part_came(scene: &mut Scene, part: prostir_proto::HostMsg) {
+/// A part of PC `pc`'s state came: kept, and what follows from it done.
+fn part_came(scene: &mut Scene, pc: PcId, part: prostir_proto::HostMsg) {
     use prostir_proto::HostMsg as M;
-    let follow = match &part {
-        M::Displays { .. } => Some(true),
-        M::Sound { part } => {
-            scene.audio_wanted = part.to_headset;
-            None
-        }
-        M::Focus { part } => {
-            scene.focus = part.display.and_then(|id| scene.key(id));
-            None
-        }
-        M::SoundFrom { part } => {
-            scene.sound_from = part.display.and_then(|id| scene.key(id));
-            None
-        }
-        M::HostCaps { part } => {
-            info!("the PC can: {:?}", part.features);
-            None
-        }
-        _ => None,
-    };
+    let listed = matches!(part, M::Displays { .. });
+    if let M::HostCaps { part } = &part {
+        info!("the PC can: {:?}", part.features);
+    }
     // Checked by the network thread already: a part of the PC's state.
-    if let Err(e) = scene.pc.apply(part) {
+    if let Err(e) = scene.session.part(pc, part) {
         warn!("a part of the PC's state: {e}");
     }
-    if follow.is_some() {
-        displays_changed(scene);
+    if listed {
+        displays_changed(scene, pc);
     }
 }
 
@@ -3319,7 +3316,7 @@ fn headset_state(
 ) -> HeadsetState {
     let mic = mic_state(settings, mic);
     HeadsetState {
-        caps: Some(headset_caps(model)),
+        caps: Some(crate::device::headset_caps(model)),
         prefs: Some(prefs_of(settings)),
         presence: Some(Presence { worn }),
         battery: battery.map(|(percent, charging)| Battery { percent, charging }),
@@ -3338,37 +3335,12 @@ fn mic_state(settings: &Settings, mic: &Mic) -> state::UpState {
     }
 }
 
-/// What this headset can do, for the PC: the displays it shows, the codecs it decodes
-/// and how large (for now fixed: H.264 up to 4K, HEVC up to 8K), how many streams and
-/// compositor layers at once; and its model, as the system names it.
-fn headset_caps(model: &str) -> HeadsetCaps {
-    let decoder = |codec: Codec, max_w, max_h| state::Decoder {
-        codec: prostir_proto::wire::encode(&codec).map_or(0, |b| b[0]),
-        max_w,
-        max_h,
-    };
-    HeadsetCaps {
-        features: vec![
-            caps::headset::PHYSICAL,
-            caps::headset::WINDOWS,
-            caps::headset::COMMANDS,
-            caps::headset::MIC,
-        ],
-        decoders: vec![
-            decoder(Codec::H264, 4096, 4096),
-            decoder(Codec::H265, 8192, 4320),
-        ],
-        streams_max: 16,
-        layers_max: 16,
-        model: model.to_owned(),
-    }
-}
-
 /// Does what the PC asks (its tray, later `prostir ctl` and hotkeys), as the menu would
 /// (see `commands`), and answers it once: after the parts it changed (`Prefs`), and for
 /// a profile once the PC answered the profile's own request.
 fn take_command(
     scene: &mut Scene,
+    pc: PcId,
     req: ReqId,
     asked: &Asked<Command>,
     passthrough: &mut Option<passthrough::Passthrough>,
@@ -3386,7 +3358,8 @@ fn take_command(
             Outcome::failed(ErrorCode::NO_SUCH_PROFILE, &(i + 1).to_string())
         }
         Does::Profile(i) => {
-            let before = scene.asks.last();
+            let last = |scene: &Scene| scene.session.pc(pc).map(|p| p.asks.last());
+            let before = last(scene);
             handle_action(
                 scene,
                 Action::ApplyProfile(i),
@@ -3394,9 +3367,12 @@ fn take_command(
                 passthrough,
                 controls,
             );
-            if scene.asks.last() > before {
+            let after = last(scene);
+            if let Some(after) = after.filter(|a| Some(*a) > before)
+                && let Some(p) = scene.session.pc_mut(pc)
+            {
                 // Answered with the PC's answer to the profile's monitors.
-                scene.asks.answer_command_after(scene.asks.last(), req);
+                p.asks.answer_command_after(after, req);
                 return;
             }
             Outcome::failed(ErrorCode::OTHER, "no connection")
@@ -3413,7 +3389,7 @@ fn take_command(
         }
         Does::Fail(code, detail) => Outcome::failed(code, &detail),
     };
-    scene.send(ClientMsg::Reply { req, outcome });
+    scene.send_to(pc, ClientMsg::Reply { req, outcome });
 }
 
 /// Passthrough cameras on only for the "room" background.
@@ -3434,6 +3410,15 @@ fn set_passthrough(scene: &mut Scene, passthrough: &mut Option<passthrough::Pass
             .f("error-cameras", &[("error", format!("{e:#}").into())]);
         scene.show_error(text);
     }
+}
+
+/// A PC the user asked to forget, and the press that asked it.
+struct Forgetting {
+    pc: PcId,
+    /// As the list of trusted PCs names it.
+    name: String,
+    on: Action,
+    in_menu: bool,
 }
 
 /// Where a press comes from.
@@ -3625,9 +3610,6 @@ fn handle_action(
             scene.settings.sound_from_screen = on;
             scene.saves.mark(persist::File::Settings);
             scene.prefs_changed();
-            if !on {
-                scene.sound_from = None;
-            }
         }
         Action::Notifications(on) => {
             scene.settings.notifications = on;
@@ -3686,7 +3668,12 @@ fn handle_action(
             scene.tell_press(note, false);
         }
         Action::SetAudio(enabled) => {
-            scene.audio_wanted = enabled;
+            // Shown at once; the PC confirms (or corrects) with its `Sound`.
+            if let Some(p) = scene.session.main().and_then(|pc| scene.session.pc_mut(pc))
+                && let Some(sound) = &mut p.state.sound
+            {
+                sound.to_headset = enabled;
+            }
             scene.request(
                 Request::SetSound {
                     to_headset: enabled,
@@ -3743,10 +3730,14 @@ fn handle_action(
             );
             // Placed once the PC answers with its monitors' numbers. Cinema, the
             // background, the curve and the preset are not the profile's: they stay.
-            scene.world.switch_to(req.map(|req| ProfileSwitch {
-                frame: p.frame,
-                rows: p.rows,
-                ..ProfileSwitch::new(req, p.places)
+            let pc = scene.session.main();
+            scene.world.switch_to(pc.zip(req).map(|(pc, req)| {
+                let switch = ProfileSwitch {
+                    frame: p.frame,
+                    rows: p.rows,
+                    ..ProfileSwitch::new(req, p.places)
+                };
+                (pc, switch)
             }));
             // The monitors changing is the answer: the menu gets out of the way.
             scene.panel_open = false;
@@ -3786,38 +3777,31 @@ fn handle_action(
                 .is_some_and(|(c, at)| c == i && at.elapsed() < CONFIRM_FOR);
             if !confirmed {
                 scene.confirm_forget = Some((i, Instant::now()));
-            } else if let Some((key, name)) = scene.paired.get(i).cloned() {
+            } else if let Some(pc) = scene.session.paired().get(i).map(|p| p.pc) {
                 scene.confirm_forget = None;
-                #[expect(
-                    clippy::disallowed_methods,
-                    reason = "the trusted PCs are read here until step 7.6 gives them to the network thread"
-                )]
-                let mut store = prostir_proto::secure::TrustStore::load(&scene.trust_file);
-                match store.remove(&key) {
-                    Ok(()) => {
-                        info!("forgot PC {name:?}");
-                        let pc = PcId::of(&key);
-                        scene.forget_pc(pc);
-                        scene.steering.trust_changed();
-                        // Connected to it (by its key, not its name: two PCs may share
-                        // one): leave, and do not come back on our own.
-                        if scene.world.pc() == Some(pc) && scene.feedback.is_some() {
-                            scene.steering.forget_current();
-                        }
-                        let text = scene.texts().f("note-pc-forgotten", &[("pc", name.into())]);
-                        scene.tell_press(Note::done(Some(action), &text), true);
-                    }
-                    Err(e) => {
-                        warn!("{e}");
-                        scene.tell_press(Note::failed(Some(action), &e.to_string()), true);
-                    }
-                }
-                scene.paired = store.entries().to_vec();
+                info!("forgetting PC {pc}");
+                // The network thread leaves it if connected (by its key, not its name:
+                // two PCs may share one), drops it and says the new list; the places of
+                // its displays go once it did (see `NetEvent::Paired`), and the button
+                // says how it went then.
+                let name = scene.session.paired().get(i).map(|p| p.name.clone());
+                scene.session.forget(pc);
+                scene.forgetting = Some(Forgetting {
+                    pc,
+                    name: name.unwrap_or_default(),
+                    on: action,
+                    in_menu: scene.press_in_menu,
+                });
             }
         }
         Action::SetEncoding(change) => {
             // Shown at once; the PC confirms (or corrects) with its `Encoding`.
-            if let Some(pc) = &mut scene.pc.encoding {
+            if let Some(pc) = scene
+                .session
+                .main()
+                .and_then(|pc| scene.session.pc_mut(pc))
+                .and_then(|p| p.state.encoding.as_mut())
+            {
                 let w = &mut pc.wanted;
                 w.bitrate = change.bitrate.unwrap_or(w.bitrate);
                 w.codec = change.codec.or(w.codec);
@@ -3839,38 +3823,33 @@ fn handle_action(
             scene.saves.mark(persist::File::Settings);
         }
         Action::ConnectTo(i) => {
-            if let Some(h) = scene.found.get(i) {
-                scene.steering.connect_to(h.addr);
+            if let Some(addr) = scene.session.search().found.get(i).map(|h| h.addr) {
+                scene.session.connect_to(addr, Instant::now());
             }
         }
         Action::ShowKeypad => scene.ip_input = Some(String::new()),
-        Action::Key(c) if scene.pairing.is_some() => {
-            if let Some(p) = &mut scene.pairing
+        Action::Key(c) if scene.session.pairing_mut().is_some() => {
+            if let Some(p) = scene.session.pairing_mut()
                 && p.typed.len() < 6
                 && c.is_ascii_digit()
             {
                 p.typed.push(c);
             }
         }
-        Action::Backspace if scene.pairing.is_some() => {
-            if let Some(p) = &mut scene.pairing {
+        Action::Backspace if scene.session.pairing_mut().is_some() => {
+            if let Some(p) = scene.session.pairing_mut() {
                 p.typed.pop();
             }
         }
-        Action::ConnectTyped if scene.pairing.is_some() => {
-            if let Some(p) = &mut scene.pairing {
-                scene.steering.submit_code(std::mem::take(&mut p.typed));
+        Action::ConnectTyped if scene.session.pairing_mut().is_some() => {
+            if let Some(p) = scene.session.pairing_mut() {
+                let code = std::mem::take(&mut p.typed);
                 p.failed = false;
+                scene.session.submit_code(code);
             }
         }
-        Action::PairAnswer(pair) => {
-            scene.steering.answer_offer(pair);
-            scene.pair_offer = None;
-        }
-        Action::PairOtherWay => {
-            scene.steering.switch_pairing_side();
-            scene.pairing = None;
-        }
+        Action::PairAnswer(pair) => scene.session.answer_offer(pair, Instant::now()),
+        Action::PairOtherWay => scene.session.switch_pairing_side(),
         Action::Key(c) => {
             if let Some(t) = &mut scene.ip_input
                 && t.len() < 21
@@ -3885,9 +3864,9 @@ fn handle_action(
         }
         Action::ConnectTyped => {
             let typed = scene.ip_input.clone().unwrap_or_default();
-            match net::parse_addr(&typed) {
+            match net::discovery::parse_addr(&typed) {
                 Some(addr) => {
-                    scene.steering.connect_to(addr);
+                    scene.session.connect_to(addr, Instant::now());
                     scene.ip_input = None;
                 }
                 None => {
@@ -3897,7 +3876,7 @@ fn handle_action(
             }
         }
         Action::CancelKeypad => scene.ip_input = None,
-        Action::ChangeHost => scene.steering.change_host(),
+        Action::ChangeHost => scene.session.change_pc(),
         Action::Close => {
             scene.panel_open = false;
             // Closing the tips counts as read, or they would open again right away.
@@ -3919,7 +3898,7 @@ mod no_selftest {
 
     use android_activity::AndroidApp;
     use openxr as xr;
-    use prostir_proto::state::HeadsetCaps;
+    use prostir_proto::state::{DisplayId, HeadsetCaps};
 
     use crate::net::NetEvent;
 
@@ -3937,6 +3916,8 @@ mod no_selftest {
         OpenMenu,
         SwitchTab,
         CloseMenu,
+        AddMonitor(u32, u32),
+        RemoveMonitor(DisplayId),
         Finish,
     }
 
