@@ -416,10 +416,18 @@ fn the_system_menu_ends_a_drag_with_one_save() {
     step(&mut sim, &mut hands, &mut right, Vec3::new(0.2, -0.3, 0.0));
     let moved = sim.m.world().placement(k(1)).copied();
     sim.saves();
+    // The shell lets go (on the system menu, the recenter, other controllers) while
+    // the hands are busy.
+    assert!(hands.busy());
     // The system menu.
     hands.cancel_all(&mut sim.m);
+    assert!(!hands.busy());
     assert!(!sim.m.world().holding());
     assert_eq!(sim.saves(), [persist::File::Desk]);
+    // Once more, with nothing held (the system's recenter, another profile of
+    // controllers): nothing to save.
+    hands.cancel_all(&mut sim.m);
+    assert_eq!(sim.saves(), []);
     step(&mut sim, &mut hands, &mut right, Vec3::new(0.5, -0.3, 0.0));
     assert_eq!(
         sim.m.world().placement(k(1)).copied(),

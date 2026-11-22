@@ -35,12 +35,17 @@ const NAMES: &[&str] = &[
     "pico",
     "vive",
     "htc",
+    "bytedance",
+    "samsung",
+    "valve",
+    "steamvr",
 ];
 
 /// The folders looked through, from the crate's own.
-const LOOKED_AT: &[&str] = &["src", "assets"];
+const LOOKED_AT: &[&str] = &["src", "assets", "lang", "tests"];
 
-/// The allowed places: (path, word); a path ending in `/` stands for all below it.
+/// The allowed places: (path, word); a path ending in `/` stands for all below it, the
+/// word `*` for every name.
 fn allowed(root: &Path) -> Vec<(String, String)> {
     let text =
         std::fs::read_to_string(root.join("neutrality-allow.txt")).expect("neutrality-allow.txt");
@@ -114,7 +119,8 @@ fn no_desktop_maker_or_store_outside_their_places() {
                     continue;
                 }
                 let place = allowed.iter().position(|(p, w)| {
-                    *w == word && (rel == *p || (p.ends_with('/') && rel.starts_with(p.as_str())))
+                    (*w == word || w == "*")
+                        && (rel == *p || (p.ends_with('/') && rel.starts_with(p.as_str())))
                 });
                 match place {
                     Some(i) => {

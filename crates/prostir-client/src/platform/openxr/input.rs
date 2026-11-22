@@ -25,6 +25,11 @@ pub struct Controls {
     pinch_ready: xr::Action<bool>,
     /// The profiles of tracked hands bound (see `controllers::Profile::hands`).
     hand_profiles: Vec<xr::Path>,
+    /// `khr/simple_controller`, when bound: a runtime may give tracked hands as that
+    /// profile, its menu click then being the system's own menu gesture.
+    simple_profile: Option<xr::Path>,
+    /// Each side's hand joints were tracked this frame.
+    joints_seen: [bool; 2],
     /// Which sides are currently driven by tracked hands rather than controllers.
     tracked_hands: [bool; 2],
     /// Last reported profile per side, to log changes.
@@ -56,13 +61,16 @@ impl Controls {
         let thumbstick =
             set.create_action::<xr::Vector2f>("adjust", "Distance and size", &hands)?;
         let haptic = set.create_action::<xr::Haptic>("haptic", "Haptic", &hands)?;
-        let menu = set.create_action::<bool>("menu", "Menu", &[])?;
+        // For each hand, so a hand whose "button" is the system's own gesture can be
+        // left out (see `menu_pressed`).
+        let menu = set.create_action::<bool>("menu", "Menu", &hands)?;
         let pinch_ready =
             set.create_action::<bool>("pinch_ready", "Hand ready to pinch", &hands)?;
         let align = set.create_action::<bool>("align", "Align monitors", &[])?;
         // Each profile of the table the runtime can have; one it refuses (an input it
         // does not know) is left out, the others still bound.
         let mut hand_profiles = Vec::new();
+        let mut simple_profile = None;
         let mut suggested = 0;
         for profile in controllers::PROFILES {
             if !has(exts, profile.needs) {
@@ -91,6 +99,9 @@ impl Controls {
                     if profile.hands {
                         hand_profiles.push(path);
                     }
+                    if profile.path == controllers::SIMPLE {
+                        simple_profile = Some(path);
+                    }
                 }
                 Err(e) => warn!("controllers {}: {e}", profile.path),
             }
@@ -117,6 +128,8 @@ impl Controls {
             align,
             pinch_ready,
             hand_profiles,
+            simple_profile,
+            joints_seen: [false; 2],
             tracked_hands: [false; 2],
             last_profile: [None; 2],
             joint_hands: [false; 2],
@@ -163,6 +176,7 @@ impl Controls {
         const INDEX_TIP: usize = 10;
         #[allow(clippy::needless_range_loop)] // `hand` indexes several per-side arrays
         for hand in 0..2 {
+            self.joints_seen[hand] = joints[hand].is_some();
             let use_joints = !self.tracked_hands[hand] && joints[hand].is_some();
             if use_joints != self.joint_hands[hand] {
                 info!(
@@ -279,12 +293,23 @@ impl Controls {
         Ok(changed)
     }
 
+    /// The menu button pressed this frame, on a side with a controller in it. A side
+    /// worked out from the joints, or one the runtime gives as the simple controller
+    /// while its hand's joints are tracked, is left out: its menu click is the system's
+    /// own menu gesture, which would open the menu and the system would close it again.
+    /// Call after `hands_from_joints`.
     pub fn menu_pressed(&self, session: &xr::Session<Gfx>) -> bool {
-        pressed_now(&self.menu, session)
+        (0..2).any(|hand| {
+            let gesture = self.joint_hands[hand]
+                || (self.joints_seen[hand]
+                    && self.simple_profile.is_some()
+                    && self.last_profile[hand] == self.simple_profile);
+            !gesture && pressed_now(&self.menu, session, self.hands[hand])
+        })
     }
 
     pub fn align_pressed(&self, session: &xr::Session<Gfx>) -> bool {
-        pressed_now(&self.align, session)
+        pressed_now(&self.align, session, xr::Path::NULL)
     }
 
     pub fn pulse(&self, session: &xr::Session<Gfx>, hand: usize) {
@@ -298,8 +323,9 @@ impl Controls {
     }
 }
 
-fn pressed_now(action: &xr::Action<bool>, session: &xr::Session<Gfx>) -> bool {
+/// `action` pressed since the last sync, on the hand `side` (`NULL`: either).
+fn pressed_now(action: &xr::Action<bool>, session: &xr::Session<Gfx>, side: xr::Path) -> bool {
     action
-        .state(session, xr::Path::NULL)
+        .state(session, side)
         .is_ok_and(|s| s.is_active && s.changed_since_last_sync && s.current_state)
 }

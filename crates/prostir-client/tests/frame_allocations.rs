@@ -4,7 +4,10 @@
 //! allocations. A quiet frame, a ray on a monitor or on the menu, and a drag of a
 //! monitor with the menu closed or open allocate nothing; the menu's state is made
 //! anew only when what it shows changed.
-
+//!
+//! On the desktop only: the app built for Android has its own counting allocator, and
+//! a program has one.
+#![cfg(not(target_os = "android"))]
 #![expect(
     clippy::disallowed_methods,
     reason = "the test's own starting time; the code under test takes the time as a parameter"

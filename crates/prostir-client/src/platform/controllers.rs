@@ -95,11 +95,15 @@ const fn right(path: &'static str, role: Role) -> Input {
     }
 }
 
+/// Any runtime's controller: a ray, a click, a menu button. A runtime may give tracked
+/// hands as this one too (see `platform::openxr::input`).
+pub const SIMPLE: &str = "/interaction_profiles/khr/simple_controller";
+
 /// The profiles the app suggests, each with its inputs.
 pub const PROFILES: &[Profile] = &[
     // Any runtime: a ray, a click, a menu button.
     Profile {
-        path: "/interaction_profiles/khr/simple_controller",
+        path: SIMPLE,
         needs: Needs::Core,
         hands: false,
         inputs: &[

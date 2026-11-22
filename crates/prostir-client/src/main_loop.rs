@@ -540,7 +540,12 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let model = android::model();
     info!("headset: {model:?}");
     if let Some(t) = test.as_deref_mut() {
-        t.runtime(&instance, &available, minimal);
+        t.runtime(
+            &instance,
+            &available,
+            minimal,
+            exts.fb_composition_layer_image_layout,
+        );
     }
 
     let egl = egl::EglContext::new()?;
@@ -911,8 +916,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     );
                     if space == xr::ReferenceSpaceType::LOCAL {
                         // A drag cannot go on with the room moving under it.
-                        hands.cancel_all(&mut shell.model);
-                        shell.apply(now);
+                        if hands.busy() {
+                            hands.cancel_all(&mut shell.model);
+                            shell.apply(now);
+                        }
                         shell.handle(now, Event::Platform(PlatformEvent::SpaceMoved));
                     }
                 }
@@ -955,7 +962,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     if let Some(hz) = meta::display_rate(&session) {
                         shell.handle(now, Event::Platform(PlatformEvent::RefreshRate(hz)));
                     }
-                    shell.controls.refresh_profiles(&session);
+                    if shell.controls.refresh_profiles(&session) && hands.busy() {
+                        hands.cancel_all(&mut shell.model);
+                        shell.apply(now);
+                    }
                 }
                 xr::Event::UserPresenceChangedEXT(e) => {
                     let present = e.is_user_present();
@@ -1723,7 +1733,7 @@ mod no_selftest {
             match *self {}
         }
 
-        pub fn runtime(&self, _: &xr::Instance, _: &xr::ExtensionSet, _: bool) {
+        pub fn runtime(&self, _: &xr::Instance, _: &xr::ExtensionSet, _: bool, _: bool) {
             match *self {}
         }
 

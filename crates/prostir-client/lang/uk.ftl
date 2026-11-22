@@ -218,10 +218,10 @@ palm-menu = Меню на долоні
 palm-menu-left = На лівій руці
 palm-menu-right = На правій руці
 display-rate = Частота екрана шолома
-display-rate-normal = { $hz } Hz
-display-rate-saver = { $hz } Hz, довше від заряду
-display-rate-note = Відео йде 60 кадрів на секунду, тож { $hz } Hz його не обрізає.
-display-rate-now = Зараз екран показує { $hz } Hz.
+display-rate-normal = { $hz } Гц
+display-rate-saver = { $hz } Гц, довше від заряду
+display-rate-note = Відео йде 60 кадрів на секунду, тож { $hz } Гц його не обрізає.
+display-rate-now = Зараз екран показує { $hz } Гц.
 menu-button = Кругла кнопка меню біля монітора
 
 ## Налаштування: звук

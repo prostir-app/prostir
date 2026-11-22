@@ -91,7 +91,9 @@ const KEYS: &[&str] = &[
     "extensions",
     "caps",
     "caps.off",
+    "flip",
     "decoders",
+    "decoders.said",
     "streams_max",
     "layers_max",
     "volume_steps",
@@ -725,7 +727,11 @@ impl Selftest {
         instance: &xr::Instance,
         available: &xr::ExtensionSet,
         minimal: bool,
+        flip: bool,
     ) {
+        // Whether the stream's picture is turned over by the runtime's extension, or
+        // shown as the surface keeps it (rows top down).
+        self.report.set("flip", if flip { "ext" } else { "none" });
         if let Ok(p) = instance.properties() {
             self.report.set(
                 "runtime",
@@ -750,12 +756,17 @@ impl Selftest {
         let missing = caps.missing();
         r.set("caps", if self.minimal { "minimal" } else { &missing });
         r.set("caps.off", missing);
-        let decoders: Vec<String> = caps
-            .decoders
-            .iter()
-            .map(|d| format!("{}:{}x{}", codec_name(d.codec), d.max_w, d.max_h))
-            .collect();
-        r.set("decoders", decoders.join(","));
+        let list = |decoders: &[crate::caps::Decoder]| -> String {
+            let each: Vec<String> = decoders
+                .iter()
+                .map(|d| format!("{}:{}x{}", codec_name(d.codec), d.max_w, d.max_h))
+                .collect();
+            each.join(",")
+        };
+        // As told to the PC (decoding at 60 frames a second), and as the system's
+        // ranges said.
+        r.set("decoders", list(&caps.decoders));
+        r.set("decoders.said", list(&caps.decoders_said));
         r.set("streams_max", caps.streams_max);
         r.set("layers_max", caps.layers_max);
         match caps.volume_steps {

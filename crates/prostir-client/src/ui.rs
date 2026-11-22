@@ -3493,27 +3493,30 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
             ),
         ],
     );
-    segmented(
-        items,
-        lx,
-        lw,
-        &mut y,
-        l.t("palm-menu"),
-        vec![
-            (
-                l.t("palm-menu-left"),
-                Action::LeftHanded(false),
-                !st.left_handed,
-                true,
-            ),
-            (
-                l.t("palm-menu-right"),
-                Action::LeftHanded(true),
-                st.left_handed,
-                true,
-            ),
-        ],
-    );
+    // The palm menu needs tracked hands.
+    if s.hands_available {
+        segmented(
+            items,
+            lx,
+            lw,
+            &mut y,
+            l.t("palm-menu"),
+            vec![
+                (
+                    l.t("palm-menu-left"),
+                    Action::LeftHanded(false),
+                    !st.left_handed,
+                    true,
+                ),
+                (
+                    l.t("palm-menu-right"),
+                    Action::LeftHanded(true),
+                    st.left_handed,
+                    true,
+                ),
+            ],
+        );
+    }
     // The rates the runtime offers, by the rule; none to choose from: hidden.
     if let Some((usual, saver)) = s.display_rates {
         let usual_text = l.f("display-rate-normal", &[("hz", usual.into())]);
