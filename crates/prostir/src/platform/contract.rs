@@ -686,6 +686,8 @@ mod windows_shape {
             input: Input {
                 source: "appsrc name=src".into(),
                 label: "Prostir-1".into(),
+                frame_rate: None,
+                live: false,
             },
             origin: Origin::Monitor,
             memory: Memory::D3D11 { adapter: gpu },
@@ -696,6 +698,8 @@ mod windows_shape {
             input: Input {
                 source: "d3d11screencapturesrc capture-api=dxgi".into(),
                 label: "DISPLAY1".into(),
+                frame_rate: None,
+                live: false,
             },
             origin: Origin::Capture,
             memory: Memory::D3D11 { adapter: gpu },
