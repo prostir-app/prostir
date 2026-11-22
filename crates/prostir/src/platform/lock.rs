@@ -112,4 +112,57 @@ mod tests {
         drop(serve);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// A program started while the lock is held shares it until its exec: the lock
+    /// let go of meanwhile is free at once, for anyone to take.
+    #[test]
+    fn let_go_while_a_starting_program_shares_it() {
+        use std::io::Read;
+        use std::os::fd::FromRawFd;
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("prostir-lock-fork-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("prostir.lock");
+        let held = take(&path, "watcher").unwrap();
+        // The child says it runs (before its exec, with the lock's file) on a pipe.
+        let mut fds = [0; 2];
+        // SAFETY: pipe2 fills the two descriptors, owned right below.
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        // SAFETY: new descriptors nothing else owns.
+        let (mut said, says) = unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                std::fs::File::from_raw_fd(fds[1]),
+            )
+        };
+        let says_fd = says.as_raw_fd();
+        let starting = std::thread::spawn(move || {
+            let mut cmd = Command::new("true");
+            // SAFETY: the child only writes to a pipe and sleeps (async-signal-safe).
+            unsafe {
+                cmd.pre_exec(move || {
+                    libc::write(says_fd, b"x".as_ptr().cast(), 1);
+                    let half = libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 500_000_000,
+                    };
+                    libc::nanosleep(&raw const half, std::ptr::null_mut());
+                    Ok(())
+                });
+            }
+            cmd.status().unwrap()
+        });
+        let mut byte = [0];
+        said.read_exact(&mut byte).unwrap();
+        // The child holds a copy of the lock's file now, for half a second.
+        drop(held);
+        assert_eq!(holder(&path, "watcher"), None, "let go");
+        let serve = take(&path, "serve").unwrap();
+        assert_eq!(holder(&path, "serve"), Some(std::process::id()));
+        drop(serve);
+        assert!(starting.join().unwrap().success());
+        drop(says);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
