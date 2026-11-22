@@ -16,8 +16,8 @@
 //!   device stays ready.
 //! - A program that leaves when idle waits for a headset without its `adb reverse`
 //!   only for a minute after it came or its state changed (its owner allows USB
-//!   debugging then, or not today): then it may leave, and the retries rest until the
-//!   next event of a device.
+//!   debugging then, or not today): then it may leave. A failed reverse is tried
+//!   again as above all the while, in a Prostir that stays too.
 //! - Without the kernel's events (no netlink), `/sys` is looked at every 10 s instead.
 //!   Without adb, nothing runs at all.
 
@@ -438,8 +438,7 @@ impl Follow {
             self.waiting
                 .store(plugged && reversed.is_empty() && patient, Ordering::Relaxed);
             let deadline = [
-                // The retries rest once nothing is waited for, until the next event.
-                retry.filter(|_| patient).map(|(at, _)| at),
+                retry.map(|(at, _)| at),
                 restart.filter(|_| plugged).map(|(at, _)| at),
                 patient_until.filter(|_| patient && plugged),
                 (!self.events).then(|| Instant::now() + POLL_WITHOUT_EVENTS),
