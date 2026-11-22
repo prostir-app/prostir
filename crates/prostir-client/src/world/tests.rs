@@ -1421,3 +1421,34 @@ fn a_failed_monitor_never_placed_does_not_hold_the_desktop_up() {
     let told = sim.arranged.last().map(|r| row_ids(r));
     assert_eq!(told, Some(vec![vec![2], vec![1]]), "the PC is told");
 }
+
+/// "Add" pressed twice before the first new monitor's picture comes: each new monitor
+/// gets a place of its own next to the others, and the placeholder still waiting moves
+/// out of the way of the one placed first.
+#[test]
+fn two_monitors_added_at_once_each_get_a_place() {
+    let mut sim = Sim::new(None);
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    sim.stream(1, QHD);
+    sim.stream(2, QHD);
+    sim.settled();
+    let gaze = sim.head.1;
+    sim.world.adding_started(Some(ReqId(1)), QHD, gaze, sim.now);
+    sim.world.adding_started(Some(ReqId(2)), QHD, gaze, sim.now);
+    sim.world.adding_made(PC, ReqId(1), Some(k(3)));
+    sim.world.adding_made(PC, ReqId(2), Some(k(4)));
+    let mut list = vec![monitor(1, QHD), monitor(2, QHD), monitor(3, QHD)];
+    sim.list(list.clone());
+    sim.stream(3, QHD);
+    let waiting = sim.world.adding().expect("the second one waits").place;
+    assert!(
+        !cover(&sim.place(k(3)), QHD, &waiting, QHD),
+        "its placeholder is where the first one went"
+    );
+    list.push(monitor(4, QHD));
+    sim.list(list);
+    sim.stream(4, QHD);
+    sim.settled();
+    none_covers(&sim, &[(1, QHD), (2, QHD), (3, QHD), (4, QHD)]);
+}

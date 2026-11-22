@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
 use prostir_layout::circle::{self, Limits};
-use prostir_layout::space::{Frame, Monitor};
+use prostir_layout::space::{Frame, Monitor, covers, cuts};
 use prostir_layout::view::Room;
 use prostir_layout::{place, rows, tidy};
 
@@ -287,6 +287,35 @@ pub fn place_new<K: Key>(
             ..Limits::default()
         },
     )
+}
+
+/// Seen overlaps smaller than this share of the smaller monitor are a shared edge (as
+/// for a new monitor, see `prostir_layout::place`).
+const SLACK: f64 = 0.01;
+
+/// Whether a monitor of `size` pixels at `p` would cover one of the placed ones of
+/// `monitors` (other than itself, `id`) as seen from `center` tilted up by `tilt`, or go
+/// through one in the room: no place for it.
+pub fn covers_any<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    id: K,
+    size: (u32, u32),
+    p: &Placement,
+    (center, tilt): ((Vec3, f32), f32),
+) -> bool {
+    let frame = frame(center, tilt);
+    let height = p.width * size.1 as f32 / size.0.max(1) as f32;
+    let mine = frame.unplace(*p);
+    let corners = mine.corners(height);
+    placed(placements, monitors)
+        .iter()
+        .filter(|m| m.id != id)
+        .any(|m| {
+            let o = frame.unplace(m.placement);
+            let oh = m.height();
+            covers(&o.corners(oh), &corners, SLACK) || cuts(&o, oh, &mine, height)
+        })
 }
 
 /// `p` for a stream now `now` pixels in size instead of `was`: the same size of a

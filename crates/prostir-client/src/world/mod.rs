@@ -143,6 +143,8 @@ pub struct Adding {
     pub size: (u32, u32),
     pub id: Option<DisplayKey>,
     since: Instant,
+    /// Where the head looked when it was asked for: its place is near there.
+    gaze: Vec3,
 }
 
 impl Adding {
@@ -1042,14 +1044,35 @@ impl World {
             if self.placements.contains_key(&m.0) {
                 continue;
             }
-            // Where its placeholder stood, for the monitor being added.
+            // Where its placeholder stood, for the monitor being added, while nothing
+            // took that place meanwhile.
             let at = match &self.adding {
-                Some(a) if a.id == Some(m.0) => a.place,
+                Some(a)
+                    if a.id == Some(m.0)
+                        && !layout::covers_any(
+                            &self.placements,
+                            &self.sizes,
+                            m.0,
+                            (m.1, m.2),
+                            &a.place,
+                            (self.center, self.tilt),
+                        ) =>
+                {
+                    a.place
+                }
                 _ => self.place_for_new((m.1, m.2), gaze),
             };
             info!("monitor {} placed next to the others", m.0);
             self.placements.insert(m.0, at);
             placed = true;
+            // A placeholder still waiting (another monitor asked for meanwhile) moves
+            // to where its monitor goes now, out of the way of this one.
+            if let Some(a) = self.adding.filter(|a| a.id != Some(m.0)) {
+                let place = self.place_for_new(a.size, a.gaze);
+                if let Some(a) = &mut self.adding {
+                    a.place = place;
+                }
+            }
         }
         if self
             .physical()
@@ -1413,6 +1436,7 @@ impl World {
                 size,
                 id: None,
                 since: now,
+                gaze,
             })
         });
     }
