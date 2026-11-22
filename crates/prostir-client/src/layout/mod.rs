@@ -23,7 +23,8 @@ mod tests;
 
 pub use arrange::{
     Physical, ahead, arrange, carried, clear_along_up, covers_any, edge_to, facing_yaw, frame,
-    kept_to, left_of, lifted, line_up, make_room, place_new, preset_radius, refit, spread, tilt,
+    kept_to, left_of, lifted, line_up, make_room, place_new, preset_radius, refit, reglue, seams,
+    spread, tilt,
 };
 pub use cinema::{cinema, cinema_choice};
 pub use desktop::{Desktop, DesktopMemo};

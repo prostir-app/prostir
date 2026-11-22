@@ -549,7 +549,9 @@ a process of its own, so the background part never loads its graphics libraries 
 Shortcuts, Hyprland's `bind`): `prostir ctl recenter`, `prostir ctl profile 1`,
 `prostir ctl closer 2`, `prostir ctl monitor add 2560x1440@125%`, `prostir ctl
 quality 50`, `prostir ctl status`, `prostir ctl watch` (a line for each change, until
-Ctrl+C). `prostir ctl help` lists every command. With `--json` each prints JSON. The
+Ctrl+C). `prostir ctl help` lists every command. `prostir ctl closer` brings the
+monitors nearer at their size, so they look larger (`farther` takes them back); the rows
+are laid out again so none overlaps another. With `--json` each prints JSON. The
 exit code says what came of it: 0 done, 1 failed, 2 Prostir not running or no headset,
 3 no answer in time, 64 wrong arguments.
 

@@ -537,7 +537,9 @@ prostir mcp
 клавіші (комбінації клавіш KDE, `bind` у Hyprland): `prostir ctl recenter`, `prostir
 ctl profile 1`, `prostir ctl closer 2`, `prostir ctl monitor add 2560x1440@125%`,
 `prostir ctl quality 50`, `prostir ctl status`, `prostir ctl watch` (рядок на кожну
-зміну, до Ctrl+C). `prostir ctl help` показує всі команди. З `--json` кожна пише JSON.
+зміну, до Ctrl+C). `prostir ctl help` показує всі команди. `prostir ctl closer`
+наближає монітори, не змінюючи їхнього розміру, тож вони здаються більшими (`farther`
+віддаляє); ряди розставляються наново, щоб жоден не заходив на інший. З `--json` кожна пише JSON.
 Код виходу каже, що вийшло: 0 зроблено, 1 не вдалося, 2 Prostir не працює чи немає
 шолома, 3 немає відповіді вчасно, 64 неправильні аргументи.
 

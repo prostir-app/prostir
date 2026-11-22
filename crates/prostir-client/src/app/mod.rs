@@ -1354,7 +1354,7 @@ impl Model {
 
     /// Brings the monitors closer or further (see `World::closer`).
     fn closer(&mut self, steps: i8) {
-        self.world.closer(steps, self.now);
+        self.world.closer(&self.settings, steps, self.now);
         self.world_done();
     }
 

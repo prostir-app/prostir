@@ -1025,22 +1025,19 @@ fn following_the_head() {
     );
 }
 
-/// Closer and further a step at a time, each keeping its size to the eye and the
-/// arrangement its shape; in front: the arrangement turned and carried to the head as it stood.
+/// Closer and further a step at a time, each keeping its size and the arrangement its
+/// shape; in front: the arrangement turned and carried to the head as it stood.
 #[test]
 fn closer_further_and_in_front() {
     let mut sim = Sim::at_desk();
     let before = sim.places();
-    sim.world.closer(-1, sim.now);
+    sim.world.closer(&sim.s, -1, sim.now);
     for (k, p) in &before {
         let q = sim.place(*k);
         assert!((q.position.length() - p.position.length() / 1.15).abs() < 1e-4);
-        assert!(
-            (q.width - p.width / 1.15).abs() < 1e-4,
-            "its size to the eye kept"
-        );
+        assert!((q.width - p.width).abs() < 1e-6, "its size kept");
     }
-    sim.world.closer(1, sim.now);
+    sim.world.closer(&sim.s, 1, sim.now);
     assert!(same_places(&sim.places(), &before), "and back");
 
     // Turned and moved: in front again, the shape as it was.
@@ -1562,28 +1559,34 @@ fn a_restart_keeps_the_rows() {
     assert_eq!(told, Some(rows), "the same rows");
 }
 
-/// Closer or further, the arrangement keeps its shape as seen: monitors glued edge to
-/// edge stay glued, none over another, and each stays the same size to the eye.
+/// Closer or further, each monitor keeps its size (nearer, it is seen larger) and as
+/// far as asked; monitors glued edge to edge stay glued (further, no gap opens), and
+/// none goes into another.
 #[test]
 fn closer_keeps_glued_monitors_apart() {
     for steps in [-2, -1, 1, 2] {
         let mut sim = Sim::at_desk();
         let before = sim.places();
-        sim.world.closer(steps, sim.now);
-        none_covers(&sim, &[(1, QHD), (2, QHD), (3, QHD)]);
-        none_cut(&sim, &[(1, QHD), (2, QHD), (3, QHD)]);
+        sim.world.closer(&sim.s, steps, sim.now);
+        let sizes = [(1, QHD), (2, QHD), (3, QHD)];
+        none_seen_over(&sim, &sizes);
+        none_cut(&sim, &sizes);
         let k_ = 1.15f32.powi(i32::from(steps));
         for n in 1..=3 {
             let (a, b) = (before[&k(n)], sim.place(k(n)));
-            assert!(
-                (b.width / a.width - k_).abs() < 1e-4,
-                "{steps}: its size to the eye"
-            );
+            assert!((b.width - a.width).abs() < 1e-6, "{steps}: its size kept");
             assert!(
                 (b.position.length() / a.position.length() - k_).abs() < 1e-4,
                 "{steps}: as far as asked"
             );
         }
+        let frame = layout::frame(sim.world.center, sim.world.tilt);
+        let order: Vec<DisplayKey> = sim.world.monitors().iter().map(|m| m.0).collect();
+        assert_eq!(
+            layout::seams(&sim.world.placements, &sim.world.sizes, &frame, &[]).len(),
+            order.len() - 1,
+            "{steps}: still glued"
+        );
     }
 }
 

@@ -1113,7 +1113,7 @@ static TOOLS: &[Tool] = &[
     asks("no_limits", "Headset command: no limits on or off.", &[ON]),
     asks(
         "distance",
-        "Headset command: the monitors closer (steps below 0) or further.",
+        "Headset command: the monitors nearer (steps below 0) or further, each keeping its size, so nearer they look larger.",
         &[Arg::of("steps", "integer", "steps, below 0 closer").within(-128, 127)],
     ),
     asks(

@@ -1065,7 +1065,7 @@ and the person hides those not needed.
 | 2 | `Profile` | `name:str(64)` | Switches to a profile: `name` is a number only, its number from 1 as the headset's `Profiles` lists them; else the name it was given, exactly; else the number after the word the headset's menu calls a profile by ("Profile 2") in a language it has (`NO_SUCH_PROFILE`); answers once it is in place. |
 | 3 | `Cinema` | `on:bool` | Cinema mode. |
 | 4 | `FocusMode` | `on:bool` | "Focus" (changes `Prefs`). |
-| 5 | `Distance` | `steps:i8` | Closer (below 0) or further. |
+| 5 | `Distance` | `steps:i8` | The monitors nearer (below 0) or further, a step (15 %) at a time. Each keeps its size in metres, so nearer it looks larger; the rows are laid out again so none overlaps another, monitors glued edge to edge staying glued. |
 | 6 | `Preset` | `preset:u8` | A preset arrangement (`BAD_ARGUMENT` for one it does not know). |
 | 7 | `LineUp` | | "Line up". |
 | 8 | `ShowMouse` | | Shows where the mouse is. |

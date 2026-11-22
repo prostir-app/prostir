@@ -267,7 +267,7 @@ impl Trial {
     fn closer(&mut self, rng: &mut Lcg) -> Option<String> {
         let steps = [-2, -1, 1, 2][rng.below(4)];
         let sim = &mut self.sim;
-        sim.world.closer(steps, sim.now);
+        sim.world.closer(&sim.s, steps, sim.now);
         Some(format!("closer {steps}"))
     }
 
@@ -417,11 +417,14 @@ fn each_arrangement_step_cuts_into_nothing() {
     }
 }
 
-/// A monitor swapped or grown next to the PC's own displays: they move as one group,
-/// still glued, and nothing cuts.
+/// A monitor swapped or grown next to the PC's own displays, or all closer or further:
+/// they move as one group, still glued, and nothing cuts.
 #[test]
 fn the_pcs_displays_move_as_one_group() {
-    holds_through(&[Step::Swap, Step::Refit, Step::PcDisplays], 300);
+    holds_through(
+        &[Step::Swap, Step::Refit, Step::PcDisplays, Step::Closer],
+        300,
+    );
 }
 
 /// Everything that changes the arrangement, in any order. Not yet: "Line up" still
