@@ -195,10 +195,10 @@ fn load_panorama(choice: Background, dir: Option<&Path>) -> Panorama {
     {
         match image::open(&path) {
             Ok(img) => {
-                let img = if img.width() > 4096 {
-                    img.resize(4096, 2048, image::imageops::FilterType::Triangle)
-                } else {
-                    img
+                // Too wide or too tall for the compositor's layer: smaller, as it is.
+                let img = match background::fit_within(img.width(), img.height()) {
+                    Some((w, h)) => img.resize(w, h, image::imageops::FilterType::Triangle),
+                    None => img,
                 };
                 let rgba = img.to_rgba8();
                 info!("panorama from {}", path.display());
@@ -720,6 +720,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     // The panorama shown and the background it was made for.
     let mut pano_layer: Option<(Background, ImageLayer)> = None;
     let mut pano_job: Option<(Background, JoinHandle<Panorama>)> = None;
+    // The background whose panorama could not be shown (not tried again while it is
+    // chosen): the person's picture falls back to the generated sky first.
+    let mut pano_failed: Option<Background> = None;
     // The selftest reads nothing of the person's there (`host.txt`, a panorama).
     let external_dir = app.external_data_path().filter(|_| test.is_none());
     let custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
@@ -1100,10 +1103,14 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // Panorama: generated or decoded off the main thread, uploaded once per choice.
         let wanted = shell.model.settings().background;
         let wants_pano = matches!(wanted, Background::Sky(_) | Background::Custom);
+        if pano_failed.is_some_and(|f| f != wanted) {
+            pano_failed = None;
+        }
         if wants_pano
             && exts.khr_composition_layer_equirect2
             && pano_layer.as_ref().is_none_or(|(b, _)| *b != wanted)
             && pano_job.is_none()
+            && pano_failed != Some(wanted)
         {
             let dir = shell.external_dir.clone();
             pano_job = Some((
@@ -1112,13 +1119,29 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             ));
         }
         if let Some((made_for, job)) = pano_job.take_if(|(_, j)| j.is_finished()) {
-            match job.join() {
-                Ok((w, h, pixels)) => {
-                    let mut layer = ImageLayer::new(&session, format, w, h, true)?;
-                    layer.upload(&gl, &pixels)?;
-                    pano_layer = Some((made_for, layer));
+            // A panorama that cannot be shown is no reason to stop the app.
+            let made = match job.join() {
+                Ok((w, h, pixels)) => ImageLayer::new(&session, format, w, h, true)
+                    .and_then(|mut layer| layer.upload(&gl, &pixels).map(|()| layer))
+                    .map_err(|e| format!("{e:#}")),
+                Err(_) => Err("its making panicked".to_owned()),
+            };
+            match made {
+                Ok(layer) => pano_layer = Some((made_for, layer)),
+                Err(e) => {
+                    warn!("the panorama for {made_for:?} cannot be shown: {e}");
+                    let first = pano_failed != Some(made_for);
+                    pano_failed = Some(made_for);
+                    if made_for == Background::Custom && first {
+                        info!("the generated sky instead of the picture");
+                        pano_job = Some((
+                            made_for,
+                            std::thread::spawn(|| {
+                                load_panorama(Background::Sky(background::Sky::Night), None)
+                            }),
+                        ));
+                    }
                 }
-                Err(_) => warn!("panorama generation panicked"),
             }
         }
 
