@@ -15,10 +15,10 @@ contract for clients written in any language; the tests of `prostir-api` pin the
 | | |
 |---|---|
 | Bus | the **session bus** (D-Bus) |
-| Name | `io.github.OlexiyOdarchuk.Prostir` |
-| Object | `/io/github/OlexiyOdarchuk/Prostir` |
-| Interface | `io.github.OlexiyOdarchuk.Prostir1` |
-| Errors | `io.github.OlexiyOdarchuk.Prostir1.Error.<Name>` |
+| Name | `io.github.prostir_app.Prostir` |
+| Object | `/io/github/prostir_app/Prostir` |
+| Interface | `io.github.prostir_app.Prostir1` |
+| Errors | `io.github.prostir_app.Prostir1.Error.<Name>` |
 
 Only programs of the same user reach the session bus, which is the whole access rule:
 the same trust as the tray icon, which shows the same things (the pairing code among
@@ -27,7 +27,7 @@ owner, with every right; see [Commands for the headset](#commands-for-the-headse
 what goes to a headset.
 
 The digit in the interface name is its version: an incompatible change adds
-`io.github.OlexiyOdarchuk.Prostir2` next to it. If the project gets a domain of its own,
+`io.github.prostir_app.Prostir2` next to it. If the project gets a domain of its own,
 a new bus name is added and this one stays as a second name until the next major
 version, so scripts keep working.
 
@@ -83,11 +83,11 @@ then answers `TimedOut`. `busctl` and `gdbus` give up after 25 s by default, so 
 them more:
 
 ```
-busctl --user --timeout=35 call io.github.OlexiyOdarchuk.Prostir \
-    /io/github/OlexiyOdarchuk/Prostir io.github.OlexiyOdarchuk.Prostir1 Recenter
-gdbus call --session --timeout 35 --dest io.github.OlexiyOdarchuk.Prostir \
-    --object-path /io/github/OlexiyOdarchuk/Prostir \
-    --method io.github.OlexiyOdarchuk.Prostir1.Profile 2
+busctl --user --timeout=35 call io.github.prostir_app.Prostir \
+    /io/github/prostir_app/Prostir io.github.prostir_app.Prostir1 Recenter
+gdbus call --session --timeout 35 --dest io.github.prostir_app.Prostir \
+    --object-path /io/github/prostir_app/Prostir \
+    --method io.github.prostir_app.Prostir1.Profile 2
 ```
 
 (`busctl` needs `--` before a negative number: `... call -- io.github... Distance n -2`.)
@@ -130,7 +130,7 @@ Prostir appears and after it restarts. After it appears, call `GetState`.
 
 ## Errors
 
-The D-Bus error name is `io.github.OlexiyOdarchuk.Prostir1.Error.` and one of:
+The D-Bus error name is `io.github.prostir_app.Prostir1.Error.` and one of:
 
 | Name | |
 |---|---|
@@ -484,7 +484,7 @@ once a second: `progress` the seconds waited, `total` its timeout.
 ## `prostir` and the settings window
 
 One program, `prostir`, in two processes. `prostir` without a command (the menu entry,
-`io.github.OlexiyOdarchuk.Prostir.desktop`) opens the settings window. `prostir serve`
+`io.github.prostir_app.Prostir.desktop`) opens the settings window. `prostir serve`
 is the service: the sockets' watcher, which sleeps until a headset comes and then
 starts the full program (`prostir serve --stay` runs the full program all along
 instead, with its sockets opened itself). Autostart entries, systemd's
@@ -506,11 +506,11 @@ the same item ("Settings…").
 The window is a process of its own: the service starts its own program again as
 `prostir window` (a hidden command), so a window that crashes takes nothing else down
 and the service never loads the window's graphics libraries (EGL, X11). The
-window's app id is `io.github.OlexiyOdarchuk.Prostir`, the desktop entry's name.
+window's app id is `io.github.prostir_app.Prostir`, the desktop entry's name.
 
-The settings window owns `io.github.OlexiyOdarchuk.Prostir.Settings` on the session
+The settings window owns `io.github.prostir_app.Prostir.Settings` on the session
 bus (one window per user: a second start calls `Present` on
-`io.github.OlexiyOdarchuk.Prostir.Settings1` of the first and quits). Prostir stays
+`io.github.prostir_app.Prostir.Settings1` of the first and quits). Prostir stays
 running while that name is on the bus, and a headset showing its pairing code then
 waits for the code to be typed in the window (`pairing.code_for`, `pairing_code`)
 instead of a dialog. `ctl watch` does not keep it running.

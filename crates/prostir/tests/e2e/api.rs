@@ -610,7 +610,7 @@ fn the_api_comes_back_after_the_bus_restarts() {
     }
     pc.wait_log(
         SOON,
-        "local API on D-Bus as io.github.OlexiyOdarchuk.Prostir again",
+        "local API on D-Bus as io.github.prostir_app.Prostir again",
     );
     let status = pc.ctl(&["status", "--json"]).unwrap();
     assert_eq!(status.code, 0, "{status:?}");

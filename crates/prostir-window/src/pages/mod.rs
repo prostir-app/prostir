@@ -28,7 +28,7 @@ use overview::{overview, tiles};
 use sound::{quality, sound};
 
 /// Where the releases are, for "Install Prostir in the headset".
-pub const RELEASES: &str = "https://github.com/OlexiyOdarchuk/prostir/releases";
+pub const RELEASES: &str = "https://github.com/prostir-app/prostir/releases";
 
 pub enum Action {
     Send(Request),

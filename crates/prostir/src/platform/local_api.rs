@@ -381,9 +381,9 @@ fn headset_signal(bus: &Shared, event: &api::Event) {
     }
 }
 
-/// The D-Bus errors, one for each [`ApiError`]: `io.github.OlexiyOdarchuk.Prostir1.Error.*`.
+/// The D-Bus errors, one for each [`ApiError`]: `io.github.prostir_app.Prostir1.Error.*`.
 #[derive(Debug, zbus::DBusError)]
-#[zbus(prefix = "io.github.OlexiyOdarchuk.Prostir1.Error")]
+#[zbus(prefix = "io.github.prostir_app.Prostir1.Error")]
 enum BusError {
     #[zbus(error)]
     ZBus(zbus::Error),
@@ -497,7 +497,7 @@ impl Object {
     }
 }
 
-#[zbus::interface(name = "io.github.OlexiyOdarchuk.Prostir1")]
+#[zbus::interface(name = "io.github.prostir_app.Prostir1")]
 impl Object {
     /// Any request, as JSON; the answer as JSON (a failure is a D-Bus error).
     async fn call(&self, request_json: String) -> Result<String, BusError> {

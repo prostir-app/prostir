@@ -30,7 +30,7 @@ cargo build --release --locked -p prostir --bin prostir
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 cp "$TARGET_DIR/release/prostir" "$DIST/$NAME/"
 mkdir -p "$DIST/$NAME/packaging"
-cp packaging/prostir.svg packaging/io.github.OlexiyOdarchuk.Prostir.desktop "$DIST/$NAME/packaging/"
+cp packaging/prostir.svg packaging/io.github.prostir_app.Prostir.desktop "$DIST/$NAME/packaging/"
 cp -r packaging/systemd packaging/udev "$DIST/$NAME/packaging/"
 cp scripts/install.sh LICENSE LICENSE-EXCEPTION.md build/THIRD-PARTY-LICENSES.txt \
     README.md README.uk.md CHANGELOG.md "$DIST/$NAME/"

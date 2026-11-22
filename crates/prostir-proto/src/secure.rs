@@ -467,6 +467,155 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A key file that is there but cannot be read as text is an error, and stays as
+    /// it is: a new key in its place would make every paired device a stranger. (A
+    /// directory in the way fails either way, since nothing can be renamed over it.)
+    #[test]
+    fn an_unreadable_key_is_not_replaced() {
+        let dir = std::env::temp_dir().join(format!("prostir-unread-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("key");
+        let garbled = [0xff, 0xfe, 0x00, 0x80];
+        std::fs::write(&key, garbled).unwrap();
+        assert!(Identity::load_or_create(&key).is_err());
+        assert_eq!(std::fs::read(&key).unwrap(), garbled, "kept as it was");
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["key"], "nothing else written");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Every change of the store is on disk at once: a store loaded again after each
+    /// one holds the same keys, in the same order, with the same labels.
+    #[test]
+    fn trust_store_round_trips() {
+        let path = std::env::temp_dir().join(format!("prostir-trust-rt-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut t = TrustStore::load(&path);
+        let on_disk = |t: &TrustStore| {
+            let back = TrustStore::try_load(&path).unwrap();
+            assert_eq!(
+                back.entries(),
+                t.entries(),
+                "the file says what the store says"
+            );
+            assert_eq!(back.len(), t.len());
+            assert_eq!(back.is_empty(), t.is_empty());
+            back
+        };
+        assert!(t.is_empty());
+        assert_eq!(t.len(), 0);
+        assert!(t.entries().is_empty());
+
+        t.add([1; 32], "Quest 3").unwrap();
+        t.add([2; 32], "Quest 3S").unwrap();
+        t.add([3; 32], "spare\nline").unwrap();
+        let back = on_disk(&t);
+        assert!(!back.is_empty());
+        assert_eq!(back.len(), 3);
+        assert_eq!(
+            back.entries(),
+            [
+                ([1; 32], "Quest 3".to_owned()),
+                ([2; 32], "Quest 3S".to_owned()),
+                ([3; 32], "spare line".to_owned()),
+            ],
+            "oldest first, a label on one line"
+        );
+
+        // Added again: one entry, the new label, now the newest; the others stay.
+        t.add([1; 32], "Quest 3 (work)").unwrap();
+        let back = on_disk(&t);
+        assert_eq!(back.len(), 3);
+        assert_eq!(
+            back.entries(),
+            [
+                ([2; 32], "Quest 3S".to_owned()),
+                ([3; 32], "spare line".to_owned()),
+                ([1; 32], "Quest 3 (work)".to_owned()),
+            ]
+        );
+
+        // Removed: that one goes, the others stay.
+        t.remove(&[2; 32]).unwrap();
+        let back = on_disk(&t);
+        assert_eq!(back.len(), 2);
+        assert!(!back.contains(&[2; 32]));
+        assert!(back.contains(&[1; 32]) && back.contains(&[3; 32]));
+        // Removing a key that is not there changes nothing.
+        t.remove(&[9; 32]).unwrap();
+        assert_eq!(on_disk(&t).len(), 2);
+
+        t.clear().unwrap();
+        let back = on_disk(&t);
+        assert!(back.is_empty());
+        assert_eq!(back.len(), 0);
+        assert!(!back.contains(&[1; 32]) && !back.contains(&[3; 32]));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// Two tags that differ anywhere, by one bit or by several, do not match, even
+    /// where the differences would cancel each other out if they were added up.
+    #[test]
+    fn tags_match_rejects_cancelling_differences() {
+        let a = [0x5au8; CONFIRM_LEN];
+        assert!(tags_match(&a, &a));
+        let mut b = a;
+        b[0] ^= 0x01;
+        b[7] ^= 0x01;
+        assert!(!tags_match(&a, &b), "two equal differences");
+        let mut c = a;
+        c[3] ^= 0xf0;
+        c[4] ^= 0x0f;
+        c[5] ^= 0xff;
+        assert!(!tags_match(&a, &c), "three differences that cancel out");
+        for byte in 0..CONFIRM_LEN {
+            for bit in 0..8 {
+                let mut d = a;
+                d[byte] ^= 1 << bit;
+                assert!(!tags_match(&a, &d), "byte {byte}, bit {bit}");
+            }
+        }
+        assert!(!tags_match(&a, &a[..CONFIRM_LEN - 1]), "a shorter tag");
+    }
+
+    /// The confirmation tag is part of the protocol: a PC and a headset of different
+    /// builds compute it the same way. The long-term keys go in sorted, so it does not
+    /// matter which side is which.
+    #[test]
+    fn a_confirmation_is_the_same_in_every_build() {
+        let low = PeerInfo {
+            key: [1; 32],
+            binding: vec![4; 32],
+            via: Via::Network,
+        };
+        let high = PeerInfo {
+            key: [2; 32],
+            ..low.clone()
+        };
+        let tag = confirmation(b"shared key", "headset", &high, &[1; 32]);
+        assert_eq!(
+            to_hex(&tag),
+            "d693b35a1f421e0c1843dc615b8c6be03bbbf7260a6c3b6f3cc072f1de238c2e"
+        );
+        assert_eq!(tag, confirmation(b"shared key", "headset", &low, &[2; 32]));
+    }
+
+    /// A key's fingerprint is the hex of its first six bytes: what the lists show and
+    /// what a device is told apart by when one is named to forget.
+    #[test]
+    fn a_fingerprint_is_the_start_of_the_key() {
+        let mut key = [0u8; 32];
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = 0xa0 + i as u8;
+        }
+        assert_eq!(fingerprint(&key), "a0a1a2a3a4a5");
+        assert_ne!(fingerprint(&key), fingerprint(&[0; 32]));
+    }
+
     /// Each write has a temporary file of its own, and none stays behind; leftovers of
     /// writes cut short, old style and new, are removed, and nothing else.
     #[test]

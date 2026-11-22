@@ -49,7 +49,7 @@ impl Store for NoStore {
     fn update_hint(&self) -> UpdateHint {
         UpdateHint {
             how: "store-update-apk",
-            place: "github.com/OlexiyOdarchuk/prostir/releases",
+            place: "github.com/prostir-app/prostir/releases",
         }
     }
 }
@@ -78,7 +78,7 @@ mod tests {
         let mut store = NoStore;
         assert_eq!(store.poll(), StoreCheck::Owned);
         let hint = store.update_hint();
-        assert_eq!(hint.place, "github.com/OlexiyOdarchuk/prostir/releases");
+        assert_eq!(hint.place, "github.com/prostir-app/prostir/releases");
         assert_eq!(
             crate::lang::builtin("en").t(hint.how),
             "Install the new APK from"

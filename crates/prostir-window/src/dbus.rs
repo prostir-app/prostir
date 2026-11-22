@@ -1,5 +1,5 @@
 //! The local API over the session bus (LOCAL-API.md): `GetState` and `Call` on
-//! `io.github.OlexiyOdarchuk.Prostir1`, the `StateChanged` signal, and the name
+//! `io.github.prostir_app.Prostir1`, the `StateChanged` signal, and the name
 //! coming and going on the bus.
 
 use std::time::Duration;
@@ -255,7 +255,7 @@ pub(crate) mod tests {
         revision: u32,
     }
 
-    #[zbus::interface(name = "io.github.OlexiyOdarchuk.Prostir1")]
+    #[zbus::interface(name = "io.github.prostir_app.Prostir1")]
     impl Service {
         fn get_state(&self) -> (u32, String) {
             (self.revision, r#"{"v":1,"pc":{"name":"desk"}}"#.into())
@@ -275,7 +275,7 @@ pub(crate) mod tests {
     }
 
     #[derive(Debug, zbus::DBusError)]
-    #[zbus(prefix = "io.github.OlexiyOdarchuk.Prostir1.Error")]
+    #[zbus(prefix = "io.github.prostir_app.Prostir1.Error")]
     enum ServiceError {
         LastDisplay(String),
         Unsupported(String),
