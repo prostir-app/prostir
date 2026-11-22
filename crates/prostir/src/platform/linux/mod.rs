@@ -18,7 +18,7 @@ pub use screenshot::{has_picture, screenshot_dir, screenshot_path};
 pub use system::{cache_home, encoder_drivers};
 pub use system::{
     clean_up_after_crash, config_home, give_memory_back, hostname, import_session_environment,
-    local_addresses, notice_mark, run, single_instance, watcher,
+    local_addresses, notice_mark, run, run_until, single_instance, watcher,
 };
 pub use usb::{keep_adb_reverse, usb_waiting};
 

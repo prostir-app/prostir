@@ -239,7 +239,9 @@ the person at the PC, or sends its bytes slowly, holds only itself. At most 16
 connections are set up at once; one more is closed at once. One pairing runs at a
 time: a `PairBegin` while another connection pairs is answered with `Error` ("Another
 headset is pairing with this PC right now") and `PairResult` without a tag, and the
-connection stays open for another `PairBegin`.
+connection stays open for another `PairBegin`. A pairing whose connection ends (the
+headset hung up while the PC asks for its code) ends with it: its dialog closes, and a
+headset that dials again (for the other way round, say) pairs at once.
 
 A connection set up and trusted opens a session. The protocol lets several headsets
 have a session at once, each with every display and its own state (see
@@ -383,9 +385,10 @@ Host (implementation-defined values from `crates/prostir/src/pairing.rs`):
 | Failed attempts in a row (all connections) | The first 3 are free. After the 4th, the next attempt has to wait 30 s, then 60 s, 120 s, 240 s, 480 s, and at most 900 s. A success resets the count |
 | During a wait | `PairBegin` is answered with `Error` ("Too many wrong codes. Try again in N min.") and `PairResult` without a tag, and the connection is closed |
 
-Every attempt that does not succeed counts as a failed one: a wrong code, a host that
-has no code to offer (cancelled dialog, no dialog program) and an exchange that breaks
-off. When the headset shows the code and the host has none, the host reads and drops the
+Every attempt that does not succeed counts as a failed one, once: a wrong code, a
+cancelled dialog, a headset that hangs up while the host asks for the code, and an
+exchange that breaks off. An attempt that showed nothing (the host has no dialog
+program) does not count. When the headset shows the code and the host has none, the host reads and drops the
 headset's `PairMsg` (sent right after `PairBegin`), so the next `PairBegin` can follow on
 the same connection.
 

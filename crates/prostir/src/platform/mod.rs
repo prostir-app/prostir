@@ -309,6 +309,8 @@ pub enum NoCode {
     Cancelled,
     /// The PC has no program to ask with.
     NoDialog,
+    /// The headset hung up meanwhile: its dialog closed.
+    Gone,
 }
 
 #[cfg(test)]

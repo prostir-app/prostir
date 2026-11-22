@@ -522,6 +522,49 @@ fn nothing_before_open() {
     );
 }
 
+/// The settings window waits for the code a headset shows, and the headset hangs up
+/// meanwhile: the attempt ends at once, the window waits no more, and the pairing is
+/// free for the next headset.
+#[test]
+fn a_headset_that_hangs_up_ends_the_wait_for_its_code() {
+    let _tray = TRAY_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pc = TestPc::new("hangup");
+    window_types_codes(true);
+    let started = Instant::now();
+    let (accepted, ()) = connect(&pc, |h| {
+        assert!(matches!(h.hello(PROTOCOL_VERSION), Answer::Welcome { .. }));
+        h.send(ClientMsg::Open { parts: Vec::new() });
+        assert_eq!(h.recv().unwrap(), HostMsg::PairingRequired);
+        h.send(ClientMsg::PairBegin {
+            headset_shows: true,
+            name: "test headset".into(),
+        });
+        let (_, msg) = Pairing::start("123456");
+        h.send(ClientMsg::PairMsg { msg });
+        let until = Instant::now() + Duration::from_secs(5);
+        while code_for().is_none() {
+            assert!(
+                Instant::now() < until,
+                "the window shows no headset waiting"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        h.link.closer.close();
+    });
+    window_types_codes(false);
+    let err = format!("{:#}", accepted.unwrap_err());
+    assert!(err.contains("hung up"), "{err}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(code_for(), None);
+    assert!(PAIRING.try_lock().is_ok(), "the pairing is free");
+}
+
 /// "Code on the PC": the headset asks first, the PC makes and shows its code, the
 /// user types it in the headset, and the headset is trusted afterwards.
 #[test]

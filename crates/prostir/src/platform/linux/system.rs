@@ -264,4 +264,4 @@ pub fn local_addresses() -> Vec<Ipv4Addr> {
     out
 }
 
-pub use crate::platform::process::run;
+pub use crate::platform::process::{run, run_until};
