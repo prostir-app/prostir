@@ -51,6 +51,21 @@ static LIMITER: Mutex<Limiter> = Mutex::new(Limiter {
     warned: false,
 });
 
+/// An attempt that did not succeed: counted as failed, and the person at the PC told
+/// once that new attempts wait now.
+fn attempt_failed() {
+    let tell = LIMITER.lock().unwrap().failed();
+    if tell {
+        notify(
+            t("Неправильні коди сполучення", "Wrong pairing codes"),
+            t(
+                "Хтось кілька разів ввів неправильний код. Нові спроби тепер чекають.",
+                "Someone typed wrong codes several times. New attempts now have to wait.",
+            ),
+        );
+    }
+}
+
 impl Limiter {
     /// How long until the next attempt is allowed.
     fn wait(&self) -> Option<Duration> {
@@ -66,9 +81,15 @@ impl Limiter {
         self.pause();
     }
 
-    /// The attempt did not succeed: the pause (if any) runs from now.
-    fn failed(&mut self) {
+    /// The attempt did not succeed: the pause (if any) runs from now. Whether the
+    /// person at the PC is to be told now that attempts wait (once, at the first
+    /// pause); an attempt that only began is not told, since it may show nothing.
+    #[must_use]
+    fn failed(&mut self) -> bool {
         self.pause();
+        let tell = self.failures > FREE_FAILURES && !self.warned;
+        self.warned |= tell;
+        tell
     }
 
     /// The attempt that began showed nothing (the PC has no dialog for the code): it
@@ -84,16 +105,6 @@ impl Limiter {
             let step = (self.failures - FREE_FAILURES - 1).min(5);
             let wait = Duration::from_secs((30u64 << step).min(900));
             self.not_before = Some(Instant::now() + wait);
-            if !self.warned {
-                self.warned = true;
-                notify(
-                    t("Неправильні коди сполучення", "Wrong pairing codes"),
-                    t(
-                        "Хтось кілька разів ввів неправильний код. Нові спроби тепер чекають.",
-                        "Someone typed wrong codes several times. New attempts now have to wait.",
-                    ),
-                );
-            }
         }
     }
 
@@ -269,6 +280,26 @@ fn take_pairing() -> Option<std::sync::MutexGuard<'static, ()>> {
             }
             Err(TryLockError::WouldBlock) => return None,
         }
+    }
+}
+
+/// Why a headset that asks to pair does not get its turn.
+enum NoTurn {
+    /// Another headset pairs.
+    Busy,
+    /// Attempts wait after wrong codes, this long still.
+    Paused(Duration),
+}
+
+/// This connection's turn to pair: the pairing taken (see [`take_pairing`]), and the
+/// pause after wrong codes looked at once it is, so headsets that waited for the
+/// pairing do not slip past a pause the attempt before them set.
+fn take_turn() -> Result<std::sync::MutexGuard<'static, ()>, NoTurn> {
+    let turn = take_pairing().ok_or(NoTurn::Busy)?;
+    let wait = LIMITER.lock().unwrap().wait();
+    match wait {
+        Some(wait) => Err(NoTurn::Paused(wait)),
+        None => Ok(turn),
     }
 }
 
@@ -732,39 +763,41 @@ fn accept_within(
                 if attempts > MAX_ATTEMPTS {
                     bail!("too many wrong pairing codes");
                 }
-                let wait = LIMITER.lock().unwrap().wait();
-                if let Some(wait) = wait {
-                    let minutes = wait.as_secs().div_ceil(60);
-                    refuse(
-                        &mut conn,
-                        &format!(
-                            "{} {minutes} {}",
-                            t(
-                                "Забагато неправильних кодів. Спробуйте за",
-                                "Too many wrong codes. Try again in",
+                let _pairing = match take_turn() {
+                    Ok(turn) => turn,
+                    Err(NoTurn::Paused(wait)) => {
+                        let minutes = wait.as_secs().div_ceil(60);
+                        refuse(
+                            &mut conn,
+                            &format!(
+                                "{} {minutes} {}",
+                                t(
+                                    "Забагато неправильних кодів. Спробуйте за",
+                                    "Too many wrong codes. Try again in",
+                                ),
+                                t("хв.", "min."),
                             ),
-                            t("хв.", "min."),
-                        ),
-                    )?;
-                    bail!(
-                        "pairing paused after wrong codes ({} s left)",
-                        wait.as_secs()
-                    );
-                }
-                let Some(_pairing) = take_pairing() else {
-                    info!("another headset is pairing: this one is told to wait");
-                    refuse(
-                        &mut conn,
-                        t(
-                            "Інший шолом саме сполучається з цим ПК. Спробуйте за хвилину.",
-                            "Another headset is pairing with this PC right now. Try again in a minute.",
-                        ),
-                    )?;
-                    // Its half of the exchange came with the request.
-                    if headset_shows {
-                        let _ = conn.recv();
+                        )?;
+                        bail!(
+                            "pairing paused after wrong codes ({} s left)",
+                            wait.as_secs()
+                        );
                     }
-                    continue;
+                    Err(NoTurn::Busy) => {
+                        info!("another headset is pairing: this one is told to wait");
+                        refuse(
+                            &mut conn,
+                            t(
+                                "Інший шолом саме сполучається з цим ПК. Спробуйте за хвилину.",
+                                "Another headset is pairing with this PC right now. Try again in a minute.",
+                            ),
+                        )?;
+                        // Its half of the exchange came with the request.
+                        if headset_shows {
+                            let _ = conn.recv();
+                        }
+                        continue;
+                    }
                 };
                 LIMITER.lock().unwrap().begin();
                 // The user needs time to read and type the code.
@@ -778,7 +811,7 @@ fn accept_within(
                     // Its pairing is let go of as this returns, for the headset dialling
                     // again (the other way round, say).
                     Err(NoCode::Gone) => {
-                        LIMITER.lock().unwrap().failed();
+                        attempt_failed();
                         bail!("the headset hung up while its code was asked for");
                     }
                     Err(NoCode::Cancelled) => refuse(
@@ -812,7 +845,7 @@ fn accept_within(
                 let paired = match paired {
                     Ok(p) => p,
                     Err(e) => {
-                        LIMITER.lock().unwrap().failed();
+                        attempt_failed();
                         return Err(e);
                     }
                 };
@@ -823,7 +856,7 @@ fn accept_within(
                     }
                     None => {
                         info!("pairing not attempted: no code on the PC");
-                        LIMITER.lock().unwrap().failed();
+                        attempt_failed();
                     }
                     Some(true) => {
                         LIMITER.lock().unwrap().succeeded();
@@ -853,7 +886,7 @@ fn accept_within(
                     }
                     Some(false) => {
                         warn!("pairing failed: the codes did not match");
-                        LIMITER.lock().unwrap().failed();
+                        attempt_failed();
                         tell(crate::events::Event::WrongCode);
                     }
                 }
