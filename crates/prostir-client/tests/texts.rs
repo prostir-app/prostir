@@ -11,7 +11,33 @@ const UK: &str = include_str!("../lang/uk.ftl");
 const SOURCES: &[(&str, &str)] = &[
     ("ui.rs", include_str!("../src/ui.rs")),
     ("note.rs", include_str!("../src/note.rs")),
-    ("app.rs", include_str!("../src/app.rs")),
+    ("app/mod.rs", include_str!("../src/app/mod.rs")),
+    ("app/session.rs", include_str!("../src/app/session.rs")),
+    (
+        "app/actions/mod.rs",
+        include_str!("../src/app/actions/mod.rs"),
+    ),
+    (
+        "app/actions/look.rs",
+        include_str!("../src/app/actions/look.rs"),
+    ),
+    (
+        "app/actions/monitors.rs",
+        include_str!("../src/app/actions/monitors.rs"),
+    ),
+    (
+        "app/actions/pc.rs",
+        include_str!("../src/app/actions/pc.rs"),
+    ),
+    (
+        "app/actions/profiles.rs",
+        include_str!("../src/app/actions/profiles.rs"),
+    ),
+    (
+        "app/actions/settings.rs",
+        include_str!("../src/app/actions/settings.rs"),
+    ),
+    ("main_loop.rs", include_str!("../src/main_loop.rs")),
     ("net/mod.rs", include_str!("../src/net/mod.rs")),
     ("net/link.rs", include_str!("../src/net/link.rs")),
     ("net/discovery.rs", include_str!("../src/net/discovery.rs")),

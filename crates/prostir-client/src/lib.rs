@@ -45,6 +45,8 @@ mod egl;
 #[cfg(target_os = "android")]
 mod input;
 #[cfg(target_os = "android")]
+mod main_loop;
+#[cfg(target_os = "android")]
 mod media;
 #[cfg(target_os = "android")]
 mod mic;
