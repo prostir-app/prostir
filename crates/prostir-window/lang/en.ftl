@@ -200,6 +200,8 @@ pair-done = { $name } is paired. It connects by itself from now on.
 pair-expired = Pairing time is over. Open it again when the headset is near.
 pair-reopen = Open again
 pair-close = Close
+# $address (String): the PC's addresses, separated by commas
+pair-address = If the headset does not find the PC by itself, type the PC's address in it: { $address }
 pair-firewall = The headset does not see the PC? Allow ports 47830/tcp and 47831/udp in the firewall.
 
 ## Sound

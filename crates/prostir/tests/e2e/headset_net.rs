@@ -2,16 +2,21 @@
 //! sound and microphone) against the PC app (step 7 note, 10.2): a session with every
 //! monitor streaming and the PC's sound, the PC quitting and coming back, leaving and
 //! forgetting the PC with the right goodbye, and a PC that does not trust the headset
-//! offered to the user. The search for the PC by queries comes with step 7.9.
+//! offered to the user. The search by queries (step 7.9): the PC found by asking,
+//! straight at its address as through a VPN (never as a broadcast: nothing here goes
+//! to the network); the first connection without the find secret, by its address, and
+//! the next by asking; a find secret gone stale while another headset was forgotten;
+//! and a sleeping PC woken by a query.
 
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use headset::net::{Config, Disconnect, Feedback, Media, MediaSource, Net, NetEvent};
-use headset::session::{Dest, NetCmd, StepId};
+use headset::net::{Config, Disconnect, Feedback, FoundHost, Media, MediaSource, Net, NetEvent};
+use headset::session::{AskTo, Dest, NetCmd, StepId};
 use headset::ui::OfferWhy;
 use prostir_proto::state::HeadsetState;
 use prostir_proto::{HeadsetGoodbye, HostMsg, PcGoodbye};
@@ -61,13 +66,22 @@ impl MediaSource for FakeSource {
 const CODE: &str = "314159";
 
 /// The headset's network thread with its files in `dir` (as the headset app keeps
-/// them: `identity`, `paired_hosts`).
+/// them: `identity`, `paired_hosts`, `find_secrets`, `last_hosts`). No query goes
+/// anywhere.
 fn headset(dir: &Path) -> (Net, Receiver<NetEvent>, Arc<Played>) {
+    headset_asking(dir, None)
+}
+
+/// [`headset`], asking the PCs at their addresses on `port` (the test PC's discovery
+/// port): never as a broadcast.
+fn headset_asking(dir: &Path, port: Option<u16>) -> (Net, Receiver<NetEvent>, Arc<Played>) {
     let (tx, rx) = mpsc::channel();
     let played = Arc::new(Played::default());
     let net = Net::start(
         Config {
             pairing_code: || CODE.to_owned(),
+            discovery_port: port,
+            broadcast: false,
             ..Config::in_dir(dir, None, "e2e headset")
         },
         tx,
@@ -383,6 +397,206 @@ fn the_headset_pairs_again_when_the_pc_forgot_it() {
     wait(&rx, START, |e| {
         matches!(e, NetEvent::Connected { pc, .. } if pc == id).then_some(())
     });
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.quit();
+}
+
+/// A query of step `step` around (to the addresses the headset keeps, and `also`):
+/// the answers, once its wait is over.
+fn ask(net: &Net, rx: &Receiver<NetEvent>, step: u32, also: Option<SocketAddr>) -> Vec<FoundHost> {
+    net.send(NetCmd::Ask {
+        step: StepId(step),
+        to: AskTo::Around { also },
+        pairing: false,
+    });
+    let mut heard = Vec::new();
+    loop {
+        match wait(rx, START, |e| match e {
+            NetEvent::Heard(h) => Some(Some(h)),
+            NetEvent::Missed { step: s } if s == StepId(step) => Some(None),
+            _ => None,
+        }) {
+            Some(h) => heard.push(h),
+            None => return heard,
+        }
+    }
+}
+
+/// `file` in the headset's `dir`, once it holds `what`.
+fn wait_file(dir: &Path, file: &str, what: &str) -> String {
+    let until = Instant::now() + SOON;
+    loop {
+        let text = std::fs::read_to_string(dir.join(file)).unwrap_or_default();
+        if text.contains(what) {
+            return text;
+        }
+        assert!(Instant::now() < until, "{file}: {text:?}, not {what:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The PC is found by asking, straight at its address (as at a VPN address): the
+/// answer carries its tag (the headset knows which PC it is before it connects) and
+/// where to connect, and the session opens there.
+#[test]
+fn the_headset_finds_its_pc_by_asking() {
+    let dir = TestDir::new("headset-net-ask");
+    dir.save_monitors(TWO_MONITORS);
+    let _keys = dir.pair();
+    let id = headset::ids::PcId::of(&dir.pc_key());
+    let options = Options {
+        discovery: true,
+        ..Options::default()
+    };
+    let pc = Pc::start(&dir, &options);
+    let port = pc.discovery.unwrap().port();
+    let (mut net, rx, _) = headset_asking(&dir.path().join("headset"), Some(port));
+    let heard = ask(&net, &rx, 1, Some(pc.addr));
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert_eq!(
+        (heard[0].pc, heard[0].addr, heard[0].name.as_str()),
+        (Some(id), pc.addr, "fake-pc")
+    );
+    net.send(NetCmd::Dial {
+        step: StepId(2),
+        to: Dest::Addr(heard[0].addr),
+        pair: None,
+        pc_shows_code: false,
+    });
+    wait(&rx, START, |e| {
+        matches!(e, NetEvent::Connected { pc, .. } if pc == id).then_some(())
+    });
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.quit();
+}
+
+/// Right after an update the headset has no find secret: the PC (paired) does not
+/// answer its query, but its address takes the connection, and the session gives the
+/// secret; kept with that address, the next search finds the PC by asking alone.
+#[test]
+fn the_first_connection_without_the_secret_then_by_asking() {
+    let dir = TestDir::new("headset-net-first");
+    dir.save_monitors(TWO_MONITORS);
+    let _keys = dir.pair();
+    let headset_dir = dir.path().join("headset");
+    std::fs::remove_file(headset_dir.join("find_secrets")).unwrap();
+    let id = headset::ids::PcId::of(&dir.pc_key());
+    let options = Options {
+        discovery: true,
+        ..Options::default()
+    };
+    let pc = Pc::start(&dir, &options);
+    let port = pc.discovery.unwrap().port();
+    let (mut net, rx, _) = headset_asking(&headset_dir, Some(port));
+    assert!(
+        ask(&net, &rx, 1, Some(pc.addr)).is_empty(),
+        "no tag, no answer"
+    );
+    dial(&net, 2, &pc);
+    wait(&rx, START, |e| {
+        matches!(e, NetEvent::Connected { pc, .. } if pc == id).then_some(())
+    });
+    let secret = prostir_proto::secure::to_hex(&dir.find_secret());
+    wait_file(&headset_dir, "find_secrets", &secret);
+    let pc_hex = prostir_proto::secure::to_hex(&dir.pc_key());
+    wait_file(&headset_dir, "last_hosts", &format!("{pc_hex} {}", pc.addr));
+    net.send(NetCmd::Leave(id, HeadsetGoodbye::OtherPc));
+    wait(&rx, START, |e| {
+        matches!(
+            e,
+            NetEvent::Ended {
+                step: StepId(2),
+                ..
+            }
+        )
+        .then_some(())
+    });
+    // Asked with nothing else to go on: the address kept, and the secret.
+    let heard = ask(&net, &rx, 3, None);
+    assert_eq!(heard.iter().map(|h| h.pc).collect::<Vec<_>>(), [Some(id)]);
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.quit();
+}
+
+/// The PC forgot another headset while this one was off: it asks with the old find
+/// secret, which the PC keeps valid for it, and is answered (with that secret's tag);
+/// its session gives it the new one, and the old one is valid no more.
+#[test]
+fn a_stale_secret_still_finds_the_pc() {
+    let dir = TestDir::new("headset-net-stale");
+    dir.save_monitors(TWO_MONITORS);
+    let old_keys = dir.pair();
+    let _other = dir.pair_headset("other");
+    let id = headset::ids::PcId::of(&dir.pc_key());
+    let old = dir.find_secret();
+    let options = Options {
+        discovery: true,
+        ..Options::default()
+    };
+    let mut pc = Pc::start(&dir, &options);
+    let Some(ctl) = pc.ctl(&["forget", "other"]) else {
+        pc.quit();
+        return;
+    };
+    assert_eq!(ctl.code, 0, "{ctl:?}");
+    pc.wait_log(SOON, "a new find secret");
+    assert_ne!(dir.find_secret(), old);
+    let headset_dir = dir.path().join("headset");
+    let (mut net, rx, _) = headset_asking(&headset_dir, Some(pc.discovery.unwrap().port()));
+    let heard = ask(&net, &rx, 1, Some(pc.addr));
+    assert_eq!(heard.iter().map(|h| h.pc).collect::<Vec<_>>(), [Some(id)]);
+    dial(&net, 2, &pc);
+    wait(&rx, START, |e| {
+        matches!(e, NetEvent::Connected { pc, .. } if pc == id).then_some(())
+    });
+    pc.wait_log(SOON, "has the current find secret now");
+    let new = prostir_proto::secure::to_hex(&dir.find_secret());
+    wait_file(&headset_dir, "find_secrets", &new);
+    // The old secret (as the files had it before) gets nothing any more.
+    let to = pc.discovery.unwrap();
+    let with_old = prostir_testkit::find::query(&old_keys, "");
+    assert!(prostir_testkit::find::ask(to, &with_old, Duration::from_millis(700)).is_none());
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.quit();
+}
+
+/// Asleep in its sockets' watcher, the PC wakes for a query of its own headset: the
+/// watcher answers it and starts the full program, which takes the connection that
+/// follows. Once the headset left and the program went back to sleep, a query is
+/// answered again by the watcher.
+#[test]
+fn a_sleeping_pc_wakes_for_its_headsets_query() {
+    let dir = TestDir::new("headset-net-asleep");
+    dir.save_monitors(TWO_MONITORS);
+    let _keys = dir.pair();
+    let id = headset::ids::PcId::of(&dir.pc_key());
+    let options = Options {
+        watcher: true,
+        discovery: true,
+        linger: 0,
+        env: vec![("PROSTIR_TEST_QUIET_SECONDS".into(), "2".into())],
+        ..Options::default()
+    };
+    let mut pc = Pc::start(&dir, &options);
+    assert_eq!(pc.program(), Some(pc.pid()), "only the watcher runs");
+    let port = pc.discovery.unwrap().port();
+    let (mut net, rx, _) = headset_asking(&dir.path().join("headset"), Some(port));
+    let heard = ask(&net, &rx, 1, Some(pc.addr));
+    assert_eq!(heard.iter().map(|h| h.pc).collect::<Vec<_>>(), [Some(id)]);
+    pc.wait_log(SOON, "starting Prostir: Headset");
+    net.send(NetCmd::Dial {
+        step: StepId(2),
+        to: Dest::Addr(heard[0].addr),
+        pair: None,
+        pc_shows_code: false,
+    });
+    wait(&rx, START, |e| {
+        matches!(e, NetEvent::Connected { pc, .. } if pc == id).then_some(())
+    });
+    net.send(NetCmd::Leave(id, HeadsetGoodbye::Quit));
+    pc.wait_log(START, "Prostir went to sleep: waiting for the headset");
+    let heard = ask(&net, &rx, 3, Some(pc.addr));
+    assert_eq!(heard.len(), 1, "answered by the watcher again");
     assert!(net.stop(Duration::from_secs(2)));
     pc.quit();
 }

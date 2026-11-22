@@ -142,6 +142,10 @@ impl Brain {
                 session.send(HostMsg::FindSecret {
                     secret: self.security.find_secret(),
                 });
+                // An older secret kept valid for it is needed no more. (Should the
+                // session break before it arrives, the headset still reaches the PC by
+                // its last address and gets it then.)
+                self.security.gave_find_secret(&key);
                 let via = session.api_session().via;
                 if via == api::Via::Wifi {
                     self.wifi = look_at_wifi();

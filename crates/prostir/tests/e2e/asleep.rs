@@ -125,19 +125,28 @@ fn the_pc_answers_everyone_until_paired_then_only_its_own() {
     );
     assert!(find::send(to, &own[..MIN_QUERY - 1], SILENCE).is_none());
 
-    // Forgotten: its tags no longer work. The other headset gets the new secret in
-    // its session and is answered again.
+    // Forgotten: a new secret. The other headset was off then, so the old secret stays
+    // valid for it (its queries are answered, with the old secret's tag) until its
+    // session gives it the new one; from then on the old secret gets silence, the
+    // forgotten headset's too.
+    let first = dir.find_secret();
     if let Some(ctl) = pc.ctl(&[
         "forget",
         &prostir_proto::secure::to_hex(&keys.identity.public),
     ]) {
         assert_eq!(ctl.code, 0, "{ctl:?}");
         pc.wait_log(SOON, "a new find secret");
-        assert!(silent(to, &keys, ""), "the forgotten headset");
-        assert!(silent(to, &other, ""), "the old secret");
+        assert_ne!(dir.find_secret(), first);
+        let old = asks(to, &other, "").expect("the old secret, still owed to it");
+        assert!(old.from_pc(&first), "answered with the old secret's tag");
         let mut headset = connect(&pc, &mut other);
         headset.learn_find_secret(&mut other, SOON).unwrap();
+        pc.wait_log(SOON, "has the current find secret now");
         assert!(asks(to, &other, "").is_some(), "with the new secret");
+        assert!(
+            silent(to, &keys, ""),
+            "the forgotten headset, the old secret"
+        );
     }
     pc.quit();
 }
@@ -548,44 +557,22 @@ fn socket_activation_starts_the_pc_for_its_headset_only() {
     pc.quit();
 }
 
-/// While the full program runs (with `--stay`, all along), its beacon wakes it once a
-/// second, and nothing else does: the price of being found by headsets that do not
-/// ask yet, until the headset asks (step 7 of 0.2.0) and the beacon goes.
+/// While the full program runs (with `--stay`, all along) and nobody asks, nothing of
+/// it wakes: it sends nothing on its own (no beacon since step 7.9), and still answers
+/// its own headset at once.
 #[test]
-fn the_beacon_is_the_only_thing_that_wakes_a_running_pc() {
-    let dir = TestDir::new("beacon");
-    let heard = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    heard
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
+fn nothing_wakes_a_running_pc_that_nobody_asks() {
+    let dir = TestDir::new("quiet");
+    let keys = dir.pair();
     let options = Options {
         discovery: true,
-        beacon_to: Some(heard.local_addr().unwrap()),
         ..Options::default()
     };
     let mut pc = Pc::start(&dir, &options);
-    let mut buf = [0u8; 512];
-    let n = heard.recv(&mut buf).expect("a beacon");
-    let (port, name) = prostir_proto::decode_beacon(&buf[..n]).expect("a beacon");
-    assert_eq!((port, name.as_str()), (pc.addr.port(), "fake-pc"));
-    // Settled, once the encoders' probe at the start is over, every wakeup is the
-    // beacon's, about one a second.
+    // Settled, once the encoders' probe at the start is over: no wakeup at all.
     pc.wait_log(START, "video encoders probed in");
-    settle(pc.pid(), &["beacon"], "the running PC");
-    let before = wakeups_of(pc.pid());
-    std::thread::sleep(WATCH);
-    let after = wakeups_of(pc.pid());
-    let mut beacon = 0;
-    for (who, n) in woke(&before, &after) {
-        assert!(
-            who.starts_with("beacon ("),
-            "only the beacon wakes: {who} woke {n}"
-        );
-        beacon += n;
-    }
-    assert!(
-        (2..=5).contains(&beacon),
-        "the beacon woke {beacon} times in {WATCH:?}"
-    );
+    assert_asleep(pc.pid(), "the running PC");
+    assert_eq!(pc.count_log("beacon"), 0, "no beacon");
+    assert!(asks(pc.discovery.unwrap(), &keys, "").is_some());
     pc.quit();
 }

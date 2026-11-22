@@ -5,11 +5,22 @@
 //! happened; the files of the trusted PCs are its own, the list of them comes here as
 //! [`Session::paired_list`].
 //!
-//! Before trust everything is in [`Search`], one for the headset: the PCs heard on the
-//! network, a PC that refuses the connection, and one attempt at a time ([`Attempt`]:
-//! dialing an address, an unknown PC offered to the user, pairing). After trust
-//! everything is in a [`Link`] by the PC's [`PcId`]: connecting, connected (its
-//! [`Pc`]), or lost. Only links count towards [`MAX_PCS`].
+//! Before trust everything is in [`Search`], one for the headset: the PCs that answered
+//! its queries, a PC that refuses the connection, the hint shown while nothing answers,
+//! and one attempt at a time ([`Attempt`]: dialing an address, an unknown PC offered to
+//! the user, pairing). After trust everything is in a [`Link`] by the PC's [`PcId`]:
+//! connecting, connected (its [`Pc`]), or lost. Only links count towards [`MAX_PCS`].
+//!
+//! The search asks (step 7 note, 8.1): a query ([`NetCmd::Ask`], as a broadcast and
+//! straight to the addresses the network thread keeps) once a second for the first
+//! [`ASK_FAST_FOR`] of a search, then every [`ASK_EVERY`]; a trusted PC's answer leads to
+//! its connection at once. A round goes USB, the PC picked in the menu, the query, a
+//! trusted PC that answered, the typed address (`host.txt`), a trusted PC's last address
+//! by TCP (at most every [`LAST_EVERY`] for each: an open port wakes a sleeping PC, and
+//! this is how the first connection after an update, or with a find secret gone stale,
+//! still works), and the one PC that answered everyone. Nothing is asked while the
+//! headset is off the head or as many PCs as allowed are in a session, so a PC in use
+//! and the other PCs around are left alone.
 //!
 //! Plain data with the time passed in: it builds and is tested on any system.
 
@@ -26,7 +37,7 @@ use prostir_proto::request::Outcome;
 use prostir_proto::state::{HeadsetState, PcState, ReqId};
 use prostir_proto::{HeadsetGoodbye, PcGoodbye};
 
-use crate::connecting::{Ended, Probing, RETRY_PAUSE};
+use crate::connecting::{Ended, RETRY_PAUSE};
 use crate::ids::PcId;
 use crate::lang::Texts;
 use crate::pending::{Answered, Asks};
@@ -45,6 +56,22 @@ pub const REFUSED_PAUSE: Duration = Duration::from_secs(10);
 const REFUSED_WITHIN: Duration = Duration::from_secs(3);
 /// How long a "Pair" answer holds for reconnecting and typing the code.
 pub const APPROVAL: Duration = Duration::from_secs(600);
+/// Queries go once a second for this long into a search, then every [`ASK_EVERY`].
+pub const ASK_FAST_FOR: Duration = Duration::from_secs(30);
+pub const ASK_FAST: Duration = Duration::from_secs(1);
+pub const ASK_EVERY: Duration = Duration::from_secs(3);
+/// A PC that answered is listed this long after its last answer.
+pub const HEARD_WITHIN: Duration = Duration::from_secs(6);
+/// A trusted PC's last address is dialed at most this often while it does not answer.
+pub const LAST_EVERY: Duration = Duration::from_secs(10);
+/// With no trusted PC (or the user picking one), no answer for this long brings the
+/// hint of what to do on the PC.
+pub const NEW_HINT_AFTER: Duration = Duration::from_secs(5);
+/// A trusted PC silent for this long (no answer, no connection) brings the hint that
+/// it does not answer.
+pub const SILENT_HINT_AFTER: Duration = Duration::from_secs(30);
+/// The most PCs listed from answers (the rest of a flood of forged ones is dropped).
+pub const FOUND_MAX: usize = 8;
 
 /// A PC this headset trusts, as the network thread's file of them says.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,11 +81,42 @@ pub struct PairedPc {
     pub name: String,
 }
 
-/// A PC heard announcing itself on the network.
+/// A PC that answered a query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoundHost {
     pub name: String,
+    /// Where it takes the connection: the address the answer came from, and the TCP
+    /// port the answer gave.
     pub addr: SocketAddr,
+    /// The trusted PC whose tag the answer carried; none for a PC that answers
+    /// everyone (unpaired, or with its pairing window open).
+    pub pc: Option<PcId>,
+    /// Its pairing window is open.
+    pub pairing: bool,
+    /// When the answer came.
+    pub heard: Instant,
+}
+
+/// What the search screen says while nothing answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hint {
+    /// No trusted PC (or the user picks another), and no PC answered: how to make the
+    /// PC answer (open pairing there), type its address or use a cable.
+    NewPc,
+    /// Trusted PCs, but none answered nor took the connection for a while: check that
+    /// Prostir runs on the PC and that it is on the same network.
+    Silent,
+}
+
+/// Where a query goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskTo {
+    /// As a broadcast, and straight to the addresses the network thread keeps (each
+    /// trusted PC's last one, `host.txt`) and to `also` (the PC picked in the menu, by
+    /// its TCP address: asked at its IP on the discovery port).
+    Around { also: Option<SocketAddr> },
+    /// To this UDP address alone (the selftest's fake PC).
+    Exactly(SocketAddr),
 }
 
 /// One step of the search, by its number: what the network thread reports about it
@@ -74,8 +132,8 @@ pub enum Dest {
     Addr(SocketAddr),
     /// The address the user wrote in `host.txt`.
     HostFile,
-    /// The address of the last PC that worked over the network.
-    LastHost,
+    /// The last address this trusted PC had a session at.
+    LastOf(PcId),
 }
 
 /// What the network thread is to do. It decides nothing itself.
@@ -91,10 +149,14 @@ pub enum NetCmd {
         pair: Option<[u8; 32]>,
         pc_shows_code: bool,
     },
-    /// Listen for PCs announcing themselves for a moment, then say it is done.
-    Listen { step: StepId },
-    /// Probe the local `/24` for a PC (until step 7.9).
-    Scan { step: StepId },
+    /// Ask which PCs are there (see [`AskTo`]): each answer is [`Session::heard`], and
+    /// the end of the wait for them [`Session::missed`]. `pairing`: the headset looks
+    /// for a PC to pair with, so the query carries its name.
+    Ask {
+        step: StepId,
+        to: AskTo,
+        pairing: bool,
+    },
     /// The attempt before trust (dialing, pairing) is given up: its connection closes.
     Hangup,
     /// Leave this PC, telling it why.
@@ -138,10 +200,12 @@ pub enum Attempt {
 /// Everything before trust (see the module).
 #[derive(Debug, Default)]
 pub struct Search {
-    /// PCs heard announcing themselves, as last heard.
+    /// PCs that answered lately (within [`HEARD_WITHIN`]), the latest last.
     pub found: Vec<FoundHost>,
-    /// A PC that announces itself but does not accept the connection (a firewall).
+    /// A PC that answers but does not accept the connection (a firewall).
     pub unreachable: Option<String>,
+    /// What the search screen says while nothing answers.
+    pub hint: Option<Hint>,
     pub attempt: Option<Attempt>,
     /// The PC speaks another protocol: (the PC is newer, its app version). Kept until
     /// a session opens.
@@ -154,9 +218,15 @@ pub struct Search {
     approved: Option<([u8; 32], Instant)>,
     /// Pairing the other way round: the PC shows the code, the headset asks for it.
     pc_shows_code: bool,
-    probing: Probing,
     round: Round,
     last_step: u32,
+    /// Since when this search goes (worn, nothing connected): for how often it asks,
+    /// and for the hints.
+    since: Option<Instant>,
+    /// When the last query went.
+    asked: Option<Instant>,
+    /// When each trusted PC's last address was dialed last.
+    last_dialed: Vec<(PcId, Instant)>,
 }
 
 /// Where the search's round stands.
@@ -178,18 +248,16 @@ enum Round {
     },
 }
 
-/// The steps of a round, in their order: USB, the PC picked in the menu, the typed
-/// address, the last PC's (straight away: the 1.2 s of listening for PCs do not hold
-/// them up), listening for PCs, the one PC heard, a probe of the network.
+/// The steps of a round, in their order (see the module).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Plan {
     Usb,
     Choice,
+    Ask,
+    Answer,
     HostFile,
     LastHost,
-    Listen,
     Sole,
-    Scan,
 }
 
 /// A trusted PC's connection.
@@ -441,10 +509,11 @@ impl Session {
     }
 
     /// "Change PC": the PC in use is left, and nothing connects on its own until the
-    /// user picks one.
+    /// user picks one. The search starts anew (its hint for a new PC too).
     pub fn change_pc(&mut self) {
         self.search.choice = None;
         self.search.picking = true;
+        self.search.since = None;
         self.leave_all(HeadsetGoodbye::OtherPc);
         if self.attempt_addr().is_some() {
             self.cmds.push(NetCmd::Hangup);
@@ -513,14 +582,39 @@ impl Session {
     /// change).
     pub fn paired_list(&mut self, list: Vec<PairedPc>) {
         self.paired = list;
+        let paired = &self.paired;
+        self.search
+            .last_dialed
+            .retain(|(pc, _)| paired.iter().any(|p| p.pc == *pc));
     }
 
-    /// The PCs heard on the network now.
-    pub fn hosts(&mut self, hosts: Vec<FoundHost>) {
-        self.search.found = hosts;
+    /// A PC answered a query at `now`: listed (in place of its earlier answer), and a
+    /// trusted one is connected to at once while the round waits for answers.
+    pub fn heard(&mut self, host: FoundHost, now: Instant) {
+        let found = &mut self.search.found;
+        found.retain(|h| h.addr != host.addr && (host.pc.is_none() || h.pc != host.pc));
+        if found.len() >= FOUND_MAX {
+            found.remove(0);
+        }
+        let (addr, pc) = (host.addr, host.pc);
+        found.push(host);
+        let Round::Waiting { at: Plan::Ask, .. } = self.search.round else {
+            return;
+        };
+        if let Some(only) = self.only {
+            if pc.is_some() {
+                self.dial(Plan::Choice, Dest::Addr(only), now);
+            }
+        } else if self.search.choice.is_none()
+            && !self.search.picking
+            && pc.is_some_and(|pc| self.wants(pc))
+        {
+            self.dial(Plan::Answer, Dest::Addr(addr), now);
+        }
     }
 
-    /// Nothing answered at step `step` (or listening is over): the round goes on.
+    /// Nothing answered at step `step` (or the wait for answers to its query is over):
+    /// the round goes on.
     pub fn missed(&mut self, step: StepId, now: Instant) {
         let Round::Waiting { step: waiting, at } = self.search.round else {
             return;
@@ -528,11 +622,10 @@ impl Session {
         if waiting != step {
             return;
         }
-        if matches!(at, Plan::Choice | Plan::Sole)
-            && let Some(addr) = self.addr_of(at)
+        if let Some(addr) = self.addr_of(at)
             && let Some(h) = self.search.found.iter().find(|h| h.addr == addr)
         {
-            // It announces itself but refuses the connection: most likely a firewall.
+            // It answers but refuses the connection: most likely a firewall.
             self.search.unreachable = Some(h.name.clone());
         }
         if matches!(
@@ -697,10 +790,6 @@ impl Session {
         ) {
             self.search.attempt = None;
         }
-        // A search after a session probes soon again.
-        if ended.opened {
-            self.search.probing = Probing::default();
-        }
         let pause = if ended
             .refused
             .is_some_and(|t| now.saturating_duration_since(t) < REFUSED_WITHIN)
@@ -735,9 +824,22 @@ impl Session {
 
     // ---- The time ----
 
-    /// Once a pass of the main loop, with or without frames: the next round of the
-    /// search starts when it is due.
+    /// Once a pass of the main loop, with or without frames: answers too old are no
+    /// longer listed, the hint follows, and the next round of the search starts when it
+    /// is due.
     pub fn tick(&mut self, now: Instant) {
+        self.search
+            .found
+            .retain(|h| now.saturating_duration_since(h.heard) < HEARD_WITHIN);
+        let searching = self.worn
+            && !self.quit
+            && !self.links.values().any(|l| !matches!(l, Link::Lost { .. }));
+        if searching {
+            self.search.since.get_or_insert(now);
+        } else {
+            self.search.since = None;
+        }
+        self.search.hint = self.hint(now);
         if let Round::Resting(at) = self.search.round
             && now >= at
         {
@@ -772,32 +874,41 @@ impl Session {
     }
 
     /// The next step of the round after `after` (`None`: a new round), handed to the
-    /// network thread; the round rests when there is none.
+    /// network thread; the round rests until the next query is due when there is none.
     fn step_after(&mut self, after: Option<Plan>, now: Instant) {
         if !self.may_search() {
             self.search.round = Round::Resting(now + RETRY_PAUSE);
             return;
         }
         if let Some(only) = self.only {
+            // The fake PC alone: asked, and dialed whether it answered or not (it
+            // answers once it gave its find secret in a session). A real PC over USB
+            // (`127.0.0.1:47830`, `adb reverse`) is never asked: USB carries TCP only.
+            let usb = only.ip().is_loopback() && only.port() == prostir_proto::TCP_PORT;
             match after {
-                None => self.dial(Plan::Choice, Dest::Addr(only), now),
-                Some(_) => self.search.round = Round::Resting(now + RETRY_PAUSE),
+                None if !usb && self.ask_due(now) => {
+                    return self.query(Plan::Ask, AskTo::Exactly(only), now);
+                }
+                None | Some(Plan::Ask) => return self.dial(Plan::Choice, Dest::Addr(only), now),
+                Some(_) => {}
             }
-            return;
+            return self.rest(now);
         }
         let s = &self.search;
         let (choice, picking) = (s.choice, s.picking);
+        // The user is choosing, or chose: only their choice, and the list of answers.
+        let own_way = !picking && choice.is_none();
         let mut at = after;
         loop {
             let next = match at {
                 None => Plan::Usb,
                 Some(Plan::Usb) => Plan::Choice,
-                Some(Plan::Choice) => Plan::HostFile,
+                Some(Plan::Choice) => Plan::Ask,
+                Some(Plan::Ask) => Plan::Answer,
+                Some(Plan::Answer) => Plan::HostFile,
                 Some(Plan::HostFile) => Plan::LastHost,
-                Some(Plan::LastHost) => Plan::Listen,
-                Some(Plan::Listen) => Plan::Sole,
-                Some(Plan::Sole) => Plan::Scan,
-                Some(Plan::Scan) => break,
+                Some(Plan::LastHost) => Plan::Sole,
+                Some(Plan::Sole) => break,
             };
             at = Some(next);
             match next {
@@ -805,42 +916,136 @@ impl Session {
                 Plan::Usb if !picking && choice.is_none_or(|c| c.ip().is_loopback()) => {
                     return self.dial(next, Dest::Usb, now);
                 }
-                Plan::Choice if choice.is_some() => {
+                Plan::Choice => {
                     if let Some(addr) = choice {
                         return self.dial(next, Dest::Addr(addr), now);
                     }
                 }
-                Plan::Listen => {
-                    let step = self.next_step();
-                    self.search.round = Round::Waiting { step, at: next };
-                    self.cmds.push(NetCmd::Listen { step });
-                    return;
+                Plan::Ask if self.ask_due(now) => {
+                    let also = choice.filter(|c| !c.ip().is_loopback());
+                    return self.query(next, AskTo::Around { also }, now);
                 }
-                // The user is choosing (or their choice is unreachable): only listen.
-                Plan::HostFile | Plan::LastHost if picking || choice.is_some() => {}
-                Plan::Sole | Plan::Scan if picking || choice.is_some() => break,
-                Plan::HostFile => return self.dial(next, Dest::HostFile, now),
-                Plan::LastHost => return self.dial(next, Dest::LastHost, now),
-                // Exactly one PC around: just use it. Several: wait for a pick.
-                Plan::Sole => match self.search.found.as_slice() {
-                    [one] => {
-                        let addr = one.addr;
+                Plan::Answer if own_way => {
+                    if let Some(addr) = self.trusted_answer() {
                         return self.dial(next, Dest::Addr(addr), now);
                     }
-                    [] => {}
-                    _ => break,
-                },
-                // Some networks drop broadcasts: now and then probe the local /24.
-                Plan::Scan if self.search.probing.due(now) => {
-                    let step = self.next_step();
-                    self.search.round = Round::Waiting { step, at: next };
-                    self.cmds.push(NetCmd::Scan { step });
-                    return;
+                }
+                Plan::HostFile if own_way => return self.dial(next, Dest::HostFile, now),
+                Plan::LastHost if own_way => {
+                    if let Some(pc) = self.last_due(now) {
+                        self.search.last_dialed.retain(|(p, _)| *p != pc);
+                        self.search.last_dialed.push((pc, now));
+                        return self.dial(next, Dest::LastOf(pc), now);
+                    }
+                }
+                // Exactly one PC answered everyone: just use it (unknown, it is offered
+                // to the user). Several: wait for a pick.
+                Plan::Sole if own_way => {
+                    if let Some(addr) = self.sole_other() {
+                        return self.dial(next, Dest::Addr(addr), now);
+                    }
                 }
                 _ => {}
             }
         }
-        self.search.round = Round::Resting(now + RETRY_PAUSE);
+        self.rest(now);
+    }
+
+    /// The round is over: the next one goes once the next query is due.
+    fn rest(&mut self, now: Instant) {
+        let due = self.search.asked.map_or(now, |at| at + self.ask_every(now));
+        self.search.round = Round::Resting(due.max(now + RETRY_PAUSE));
+    }
+
+    /// How often the search asks at `now`.
+    fn ask_every(&self, now: Instant) -> Duration {
+        let long = self
+            .search
+            .since
+            .is_some_and(|since| now.saturating_duration_since(since) >= ASK_FAST_FOR);
+        if long { ASK_EVERY } else { ASK_FAST }
+    }
+
+    fn ask_due(&self, now: Instant) -> bool {
+        self.search
+            .asked
+            .is_none_or(|at| now.saturating_duration_since(at) >= self.ask_every(now))
+    }
+
+    fn query(&mut self, at: Plan, to: AskTo, now: Instant) {
+        let step = self.next_step();
+        self.search.asked = Some(now);
+        self.search.round = Round::Waiting { step, at };
+        self.cmds.push(NetCmd::Ask {
+            step,
+            to,
+            pairing: self.looking_for_new(),
+        });
+    }
+
+    /// The headset looks for a PC to pair with: it trusts none, or the user picks
+    /// another.
+    fn looking_for_new(&self) -> bool {
+        self.paired.is_empty() || self.search.picking
+    }
+
+    /// Whether the search would connect to trusted PC `pc` now: it has no link on its
+    /// way or in a session.
+    fn wants(&self, pc: PcId) -> bool {
+        self.paired.iter().any(|p| p.pc == pc)
+            && self
+                .links
+                .get(&pc)
+                .is_none_or(|l| matches!(l, Link::Lost { .. }))
+    }
+
+    /// The address of a trusted PC that answered and is wanted, the latest first.
+    fn trusted_answer(&self) -> Option<SocketAddr> {
+        self.search
+            .found
+            .iter()
+            .rev()
+            .find(|h| h.pc.is_some_and(|pc| self.wants(pc)))
+            .map(|h| h.addr)
+    }
+
+    /// The address of the one PC that answered without being a trusted one (it
+    /// answers everyone), if exactly one did.
+    fn sole_other(&self) -> Option<SocketAddr> {
+        let mut others = self.search.found.iter().filter(|h| h.pc.is_none());
+        match (others.next(), others.next()) {
+            (Some(one), None) => Some(one.addr),
+            _ => None,
+        }
+    }
+
+    /// A trusted PC whose last address is due to be dialed at `now`: wanted, not
+    /// dialed there within [`LAST_EVERY`].
+    fn last_due(&self, now: Instant) -> Option<PcId> {
+        self.paired.iter().map(|p| p.pc).find(|pc| {
+            self.wants(*pc)
+                && self
+                    .search
+                    .last_dialed
+                    .iter()
+                    .find(|(p, _)| p == pc)
+                    .is_none_or(|(_, at)| now.saturating_duration_since(*at) >= LAST_EVERY)
+        })
+    }
+
+    /// What the search screen says at `now` (see [`Hint`]).
+    fn hint(&self, now: Instant) -> Option<Hint> {
+        let s = &self.search;
+        let long = now.saturating_duration_since(s.since?);
+        if self.only.is_some() || s.attempt.is_some() || s.update.is_some() {
+            return None;
+        }
+        if self.looking_for_new() {
+            (long >= NEW_HINT_AFTER && s.found.is_empty()).then_some(Hint::NewPc)
+        } else {
+            let answered = s.found.iter().any(|h| h.pc.is_some());
+            (s.choice.is_none() && long >= SILENT_HINT_AFTER && !answered).then_some(Hint::Silent)
+        }
     }
 
     fn dial(&mut self, at: Plan, to: Dest, now: Instant) {
@@ -868,10 +1073,8 @@ impl Session {
     fn addr_of(&self, at: Plan) -> Option<SocketAddr> {
         match at {
             Plan::Choice => self.search.choice.or(self.only),
-            Plan::Sole => match self.search.found.as_slice() {
-                [one] => Some(one.addr),
-                _ => None,
-            },
+            Plan::Sole => self.sole_other(),
+            Plan::Answer => self.trusted_answer(),
             _ => None,
         }
     }
@@ -903,8 +1106,8 @@ impl Session {
         }
     }
 
-    /// What the user reads for the PC at `addr`: its name as heard on the network,
-    /// "PC over USB", or its address.
+    /// What the user reads for the PC at `addr`: its name as its answer said it, "PC
+    /// over USB", or its address.
     fn label(&self, addr: SocketAddr, texts: &Texts) -> String {
         if let Some(h) = self.search.found.iter().find(|h| h.addr == addr) {
             return h.name.clone();

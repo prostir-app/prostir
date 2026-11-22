@@ -252,7 +252,7 @@ change older clients would misread.
 ```json
 {
   "v": 1,
-  "pc": {"name": "desk", "app": "0.2.0", "desktop": "KDE Plasma", "phase": "live"},
+  "pc": {"name": "desk", "app": "0.2.0", "desktop": "KDE Plasma", "phase": "live", "addresses": ["192.168.1.10"]},
   "window": {"theme": "system", "palette": "ink", "language": null},
   "autostart": true,
   "headsets": [
@@ -311,6 +311,7 @@ change older clients would misread.
 | `pc.app` | the PC app's version |
 | `pc.desktop` | `KDE Plasma`, `Hyprland`; empty while there are no monitors |
 | `pc.phase` | `idle` (waiting, no monitors), `live` (a headset connected), `lingering` (the monitors wait for the headset to come back) |
+| `pc.addresses` | the PC's IPv4 addresses on its networks (a VPN's too, not those of containers or virtual machines), as a person types one into a headset that does not find the PC by itself; empty from a PC before 0.2.0's step 7.9 |
 | `window` | the settings window's look (`window_look`) |
 | `autostart` | starting with the session; `null` where it is not set from here |
 | `headsets` | every paired headset, those connected first (in the order they connected) |

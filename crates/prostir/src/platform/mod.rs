@@ -46,7 +46,7 @@
 //!   `notify_and_wait` (desktop notifications), `notice` (a notification with a
 //!   button, as a `Notice` whose descriptor the watcher sleeps on).
 //! - System: `config_home`, `single_instance` (with who holds it) and `watcher`,
-//!   `clean_up_after_crash`, `give_memory_back`, `hostname`, `broadcast_addresses`,
+//!   `clean_up_after_crash`, `give_memory_back`, `hostname`, `local_addresses`,
 //!   `screenshot_path`, `import_session_environment`. The private runtime dir, and
 //!   running a program with a time limit, stay inside the platform.
 //! - `sockets` (`take`, `open`, `filter_queries`, `readable`, `start_with`): the
@@ -157,6 +157,24 @@ compile_error!("Prostir has no platform layer for this operating system yet (see
 
 #[cfg(not(any(feature = "desktop", feature = "fake-desktop")))]
 compile_error!("Prostir needs a desktop: the default feature `desktop`, or `fake-desktop`");
+
+/// What people call a display of the PC (see [`PhysicalDisplay::label`]): its `make`
+/// and `model` as it says them (the model alone when it starts with the make, as
+/// `Dell Inc.` and `DELL U2720Q` do), else its `connector`. Any desktop's.
+pub fn display_label(make: &str, model: &str, connector: &str) -> String {
+    fn said(w: &str) -> Option<&str> {
+        let w = w.trim();
+        (!w.is_empty() && !w.eq_ignore_ascii_case("unknown")).then_some(w)
+    }
+    let first = |w: &str| w.split_whitespace().next().unwrap_or("").to_lowercase();
+    let make = said(make).map(|m| m.trim_end_matches(['.', ',']));
+    match (make, said(model)) {
+        (Some(make), Some(model)) if first(model).starts_with(&first(make)) => model.to_owned(),
+        (Some(make), Some(model)) => format!("{make} {model}"),
+        (Some(one), None) | (None, Some(one)) => one.to_owned(),
+        (None, None) => connector.to_owned(),
+    }
+}
 
 /// A virtual monitor to make: its mode and scale.
 #[derive(Debug, Clone, PartialEq)]
@@ -296,6 +314,23 @@ pub enum NoCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A display of the PC is called by its maker and model where it says them, by
+    /// its connector where it does not.
+    #[test]
+    fn displays_of_the_pc_have_human_names() {
+        assert_eq!(
+            display_label("Samsung", "S24R35x", "HDMI-A-1"),
+            "Samsung S24R35x"
+        );
+        assert_eq!(
+            display_label("Dell Inc.", "DELL U2720Q", "DP-1"),
+            "DELL U2720Q"
+        );
+        assert_eq!(display_label(" ", "unknown", "eDP-1"), "eDP-1");
+        assert_eq!(display_label("BOE", "", "eDP-1"), "BOE");
+        assert_eq!(display_label("", "", "HDMI-A-1"), "HDMI-A-1");
+    }
 
     /// A monitor is planned with the scale its output gets: whole percent.
     #[test]

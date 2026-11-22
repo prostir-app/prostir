@@ -1,13 +1,15 @@
 //! A fake PC: serves one trusted headset at a time like the PC app does (encryption,
-//! hello, `Snapshot`, parts, pings), streams monitors from clips encoded beforehand,
-//! answers requests, and breaks things on purpose (a frame the decoder cannot take, a
-//! stream started over, the connection dropped). No GStreamer, no desktop.
+//! hello, `Snapshot`, its find secret, parts, pings), answers the queries of the
+//! headsets it trusts (on the UDP port of the same number as its TCP port), streams
+//! monitors from clips encoded beforehand, answers requests, and breaks things on
+//! purpose (a frame the decoder cannot take, a stream started over, the connection
+//! dropped). No GStreamer, no desktop.
 //!
 //! One fake for three places: the headset's selftest (in the headset's own process),
 //! tests of the headset's network code on Linux, and scenarios of the headset's core
 //! (there by its messages alone).
 
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -17,6 +19,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use prostir_proto::discovery::{Answer, FindSecret, MAX_ANSWER, MAX_QUERY, QueryRef, flags};
 use prostir_proto::handshake::{self, First};
 use prostir_proto::link::tcp::{NoiseTcp, Plain};
 use prostir_proto::link::{Closer, Link, RecordReceiver, RecordSender};
@@ -138,6 +141,9 @@ pub struct PcConfig {
     pub monitors: usize,
     /// Its name, as `PcInfo` says it.
     pub name: String,
+    /// What the headsets it trusts make their tags with: given in each session, as
+    /// the PC app does.
+    pub find_secret: FindSecret,
 }
 
 /// Something the fake PC saw or did, when.
@@ -157,6 +163,11 @@ pub enum Happened {
     },
     /// A headset it does not trust asked for a session: told to pair, closed.
     NotTrusted,
+    /// A query came: with its tag (`ours`), and whether it was answered.
+    Asked {
+        ours: bool,
+        answered: bool,
+    },
     /// The snapshot went out, listing these monitors.
     Snapshot {
         monitors: Vec<DisplayId>,
@@ -266,14 +277,69 @@ pub struct FakePc {
     shared: Arc<Shared>,
     events: Receiver<Event>,
     thread: Option<JoinHandle<()>>,
+    find: Option<JoinHandle<()>>,
+}
+
+/// A TCP port and the UDP port of the same number on `127.0.0.1`, both free.
+fn ports() -> Result<(TcpListener, UdpSocket)> {
+    let mut last = None;
+    for _ in 0..32 {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let port = listener.local_addr()?.port();
+        match UdpSocket::bind((Ipv4Addr::LOCALHOST, port)) {
+            Ok(udp) => return Ok((listener, udp)),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(anyhow!("no free pair of ports: {last:?}"))
+}
+
+/// Answers the queries on `udp` as the PC app does: with its tag, or any while it
+/// trusts nobody. Until stopped.
+fn answer_queries(udp: &UdpSocket, config: &FindConfig, shared: &Shared) {
+    let _ = udp.set_read_timeout(Some(Duration::from_millis(100)));
+    let mut buf = [0u8; MAX_QUERY + 1];
+    let mut out = Vec::with_capacity(MAX_ANSWER);
+    while !shared.stop.load(Ordering::Relaxed) {
+        let Ok((n, from)) = udp.recv_from(&mut buf) else {
+            continue;
+        };
+        let Some(query) = QueryRef::read(&buf[..n]) else {
+            continue;
+        };
+        let ours = query.looks_for(&config.secret);
+        let answered = ours || !config.paired;
+        if answered {
+            let bits = if config.paired { 0 } else { flags::ANSWERS_ALL };
+            Answer::write_to(
+                &query.nonce,
+                &config.secret,
+                config.port,
+                bits,
+                &config.name,
+                &mut out,
+            );
+            let _ = udp.send_to(&out, from);
+        }
+        shared.tell(Happened::Asked { ours, answered });
+    }
+}
+
+/// What the fake PC answers queries with.
+struct FindConfig {
+    secret: FindSecret,
+    paired: bool,
+    port: u16,
+    name: String,
 }
 
 impl FakePc {
-    /// Starts listening on `127.0.0.1` on a free port.
+    /// Starts listening on `127.0.0.1` on a free port (TCP for the sessions, UDP of the
+    /// same number for the queries).
     pub fn start(config: PcConfig) -> Result<Self> {
         let identity = Identity::load_or_create(&config.identity)
             .with_context(|| format!("the fake PC's key in {}", config.identity.display()))?;
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let (listener, udp) = ports()?;
         let addr = listener.local_addr()?;
         let (tx, events) = mpsc::channel();
         let shared = Arc::new(Shared {
@@ -284,6 +350,16 @@ impl FakePc {
             frames: Mutex::default(),
         });
         let key = identity.public;
+        let finding = FindConfig {
+            secret: config.find_secret,
+            paired: !config.trusted.is_empty(),
+            port: addr.port(),
+            name: config.name.clone(),
+        };
+        let answering = shared.clone();
+        let find = std::thread::Builder::new()
+            .name("fake-pc-find".into())
+            .spawn(move || answer_queries(&udp, &finding, &answering))?;
         let served = shared.clone();
         let thread = std::thread::Builder::new()
             .name("fake-pc".into())
@@ -294,6 +370,7 @@ impl FakePc {
             shared,
             events,
             thread: Some(thread),
+            find: Some(find),
         })
     }
 
@@ -364,6 +441,9 @@ impl FakePc {
         let _ = TcpStream::connect_timeout(&self.addr, Duration::from_secs(1));
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+        }
+        if let Some(find) = self.find.take() {
+            let _ = find.join();
         }
     }
 }
@@ -482,7 +562,9 @@ fn session(
     send(
         &mut *sender,
         lane::CONTROL,
-        HostMsg::FindSecret { secret: [7; 32] },
+        HostMsg::FindSecret {
+            secret: config.find_secret,
+        },
     )?;
     shared.tell(Happened::Snapshot {
         monitors: pc.displays.iter().flat_map(Displays::ids).collect(),
@@ -867,9 +949,39 @@ mod tests {
             clips: vec![clip(30, Codec::H264)],
             monitors,
             name: "Fake".into(),
+            find_secret: [7; 32],
         })
         .unwrap();
         (pc, Keys::load(&dir.join("headset")).unwrap())
+    }
+
+    /// Its own headset's query (with the fake PC's tag) is answered, with the tag of
+    /// the same secret; a stranger's gets nothing.
+    #[test]
+    fn its_headsets_find_it_by_asking() {
+        let dir = temp_dir("asked");
+        let (pc, _) = started(&dir, 1);
+        let to = pc.addr();
+        let own = prostir_proto::discovery::Query::new([&[7; 32]], "");
+        let answer = crate::find::ask(to, &own, Duration::from_secs(2)).expect("answered");
+        assert!(answer.from_pc(&[7; 32]));
+        assert_eq!((answer.port, answer.name.as_str()), (to.port(), "Fake"));
+        let stranger = prostir_proto::discovery::Query::new([&[8; 32]], "");
+        assert!(crate::find::ask(to, &stranger, Duration::from_millis(300)).is_none());
+        wait_for(&pc, |h| {
+            *h == Happened::Asked {
+                ours: true,
+                answered: true,
+            }
+        });
+        wait_for(&pc, |h| {
+            *h == Happened::Asked {
+                ours: false,
+                answered: false,
+            }
+        });
+        pc.stop();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn wait_for(pc: &FakePc, what: impl Fn(&Happened) -> bool) -> Event {
@@ -986,6 +1098,7 @@ mod tests {
             clips: vec![clip(300, Codec::H264)],
             monitors: 1,
             name: "Fake".into(),
+            find_secret: [7; 32],
         })
         .unwrap();
         let mut keys = Keys::load(&dir.join("headset")).unwrap();

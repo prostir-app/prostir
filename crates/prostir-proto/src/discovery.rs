@@ -23,7 +23,12 @@
 //! sent, so a PC cannot be used to amplify traffic.
 //!
 //! Neither is encrypted or authenticated beyond the tags: an answer is a hint where to
-//! connect, and trust comes from the handshake, as with the beacon.
+//! connect, and trust comes from the handshake.
+//!
+//! A PC reads a query without making anything new ([`QueryRef::read`] borrows the
+//! datagram, [`Answer::write_to`] fills a buffer kept for it), and a headset makes its
+//! queries in the same memory each time ([`Query::renew`], [`Query::encode_into`]): a
+//! stream of datagrams costs neither side allocations.
 
 use sha2::{Digest, Sha256};
 
@@ -133,30 +138,37 @@ impl Query {
     /// a new nonce, filled up to [`MIN_TAGS`] with random tags and shuffled; `name` is
     /// cut to [`MAX_HEADSET_NAME`] bytes.
     pub fn new<'a>(pcs: impl IntoIterator<Item = &'a FindSecret>, name: &str) -> Self {
-        let mut nonce = [0; NONCE];
-        getrandom::fill(&mut nonce).expect("system randomness");
-        let mut tags: Vec<[u8; TAG]> = pcs
-            .into_iter()
-            .take(MAX_TAGS)
-            .map(|secret| find_tag(secret, &nonce))
-            .collect();
-        while tags.len() < MIN_TAGS {
+        let mut query = Self {
+            nonce: [0; NONCE],
+            tags: Vec::with_capacity(MIN_TAGS),
+            name: String::new(),
+        };
+        query.renew(pcs, name);
+        query
+    }
+
+    /// Makes this query anew in the memory it has (a new nonce, the tags of `pcs`,
+    /// `name`), as [`Query::new`] would.
+    pub fn renew<'a>(&mut self, pcs: impl IntoIterator<Item = &'a FindSecret>, name: &str) {
+        getrandom::fill(&mut self.nonce).expect("system randomness");
+        self.tags.clear();
+        for secret in pcs.into_iter().take(MAX_TAGS) {
+            self.tags.push(find_tag(secret, &self.nonce));
+        }
+        while self.tags.len() < MIN_TAGS {
             let mut dummy = [0; TAG];
             getrandom::fill(&mut dummy).expect("system randomness");
-            tags.push(dummy);
+            self.tags.push(dummy);
         }
         // Fisher-Yates, so where the real tags are tells nothing.
         let mut random = [0u8; MAX_TAGS * 4];
         getrandom::fill(&mut random).expect("system randomness");
-        for i in (1..tags.len()).rev() {
+        for i in (1..self.tags.len()).rev() {
             let r = u32::from_le_bytes(random[i * 4..i * 4 + 4].try_into().unwrap());
-            tags.swap(i, r as usize % (i + 1));
+            self.tags.swap(i, r as usize % (i + 1));
         }
-        Self {
-            nonce,
-            tags,
-            name: cut(name, MAX_HEADSET_NAME).to_owned(),
-        }
+        self.name.clear();
+        self.name.push_str(cut(name, MAX_HEADSET_NAME));
     }
 
     /// Whether it looks for the PC whose find secret is `secret`.
@@ -167,9 +179,16 @@ impl Query {
 
     /// The datagram: [`MIN_QUERY`] bytes at least.
     pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(MIN_QUERY);
+        self.encode_into(&mut out);
+        out
+    }
+
+    /// The datagram in `out`, which is cleared first.
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
         let tags = &self.tags[..self.tags.len().min(MAX_TAGS)];
         let name = cut(&self.name, MAX_HEADSET_NAME);
-        let mut out = Vec::with_capacity(MIN_QUERY);
+        out.clear();
         out.extend_from_slice(QUERY_MAGIC);
         out.push(VERSION);
         out.extend_from_slice(&self.nonce);
@@ -182,12 +201,35 @@ impl Query {
         if out.len() < MIN_QUERY {
             out.resize(MIN_QUERY, 0);
         }
-        out
     }
 
     /// Reads a datagram: `None` for anything that is not a whole query of
-    /// [`MIN_QUERY`] to [`MAX_QUERY`] bytes (a beacon, a short or a broken one).
+    /// [`MIN_QUERY`] to [`MAX_QUERY`] bytes (a short or a broken one, an old PC's
+    /// beacon).
     pub fn decode(buf: &[u8]) -> Option<Self> {
+        let q = QueryRef::read(buf)?;
+        Some(Self {
+            nonce: q.nonce,
+            tags: q.tags().collect(),
+            name: q.name.to_owned(),
+        })
+    }
+}
+
+/// A query as it lies in the datagram, read without copying (see [`Query`] for the
+/// layout): what a PC looks at for each datagram that comes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryRef<'a> {
+    pub nonce: [u8; NONCE],
+    tags: &'a [[u8; TAG]],
+    /// The headset's name, while it looks for a PC to pair with; empty otherwise.
+    pub name: &'a str,
+}
+
+impl<'a> QueryRef<'a> {
+    /// Reads a datagram: `None` for anything that is not a whole query of
+    /// [`MIN_QUERY`] to [`MAX_QUERY`] bytes.
+    pub fn read(buf: &'a [u8]) -> Option<Self> {
         if !(MIN_QUERY..=MAX_QUERY).contains(&buf.len()) {
             return None;
         }
@@ -197,23 +239,29 @@ impl Query {
             return None;
         }
         let nonce: [u8; NONCE] = rest.get(..NONCE)?.try_into().ok()?;
-        let (&count, mut rest) = rest[NONCE..].split_first()?;
-        if usize::from(count) > MAX_TAGS {
+        let (&count, rest) = rest[NONCE..].split_first()?;
+        let count = usize::from(count);
+        if count > MAX_TAGS {
             return None;
         }
-        let mut tags = Vec::with_capacity(count.into());
-        for _ in 0..count {
-            tags.push(rest.get(..TAG)?.try_into().ok()?);
-            rest = &rest[TAG..];
-        }
-        let (&len, rest) = rest.split_first()?;
+        let (tags, _) = rest.get(..count * TAG)?.as_chunks::<TAG>();
+        let (&len, rest) = rest[count * TAG..].split_first()?;
         if usize::from(len) > MAX_HEADSET_NAME {
             return None;
         }
-        let name = std::str::from_utf8(rest.get(..len.into())?)
-            .ok()?
-            .to_owned();
+        let name = std::str::from_utf8(rest.get(..len.into())?).ok()?;
         Some(Self { nonce, tags, name })
+    }
+
+    /// The tags, in their order.
+    pub fn tags(&self) -> impl Iterator<Item = [u8; TAG]> + 'a {
+        self.tags.iter().copied()
+    }
+
+    /// Whether it looks for the PC whose find secret is `secret`.
+    pub fn looks_for(&self, secret: &FindSecret) -> bool {
+        let ours = find_tag(secret, &self.nonce);
+        self.tags.contains(&ours)
     }
 }
 
@@ -258,17 +306,30 @@ impl Answer {
 
     /// The datagram: [`MAX_ANSWER`] bytes at most.
     pub fn encode(&self) -> Vec<u8> {
-        let name = cut(&self.name, MAX_PC_NAME);
         let mut out = Vec::with_capacity(MAX_ANSWER);
-        out.extend_from_slice(ANSWER_MAGIC);
-        out.push(VERSION);
-        out.extend_from_slice(&self.nonce);
-        out.extend_from_slice(&self.tag);
-        out.extend_from_slice(&self.port.to_le_bytes());
-        out.push(self.flags);
-        out.push(name.len() as u8);
-        out.extend_from_slice(name.as_bytes());
+        write(
+            &self.nonce,
+            self.tag,
+            self.port,
+            self.flags,
+            &self.name,
+            &mut out,
+        );
         out
+    }
+
+    /// The datagram of the answer of the PC whose find secret is `secret` to a query
+    /// with `nonce`, in `out` (cleared first): [`MAX_ANSWER`] bytes at most, `name` cut
+    /// to [`MAX_PC_NAME`] bytes. Nothing new is made.
+    pub fn write_to(
+        nonce: &[u8; NONCE],
+        secret: &FindSecret,
+        port: u16,
+        flags: u8,
+        name: &str,
+        out: &mut Vec<u8>,
+    ) {
+        write(nonce, here_tag(secret, nonce), port, flags, name, out);
     }
 
     /// Reads a datagram: `None` for anything that is not an answer. Bytes after the
@@ -297,6 +358,20 @@ impl Answer {
             name,
         })
     }
+}
+
+/// An answer's datagram in `out`, cleared first.
+fn write(nonce: &[u8; NONCE], tag: [u8; TAG], port: u16, flags: u8, name: &str, out: &mut Vec<u8>) {
+    let name = cut(name, MAX_PC_NAME);
+    out.clear();
+    out.extend_from_slice(ANSWER_MAGIC);
+    out.push(VERSION);
+    out.extend_from_slice(nonce);
+    out.extend_from_slice(&tag);
+    out.extend_from_slice(&port.to_le_bytes());
+    out.push(flags);
+    out.push(name.len() as u8);
+    out.extend_from_slice(name.as_bytes());
 }
 
 #[cfg(test)]
@@ -345,6 +420,37 @@ mod tests {
         assert!(first < 32, "first {first} times of 64");
     }
 
+    /// Made anew in the same memory, a query is as a new one; read in place, it says
+    /// what the owned one says.
+    #[test]
+    fn a_query_made_anew_and_read_in_place() {
+        let mut q = Query::new([&PC], "Quest 3S");
+        let mut bytes = Vec::new();
+        q.encode_into(&mut bytes);
+        let first = q.nonce;
+        let (tags_at, bytes_at) = (q.tags.as_ptr(), bytes.as_ptr());
+        q.renew([&OTHER, &PC], "");
+        q.encode_into(&mut bytes);
+        assert_ne!(q.nonce, first);
+        assert_eq!(q.tags.len(), MIN_TAGS);
+        assert_eq!(q.name, "");
+        assert_eq!(
+            (q.tags.as_ptr(), bytes.as_ptr()),
+            (tags_at, bytes_at),
+            "the same memory"
+        );
+        let r = QueryRef::read(&bytes).unwrap();
+        assert!(r.looks_for(&PC) && r.looks_for(&OTHER) && !r.looks_for(&[1; 32]));
+        assert_eq!(r.tags().collect::<Vec<_>>(), q.tags);
+        assert_eq!(Query::decode(&bytes).unwrap(), q);
+        let mut answer = Vec::new();
+        Answer::write_to(&q.nonce, &PC, 47830, flags::PAIRING, "desk", &mut answer);
+        assert_eq!(
+            answer,
+            Answer::to(&q, &PC, 47830, flags::PAIRING, "desk").encode()
+        );
+    }
+
     #[test]
     fn a_query_with_every_tag_fits() {
         let keys: Vec<[u8; 32]> = (0..40u8).map(|i| [i; 32]).collect();
@@ -389,8 +495,8 @@ mod tests {
         utf8[name_at] = 1;
         utf8[name_at + 1] = 0xff;
         assert!(Query::decode(&utf8).is_none(), "a name that is not UTF-8");
-        // The beacon is no query.
-        let mut beacon = crate::encode_beacon(47830, "desk");
+        // An old PC's beacon (`PROSTIR1`, its port and name) is no query.
+        let mut beacon = b"PROSTIR1\xd6\xbadesk".to_vec();
         beacon.resize(MIN_QUERY, 0);
         assert!(Query::decode(&beacon).is_none());
         // A newer version adds after the fields of this one.

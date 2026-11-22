@@ -302,16 +302,50 @@ pub struct Security {
     pub identity: Identity,
     pub trusted: Mutex<TrustStore>,
     /// What the trusted headsets' discovery tags for this PC are made with (see
-    /// `prostir_proto::discovery`): given to them in the session, made anew when the
-    /// PC forgets a headset.
-    pub find: Mutex<FindSecret>,
+    /// `prostir_proto::discovery` and `crate::find`): given to them in the session,
+    /// made anew when the PC forgets a headset.
+    pub find: Mutex<FindSecrets>,
     /// Where the find secret is kept.
     find_file: PathBuf,
+}
+
+/// The PC's find secret, and the older ones still owed: a trusted headset that was not
+/// in a session when the secret changed asks with the one it has, which stays valid for
+/// it until its next session gives it the current one, or it is forgotten (step 7 note,
+/// 8.1, question 35).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FindSecrets {
+    pub current: FindSecret,
+    /// The secret each such headset (by its key) still has.
+    pub owed: std::collections::BTreeMap<[u8; 32], FindSecret>,
+}
+
+impl FindSecrets {
+    /// What a query may be answered by: the current secret and those still owed.
+    pub fn valid(&self) -> crate::find::Secrets {
+        crate::find::Secrets::with_stale(self.current, self.owed.values())
+    }
+
+    /// The current secret changes to `new`: each headset of `off` (trusted, not in a
+    /// session, so it does not get `new` now) keeps the one it has valid.
+    fn renew(&mut self, new: FindSecret, off: impl IntoIterator<Item = [u8; 32]>) {
+        let old = std::mem::replace(&mut self.current, new);
+        for key in off {
+            self.owed.entry(key).or_insert(old);
+        }
+    }
 }
 
 /// The file of the find secret, in `dir`.
 pub fn find_secret_file(dir: &std::path::Path) -> PathBuf {
     dir.join("find_secret")
+}
+
+/// The file of the find secrets still owed, next to `secret_file`: a line
+/// `<headset key hex> <secret hex>` for each headset that has an older one. A file of
+/// its own, so `find_secret` stays as earlier builds read it.
+pub fn owed_file(secret_file: &std::path::Path) -> PathBuf {
+    secret_file.with_file_name("find_secret_owed")
 }
 
 /// The find secret kept in `path`, made on first use. A file that is there but does
@@ -320,26 +354,39 @@ pub fn find_secret_file(dir: &std::path::Path) -> PathBuf {
 pub fn load_find_secret(path: &std::path::Path) -> Result<FindSecret> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
-            let text = text.trim();
-            let mut secret = [0u8; 32];
-            let ok = text.len() == 64
-                && secret.iter_mut().enumerate().all(|(i, b)| {
-                    text.get(i * 2..i * 2 + 2)
-                        .and_then(|h| u8::from_str_radix(h, 16).ok())
-                        .map(|v| *b = v)
-                        .is_some()
-                });
-            anyhow::ensure!(
-                ok,
-                "{} is no find secret (move it away to make a new one; headsets get it at \
-                 their next session)",
-                path.display()
-            );
-            Ok(secret)
+            let secret = secure::from_hex::<32>(text.trim());
+            secret.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} is no find secret (move it away to make a new one; headsets get it at \
+                     their next session)",
+                    path.display()
+                )
+            })
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => save_find_secret(path, new_secret()),
         Err(e) => Err(anyhow::anyhow!("cannot read {}: {e}", path.display())),
     }
+}
+
+/// The find secrets in `path` and the ones owed next to it (see [`owed_file`]). The
+/// owed ones are read leniently: a line that does not read is left out (that headset
+/// then finds the PC by its last address until its next session).
+pub fn load_find_secrets(path: &std::path::Path) -> Result<FindSecrets> {
+    let current = load_find_secret(path)?;
+    let owed = match std::fs::read_to_string(owed_file(path)) {
+        Ok(text) => text
+            .lines()
+            .filter_map(|line| {
+                let (key, secret) = line.split_once(' ')?;
+                Some((
+                    secure::from_hex::<32>(key)?,
+                    secure::from_hex::<32>(secret.trim())?,
+                ))
+            })
+            .collect(),
+        Err(_) => std::collections::BTreeMap::new(),
+    };
+    Ok(FindSecrets { current, owed })
 }
 
 fn save_find_secret(path: &std::path::Path, secret: FindSecret) -> Result<FindSecret> {
@@ -351,14 +398,36 @@ fn save_find_secret(path: &std::path::Path, secret: FindSecret) -> Result<FindSe
     Ok(secret)
 }
 
+/// Keeps the secrets still owed next to `path` (no file while none is).
+fn save_owed(path: &std::path::Path, secrets: &FindSecrets) -> Result<()> {
+    use std::fmt::Write as _;
+    let file = owed_file(path);
+    if secrets.owed.is_empty() {
+        return match std::fs::remove_file(&file) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                Err(anyhow::anyhow!("cannot remove {}: {e}", file.display()))
+            }
+            _ => Ok(()),
+        };
+    }
+    let mut text = String::new();
+    for (key, secret) in &secrets.owed {
+        let _ = writeln!(text, "{} {}", secure::to_hex(key), secure::to_hex(secret));
+    }
+    secure::write_atomic(&file, text.as_bytes())
+        .with_context(|| format!("cannot write {}", file.display()))
+}
+
 impl Security {
     pub fn load() -> Result<Self> {
         let dir = config_dir();
+        let find_file = find_secret_file(&dir);
         // A write cut short leaves its temporary file; the real one is whole.
         for file in [
             dir.join("identity"),
             dir.join("paired_headsets"),
-            find_secret_file(&dir),
+            find_file.clone(),
+            owed_file(&find_file),
         ] {
             secure::remove_leftovers(&file);
         }
@@ -368,8 +437,9 @@ impl Security {
         // Unreadable, it would read as no headset at all: everyone answered.
         let trusted = TrustStore::try_load(&dir.join("paired_headsets"))
             .context("cannot read the paired headsets")?;
-        let find_file = find_secret_file(&dir);
-        let find = load_find_secret(&find_file)?;
+        let mut find = load_find_secrets(&find_file)?;
+        // Owed only to headsets still trusted.
+        find.owed.retain(|key, _| trusted.contains(key));
         Ok(Self {
             identity,
             trusted: Mutex::new(trusted),
@@ -378,22 +448,67 @@ impl Security {
         })
     }
 
-    /// A new find secret (a headset was forgotten): queries made with the old one get
-    /// no answer any more. The new one: the headsets still trusted get it in their
-    /// session.
-    pub fn new_find_secret(&self) -> FindSecret {
+    /// A new find secret, after the PC forgot the headsets `forgotten`: queries made
+    /// with the old one get no answer any more, but from the trusted headsets for whom
+    /// `in_session` is false (they get the new one at their next session, and until
+    /// then the one they have stays valid). The new one: the headsets in a session
+    /// get it now ([`Security::gave_find_secret`]).
+    pub fn new_find_secret(
+        &self,
+        forgotten: &[[u8; 32]],
+        in_session: impl Fn(&[u8; 32]) -> bool,
+    ) -> FindSecret {
+        let trusted: Vec<[u8; 32]> = self
+            .trusted
+            .lock()
+            .unwrap()
+            .entries()
+            .iter()
+            .map(|(key, _)| *key)
+            .filter(|key| !forgotten.contains(key))
+            .collect();
         let secret = new_secret();
+        let mut find = self.find.lock().unwrap();
+        // Owed to trusted headsets only: one forgotten is owed nothing.
+        find.owed.retain(|key, _| trusted.contains(key));
+        find.renew(secret, trusted.into_iter().filter(|key| !in_session(key)));
         if let Err(e) = save_find_secret(&self.find_file, secret) {
             warn!("{e:#}");
         }
-        *self.find.lock().unwrap() = secret;
-        info!("a new find secret: a forgotten headset can no longer find this PC");
+        if let Err(e) = save_owed(&self.find_file, &find) {
+            warn!("{e:#}");
+        }
+        info!(
+            "a new find secret: a forgotten headset can no longer find this PC ({} old \
+             one(s) still valid for headsets not connected)",
+            find.valid().stale().len()
+        );
         secret
+    }
+
+    /// Headset `key` got the current find secret in its session: the older one it had
+    /// is valid no more.
+    pub fn gave_find_secret(&self, key: &[u8; 32]) {
+        let mut find = self.find.lock().unwrap();
+        if find.owed.remove(key).is_some() {
+            info!(
+                "headset {} has the current find secret now",
+                secure::fingerprint(key)
+            );
+            if let Err(e) = save_owed(&self.find_file, &find) {
+                warn!("{e:#}");
+            }
+        }
     }
 
     /// The find secret now.
     pub fn find_secret(&self) -> FindSecret {
-        *self.find.lock().unwrap()
+        self.find.lock().unwrap().current
+    }
+
+    /// What a query may be answered by now.
+    pub fn find_secrets(&self) -> crate::find::Secrets {
+        self.find.lock().unwrap().valid()
     }
 }
 

@@ -1,7 +1,7 @@
-//! Wire protocol between the PC host and the Quest client.
+//! Wire protocol between the PC host and the headset client.
 //!
-//! The client connects over TCP (USB via `adb reverse`, or Wi-Fi after discovering the
-//! host through a UDP broadcast beacon or by asking, see [`discovery`]), and both
+//! The client connects over TCP (USB via `adb reverse`, or Wi-Fi after asking which
+//! PCs are there, see [`discovery`]), and both
 //! sides run an encrypted handshake ([`link::tcp`]); who trusts whom is [`secure`].
 //! After it every message is framed as `[tag: u8][len: u32 LE][payload: len bytes]`,
 //! and travels in [`packet`]s after the version handshake ([`handshake`]). A payload
@@ -181,9 +181,6 @@ impl HeadsetGoodbye {
         }
     }
 }
-
-/// Prefix of the UDP discovery beacon: `MAGIC ++ tcp_port (u16 LE) ++ hostname (utf-8)`.
-pub const BEACON_MAGIC: &[u8; 8] = b"PROSTIR1";
 
 /// Largest message from the PC (a video frame can be several megabytes).
 const MAX_HOST_PAYLOAD: u32 = 64 * 1024 * 1024;
@@ -837,21 +834,6 @@ impl ClientMsg {
             })
         })
     }
-}
-
-/// Builds a discovery beacon payload.
-pub fn encode_beacon(tcp_port: u16, hostname: &str) -> Vec<u8> {
-    let mut v = BEACON_MAGIC.to_vec();
-    v.extend_from_slice(&tcp_port.to_le_bytes());
-    v.extend_from_slice(hostname.as_bytes());
-    v
-}
-
-/// Parses a discovery beacon, returning `(tcp_port, hostname)`.
-pub fn decode_beacon(buf: &[u8]) -> Option<(u16, String)> {
-    let rest = buf.strip_prefix(BEACON_MAGIC.as_slice())?;
-    let port = u16::from_le_bytes(rest.get(..2)?.try_into().ok()?);
-    Some((port, String::from_utf8_lossy(&rest[2..]).into_owned()))
 }
 
 #[cfg(test)]

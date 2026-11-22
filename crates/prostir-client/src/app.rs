@@ -1138,9 +1138,17 @@ impl Scene {
             found: search
                 .found
                 .iter()
-                .map(|h| (h.name.clone(), h.addr.ip().to_string()))
+                .map(|h| {
+                    let name = if h.pairing {
+                        format!("{} · {}", h.name, self.texts().t("connect-pairing-open"))
+                    } else {
+                        h.name.clone()
+                    };
+                    (name, h.addr.ip().to_string())
+                })
                 .collect(),
             ip_input: self.ip_input.clone(),
+            hint: search.hint,
             pairing: match &search.attempt {
                 Some(Attempt::Pairing { view, .. }) => Some(view.clone()),
                 _ => None,
@@ -3011,7 +3019,7 @@ fn handle_net_event(
     match event {
         NetEvent::Dialed { step, addr } => scene.session.dialed(step, addr),
         NetEvent::Missed { step } => scene.session.missed(step, now),
-        NetEvent::Hosts(hosts) => scene.session.hosts(hosts),
+        NetEvent::Heard(host) => scene.session.heard(host, now),
         NetEvent::Reached { step, pc, addr } => {
             // Reached through pairing: said once.
             let paired = match &scene.session.search().attempt {

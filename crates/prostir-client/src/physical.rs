@@ -39,10 +39,14 @@ pub fn switch(displays: &Displays) -> Option<&Display> {
 }
 
 /// What the person calls display `d` of the PC: the laptop's own panel is the laptop
-/// screen, another one goes by its name on the PC (`HDMI-A-1`).
+/// screen, another one goes by the name the PC gives it (its maker and model, as
+/// `DELL U2720Q`, from PCs of step 7.9 on), else by its connector (`HDMI-A-1`).
 pub fn label(d: &Display, l: &Texts) -> String {
     match &d.kind {
         DisplayKind::Physical { builtin: true, .. } => l.t("laptop-screen").to_owned(),
+        DisplayKind::Physical { connector, .. } if !d.name.is_empty() && d.name != *connector => {
+            d.name.clone()
+        }
         DisplayKind::Physical { connector, .. } if !connector.is_empty() => {
             l.f("pc-display-named", &[("name", connector.into())])
         }
@@ -129,6 +133,10 @@ mod tests {
             "Екран HDMI-A-1",
             "named"
         );
+        // A PC that says the display's maker and model: by them.
+        let mut dell = physical(117, "HDMI-A-1", false, true, true);
+        dell.name = "DELL U2720Q".into();
+        assert_eq!(label(&dell, &crate::lang::builtin("uk")), "DELL U2720Q");
         let none = list(vec![monitor(1), laptop()], Some(1));
         assert_eq!(switch(&none).map(|d| d.id.0), None);
     }

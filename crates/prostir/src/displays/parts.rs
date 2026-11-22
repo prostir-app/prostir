@@ -132,13 +132,13 @@ impl Displays {
                         title: String::new(),
                     },
                     ScreenKind::Physical {
-                        label,
+                        key,
                         builtin,
                         shown,
                         ..
                     } => DisplayKind::Physical {
                         builtin: *builtin,
-                        connector: clip(label, state::MAX_CONNECTOR),
+                        connector: clip(&key.connector, state::MAX_CONNECTOR),
                         shown: *shown,
                     },
                 };

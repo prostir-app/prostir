@@ -194,6 +194,7 @@ fn each_state_of_the_other_pages() {
             ..Default::default()
         });
         s.nearby.clear();
+        s.pc.addresses = vec!["192.168.1.10".into()];
     };
     let (mut h, _) = window(dark(Mock::connected().pairing().edit(waiting)), shot());
     open(&mut h, Page::Headsets);

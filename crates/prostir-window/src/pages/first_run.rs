@@ -101,7 +101,7 @@ pub(super) fn first_run(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                 if let Some(name) = &paired {
                     w::status(ui, tk, p.ok, &tk.f("pair-done", &[("name", name.into())]));
                 } else if let Some(pr) = &s.pairing {
-                    pair_body(ui, v, pr, revision);
+                    pair_body(ui, v, pr, &s.pc.addresses, revision);
                     next_ok = false;
                 } else if let Some(h) = s.headsets.last() {
                     w::status(

@@ -95,15 +95,17 @@ pub fn new_headset_notice() -> Option<Notice> {
 }
 
 /// What answers queries while the full program does not run: its port and name, the
-/// files of the headsets it trusts and of its find secret (read for each query: the
-/// full program pairs and forgets headsets), and the notice of a new headset. It
-/// keeps nothing of who asked: a stream of queries from made-up addresses costs it
-/// nothing.
+/// files of the headsets it trusts and of its find secrets (read for each query that
+/// reads as one: the full program pairs and forgets headsets), and the notice of a new
+/// headset. It keeps nothing of who asked: a stream of queries from made-up addresses
+/// costs it nothing but what [`Responder`] lets through. A query from one of the PC's
+/// own headsets (by the current find secret, or an older one still owed to it) starts
+/// the full program: this is how a sleeping PC wakes for its headset.
 struct Sorter {
     responder: Responder,
     trust: PathBuf,
     /// The PC's find secret's file (the full program makes a new one when it forgets a
-    /// headset).
+    /// headset), and the older ones still owed next to it.
     secret: PathBuf,
     notice: Option<(Notice, Instant)>,
 }
@@ -124,26 +126,32 @@ impl Sorter {
 
     /// Who may get an answer now. An unreadable file closes the door rather than
     /// opening it: everyone answered would be the wrong way to fail.
-    fn open(&self) -> find::Open {
-        let trusted = prostir_proto::secure::TrustStore::try_load(&self.trust);
-        let secret = crate::pairing::load_find_secret(&self.secret);
-        match (trusted, secret) {
-            (Ok(trusted), Ok(secret)) => find::Open {
-                paired: !trusted.is_empty(),
-                pairing: false,
-                secret,
-            },
-            (trusted, secret) => {
+    fn open(trust: &std::path::Path, secret: &std::path::Path) -> find::Open {
+        let trusted = prostir_proto::secure::TrustStore::try_load(trust);
+        let secrets = crate::pairing::load_find_secrets(secret);
+        match (trusted, secrets) {
+            (Ok(trusted), Ok(mut secrets)) => {
+                secrets.owed.retain(|key, _| trusted.contains(key));
+                find::Open {
+                    paired: !trusted.is_empty(),
+                    pairing: false,
+                    secrets: secrets.valid(),
+                }
+            }
+            (trusted, secrets) => {
                 if let Err(e) = &trusted {
                     warn!("discovery: {e}");
                 }
-                if let Err(e) = &secret {
+                if let Err(e) = &secrets {
                     warn!("discovery: {e:#}");
                 }
                 find::Open {
                     paired: true,
                     pairing: false,
-                    secret: secret.unwrap_or_else(|_| prostir_proto::discovery::new_secret()),
+                    secrets: find::Secrets::new(
+                        secrets
+                            .map_or_else(|_| prostir_proto::discovery::new_secret(), |s| s.current),
+                    ),
                 }
             }
         }
@@ -153,8 +161,9 @@ impl Sorter {
     /// own headsets asked. A stranger it does not answer brings the notice, once a
     /// minute at most however many programs ask (see `door::notice_due`).
     fn query(&mut self, udp: &std::net::UdpSocket) -> Option<Wake> {
-        let open = self.open();
-        let asker = match find::answer_one(udp, &mut self.responder, || open) {
+        let (trust, secret) = (&self.trust, &self.secret);
+        let open = || Self::open(trust, secret);
+        let asker = match find::answer_one(udp, &mut self.responder, open) {
             Ok(Some(asker)) => asker,
             Ok(None) => return None,
             Err(e) => {

@@ -114,7 +114,8 @@ impl Brain {
                 }
                 drop(trusted);
                 self.keep_seen_of_paired();
-                self.security.new_find_secret();
+                // None trusted is left: no old secret stays valid.
+                self.security.new_find_secret(&[], |_| true);
                 let keys: Vec<[u8; 32]> = self.sessions.keys().copied().collect();
                 self.end_sessions(
                     keys,

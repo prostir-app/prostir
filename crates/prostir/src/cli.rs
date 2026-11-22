@@ -124,12 +124,10 @@ pub(super) struct Args {
     /// Keep the virtual monitors this many seconds after the headset disconnects.
     #[arg(long, default_value_t = 30)]
     pub(crate) linger: u64,
-    /// Do not answer headsets that ask for this PC on the network, and send no beacon.
+    /// Do not answer headsets that ask for this PC on the network (a headset then
+    /// reaches it by its address or over USB).
     #[arg(long)]
     pub(crate) no_discovery: bool,
-    /// Send no beacon (headsets that do not ask yet listen for it), but answer.
-    #[arg(long, hide = true)]
-    pub(crate) no_beacon: bool,
     /// Stay running while no headset needs Prostir, with its sockets opened here,
     /// instead of sleeping in a small watcher until a headset comes.
     #[arg(long)]
