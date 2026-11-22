@@ -450,9 +450,8 @@ impl Displays {
 
     /// Moves screen `id` on the desktop to about `x`, `y` (its top-left corner, in
     /// logical pixels, within [`PLACE_LIMIT`]): into the row it then is in, between the
-    /// neighbours left and
-    /// right of it. The desktop's arrangement then lines it up (see `layout::desk`),
-    /// until the main headset arranges the monitors again.
+    /// neighbours left and right of it. The desktop's arrangement then lines it up (see
+    /// `layout::desk`), until the main headset arranges the monitors again.
     pub fn move_to(&mut self, id: ScreenId, x: i32, y: i32) -> Result<()> {
         let Some(me) = self.desk_rect(id) else {
             bail!(UserError::UnknownDisplay);
