@@ -515,8 +515,9 @@ impl Pc {
         self.again_with(args, &[])
     }
 
-    /// [`Pc::again`] with `env` set besides (an autostart's variables, say).
-    pub fn again_with(&self, args: &[&str], env: &[(&str, &str)]) -> Ctl {
+    /// The PC app to start again with `args` and the same environment, with `env` set
+    /// besides; its stdout and stderr piped.
+    pub fn again_command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_prostir"));
         cmd.args(args)
             .stdin(Stdio::null())
@@ -529,7 +530,15 @@ impl Pc {
             };
         }
         cmd.envs(env.iter().copied());
-        let mut child = cmd.spawn().expect("start the PC app again");
+        cmd
+    }
+
+    /// [`Pc::again`] with `env` set besides (an autostart's variables, say).
+    pub fn again_with(&self, args: &[&str], env: &[(&str, &str)]) -> Ctl {
+        let mut child = self
+            .again_command(args, env)
+            .spawn()
+            .expect("start the PC app again");
         let until = Instant::now() + Duration::from_secs(30);
         while child.try_wait().unwrap().is_none() {
             if Instant::now() > until {

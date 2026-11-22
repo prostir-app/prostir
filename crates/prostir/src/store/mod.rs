@@ -58,6 +58,15 @@ const FIRST_ID: u32 = 101;
 /// How long quitting waits for the files to be written.
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
+/// The video quality the PC offers, Mbit/s per monitor: a quality out of it (written
+/// into `settings.txt` by hand, `--bitrate`) holds at its nearest end.
+pub const BITRATES: std::ops::RangeInclusive<u32> = 5..=100;
+
+/// `mbps` in [`BITRATES`].
+pub fn bitrate_in_range(mbps: u32) -> u32 {
+    mbps.clamp(*BITRATES.start(), *BITRATES.end())
+}
+
 /// What holds for this run only, from the command line: never written.
 #[derive(Debug, Clone, Default)]
 pub struct Run {
@@ -372,7 +381,7 @@ impl Store {
     /// this run.
     pub fn wanted(&self) -> Settings {
         Settings {
-            bitrate: self.run.bitrate.unwrap_or(self.settings.bitrate),
+            bitrate: bitrate_in_range(self.run.bitrate.unwrap_or(self.settings.bitrate)),
             codec: self.run.codec.unwrap_or(self.settings.codec),
             software: self.run.software.unwrap_or(self.settings.software),
             ..self.settings.clone()

@@ -75,6 +75,13 @@ pub trait CtlClient {
     fn port_taken(&self) -> bool {
         false
     }
+    /// While Prostir is not running: quits what sleeps for it (its sockets' watcher,
+    /// or systemd's socket until the next login), as `quit` does while it runs;
+    /// whether anything did. A Prostir that runs on another session bus (another
+    /// session's) is not asleep: nothing of it quits from here.
+    fn quit_asleep(&self) -> bool {
+        false
+    }
 }
 
 /// What `ctl` was asked.
@@ -383,7 +390,7 @@ pub fn run(
         Ctl::Help => DONE,
         Ctl::Ask(request) => {
             let for_headset = request.for_headset();
-            match client.call(&request) {
+            match ask(client, &request) {
                 Ok(answer) => {
                     if json {
                         let _ = writeln!(io.out, "{}", answer.to_json());
@@ -434,6 +441,18 @@ pub fn run(
             }
         }
         Ctl::Watch => watch(client, json, io),
+    }
+}
+
+/// Asks the running Prostir for `request`. `quit` while Prostir sleeps quits what
+/// sleeps for it, so nothing waits for the headset afterwards, as after `quit` while it
+/// runs.
+pub fn ask(client: &dyn CtlClient, request: &Request) -> Result<Answer, ClientError> {
+    match client.call(request) {
+        Err(ClientError::NotRunning) if *request == Request::Quit && client.quit_asleep() => {
+            Ok(Answer::default())
+        }
+        asked => asked,
     }
 }
 

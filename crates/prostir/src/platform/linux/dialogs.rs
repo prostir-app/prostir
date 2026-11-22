@@ -8,10 +8,11 @@ use std::time::Duration;
 use log::warn;
 
 use crate::i18n::t;
-use crate::platform::{NoCode, run};
+use crate::platform::{NoCode, run, run_until};
 
-/// Asks for the code the headset shows, in a small dialog on the PC.
-pub fn ask_code() -> Result<String, NoCode> {
+/// Asks for the code the headset shows, in a small dialog on the PC, closed when
+/// `gone` says the headset is gone.
+pub fn ask_code(gone: &dyn Fn() -> bool) -> Result<String, NoCode> {
     let text = t(
         "Шолом хоче підключитися.\nВведіть код, який він показує:",
         "A headset wants to connect.\nType the code it shows:",
@@ -28,10 +29,16 @@ pub fn ask_code() -> Result<String, NoCode> {
     ];
     for (program, args) in attempts {
         // Nobody at the PC: the dialog goes away rather than holding the PC.
-        let out = match run(Command::new(program).args(&args), Duration::from_secs(120)) {
+        let asked = run_until(
+            Command::new(program).args(&args),
+            Duration::from_secs(120),
+            gone,
+        );
+        let out = match asked {
             Ok(out) => out,
             Err(e) if e.kind() == ErrorKind::NotFound => continue, // not installed
-            Err(_) => return Err(NoCode::Cancelled),               // timed out
+            Err(e) if e.kind() == ErrorKind::Interrupted => return Err(NoCode::Gone),
+            Err(_) => return Err(NoCode::Cancelled), // timed out
         };
         if !out.status.success() {
             return Err(NoCode::Cancelled);

@@ -721,6 +721,16 @@ fn broken(e: impl std::fmt::Display) -> ClientError {
     ClientError::Broken(e.to_string())
 }
 
+/// The sockets' watcher of this user while it sleeps: its process id. One whose full
+/// program runs is not asleep, also when that program is on another session bus than
+/// this one (another session's): it is not quit from here.
+fn sleeping_watcher() -> Option<u32> {
+    let pid = crate::platform::watcher()?;
+    let children =
+        std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap_or_default();
+    children.trim().is_empty().then_some(pid)
+}
+
 impl CtlClient for Client {
     fn call(&self, request: &Request) -> Result<Answer, ClientError> {
         let msg = self.method("Call", &(request.to_json(),))?;
@@ -742,7 +752,20 @@ impl CtlClient for Client {
     }
 
     fn asleep(&self) -> bool {
-        crate::platform::watcher().is_some() || crate::platform::autostart::socket_waits()
+        sleeping_watcher().is_some() || crate::platform::autostart::socket_waits()
+    }
+
+    fn quit_asleep(&self) -> bool {
+        if let Some(pid) = sleeping_watcher() {
+            // SAFETY: a signal to a Prostir of this user, which quits on it (and ends
+            // the full program it started, if one starts meanwhile).
+            return unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0;
+        }
+        if crate::platform::autostart::socket_waits() {
+            crate::platform::autostart::quit_until_login();
+            return true;
+        }
+        false
     }
 
     fn port_taken(&self) -> bool {

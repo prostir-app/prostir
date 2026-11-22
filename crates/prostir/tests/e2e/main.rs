@@ -145,6 +145,27 @@ fn an_unknown_headset_must_pair_first() {
         .unwrap();
 }
 
+/// A PC without a dialog for the code shows nothing, so the attempts are no wrong
+/// codes: however many times the headset tries, it is told there is no dialog, never
+/// to wait.
+#[test]
+fn attempts_without_a_dialog_on_the_pc_are_no_wrong_codes() {
+    let dir = TestDir::new("pairing-no-dialog");
+    dir.save_monitors(TWO_MONITORS);
+    let pc = Pc::start(&dir, &Options::default());
+    let mut keys = dir.headset_keys();
+    for attempt in 1..=6 {
+        let refused = FakeHeadset::connect(pc.addr, &mut keys, Some(&mut || "314159".into()));
+        match refused {
+            Err(ConnectError::PairingFailed(why)) => {
+                assert!(why.contains("no dialog"), "attempt {attempt}: {why}");
+            }
+            other => panic!("attempt {attempt}: {:?}", other.err()),
+        }
+    }
+    assert!(keys.trusted.is_empty());
+}
+
 /// A headset that forgot the PC (the PC still trusts it) pairs again before the session
 /// starts: the versions come first, then pairing, then the session.
 #[test]
