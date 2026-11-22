@@ -76,6 +76,7 @@ impl Model {
                 self.session.paired_list(list);
             }
             NetEvent::ForgetFailed { pc, why } => {
+                self.session.forget_failed(pc);
                 if let Some(f) = self.forgetting.take_if(|f| f.pc == pc) {
                     self.tell(Note::failed(Some(f.on), &why), true, f.in_menu);
                 }

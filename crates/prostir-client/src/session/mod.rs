@@ -347,6 +347,9 @@ pub struct Session {
     cmds: Vec<NetCmd>,
     /// The state of no PC, for when none is connected.
     empty: PcState,
+    /// A PC in use being forgotten, and the user's pick before (the choice, and
+    /// whether they were picking): back as it was if forgetting fails.
+    forgetting: Option<(PcId, Option<SocketAddr>, bool)>,
 }
 
 impl Session {
@@ -365,6 +368,7 @@ impl Session {
             offline_since: Some(now),
             cmds: Vec::new(),
             empty: PcState::default(),
+            forgetting: None,
         }
     }
 
@@ -546,10 +550,20 @@ impl Session {
     /// it; the headset does not come back to it on its own.
     pub fn forget(&mut self, pc: PcId) {
         if self.links.get(&pc).is_some_and(|l| link_addr(l).is_some()) {
+            self.forgetting = Some((pc, self.search.choice, self.search.picking));
             self.search.choice = None;
             self.search.picking = true;
         }
         self.cmds.push(NetCmd::Forget(pc));
+    }
+
+    /// Forgetting PC `pc` failed (the network thread kept it): the search goes on as
+    /// before it was asked.
+    pub fn forget_failed(&mut self, pc: PcId) {
+        if let Some((_, choice, picking)) = self.forgetting.take_if(|f| f.0 == pc) {
+            self.search.choice = choice;
+            self.search.picking = picking;
+        }
     }
 
     /// The user's answer to "Pair with this PC?".
@@ -608,6 +622,13 @@ impl Session {
     pub fn paired_list(&mut self, list: Vec<PairedPc>) {
         self.paired = list;
         let paired = &self.paired;
+        // Forgotten: nothing to put back.
+        if self
+            .forgetting
+            .is_some_and(|f| paired.iter().all(|p| p.pc != f.0))
+        {
+            self.forgetting = None;
+        }
         self.search
             .last_dialed
             .retain(|(pc, _)| paired.iter().any(|p| p.pc == *pc));

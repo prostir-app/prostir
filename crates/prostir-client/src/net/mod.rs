@@ -773,17 +773,23 @@ impl Here<'_> {
                     .map(|(k, _)| *k)
                     .filter(|k| PcId::of(k) == pc)
                     .collect();
-                let mut failed = None;
+                let (mut removed, mut failed) = (false, None);
                 for key in &keys {
+                    // Kept as it was when its file cannot be written.
                     match trusted.remove(key) {
-                        Ok(()) => info!("forgot PC {pc}"),
+                        Ok(()) => {
+                            info!("forgot PC {pc}");
+                            removed = true;
+                        }
                         Err(e) => {
                             warn!("cannot forget PC {pc}: {e}");
                             failed = Some(e.to_string());
                         }
                     }
                 }
-                shared.tell(NetEvent::Paired(paired(trusted)));
+                if removed {
+                    shared.tell(NetEvent::Paired(paired(trusted)));
+                }
                 if let Some(why) = failed {
                     // Still trusted: its session goes on, and the menu says why.
                     shared.tell(NetEvent::ForgetFailed { pc, why });

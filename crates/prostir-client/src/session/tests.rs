@@ -1012,3 +1012,26 @@ fn a_picked_pc_that_moves_is_found_again() {
     let (dialed, _) = dials_its_answer(&mut sim, 1, addr(8), 5);
     assert!(dialed, "the picked PC at its new address is dialed");
 }
+
+/// Forgetting the PC in use fails (its file cannot be written): the search goes on as
+/// before, and once the session ends the PC is connected to again on its own.
+#[test]
+fn a_failed_forget_changes_nothing() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.reach(s, 1, usb());
+    let _ = sim.cmds();
+    sim.s.forget(pc(1));
+    assert_eq!(sim.cmds(), [NetCmd::Forget(pc(1))]);
+    sim.s.forget_failed(pc(1));
+    let broke = Ended {
+        opened: true,
+        ..Ended::default()
+    };
+    sim.end(s, Some(1), &broke, Duration::from_secs(60));
+    sim.after(Duration::ZERO);
+    let (_, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb, "not picking: it goes its own way");
+}

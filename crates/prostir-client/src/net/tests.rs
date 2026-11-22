@@ -261,6 +261,50 @@ fn a_session_opens_streams_and_comes_back() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Forgetting a PC whose file cannot be written changes nothing: it is still trusted
+/// (the list says so), and its session goes on.
+#[test]
+fn a_forget_that_cannot_be_kept_changes_nothing() {
+    let dir = temp_dir("forget-failed");
+    let (pc, mut net, rx, _) = start(&dir, false, false);
+    let id = PcId::of(&pc.key());
+    dial(&net, 1, pc.addr());
+    wait(&rx, |e| {
+        matches!(e, NetEvent::Connected { .. }).then_some(())
+    });
+    // The file's place taken by a folder: it cannot be written.
+    let file = dir.join("headset/paired_hosts");
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    std::fs::write(file.join("in-the-way"), "").unwrap();
+    net.send(NetCmd::Forget(id));
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left).expect("no word of the forget") {
+            NetEvent::Paired(list) => {
+                assert!(list.iter().any(|p| p.pc == id), "still trusted: {list:?}");
+            }
+            NetEvent::ForgetFailed { pc: p, .. } => {
+                assert_eq!(p, id);
+                break;
+            }
+            NetEvent::Ended { .. } => panic!("the session ended"),
+            _ => {}
+        }
+    }
+    // Still in its session a while later.
+    let until = Instant::now() + Duration::from_millis(500);
+    while let Some(left) = until.checked_duration_since(Instant::now()) {
+        if let Ok(e) = rx.recv_timeout(left) {
+            assert!(!matches!(e, NetEvent::Ended { .. }), "the session ended");
+        }
+    }
+    assert!(net.stop(Duration::from_secs(2)));
+    pc.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn forgetting_leaves_and_drops_the_pc() {
     let dir = temp_dir("forget");
