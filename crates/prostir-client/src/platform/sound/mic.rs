@@ -20,6 +20,7 @@ use prostir_proto::state::{UpFormat, UpKind, permission};
 use prostir_proto::{AUDIO_RATE, ClientMsg, MIC_CHANNELS};
 
 use crate::net::Feedback;
+use crate::platform::android::with_app_context;
 
 const PERMISSION: &str = "android.permission.RECORD_AUDIO";
 /// 10 ms per slice.
@@ -170,7 +171,9 @@ impl Recorder {
         let _ = std::thread::Builder::new()
             .name("mic".into())
             .spawn(move || {
-                crate::xrutil::raise_thread_priority(crate::xrutil::Priority::Audio);
+                crate::platform::android::raise_thread_priority(
+                    crate::platform::android::Priority::Audio,
+                );
                 if !mic.ensure_permission(&flag) {
                     return;
                 }
@@ -242,29 +245,6 @@ fn record(input: &Input, up: u8, feedback: &Feedback, stop: &AtomicBool) -> bool
     }
     info!("headset microphone off");
     true
-}
-
-/// Runs `f` with the app's context: the Application that `ndk_context` holds
-/// (android-activity puts it there), not the activity. Enough for system services and
-/// checking permissions; what needs the Activity itself (asking for one) takes it from
-/// the `AndroidApp`.
-pub(crate) fn with_app_context<T>(
-    f: impl FnOnce(&mut jni::Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
-) -> Option<T> {
-    let ctx = ndk_context::android_context();
-    // SAFETY: the VM of the running NativeActivity.
-    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
-    // In a local frame of its own; a Java exception on the way is caught and cleared,
-    // and comes back as the error.
-    vm.attach_current_thread(|env| {
-        let raw: jobject = ctx.context().cast();
-        // SAFETY: a global reference to the Application, kept for the life of the
-        // process; the cast only borrows it, it never deletes it.
-        let context = unsafe { env.as_cast_raw::<JObject<'static>>(&raw) }?;
-        f(env, &context)
-    })
-    .inspect_err(|e| warn!("a call into Android failed: {e}"))
-    .ok()
 }
 
 fn has_permission() -> bool {

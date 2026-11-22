@@ -64,8 +64,10 @@ impl Model {
             Action::BatterySaver(on) => {
                 self.settings.battery_saver = on;
                 self.saves.mark(persist::File::Settings);
-                self.effects
-                    .push(Effect::Xr(XrCmd::RefreshRate { saver: on }));
+                // The rate by the rule, from those the runtime offers.
+                if let Some(hz) = self.headset.caps.rate(on) {
+                    self.effects.push(Effect::Xr(XrCmd::RefreshRate(hz)));
+                }
             }
             Action::LeftHanded(on) => {
                 self.settings.left_handed = on;

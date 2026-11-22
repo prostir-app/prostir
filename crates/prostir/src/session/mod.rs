@@ -419,6 +419,23 @@ impl Session {
         let headset = &self.publisher.headset;
         let line = self.tray_line();
         let mic = headset.up.get(&UpKind::Mic);
+        let profiles: Vec<String> = headset
+            .profiles
+            .iter()
+            .flat_map(|p| &p.list)
+            .map(|p| p.name.clone())
+            .collect();
+        // The one in use by what `profile` takes: its name, else its number.
+        let profile = headset
+            .profiles
+            .as_ref()
+            .and_then(|p| p.active)
+            .map(usize::from)
+            .filter(|i| *i < profiles.len())
+            .map(|i| match profiles[i].as_str() {
+                "" => (i + 1).to_string(),
+                name => name.to_owned(),
+            });
         api::Session {
             via: match self.via {
                 "USB" => api::Via::Usb,
@@ -428,7 +445,8 @@ impl Session {
             battery: line
                 .battery
                 .map(|(percent, charging)| api::Battery { percent, charging }),
-            profile: None,
+            profile,
+            profiles,
             mic_allowed: mic.and_then(|m| match m.permission {
                 permission::GRANTED => Some(true),
                 permission::DENIED => Some(false),

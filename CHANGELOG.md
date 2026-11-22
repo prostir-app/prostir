@@ -186,7 +186,7 @@
   `prostir ctl recenter`, `prostir ctl profile Work`, `prostir ctl monitor add
   2560x1440@125%`, `prostir ctl status`, `prostir ctl watch` (the headset connecting,
   taken off, put on, leaving), each with `--json` and exit codes for scripts.
-- The same on D-Bus for other programs and hot keys (`io.github.OlexiyOdarchuk.Prostir`
+- The same on D-Bus for other programs and hot keys (`io.github.prostir_app.Prostir`
   on the session bus, see `LOCAL-API.md`).
 - `prostir mcp` offers the same to an AI agent over the Model Context Protocol
   (`claude mcp add prostir -- prostir mcp` for Claude Code): the state, monitors and
@@ -398,7 +398,7 @@ First public version.
   update.
 - Packages: `prostir-bin` on the AUR, a `.deb` and an `.rpm` (Fedora), a tarball with
   `install.sh` (with `--autostart` and `--uninstall --purge`), and a Nix flake
-  (`nix run github:OlexiyOdarchuk/prostir`, NixOS and `nix develop`). Every release
+  (`nix run github:prostir-app/prostir`, NixOS and `nix develop`). Every release
   ships `THIRD-PARTY-LICENSES.txt`.
 - Official builds count how many PCs use Prostir: one anonymous request a day with only
   the date in it, announced on the first start; off in the tray or with

@@ -32,6 +32,10 @@ fn command_of(request: &Request) -> Option<Command> {
         Request::ShowMouse => Command::ShowMouse,
         Request::ResetArrangement => Command::ResetArrangement,
         Request::Profile { name } => Command::Profile { name: name.clone() },
+        Request::RenameProfile { profile, name } => Command::RenameProfile {
+            profile: profile.clone(),
+            name: name.clone(),
+        },
         Request::Cinema { on } => Command::Cinema { on: *on },
         Request::Focus { on } => Command::FocusMode { on: *on },
         Request::Follow { on } => Command::Follow { on: *on },
@@ -45,9 +49,13 @@ fn command_of(request: &Request) -> Option<Command> {
 /// Whether `command` can go to the headset as it is: its arguments within what the
 /// protocol carries (a profile's name of 64 bytes at most), else why not.
 pub fn fits_the_wire(command: &Command) -> Result<(), Failure> {
-    if let Command::Profile { name } = command
-        && name.len() > wire::MAX_DISPLAY_NAME
-    {
+    let long = |name: &String| name.len() > wire::MAX_DISPLAY_NAME;
+    let too_long = match command {
+        Command::Profile { name } => long(name),
+        Command::RenameProfile { profile, name } => long(profile) || long(name),
+        _ => false,
+    };
+    if too_long {
         return Err(Failure::new(
             ApiError::BadArgument,
             format!(
@@ -562,6 +570,7 @@ impl Brain {
             | Request::ShowMouse
             | Request::ResetArrangement
             | Request::Profile { .. }
+            | Request::RenameProfile { .. }
             | Request::Cinema { .. }
             | Request::Focus { .. }
             | Request::Follow { .. }

@@ -689,7 +689,7 @@ one `Open` or `Snapshot` (of the same kind, for the parts kept per kind) is an e
 | Side | Parts | Kept |
 |---|---|---|
 | Host | `Displays`, `PcInfo`, `HostCaps`, `Access`, `Limits`, `Encoding`, `Sound`, `UpWanted`, `Focus`, `SoundFrom` | one of each; `UpWanted` one per kind |
-| Headset | `HeadsetCaps`, `Prefs`, `Presence`, `Battery`, `Volume`, `UpState` | one of each; `UpState` one per kind |
+| Headset | `HeadsetCaps`, `Prefs`, `Presence`, `Battery`, `Volume`, `UpState`, `Profiles` | one of each; `UpState` one per kind |
 
 `HeadsetCaps` is always in `Open`, and `HostCaps` in `Snapshot`; neither changes in a
 session. The host sends `Displays` first and `Focus` and `SoundFrom` last, in one pass,
@@ -980,6 +980,7 @@ are marked as such (their bytes never change). "Part" marks a part of the state 
 | 119 | `Battery` | `percent:u8, charging:bool` | Part. For the PC's tray. |
 | 135 | `Volume` | `level:u8, muted:bool, seq:u32, ask:u32` | Part. The headset's volume (see [Volume](#volume)). |
 | 136 | `UpState` | `kind:UpKind, switch:bool, permission:u8` | Part, one per kind. The headset's switch for its microphone, and whether the system lets it record: `0` not known, `1` yes, `2` no, `3` the system is asking the user now. |
+| 143 | `Profiles` | `list:list<ProfileName>(max 32), active:opt<u8>` | Part (from 0.2.0 step 7.10; an older host skips it). The profiles saved in the headset, in the order its menu lists them, each `ProfileName` a `name:str(64)`, empty for one the menu calls by its number ("Profile 2"); `active`: the one in use (switched to or saved last, until something is changed by hand), by its place in `list`. Commands name a profile by its name or by its number from 1 in this order. |
 | 139 | `UpStart` | `up:u8, kind:UpKind, format:UpFormat` | Up stream `up` starts. Lane 1. |
 | 140 | `Up` | `up:u8, data:bytes*` | A piece of up stream `up`. Lane 1. |
 | 141 | `UpEnd` | `up:u8` | Up stream `up` ended. Lane 1. |
@@ -1054,18 +1055,28 @@ headset shows the laptop's own panel (`builtin`) by its own words for it.
 | 10 | `WindowHere` | `id:DisplayId` | `Done` | input | `NO_WINDOW`, `UNKNOWN_DISPLAY` |
 | 11 | `Screenshot` | `id:DisplayId` | `Saved` | private | `CAPTURE` |
 | 12 | `FindMouse` | | `Pointer` | none | `NOT_ON_DISPLAYS` |
+| 13 | `SetScale` | `id:DisplayId, scale:u16` | `Done` (the monitor is made anew at `scale` under the same number: `Starting` in the list that comes with the reply, then `Running`) | changes | `BAD_SIZE` (a scale not in `Limits.scales`, or one the desktop does not give that size), `UNKNOWN_DISPLAY` |
 
 `SetDisplays` sets the monitors of a profile, left to right: monitors of a size that
 is there already are kept with their windows; `shown_physical` are the displays of the
-PC to show, the others are hidden. Kind 8 is retired (`RETIRED_REQUEST_KINDS`) and
-never used.
+PC to show, the others are hidden. `SetScale` is from 0.2.0 step 7.10: a host before it
+answers it `UNSUPPORTED`, as any kind it does not know; a headset offers it only to a
+host that names capability 10 (monitors with a scale). Kind 8 is retired
+(`RETIRED_REQUEST_KINDS`) and never used.
+
+A display of the host seen for the first time is shown in the headset, while the
+person wants the host's displays there, fewer than the host's `physical_max`
+without "No limits" are shown, and a headset connected then decodes one more stream:
+at first every display of the host shows, standing to the others as on its desktop
+(`Display.desk`; side by side where they cover each other, as a cloned desktop's do),
+and the person hides those not needed.
 
 ### Commands
 
 | `kind` | Command | Fields | What the headset does |
 |---:|---|---|---|
 | 1 | `Recenter` | | Brings everything in front of the user. |
-| 2 | `Profile` | `name:str(64)` | Switches to a profile: `name` is the profile's number, 1 to 3, as the headset menu shows it (`NO_SUCH_PROFILE`); answers once it is in place. |
+| 2 | `Profile` | `name:str(64)` | Switches to a profile: `name` is a number only, its number from 1 as the headset's `Profiles` lists them; else the name it was given, exactly; else the number after the word the headset's menu calls a profile by ("Profile 2") in a language it has (`NO_SUCH_PROFILE`); answers once it is in place. |
 | 3 | `Cinema` | `on:bool` | Cinema mode. |
 | 4 | `FocusMode` | `on:bool` | "Focus" (changes `Prefs`). |
 | 5 | `Distance` | `steps:i8` | Closer (below 0) or further. |
@@ -1075,6 +1086,7 @@ never used.
 | 10 | `Follow` | `on:bool` | Follow the head. |
 | 11 | `ResetArrangement` | | Reset the arrangement (`UNSUPPORTED` in the current client). |
 | 12 | `NoLimits` | `on:bool` | "No limits" (changes `Prefs`). |
+| 13 | `RenameProfile` | `profile:str(64), name:str(64)` | Gives profile `profile` (named as for `Profile`) the name `name`, on one line, without spaces around it or characters that turn text around; an empty one gives it back its number (`NO_SUCH_PROFILE`; `BAD_ARGUMENT` for a number only, which names a profile by its place; `NOT_ALLOWED` from a host the headset's menu does not act on). The headset's `Profiles` part shows it before the answer. From 0.2.0 step 7.10; an older headset answers `UNSUPPORTED`. |
 
 Kind 9 is retired (`RETIRED_COMMAND_KINDS`): it set the headset's microphone switch in
 development builds, and is never used again. The switch is the user's, changed only in

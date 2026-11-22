@@ -87,7 +87,15 @@ fn headset_asking(dir: &Path, port: Option<u16>) -> (Net, Receiver<NetEvent>, Ar
         tx,
         Arc::new(FakeSource(played.clone())),
         HeadsetState {
-            caps: Some(headset::device::headset_caps("e2e headset")),
+            caps: Some(
+                headset::caps::Caps::without_extensions(
+                    "e2e headset".into(),
+                    headset::caps::DECODERS_UNSAID.to_vec(),
+                    headset::caps::STREAMS_UNSAID,
+                    None,
+                )
+                .headset_caps(),
+            ),
             ..HeadsetState::default()
         },
     )

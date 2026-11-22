@@ -13,8 +13,8 @@ Build-Depends: debhelper-compat (= 13),
                libgstreamer-plugins-base1.0-dev (>= 1.24)
 Standards-Version: 4.7.0
 Homepage: https://prostir.ishawyha.dev
-Vcs-Browser: https://github.com/OlexiyOdarchuk/prostir
-Vcs-Git: https://github.com/OlexiyOdarchuk/prostir.git
+Vcs-Browser: https://github.com/prostir-app/prostir
+Vcs-Git: https://github.com/prostir-app/prostir.git
 Rules-Requires-Root: no
 
 Package: prostir

@@ -1,14 +1,14 @@
 //! Renders the headset menu to a PNG for checking the design on the desktop.
 //! cargo run -p prostir-client --example panel_preview -- panel.png [hover_x hover_y]
-//! Environment: WRIST=1 (the wrist menu), TAB=monitors|look|sound|language|pc|help (default: quick), LANG_UI=en|uk|qps (qps: the longer pseudo-language), PAIR=show|type|failed, OFFLINE=1, KEYPAD=…, NOTE=done|failed|waiting|saved (what the page says under a button pressed on it)
+//! Environment: WRIST=1 (the wrist menu), TAB=monitors|profiles|look|sound|language|pc|paired|help (default: quick), LANG_UI=en|uk|qps (qps: the longer pseudo-language), PAIR=show|type|failed, OFFLINE=1, KEYPAD=…, NOTE=done|failed|waiting|saved (what the page says under a button pressed on it), PHYSICAL=n (the PC's own displays, 0 to 5; 2 by default), PHYSICAL_MAX=n (how many of them the PC lets show; 4 by default), PROFILES=n (saved profiles; 3 by default), SELECTED=1 (the second monitor picked on the map), NO_SCALE=1 (a PC without monitors at another scale)
 
 use prostir::ids::{DisplayKey, PcId};
 use prostir::lang::{BUILTIN, Known, Lang, Language, Loader, Texts};
 use prostir::note::Note;
+use prostir::platform::store::{NoStore, Store as _};
 use prostir::settings::Settings;
-use prostir::store::{NoStore, Store as _};
 use prostir::ui::{
-    Action, MonitorEntry, OfferWhy, PairingView, Panel, Place, Section, Tab, UiState,
+    Action, MonitorEntry, OfferWhy, PairingView, Panel, PhysicalEntry, Place, Section, Tab, UiState,
 };
 
 /// NOTE=`kind`: what the page of `s` says under one of its buttons, as after pressing
@@ -17,10 +17,23 @@ use prostir::ui::{
 fn note(kind: &str, s: &UiState) -> Option<Note> {
     let l = &s.texts;
     let (on, done, failed, detail) = match (s.tab, kind) {
-        (Tab::Monitors, "saved") => {
-            let name = l.f("profile-n", &[("n", 2.into())]);
-            let text = l.f("toast-profile-saved", &[("name", name.into())]);
+        (Tab::Profiles, "saved") => {
+            let text = l.f("toast-profile-saved", &[("name", "Робота".into())]);
             return Some(Note::done(Some(Action::SaveProfile(1)), &text));
+        }
+        (Tab::Profiles, _) => (
+            Action::NewProfile,
+            l.t("note-profile-deleted"),
+            l.t("failure-not-connected"),
+            None,
+        ),
+        (Tab::Monitors, "physical") => {
+            let on = Some(Action::ShowPhysical(k(117), false));
+            return Some(Note::done(on, l.t("note-display-hidden")));
+        }
+        (Tab::Monitors, "scale") => {
+            let on = Some(Action::SetScale(k(1), 125));
+            return Some(Note::waiting(on, l));
         }
         (Tab::Quick, _) => (
             Action::SetAudio(false),
@@ -50,6 +63,12 @@ fn note(kind: &str, s: &UiState) -> Option<Note> {
             None,
         ),
         (Tab::Settings(Section::Pc), _) => {
+            return Some(Note::done(
+                Some(Action::NoLimits(true)),
+                l.t("note-no-limits-on"),
+            ));
+        }
+        (Tab::Settings(Section::Paired), _) => {
             let text = l.f("note-pc-forgotten", &[("pc", "laptop".into())]);
             return Some(Note::done(Some(Action::ForgetPc(1)), &text));
         }
@@ -64,6 +83,59 @@ fn note(kind: &str, s: &UiState) -> Option<Note> {
         "waiting" => Note::waiting(on, l),
         _ => Note::done(on, done),
     })
+}
+
+/// The PC's own displays (PHYSICAL=n of them): the laptop's panel with its lid
+/// closed, a monitor shown, and more of them hidden.
+fn physical(texts: &Texts) -> Vec<PhysicalEntry> {
+    let n: usize = std::env::var("PHYSICAL")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(2);
+    let all = [
+        (
+            100,
+            texts.t("laptop-screen").to_owned(),
+            "eDP-1",
+            false,
+            false,
+        ),
+        (117, "DELL U2720Q".to_owned(), "HDMI-A-1", true, true),
+        (118, "LG ULTRAGEAR".to_owned(), "DP-2", false, true),
+        (119, "Samsung Odyssey G9".to_owned(), "DP-3", false, true),
+        (
+            120,
+            texts.f("pc-display-named", &[("name", "DP-4".into())]),
+            "DP-4",
+            false,
+            true,
+        ),
+    ];
+    all.into_iter()
+        .take(n)
+        .map(|(id, name, connector, shown, connected)| PhysicalEntry {
+            id: k(id),
+            connector: (!name.contains(connector)).then(|| connector.into()),
+            name,
+            shown,
+            connected,
+        })
+        .collect()
+}
+
+/// The profiles saved (PROFILES=n of them): the second one named.
+fn profiles(texts: &Texts) -> Vec<String> {
+    let n: usize = std::env::var("PROFILES")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(3);
+    (0..n)
+        .map(|i| match i {
+            1 => "Робота".to_owned(),
+            4 => "Ігри й кіно вечорами".to_owned(),
+            _ => texts.f("profile-n", &[("n", (i + 1).into())]),
+        })
+        .collect()
 }
 
 /// Display `n` of the PC of the preview.
@@ -129,6 +201,7 @@ fn main() {
                 height: 800,
                 place: Place::default(),
                 seen: None,
+                scale: 100,
             }]
         } else {
             Vec::new()
@@ -136,7 +209,10 @@ fn main() {
         limits: Some(prostir_proto::state::Limits {
             virtual_max: 6,
             windows_max: 3,
-            physical_max: 1,
+            physical_max: std::env::var("PHYSICAL_MAX")
+                .ok()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(4),
             streams_max: 16,
             min: (640, 480),
             max: (5120, 2880),
@@ -206,6 +282,7 @@ fn main() {
                 height: 1440,
                 place: Place::default(),
                 seen: Some([-1.0, 0.0, 0.5, 0.28]),
+                scale: 100,
             },
             MonitorEntry {
                 id: k(1),
@@ -214,6 +291,7 @@ fn main() {
                 height: 1440,
                 place: Place::default(),
                 seen: Some([0.0, 0.0, 0.5, 0.28]),
+                scale: 125,
             },
             MonitorEntry {
                 id: k(2),
@@ -222,22 +300,32 @@ fn main() {
                 height: 2560,
                 place: Place::default(),
                 seen: Some([0.78, 0.12, 0.28, 0.5]),
+                scale: 100,
             },
         ],
         primary: Some(k(1)),
         cinema_screen: None,
-        selected: None,
-        mirror_seen: Some([0.0, -0.55, 0.35, 0.22]),
-        mirror_wanted: true,
+        selected: std::env::var("SELECTED").is_ok().then_some(k(1)),
+        physical_seen: vec![
+            ([-0.35, -0.55, 0.2, 0.13], "DELL U2720Q".into()),
+            ([0.15, -0.58, 0.3, 0.17], texts.t("laptop-screen").into()),
+        ],
+        physical_page: std::env::var("PHYSICAL_PAGE")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0),
+        physical: physical(&texts),
         audio_wanted: true,
         mic_wanted: true,
-        mirror_name: Some(texts.f("pc-display-named", &[("name", "HDMI-A-1".into())])),
         settings: Settings::default(),
         room_available: true,
         panorama_available: true,
         custom_available: false,
         curve_available: true,
         keyboard_available: true,
+        hands_available: true,
+        display_rates: Some((90, 72)),
+        display_rate_now: Some(90),
         error: None,
         confirm_remove: std::env::var("CONFIRM").is_ok().then_some(k(2)),
         intro: std::env::var("INTRO").is_ok(),
@@ -250,12 +338,21 @@ fn main() {
             Ok("sound") => Tab::Settings(Section::Sound),
             Ok("language") => Tab::Settings(Section::Language),
             Ok("pc") => Tab::Settings(Section::Pc),
+            Ok("paired") => Tab::Settings(Section::Paired),
+            Ok("profiles") => Tab::Profiles,
             Ok("help") => Tab::Settings(Section::Help),
             Ok("controls") => Tab::Settings(Section::Controls),
             _ => Tab::Quick,
         },
-        saved_profiles: [true, false, false],
-        active_profile: Some(0),
+        profiles: profiles(&texts),
+        profile_page: std::env::var("PAGE")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0),
+        confirm_delete: None,
+        can_scale: std::env::var("NO_SCALE").is_err(),
+        add_scale: 100,
+        active_profile: Some(1),
         note: None,
         texts,
         languages: languages.into(),

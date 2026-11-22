@@ -184,6 +184,15 @@ hs-empty-title = No paired headsets yet
 hs-empty-body = Open Prostir in the headset near this PC and pair them with a code.
 hs-pair-hint = To pair a new headset, open Prostir in it near this PC: the PC shows a code here to type in the headset.
 hs-guest-name = { $name } (guest)
+hs-profiles = Profiles in { $name }
+hs-profile-n = Profile { $n }
+hs-profile-in-use = In use now
+hs-profile-rename = Rename
+hs-profile-rename-named = Rename { $name }
+hs-profile-name = New name for { $name }
+hs-profile-save = Save
+hs-profile-number = A name cannot be a number only: a number is the profile's place.
+hs-profiles-note = The name shows in the headset's menu. An empty name brings back the number.
 
 ## Pairing
 

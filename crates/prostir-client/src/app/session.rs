@@ -6,7 +6,7 @@ use glam::Vec2;
 use log::{info, warn};
 use prostir_proto::ClientMsg;
 use prostir_proto::request::{Asked, Command, Outcome};
-use prostir_proto::state::{self, HeadsetState, ReqId};
+use prostir_proto::state::{HeadsetState, ReqId};
 
 use super::{By, Effect, Model, VideoCmd};
 use crate::ids::{DisplayKey, PcId};
@@ -15,7 +15,7 @@ use crate::net::NetEvent;
 use crate::note::Note;
 use crate::session::{self, Attempt};
 use crate::ui::{self, Action};
-use crate::{persist, physical, presence};
+use crate::{persist, presence};
 
 impl Model {
     /// What the network thread said (the shell kept the handles it brought).
@@ -105,6 +105,7 @@ impl Model {
                             // with its list of displays). The menu is closed by now: a
                             // toast says it.
                             self.menu.active_profile = Some(slot);
+                            self.profiles_changed();
                             let name = self.profile_name(slot);
                             let text = self
                                 .texts()
@@ -159,6 +160,7 @@ impl Model {
                     self.given_up(pc, req, ui::Failure::Disconnected);
                 }
                 self.menu.notes.forget_requests(pc);
+                self.menu.physical_asked.retain(|(k, _)| k.pc != pc);
                 self.sessions.remove(&pc);
                 // The next session's list is news, not displays removed.
                 self.world.disconnected(pc);
@@ -212,6 +214,9 @@ impl Model {
         if now.presence != opened_with.presence {
             self.tell_presence();
         }
+        if now.profiles != opened_with.profiles {
+            self.tell_profiles();
+        }
         // Asleep already as the session opened (`Open` says only "not worn").
         if self.presence.state() == presence::State::Asleep {
             self.tell_all(&ClientMsg::Asleep);
@@ -220,24 +225,11 @@ impl Model {
     }
 
     /// PC `pc` listed its displays anew (see `World::listed`): the displays gone end
-    /// their streams, and the switch of the PC's own displays shows how it stands.
+    /// their streams.
     fn displays_changed(&mut self, pc: PcId) {
         let Some(displays) = self.session.pc(pc).and_then(|p| p.state.displays.as_ref()) else {
             return;
         };
-        // As the switch says: its display shown; with none connected, any one kept
-        // shown.
-        if self.session.main() == Some(pc) {
-            self.headset.mirror_wanted = physical::switch(displays).map_or_else(
-                || {
-                    displays
-                        .displays
-                        .iter()
-                        .any(state::Display::is_shown_physical)
-                },
-                state::Display::is_shown_physical,
-            );
-        }
         let gone = self
             .world
             .listed(pc, displays, &self.settings, self.head, self.now);
@@ -269,13 +261,27 @@ impl Model {
         use crate::commands::Does;
         use prostir_proto::state::ErrorCode;
         info!("the PC asks: {asked:?}");
-        let outcome = match crate::commands::what_to_do(asked) {
+        let texts = self.texts().clone();
+        let menu_name = |n: usize| texts.f("profile-n", &[("n", n.into())]);
+        let outcome = match crate::commands::what_to_do(asked, &self.profiles, &menu_name) {
             Does::Act(action) => {
                 self.act(action, By::Elsewhere);
                 Outcome::Done
             }
-            Does::Profile(i) if self.profiles.get(i).is_none_or(Option::is_none) => {
-                Outcome::failed(ErrorCode::NO_SUCH_PROFILE, &(i + 1).to_string())
+            // The names are the person's: only the PC the menu acts on names them.
+            Does::Rename(..) if self.session.main() != Some(pc) => {
+                Outcome::failed(ErrorCode::NOT_ALLOWED, "")
+            }
+            Does::Rename(i, name) => {
+                if let Some(p) = self.profiles.get_mut(i) {
+                    info!("profile {} named anew", i + 1);
+                    p.name = name;
+                    self.saves.mark(persist::File::Profiles);
+                    // The PC hears the new name before the answer.
+                    self.rev += 1;
+                    self.tell_profiles();
+                }
+                Outcome::Done
             }
             Does::Profile(i) => {
                 let last = |m: &Self| m.session.pc(pc).map(|p| p.asks.last());
@@ -293,12 +299,6 @@ impl Model {
             }
             Does::Closer(steps) => {
                 self.closer(steps);
-                Outcome::Done
-            }
-            Does::NoLimits(on) => {
-                self.settings.no_limits = on;
-                self.saves.mark(persist::File::Settings);
-                self.prefs_changed();
                 Outcome::Done
             }
             Does::Fail(code, detail) => Outcome::failed(code, &detail),

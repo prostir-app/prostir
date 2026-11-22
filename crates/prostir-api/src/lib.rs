@@ -46,15 +46,15 @@ lenient!(MicState: Off, Ready, Failed);
 lenient!(Counting: Unasked, Yes, No);
 
 /// The service's name on the session bus.
-pub const BUS_NAME: &str = "io.github.OlexiyOdarchuk.Prostir";
+pub const BUS_NAME: &str = "io.github.prostir_app.Prostir";
 /// Its object.
-pub const OBJECT_PATH: &str = "/io/github/OlexiyOdarchuk/Prostir";
+pub const OBJECT_PATH: &str = "/io/github/prostir_app/Prostir";
 /// Its interface. An incompatible change gets `Prostir2` next to it.
-pub const INTERFACE: &str = "io.github.OlexiyOdarchuk.Prostir1";
+pub const INTERFACE: &str = "io.github.prostir_app.Prostir1";
 /// Prefix of the service's D-Bus errors: `<prefix>NotConnected` and so on.
-pub const ERROR_PREFIX: &str = "io.github.OlexiyOdarchuk.Prostir1.Error.";
+pub const ERROR_PREFIX: &str = "io.github.prostir_app.Prostir1.Error.";
 /// The settings window's name on the bus (one window per user).
-pub const SETTINGS_NAME: &str = "io.github.OlexiyOdarchuk.Prostir.Settings";
+pub const SETTINGS_NAME: &str = "io.github.prostir_app.Prostir.Settings";
 
 /// How long the service waits for the headset to answer a command.
 pub const COMMAND_SECONDS: u64 = 30;
@@ -78,7 +78,15 @@ pub enum Request {
     LineUp,
     ShowMouse,
     ResetArrangement,
+    /// Switch to a profile saved in the headset: its name, or its number from 1 as
+    /// the headset's menu lists them.
     Profile {
+        name: String,
+    },
+    /// Gives profile `profile` (its name or number) the name `name`; an empty one
+    /// gives it back the headset menu's own ("Profile 2").
+    RenameProfile {
+        profile: String,
         name: String,
     },
     Cinema {
@@ -219,6 +227,7 @@ pub const REQUESTS: &[&str] = &[
     "show_mouse",
     "reset_arrangement",
     "profile",
+    "rename_profile",
     "cinema",
     "focus",
     "follow",
@@ -290,6 +299,7 @@ impl Request {
                 | Self::ShowMouse
                 | Self::ResetArrangement
                 | Self::Profile { .. }
+                | Self::RenameProfile { .. }
                 | Self::Cinema { .. }
                 | Self::Focus { .. }
                 | Self::Follow { .. }
@@ -739,8 +749,12 @@ pub struct Session {
     /// On the head; streaming pauses while no headset is.
     pub worn: bool,
     pub battery: Option<Battery>,
-    /// The headset's profile in use, where it says.
+    /// The headset's profile in use, where it says: its name, or its number from 1
+    /// where it has none (what `profile` takes).
     pub profile: Option<String>,
+    /// The profiles saved in the headset, in its menu's order, where it says: the name
+    /// each was given, empty for one called by its number ("Profile 2").
+    pub profiles: Vec<String>,
     /// Whether the headset's system lets it record its microphone, where known.
     pub mic_allowed: Option<bool>,
     /// Its microphone switch is on.
@@ -1025,6 +1039,10 @@ mod tests {
             Request::Profile {
                 name: "Робота".into(),
             },
+            Request::RenameProfile {
+                profile: "2".into(),
+                name: "Ігри".into(),
+            },
             Request::Cinema { on: true },
             Request::Focus { on: false },
             Request::Follow { on: true },
@@ -1243,7 +1261,8 @@ mod tests {
                         percent: 80,
                         charging: false,
                     }),
-                    profile: None,
+                    profile: Some("Робота".into()),
+                    profiles: vec![String::new(), "Робота".into()],
                     mic_allowed: Some(true),
                     mic_on: false,
                     main: true,
@@ -1352,7 +1371,8 @@ mod tests {
             r#""headsets":[{"key":"a1b2c3d4e5f6","name":"Quest 3","model":"Quest 3","#,
             r#""app":"0.2.0","last_seen":1795000000,"role":"main","rights":["input","mic"],"#,
             r#""session":{"via":"wifi","worn":true,"battery":{"percent":80,"charging":false},"#,
-            r#""profile":null,"mic_allowed":true,"mic_on":false,"main":true,"commands":true,"#,
+            r#""profile":"Робота","profiles":["","Робота"],"mic_allowed":true,"mic_on":false,"#,
+            r#""main":true,"commands":true,"#,
             r#""no_limits":false}}],"connecting":null,"#,
             r#""displays":[{"id":103,"kind":"virtual","name":"Prostir-1","#,
             r#""output":"Virtual-Prostir-1","builtin":false,"shown":true,"#,

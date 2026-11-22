@@ -1082,12 +1082,29 @@ static TOOLS: &[Tool] = &[
     ),
     asks(
         "profile",
-        "Headset command: switches to a profile saved in the headset.",
+        "Headset command: switches to a profile saved in the headset (its names are \
+         headsets[].session.profiles in the state).",
         &[Arg::of(
             "name",
             "string",
-            "the profile's number, 1 to 3, as the headset menu shows it",
+            "the profile's name, or its number from 1 as the headset menu lists them",
         )],
+    ),
+    asks(
+        "rename_profile",
+        "Headset command: gives a profile saved in the headset another name.",
+        &[
+            Arg::of(
+                "profile",
+                "string",
+                "the profile's name, or its number from 1 as the headset menu lists them",
+            ),
+            Arg::of(
+                "name",
+                "string",
+                "its new name; empty: called by its number again",
+            ),
+        ],
     ),
     asks("cinema", "Headset command: cinema mode on or off.", &[ON]),
     asks("focus", "Headset command: focus mode on or off.", &[ON]),

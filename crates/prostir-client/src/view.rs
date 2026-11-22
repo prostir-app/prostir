@@ -5,6 +5,9 @@
 #![forbid(unsafe_code)]
 
 use crate::app::Model;
+use crate::caps::Offer;
+use crate::ids::DisplayKey;
+use crate::physical;
 use crate::session::Attempt;
 use crate::ui::{self, MonitorEntry, UiState};
 
@@ -34,12 +37,18 @@ impl View {
     }
 }
 
+/// A display rate as the menu writes it, in whole hertz.
+fn hz(rate: f32) -> u16 {
+    rate.round().clamp(0.0, f32::from(u16::MAX)) as u16
+}
+
 /// What the menu shows, from `m`.
 pub fn build(m: &Model) -> UiState {
     let world = m.world();
     let session = m.session();
     let menu = m.menu();
     let headset = m.headset();
+    let caps = &headset.caps;
     let now = m.now();
     let shown_for = |at: std::time::Instant, d| now.saturating_duration_since(at) < d;
     let map = world.map_spots();
@@ -54,6 +63,7 @@ pub fn build(m: &Model) -> UiState {
             height,
             place: ui::Place::Unknown,
             seen: None,
+            scale: 100,
         })
         .collect();
     windows.sort_unstable_by_key(|w| w.id);
@@ -78,6 +88,8 @@ pub fn build(m: &Model) -> UiState {
         unreachable: search.unreachable.clone(),
         pc: m.pc().encoding.clone(),
         limits: m.pc().limits.clone(),
+        can_scale: m.can_scale(),
+        add_scale: menu.add_scale,
         can_move_mouse: m.can_move_mouse(),
         monitors: world
             .monitors()
@@ -90,27 +102,51 @@ pub fn build(m: &Model) -> UiState {
                 height,
                 place: world.place_of(id, m.view_eye()),
                 seen: spot(id),
+                scale: m.display(id).map_or(100, |d| d.mode.scale),
             })
             .collect(),
         windows,
         primary: world.primary(),
         cinema_screen: world.desk().cinema(),
         selected: menu.selected.filter(|id| world.streams(*id)),
-        mirror_seen: world
-            .mirror()
-            .filter(|id| world.streams(*id))
-            .and_then(spot),
-        mirror_wanted: headset.mirror_wanted,
+        physical_seen: world
+            .physical()
+            .iter()
+            .filter(|(id, _)| world.streams(*id))
+            .filter_map(|(id, _)| {
+                let name = physical::label(m.display(*id)?, m.texts());
+                Some((spot(*id)?, name))
+            })
+            .collect(),
+        physical_page: menu.physical_page,
+        physical: match (session.main(), m.pc().displays.as_ref()) {
+            (Some(pc), Some(displays)) => {
+                // Asked and not answered yet: as asked.
+                let waits = |k: &DisplayKey| session.waits(ui::Asked::Physical(*k));
+                let asked: Vec<(DisplayKey, bool)> = menu
+                    .physical_asked
+                    .iter()
+                    .filter(|(k, _)| waits(k))
+                    .copied()
+                    .collect();
+                physical::entries(pc, displays, &asked, m.texts())
+            }
+            _ => Vec::new(),
+        },
         audio_wanted: m.pc().sound.as_ref().is_none_or(|s| s.to_headset),
         mic_wanted: headset.mic_wanted,
         mic_denied: headset.mic_wanted && headset.mic_denied,
-        mirror_name: m.physical_name(),
         settings: *m.settings(),
-        room_available: headset.can.room,
-        panorama_available: headset.can.panorama,
-        custom_available: headset.can.custom_panorama,
+        room_available: caps.offers(Offer::RoomBackground),
+        panorama_available: caps.offers(Offer::Panorama),
+        custom_available: headset.custom_panorama,
         curve_available: world.curve_supported(),
-        keyboard_available: headset.can.keyboard_window,
+        keyboard_available: caps.offers(Offer::KeyboardWindow),
+        hands_available: caps.offers(Offer::Hands),
+        display_rates: caps
+            .rate_choice()
+            .map(|(usual, saver)| (hz(usual), hz(saver))),
+        display_rate_now: headset.refresh_hz.map(hz),
         error: menu
             .error
             .as_ref()
@@ -122,6 +158,10 @@ pub fn build(m: &Model) -> UiState {
             .map(|(id, _)| id),
         confirm_save: menu
             .confirm_save
+            .filter(|(_, at)| shown_for(*at, crate::app::CONFIRM_FOR))
+            .map(|(i, _)| i),
+        confirm_delete: menu
+            .confirm_delete
             .filter(|(_, at)| shown_for(*at, crate::app::CONFIRM_FOR))
             .map(|(i, _)| i),
         paired: session.paired().iter().map(|p| p.name.clone()).collect(),
@@ -138,8 +178,9 @@ pub fn build(m: &Model) -> UiState {
         language_page: menu.language_page,
         intro: !m.settings().intro_seen,
         update: search.update.clone(),
-        update_from: headset.can.update_from,
-        saved_profiles: m.profiles().each_ref().map(Option::is_some),
+        update_from: headset.update_from,
+        profiles: (0..m.profiles().len()).map(|i| m.profile_name(i)).collect(),
+        profile_page: menu.profile_page,
         active_profile: menu.active_profile,
         note: menu.notes.shown().cloned(),
     }

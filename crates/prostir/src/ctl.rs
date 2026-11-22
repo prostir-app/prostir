@@ -138,14 +138,21 @@ pub fn parse(args: &[String]) -> Result<(Ctl, bool), String> {
         "reset" => ask(Request::ResetArrangement),
         "profile" => {
             takes = rest.len();
-            let name = rest.join(" ");
-            if name.is_empty() {
-                Err(
-                    "expected the profile's number, 1 to 3, as the headset menu shows it"
+            match rest.split_first() {
+                Some((&"rename", [profile, name @ ..])) => ask(Request::RenameProfile {
+                    profile: (*profile).to_owned(),
+                    name: name.join(" "),
+                }),
+                Some((&"rename", [])) => {
+                    Err("expected the profile's number or name, then its new name".to_owned())
+                }
+                Some(_) => ask(Request::Profile {
+                    name: rest.join(" "),
+                }),
+                None => Err(
+                    "expected the profile's name, or its number as the headset menu lists them"
                         .to_owned(),
-                )
-            } else {
-                ask(Request::Profile { name })
+                ),
             }
         }
         "cinema" | "focus" | "follow" | "mic" | "nolimits" => {
@@ -328,7 +335,10 @@ prostir ctl COMMAND [--json]
   status                         what Prostir is doing
   watch                          what happens, a line each, until Ctrl+C
   recenter | lineup | showmouse | reset
-  profile N                      the profile's number, 1 to 3, as the headset menu shows it
+  profile N|NAME                 a profile of the headset: its number as its menu lists
+                                 them, or its name
+  profile rename N NEW NAME      gives profile N (its number, or a one-word name) the
+                                 name NEW NAME; with none, its number again
   cinema | focus | follow | mic | nolimits  on|off
   closer [N] | farther [N]
   preset N

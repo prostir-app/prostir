@@ -3,8 +3,12 @@
 //! and the system quiet, counted by an allocator that counts this thread's
 //! allocations. A quiet frame, a ray on a monitor or on the menu, and a drag of a
 //! monitor with the menu closed or open allocate nothing; the menu's state is made
-//! anew only when what it shows changed.
-
+//! anew only when what it shows changed. Pointing about the menu's picture, once each
+//! button was pointed at, draws nothing and takes no memory.
+//!
+//! On the desktop only: the app built for Android has its own counting allocator, and
+//! a program has one.
+#![cfg(not(target_os = "android"))]
 #![expect(
     clippy::disallowed_methods,
     reason = "the test's own starting time; the code under test takes the time as a parameter"
@@ -16,15 +20,16 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use glam::Vec3;
-use prostir::app::{By, Can, Effect, Event, Model, Start};
+use prostir::app::{By, Effect, Event, Model, Start};
+use prostir::caps::{self, Caps};
 use prostir::ids::{DisplayKey, PcId};
 use prostir::interaction::{Button, FrameInput, HandState, Hands, Head, Menu, Menus};
 use prostir::lang::{self, LangState};
 use prostir::layout::{Desk, Ray};
 use prostir::net::NetEvent;
+use prostir::platform::store::Store as _;
 use prostir::session::NetCmd;
 use prostir::settings::Settings;
-use prostir::store::Store as _;
 use prostir::ui::Action;
 use prostir::view::View;
 use prostir_proto::HostMsg;
@@ -202,7 +207,7 @@ fn connected() -> Loop {
         settings: Settings::default(),
         desk: Desk::default(),
         keyboard: None,
-        profiles: Default::default(),
+        profiles: Vec::new(),
         // The built-in texts only: no folder to read.
         lang: LangState::new(
             lang::Loader::new(None).load(lang::Lang::FALLBACK),
@@ -210,15 +215,21 @@ fn connected() -> Loop {
         ),
         system_lang: None,
         battery: Some((80, false)),
-        model: "Test headset".into(),
-        can: Can {
-            room: false,
-            keyboard_window: false,
-            panorama: true,
-            curve: true,
-            custom_panorama: false,
-            update_from: prostir::store::NoStore.update_hint(),
+        caps: Caps {
+            equirect: true,
+            cylinder: true,
+            color_scale: true,
+            refresh_rates: vec![72.0, 90.0],
+            ..Caps::without_extensions(
+                "Test headset".into(),
+                caps::DECODERS_UNSAID.to_vec(),
+                caps::STREAMS_UNSAID,
+                None,
+            )
         },
+        refresh_hz: Some(90.0),
+        custom_panorama: false,
+        update_from: prostir::platform::store::NoStore.update_hint(),
         mic_permission: permission::UNKNOWN,
         only: Some(addr()),
     });
@@ -345,6 +356,55 @@ fn a_frame_takes_no_memory() {
     let drag = move |i: u32| drag_at(beside, i);
     assert_eq!(l.measure(300, drag), (0, 0), "a drag, the menu open");
     assert!(monitor(&l), "the drag held a monitor");
+}
+
+/// The menu's picture as the ray goes over it, button to button and off it, twice: the
+/// first time each button's part is drawn (and kept), the second time it is only
+/// copied, without memory (`ui::Panel::render_if_dirty`). Each change is a part, never
+/// the whole picture.
+#[test]
+fn pointing_about_the_menu_takes_no_memory() {
+    let mut l = connected();
+    l.handle(Event::Menu(Action::OpenMenu, By::Elsewhere));
+    for tab in [
+        prostir::ui::Tab::Quick,
+        prostir::ui::Tab::Monitors,
+        prostir::ui::Tab::Settings(prostir::ui::Section::Pc),
+    ] {
+        l.handle(Event::Menu(Action::Tab(tab), By::Elsewhere));
+        let mut panel = prostir::ui::Panel::new();
+        panel.set_state(l.view.state(&l.m));
+        assert!(panel.render_if_dirty().is_some());
+        assert_eq!(panel.damage(), None, "drawn whole first");
+        // Across the picture, row by row, and off it now and then.
+        let points: Vec<Option<(f32, f32)>> = (0..prostir::ui::HEIGHT)
+            .step_by(24)
+            .flat_map(|y| {
+                (0..prostir::ui::WIDTH)
+                    .step_by(24)
+                    .map(move |x| Some((x as f32, y as f32)))
+                    .chain([None])
+            })
+            .collect();
+        let pass = |panel: &mut prostir::ui::Panel| {
+            let mut parts = 0;
+            for &at in &points {
+                panel.hover(at);
+                if panel.render_if_dirty().is_some() {
+                    let part = panel.damage().expect("a part, not the whole picture");
+                    assert!(part.w * part.h < prostir::ui::WIDTH * prostir::ui::HEIGHT / 3);
+                    parts += 1;
+                }
+            }
+            parts
+        };
+        let first = pass(&mut panel);
+        assert!(first > 20, "{tab:?}: {first} buttons pointed at");
+        let before = allocations();
+        let second = pass(&mut panel);
+        assert_eq!(allocations() - before, 0, "{tab:?}");
+        assert_eq!(second, first);
+    }
 }
 
 /// The counting itself: making the model and its session takes memory, and making

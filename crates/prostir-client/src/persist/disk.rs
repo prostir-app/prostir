@@ -773,14 +773,15 @@ mod tests {
         let (empty, mut saver) = start_after(&dir, Duration::ZERO);
         assert_eq!(empty.settings, Settings::default());
         assert!(empty.desk.arrangement().placements.is_empty());
-        assert!(empty.profiles.iter().all(Option::is_none) && empty.keyboard.is_none());
+        assert!(empty.profiles.is_empty() && empty.keyboard.is_none());
         let settings = Settings {
             mic: false,
             ..Settings::default()
         };
         saver.save(File::Settings, |out| settings.write_text(out));
         let mut profiles = profiles::empty();
-        profiles[1] = Some(profiles::Profile {
+        profiles.push(profiles::Profile {
+            name: Some("Робота".into()),
             monitors: vec![prostir_proto::state::Mode::new(2560, 1440)],
             primary: 0,
             shown: Vec::new(),
@@ -867,7 +868,7 @@ mod tests {
             assert!(loaded.desk.arrangement().placements.is_empty(), "case {n}");
             assert!(loaded.desk.arrangement().center.is_none(), "case {n}");
             assert!(loaded.keyboard.is_none(), "case {n}");
-            assert!(loaded.profiles.iter().all(Option::is_none), "case {n}");
+            assert!(loaded.profiles.is_empty(), "case {n}");
             for file in [File::Desk, File::Profiles, File::Keyboard] {
                 assert!(!dir.join(file.name()).exists(), "case {n}: moved");
                 let old = std::fs::read(dir.join(format!("{}.old", file.name()))).unwrap();

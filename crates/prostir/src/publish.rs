@@ -35,7 +35,7 @@ pub const MAX_SIZE: (u32, u32) = (7680, 4320);
 /// usually has, so each connected one can be shown. The streams the headset takes at
 /// once bound them together with the monitors (`streams_max`); displays not
 /// connected count for none.
-const PHYSICAL_MAX: u8 = 4;
+pub(crate) const PHYSICAL_MAX: u8 = 4;
 const PHYSICAL_NO_LIMITS: u8 = 8;
 
 /// What the parts are built from at one moment.

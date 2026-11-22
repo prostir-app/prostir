@@ -511,6 +511,8 @@ struct Shared {
     refuse: Mutex<Option<prostir_proto::state::ErrorCode>>,
     /// The headset's volume, which the PC asks to change.
     volume: Mutex<Option<HeadsetVolume>>,
+    /// The profiles it has, which the PC renames.
+    profiles: Mutex<Option<prostir_proto::state::Profiles>>,
     /// Why reading stopped.
     end: Mutex<Option<std::io::ErrorKind>>,
     pings: Mutex<Pings>,
@@ -630,6 +632,16 @@ impl FakeHeadset {
                 },
             ))
             .collect(),
+            // Two profiles, the second one named and in use.
+            profiles: Some(prostir_proto::state::Profiles {
+                list: vec![
+                    prostir_proto::state::ProfileName::default(),
+                    prostir_proto::state::ProfileName {
+                        name: "Робота".into(),
+                    },
+                ],
+                active: Some(1),
+            }),
         }
     }
 
@@ -704,6 +716,7 @@ impl FakeHeadset {
         receiver.set_idle_limit(Some(SILENCE));
         let writer = Arc::new(Mutex::new(sender));
         let shared = Arc::new(Shared::default());
+        shared.profiles.lock().unwrap().clone_from(&state.profiles);
         if let Some(v) = state.volume {
             *shared.volume.lock().unwrap() = Some(HeadsetVolume::new(v.level, v.muted));
         }
@@ -1177,6 +1190,42 @@ fn spawn_reader(
                             };
                             let _ = send(&mut **writer.lock().unwrap(), ClientMsg::Prefs { part });
                         }
+                        // A profile named anew (by its number), said before the answer.
+                        let renamed = match (asked, &outcome) {
+                            (
+                                Asked::Known(Command::RenameProfile { profile, name }),
+                                Outcome::Done,
+                            ) => {
+                                let mut profiles = shared.profiles.lock().unwrap();
+                                profile
+                                    .parse::<usize>()
+                                    .ok()
+                                    .and_then(|n| {
+                                        profiles.as_mut()?.list.get_mut(n.checked_sub(1)?)
+                                    })
+                                    .map(|p| name.trim().clone_into(&mut p.name))
+                                    .and_then(|()| profiles.clone())
+                            }
+                            _ => None,
+                        };
+                        let outcome = match (asked, renamed) {
+                            (_, Some(part)) => {
+                                let _ = send(
+                                    &mut **writer.lock().unwrap(),
+                                    ClientMsg::Profiles { part },
+                                );
+                                outcome
+                            }
+                            (Asked::Known(Command::RenameProfile { profile, .. }), None)
+                                if outcome == Outcome::Done =>
+                            {
+                                Outcome::failed(
+                                    prostir_proto::state::ErrorCode::NO_SUCH_PROFILE,
+                                    profile,
+                                )
+                            }
+                            _ => outcome,
+                        };
                         let reply = ClientMsg::Reply { req: *req, outcome };
                         let _ = send(&mut **writer.lock().unwrap(), reply);
                     }

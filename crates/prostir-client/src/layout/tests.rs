@@ -16,6 +16,23 @@ use crate::ids::{DisplayKey, PcId};
 use crate::persist::{self, LoadError};
 use crate::settings::Preset;
 
+/// [`super::arrange`] with at most one display of the PC itself (the laptop's
+/// screen), as most of these tests have it: `(id, width, height)`, its place on the
+/// desktop not known.
+fn arrange<K: Key>(
+    preset: Preset,
+    monitors: &[(K, u32, u32)],
+    primary: Option<K>,
+    mirror: Option<(K, u32, u32)>,
+    curve: Option<f32>,
+) -> HashMap<K, Placement> {
+    let physical: Vec<Physical<K>> = mirror
+        .map(|(id, w, h)| (id, w, h, None))
+        .into_iter()
+        .collect();
+    super::arrange(preset, monitors, primary, &physical, curve)
+}
+
 /// Display `n` of the one PC of these tests.
 fn k(n: u32) -> DisplayKey {
     DisplayKey::new(PcId([5; 8]), DisplayId(n))
@@ -1717,10 +1734,8 @@ fn saved_profile(
         tilt: 0.0,
     };
     let profile = crate::profiles::Profile::of(&modes(m), primary, Vec::new(), &live, None, rows);
-    let mut all = crate::profiles::empty();
-    all[0] = Some(profile);
-    let [back, ..] = reread_profiles(&all);
-    back.unwrap()
+    let all = vec![profile];
+    reread_profiles(&all).remove(0)
 }
 
 /// `profile` switched to with the user's center at `now`, the PC giving its
@@ -1941,8 +1956,7 @@ fn a_profile_laid_out_lying_down_is_seen_lying_down() {
     };
     let profile =
         crate::profiles::Profile::of(&modes(&m), Some(1), Vec::new(), &live, None, &then.rows);
-    let [profile, ..] = reread_profiles(&[Some(profile), None, None]);
-    let profile = profile.unwrap();
+    let profile = reread_profiles(&vec![profile]).remove(0);
     let saved = profile.frame.unwrap();
     assert_eq!(saved.tilt, lying);
     // Switched to elsewhere: the tilt the scene takes is the profile's.

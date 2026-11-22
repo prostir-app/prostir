@@ -469,9 +469,9 @@ impl Loader {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().is_some_and(|e| e == "ftl") {
-                    let meta = entry.metadata().ok();
-                    let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
-                    let changed = meta.and_then(|m| m.modified().ok());
+                    let info = entry.metadata().ok();
+                    let size = info.as_ref().map_or(0, std::fs::Metadata::len);
+                    let changed = info.and_then(|m| m.modified().ok());
                     stamps.push((path, size, changed));
                 }
             }

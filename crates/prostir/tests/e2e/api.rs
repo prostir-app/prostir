@@ -558,6 +558,49 @@ fn a_command_that_does_not_fit_is_refused() {
     assert_eq!(unknown.json()["error"], "Unsupported");
 }
 
+/// The headset's profiles in the state, its names and the one in use; one renamed from
+/// the PC (`rename_profile`, `prostir ctl profile rename`) shows there before the
+/// answer; one the headset does not have is refused.
+#[test]
+fn a_profile_renamed_from_the_pc() {
+    let (_dir, pc, _keys, _headset) = session("api-rename", &Options::default());
+    let Some(bus) = &pc.bus else {
+        return;
+    };
+    let bus = bus.connect();
+    let started = Instant::now();
+    loop {
+        let (_, state) = get_state(&bus);
+        let (_, session) = state.connected().unwrap();
+        if !session.profiles.is_empty() {
+            assert_eq!(session.profiles, ["", "Робота"]);
+            assert_eq!(session.profile.as_deref(), Some("Робота"));
+            break;
+        }
+        assert!(started.elapsed() < SOON, "the profiles in the state");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let request = r#"{"request":"rename_profile","profile":"1","name":"Ігри"}"#.to_owned();
+    let (answer, before) = calls_in_order(&bus, &[request]).remove(0);
+    let (revision, state) = before.last().expect("a state before the answer");
+    assert_eq!(*revision, answer["revision"].as_u64().unwrap() as u32);
+    let (_, session) = state.connected().unwrap();
+    assert_eq!(
+        session.profiles,
+        ["Ігри", "Робота"],
+        "the state before it has it"
+    );
+    let Some(done) = pc.ctl(&["profile", "rename", "2", "Робота", "вдома"]) else {
+        return;
+    };
+    assert_eq!(done.code, 0, "{done:?}");
+    let missing = pc.ctl(&["profile", "rename", "7", "x", "--json"]).unwrap();
+    assert_eq!(missing.code, 1, "{missing:?}");
+    assert_eq!(missing.json()["error"], "NoSuchProfile");
+    let typed = call(&bus, "RenameProfile", &("1", "")).map(drop);
+    assert!(typed.is_ok(), "{typed:?}");
+}
+
 /// The session bus restarted: the PC app takes its name again and answers as before.
 #[test]
 fn the_api_comes_back_after_the_bus_restarts() {
@@ -567,7 +610,7 @@ fn the_api_comes_back_after_the_bus_restarts() {
     }
     pc.wait_log(
         SOON,
-        "local API on D-Bus as io.github.OlexiyOdarchuk.Prostir again",
+        "local API on D-Bus as io.github.prostir_app.Prostir again",
     );
     let status = pc.ctl(&["status", "--json"]).unwrap();
     assert_eq!(status.code, 0, "{status:?}");

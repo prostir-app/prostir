@@ -43,8 +43,8 @@
     "https://prostir.ishawyha.dev/menu-pc.png",
     "https://prostir.ishawyha.dev/hyprland.jpg"
   ],
-  "downloadUrl": "https://github.com/OlexiyOdarchuk/prostir/releases",
-  "softwareHelp": "https://github.com/OlexiyOdarchuk/prostir#readme",
+  "downloadUrl": "https://github.com/prostir-app/prostir/releases",
+  "softwareHelp": "https://github.com/prostir-app/prostir#readme",
   "license": "https://www.gnu.org/licenses/gpl-3.0.html",
   "isAccessibleForFree": true,
   "offers": {
@@ -53,7 +53,7 @@
     "priceCurrency": "USD"
   },
   "sameAs": [
-    "https://github.com/OlexiyOdarchuk/prostir"
+    "https://github.com/prostir-app/prostir"
   ]
 }
   </script>
@@ -68,7 +68,7 @@
       <a href="#install">Install</a>
       <a href="#requirements">Requirements</a>
       <a href="#help">Help</a>
-      <a href="https://github.com/OlexiyOdarchuk/prostir">GitHub</a>
+      <a href="https://github.com/prostir-app/prostir">GitHub</a>
     </nav>
     <nav class="lang" aria-label="Language">
       <a href="./" aria-current="page" hreflang="en" lang="en">EN</a>
@@ -84,8 +84,8 @@
         <h1>Extra monitors for KDE Plasma and Hyprland, inside a Quest 3</h1>
         <p class="lead">Real desktop outputs around you. Windows, panels and the mouse move across them as if the monitors stood on your desk.</p>
         <div class="actions">
-          <a class="button primary" href="https://github.com/OlexiyOdarchuk/prostir/releases">Download for Linux</a>
-          <a class="button" href="https://github.com/OlexiyOdarchuk/prostir">Source code</a>
+          <a class="button primary" href="https://github.com/prostir-app/prostir/releases">Download for Linux</a>
+          <a class="button" href="https://github.com/prostir-app/prostir">Source code</a>
         </div>
         <p class="downloads" id="downloads" aria-live="polite"></p>
       </div>
@@ -194,7 +194,7 @@
   <section id="install">
     <div class="wrap">
       <h2>Install</h2>
-      <p class="intro">Each <a href="https://github.com/OlexiyOdarchuk/prostir/releases">release</a> has both parts: the program for the PC and the app for the headset, an APK file.</p>
+      <p class="intro">Each <a href="https://github.com/prostir-app/prostir/releases">release</a> has both parts: the program for the PC and the app for the headset, an APK file.</p>
       <div class="steps">
         <div>
           <h3>On the PC</h3>
@@ -218,7 +218,7 @@ echo "deb [signed-by=/etc/apt/keyrings/prostir.asc] $repo/ /" | sudo tee /etc/ap
 sudo apt update &amp;&amp; sudo apt install prostir</code></pre>
                   These repositories are built on the <a href="https://build.opensuse.org/package/show/home:iShawyha:prostir/prostir">openSUSE Build Service</a>, and Prostir then updates with the system. Each release also has a <code>.deb</code> and an <code>.rpm</code> to install by hand. ARM (aarch64) builds are experimental: on ARM without a VA-API H.264 or HEVC encoder (Asahi, Raspberry Pi 5) Prostir encodes on the CPU, which costs CPU time.</li>
                 <li><h4>Nix and NixOS</h4>The repository is a flake:
-<pre><code>nix run github:OlexiyOdarchuk/prostir</code></pre>
+<pre><code>nix run github:prostir-app/prostir</code></pre>
                   On NixOS, add it as a flake input and put <code>inputs.prostir.packages.${pkgs.system}.default</code> in <code>environment.systemPackages</code>.</li>
                 <li><h4>Any distribution, without root</h4>Download <code>prostir-&lt;version&gt;-x86_64-linux.tar.gz</code>, unpack it and run the installer, which installs into <code>~/.local</code>:
 <pre><code>tar xf prostir-*-x86_64-linux.tar.gz
@@ -301,7 +301,7 @@ cd prostir-*/
           <h3>PC</h3>
           <ul>
             <li>KDE Plasma 6 or Hyprland, on Wayland. X11 sessions are not supported.</li>
-            <li>GNOME is not supported yet. <a href="https://github.com/OlexiyOdarchuk/prostir/issues/1">Want it? Vote with a 👍 on GitHub.</a></li>
+            <li>GNOME is not supported yet. <a href="https://github.com/prostir-app/prostir/issues/1">Want it? Vote with a 👍 on GitHub.</a></li>
             <li>PipeWire with its PulseAudio server (<code>pipewire-pulse</code>), <code>pw-cli</code>, <code>pw-loopback</code> and <code>pactl</code>, and GStreamer 1.24 or newer with its PipeWire and PulseAudio plugins.</li>
             <li>For encoding on the GPU: VA-API H.264 or HEVC encoding and the GStreamer <code>va</code> plugin (<code>gst-plugin-va</code> on Arch, part of gst-plugins-bad elsewhere). Tested on Intel; AMD through Mesa should work but is untested.</li>
             <li>NVIDIA: NVENC through the GStreamer <code>nvcodec</code> plugin, experimental and untested.</li>
@@ -322,7 +322,7 @@ cd prostir-*/
           </ul>
         </div>
       </div>
-      <p class="muted">Version 0.1, used every day by its author on Plasma 6.8 and Hyprland 0.57 with Intel Arc graphics. Problems and ideas go to <a href="https://github.com/OlexiyOdarchuk/prostir/issues">GitHub issues</a>.</p>
+      <p class="muted">Version 0.1, used every day by its author on Plasma 6.8 and Hyprland 0.57 with Intel Arc graphics. Problems and ideas go to <a href="https://github.com/prostir-app/prostir/issues">GitHub issues</a>.</p>
     </div>
   </section>
 
@@ -363,7 +363,7 @@ sudo firewall-cmd --reload</code></pre>
         </div>
         <div>
           <h3>Logs for a bug report</h3>
-          <p>PC: run <code>prostir</code> in a terminal; <code>RUST_LOG=debug prostir</code> adds more detail. Headset: <code>adb logcat -s prostir</code>. Then open an <a href="https://github.com/OlexiyOdarchuk/prostir/issues">issue on GitHub</a>.</p>
+          <p>PC: run <code>prostir</code> in a terminal; <code>RUST_LOG=debug prostir</code> adds more detail. Headset: <code>adb logcat -s prostir</code>. Then open an <a href="https://github.com/prostir-app/prostir/issues">issue on GitHub</a>.</p>
         </div>
       </div>
     </div>
@@ -372,7 +372,7 @@ sudo firewall-cmd --reload</code></pre>
 
 <footer>
   <div class="wrap">
-    <p>Prostir is free software under the <a href="https://github.com/OlexiyOdarchuk/prostir/blob/main/LICENSE">GPL-3.0-or-later</a> with an <a href="https://github.com/OlexiyOdarchuk/prostir/blob/main/LICENSE-EXCEPTION.md">additional permission</a> for the Meta Platform SDK. <a href="privacy.html">Privacy</a>.</p>
+    <p>Prostir is free software under the <a href="https://github.com/prostir-app/prostir/blob/main/LICENSE">GPL-3.0-or-later</a> with an <a href="https://github.com/prostir-app/prostir/blob/main/LICENSE-EXCEPTION.md">additional permission</a> for the Meta Platform SDK. <a href="privacy.html">Privacy</a>.</p>
     <p>Meta and Meta Quest are trademarks of Meta Platforms, Inc. KDE and Plasma are trademarks of KDE e.V. Prostir is independent and not affiliated with or endorsed by either.</p>
   </div>
 </footer>

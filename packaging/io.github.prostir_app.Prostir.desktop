@@ -11,4 +11,4 @@ Terminal=false
 Categories=Utility;System;
 Keywords=VR;XR;Quest;monitor;display;virtual;settings;
 # The settings window's app id: the desktop finds this entry's name and icon by it.
-StartupWMClass=io.github.OlexiyOdarchuk.Prostir
+StartupWMClass=io.github.prostir_app.Prostir
