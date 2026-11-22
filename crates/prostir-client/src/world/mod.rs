@@ -373,6 +373,14 @@ impl World {
         self.streams.contains_key(&id)
     }
 
+    /// The window panels whose streams show, with their sizes in pixels (in no order).
+    pub fn windows(&self) -> impl Iterator<Item = (DisplayKey, PixelSize)> + '_ {
+        self.streams
+            .iter()
+            .filter(|(id, _)| self.is_window(**id))
+            .map(|(id, size)| (*id, *size))
+    }
+
     /// The monitors left to right: in the PC's order, unknown ones at the end, with
     /// their stream sizes.
     pub fn monitors(&self) -> &[(DisplayKey, u32, u32)] {
@@ -651,6 +659,11 @@ impl World {
         self.held.iter().any(Option::is_some)
     }
 
+    /// Follow mode is moving the monitors after the head right now.
+    pub fn following(&self) -> bool {
+        self.following
+    }
+
     /// The monitor resized with both hands.
     pub fn resizing(&self) -> Option<DisplayKey> {
         self.resizing
@@ -817,27 +830,35 @@ impl World {
     /// Keeps the desktops' arrangements in step once nothing is being moved: no
     /// monitor in a hand, none resized, no profile being switched to.
     pub fn settle(&mut self, now: Instant) {
-        let carried = self.held.iter().flatten().any(|t| t.display().is_some());
-        if !carried && self.resizing.is_none() && !self.switching() {
+        if !self.carried() && !self.switching() {
             self.send_layout(now);
         }
     }
 
-    /// The monitors on the map: the desktop the main PC gets (see `layout::Desktop`).
-    pub fn map_spots(&self) -> HashMap<DisplayKey, [f32; 4]> {
-        let Some(view) = self.main() else {
-            return HashMap::new();
-        };
-        view.desktop_memo
-            .get_ref(
-                &self.placements,
-                &view.sizes,
-                self.center,
-                self.tilt,
-                view.primary,
-                view.sent_layout.as_ref(),
-            )
-            .spots()
+    /// The monitors on the map: the desktop the main PC gets (see `layout::Desktop`;
+    /// look one up with `Desktop::spot`). While a monitor is in a hand or resized the
+    /// PC is not told anything new, and the map shows the desktop as it was until the
+    /// hand lets go (nothing is worked out, nor allocated, in the frames of a drag).
+    pub fn map_spots(&self) -> Option<std::cell::Ref<'_, Desktop<DisplayKey>>> {
+        let view = self.main()?;
+        if self.carried()
+            && let Some(last) = view.desktop_memo.last()
+        {
+            return Some(last);
+        }
+        Some(view.desktop_memo.get_ref(
+            &self.placements,
+            &view.sizes,
+            self.center,
+            self.tilt,
+            view.primary,
+            view.sent_layout.as_ref(),
+        ))
+    }
+
+    /// A monitor is in a hand, or resized with both.
+    fn carried(&self) -> bool {
+        self.held.iter().flatten().any(|t| t.display().is_some()) || self.resizing.is_some()
     }
 
     /// The rows the main PC's desktop is laid out by, by id: those last sent, or those
