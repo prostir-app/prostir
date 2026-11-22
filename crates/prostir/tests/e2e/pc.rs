@@ -453,13 +453,45 @@ pub fn port_in(line: &str, after: &str) -> u16 {
         .unwrap_or_else(|_| panic!("no port in {line:?}"))
 }
 
-/// GStreamer's plugin registry, which the PC apps of every test share.
+/// GStreamer's plugin registry, which the PC apps of every test share. Brought up to
+/// date once, before the first PC app starts: without it (a new target directory, CI)
+/// or after GStreamer or a plugin changed, every PC app would scan the plugins at the
+/// same moment, which on a busy machine takes longer than a headset waits for its
+/// session.
 fn registry() -> PathBuf {
-    Path::new(env!("CARGO_TARGET_TMPDIR")).join("gst-registry.bin")
+    static SCANNED: std::sync::Once = std::sync::Once::new();
+    let registry = Path::new(env!("CARGO_TARGET_TMPDIR")).join("gst-registry.bin");
+    SCANNED.call_once(|| scan_plugins(&registry));
+    registry
 }
 
-/// Held by a PC app that writes the plugin registry (see [`Pc::start`]).
-static SCAN: Mutex<()> = Mutex::new(());
+/// Has `gst-inspect-1.0` bring `registry` up to date, with an empty home as every PC
+/// app has (no plugins of the user's); without it, says so loudly (CI installs it).
+fn scan_plugins(registry: &Path) {
+    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("e2e-gst-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let scanned = Command::new("gst-inspect-1.0")
+        .arg("--version")
+        .env("GST_REGISTRY", registry)
+        .env("HOME", &home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match scanned {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("gst-inspect-1.0 --version: {status}"),
+        Err(e) => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "no gst-inspect-1.0 ({e}), which CI must have"
+            );
+            eprintln!(
+                "\n*** no gst-inspect-1.0 ({e}): the PC apps scan GStreamer's plugins themselves ***\n"
+            );
+        }
+    }
+}
 
 /// A running PC app. Stopped (killed if it has to be) when dropped.
 pub struct Pc {
@@ -611,16 +643,6 @@ impl Pc {
         if let Some(activate) = &options.activate {
             cmd = activate.wrap(&cmd);
         }
-        // Without a registry yet, this PC app scans the plugins while the others wait
-        // for the registry it writes: a dozen scans at once on a busy machine would take
-        // longer than a headset waits for its session. Not one asleep in its watcher,
-        // which starts no GStreamer.
-        let scanning = (!options.watcher && options.activate.is_none())
-            .then(|| {
-                SCAN.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-            })
-            .filter(|_| !registry().exists());
         let mut child = cmd.spawn().expect("start the PC app");
         let log = Arc::new(Mutex::new(Vec::new()));
         let stderr = child.stderr.take().unwrap();
@@ -671,16 +693,6 @@ impl Pc {
         }
         if pc.bus.is_some() && !options.watcher {
             pc.wait_log(Duration::from_secs(10), "local API on D-Bus as");
-        }
-        if scanning.is_some() {
-            let started = Instant::now();
-            while !registry().exists() && pc.child.try_wait().unwrap().is_none() {
-                assert!(
-                    started.elapsed() < crate::START,
-                    "GStreamer wrote no plugin registry"
-                );
-                std::thread::sleep(Duration::from_millis(50));
-            }
         }
         pc
     }

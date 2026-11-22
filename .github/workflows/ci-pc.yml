@@ -53,13 +53,14 @@ jobs:
           persist-credentials: false
       # Plugins for the end-to-end tests: the runner has no graphics card, so they encode
       # with x264 (plugins-ugly); h264parse comes from plugins-bad. dbus-daemon gives the
-      # tests of the local API a session bus of their own.
+      # tests of the local API a session bus of their own; gst-inspect-1.0 (the tools)
+      # scans the plugins once for all of them.
       - uses: ./.github/actions/system-libraries
         with:
           packages: >-
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
-            gstreamer1.0-plugins-ugly dbus-daemon
+            gstreamer1.0-plugins-ugly gstreamer1.0-tools dbus-daemon
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
         with:
           toolchain: 1.100.0
