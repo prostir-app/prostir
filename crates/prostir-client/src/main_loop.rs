@@ -1200,10 +1200,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             )?;
             placeholder = Some((layer, a.size, model.texts().clone()));
         }
-        if world.wrist().is_some()
-            && let Some(pixels) = panels.palm.render_if_dirty()
-        {
-            wrist_layer.upload(&gl, pixels)?;
+        // Only what changed is uploaded: pointing at another button changes its part.
+        if world.wrist().is_some() && panels.palm.render_if_dirty().is_some() {
+            wrist_layer.upload_part(&gl, panels.palm.pixels(), panels.palm.damage())?;
         }
         if model.menu().open {
             let rev = Some(model.rev());
@@ -1212,9 +1211,9 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 panels.main_rev = rev;
             }
             let drawing = test.is_some().then(Instant::now);
-            if let Some(pixels) = panels.main.render_if_dirty() {
+            if panels.main.render_if_dirty().is_some() {
                 menu_drawn = drawing.map(|t| t.elapsed());
-                panel_layer.upload(&gl, pixels)?;
+                panel_layer.upload_part(&gl, panels.main.pixels(), panels.main.damage())?;
             }
         }
 

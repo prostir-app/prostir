@@ -1,5 +1,7 @@
 //! The floating menu panel. It is drawn on the CPU into an RGBA image and only
-//! re-uploaded when something changes (hover, a click, news from the host).
+//! re-uploaded when something changes (hover, a click, news from the host). Pointing at
+//! another button draws only that button's part of the picture again (see
+//! [`Panel::damage`]), from copies kept after the first time.
 
 #![forbid(unsafe_code)]
 
@@ -8,7 +10,7 @@ use std::collections::HashMap;
 use fontdue::{Font, FontSettings, Metrics};
 use prostir_proto::Codec;
 use prostir_proto::state::{Encoding, ErrorCode, Limits};
-use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, PixmapMut, Rect, Stroke, Transform};
 
 use crate::ids::DisplayKey;
 use crate::lang::{Language, Moment, Texts};
@@ -516,6 +518,17 @@ enum Item {
 }
 
 impl Item {
+    /// Where a shape is drawn (`None` for a text and a note, which are drawn wherever
+    /// they reach).
+    fn bounds(&self) -> Option<Rect> {
+        match self {
+            Item::Panel(r) | Item::Box(r, _) | Item::Button { rect: r, .. } => Some(*r),
+            Item::Dot { x, y, r, .. } => Some(rect(x - r, y - r, 2.0 * r, 2.0 * r)),
+            Item::Wedge { cx, cy, r1, .. } => Some(rect(cx - r1, cy - r1, 2.0 * r1, 2.0 * r1)),
+            Item::Text { .. } | Item::Note { .. } => None,
+        }
+    }
+
     /// Whether (`x`, `y`) is on this wedge.
     fn wedge_contains(&self, x: f32, y: f32) -> bool {
         let Item::Wedge {
@@ -546,6 +559,20 @@ fn wedge_center(cx: f32, cy: f32, r0: f32, r1: f32, a0: f32, a1: f32) -> (f32, f
     }
     let (r, a) = ((r0 + r1) / 2.0, (a0 + a1) / 2.0);
     (cx + r * a.sin(), cy - r * a.cos())
+}
+
+/// The box around a ring sector (see [`Item::Wedge`]).
+fn sector_bounds(cx: f32, cy: f32, r0: f32, r1: f32, a0: f32, a1: f32) -> Rect {
+    let at = |r: f32, a: f32| (cx + r * a.sin(), cy - r * a.cos());
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for i in 0..=32 {
+        let a = a0 + (a1 - a0) * i as f32 / 32.0;
+        for r in [r0.max(0.0), r1] {
+            let (x, y) = at(r, a);
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+    }
+    rect(x0, y0, x1 - x0, y1 - y0)
 }
 
 /// A ring sector as a path (see [`Item::Wedge`]), `None` if degenerate.
@@ -583,6 +610,154 @@ const WAIT: [u8; 4] = [251, 191, 36, 255];
 const ACCENT: [u8; 4] = [61, 126, 255, 255];
 const DANGER: [u8; 4] = [255, 107, 107, 255];
 
+/// A part of the menu's picture, in whole pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Area {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Area {
+    pub const EMPTY: Area = Area {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+    };
+
+    /// `r` and `margin` around it, within a picture `pw`×`ph`; none outside it.
+    fn around(r: Rect, margin: f32, pw: u32, ph: u32) -> Option<Self> {
+        let clamp = |v: f32, max: u32| v.clamp(0.0, max as f32) as u32;
+        let (x0, y0) = (
+            clamp((r.left() - margin).floor(), pw),
+            clamp((r.top() - margin).floor(), ph),
+        );
+        let (x1, y1) = (
+            clamp((r.right() + margin).ceil(), pw),
+            clamp((r.bottom() + margin).ceil(), ph),
+        );
+        (x1 > x0 && y1 > y0).then_some(Self {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        })
+    }
+
+    /// Larger by `by` on each side, within a picture `pw`×`ph`.
+    fn grown(self, by: u32, pw: u32, ph: u32) -> Self {
+        let (x0, y0) = (self.x.saturating_sub(by), self.y.saturating_sub(by));
+        let (x1, y1) = (
+            (self.x + self.w + by).min(pw),
+            (self.y + self.h + by).min(ph),
+        );
+        Self {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        }
+    }
+
+    /// The smallest area holding both.
+    pub fn union(self, other: Self) -> Self {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+        let (x0, y0) = (self.x.min(other.x), self.y.min(other.y));
+        let x1 = (self.x + self.w).max(other.x + other.w);
+        let y1 = (self.y + self.h).max(other.y + other.h);
+        Self {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.w == 0 || self.h == 0
+    }
+
+    /// Its pixels' bytes.
+    fn len(&self) -> usize {
+        self.w as usize * self.h as usize * 4
+    }
+}
+
+/// An item's part of the picture, kept as not pointed at and as pointed at (see
+/// [`Panel::render_if_dirty`]).
+#[derive(Debug, Clone, Copy)]
+struct LitPart {
+    item: usize,
+    area: Area,
+    /// Where its two copies start in `Panel::lit_pixels`.
+    plain: usize,
+    lit: usize,
+}
+
+/// How far around an item pointed at its look changes (its outline, smoothing).
+const LIT_MARGIN: f32 = 3.0;
+/// How much larger than its area a part is drawn before it is cut: shapes cut at the
+/// edge of a part are smoothed a little differently there.
+const PART_PAD: u32 = 2;
+
+/// `area` of `pixmap`, row by row, added to `out`.
+fn copy_out(pixmap: &Pixmap, area: Area, out: &mut Vec<u8>) {
+    let row = pixmap.width() as usize * 4;
+    let (x, w) = (area.x as usize * 4, area.w as usize * 4);
+    for y in area.y as usize..(area.y + area.h) as usize {
+        let at = y * row + x;
+        out.extend_from_slice(&pixmap.data()[at..at + w]);
+    }
+}
+
+/// `area` of `pixmap` from `from`, its rows one after another.
+fn copy_in(pixmap: &mut Pixmap, area: Area, from: &[u8]) {
+    let row = pixmap.width() as usize * 4;
+    let (x, w) = (area.x as usize * 4, area.w as usize * 4);
+    let data = pixmap.data_mut();
+    for (k, y) in (area.y as usize..(area.y + area.h) as usize).enumerate() {
+        let at = y * row + x;
+        data[at..at + w].copy_from_slice(&from[k * w..k * w + w]);
+    }
+}
+
+/// Where shapes and texts are drawn: a whole picture, or a part of the menu's picture
+/// whose top left corner is `at` (each moved by it).
+struct Canvas<'a> {
+    pm: PixmapMut<'a>,
+    at: (i32, i32),
+}
+
+impl Canvas<'_> {
+    fn whole(pixmap: &mut Pixmap) -> Canvas<'_> {
+        Canvas {
+            pm: pixmap.as_mut(),
+            at: (0, 0),
+        }
+    }
+
+    fn transform(&self) -> Transform {
+        Transform::from_translate(-self.at.0 as f32, -self.at.1 as f32)
+    }
+
+    /// Whether `r` (in the whole picture) reaches into it.
+    fn meets(&self, r: Rect) -> bool {
+        let (x, y) = (self.at.0 as f32, self.at.1 as f32);
+        let (w, h) = (self.pm.width() as f32, self.pm.height() as f32);
+        r.right() + 2.0 >= x
+            && r.left() - 2.0 <= x + w
+            && r.bottom() + 2.0 >= y
+            && r.top() - 2.0 <= y + h
+    }
+}
+
 pub struct Panel {
     regular: Font,
     medium: Font,
@@ -591,7 +766,19 @@ pub struct Panel {
     state: Option<UiState>,
     hovered: Option<usize>,
     pixmap: Pixmap,
+    /// The items changed: the whole picture is drawn again.
     dirty: bool,
+    /// The item drawn pointed at in `pixmap` now (the rest is drawn as not pointed at).
+    lit: Option<usize>,
+    /// Each item pointed at since the picture was last drawn whole: its part of the
+    /// picture, as not pointed at and as pointed at, kept in `lit_pixels`; pointing at
+    /// it again copies them back without drawing (see [`Panel::render_if_dirty`]).
+    lit_parts: Vec<LitPart>,
+    lit_pixels: Vec<u8>,
+    /// Where a part is drawn before it is kept (its memory kept between parts).
+    scratch: Vec<u8>,
+    /// What the last [`Panel::render_if_dirty`] changed: `None` for all of it.
+    damage: Option<Area>,
     /// The wrist menu rather than the main one.
     wrist: bool,
     /// The page shown.
@@ -661,6 +848,11 @@ impl Panel {
             hovered: None,
             pixmap: Pixmap::new(WIDTH, HEIGHT).expect("panel size"),
             dirty: true,
+            lit: None,
+            lit_parts: Vec::new(),
+            lit_pixels: Vec::new(),
+            scratch: Vec::new(),
+            damage: None,
             wrist: false,
             page: Page::Welcome,
             pressed: None,
@@ -690,6 +882,18 @@ impl Panel {
         self.state = Some(state.clone());
         self.hovered = None;
         self.dirty = true;
+    }
+
+    /// The picture as last drawn (premultiplied RGBA, top row first).
+    pub fn pixels(&self) -> &[u8] {
+        self.pixmap.data()
+    }
+
+    /// The part of the picture the last [`Panel::render_if_dirty`] changed: `None` for
+    /// all of it (the items changed), else the parts of the button pointed at before and
+    /// of the one pointed at now (empty when neither changes how it looks).
+    pub fn damage(&self) -> Option<Area> {
+        self.damage
     }
 
     /// Updates the hovered button from a point in panel pixels (`None`: not pointing at the panel).
@@ -722,10 +926,7 @@ impl Panel {
                 _ => false,
             }))
         });
-        if hovered != self.hovered {
-            self.hovered = hovered;
-            self.dirty = true;
-        }
+        self.hovered = hovered;
     }
 
     pub fn hovered_action(&self) -> Option<Action> {
@@ -1121,14 +1322,133 @@ impl Panel {
         items
     }
 
-    /// Premultiplied RGBA, top row first, when it changed since the last call.
+    /// Premultiplied RGBA, top row first, when it changed since the last call; what
+    /// changed is [`Panel::damage`]. New items are drawn whole, nothing pointed at;
+    /// then only the button pointed at before and the one pointed at now are drawn
+    /// again, each from the copies of its part kept the first time it was pointed at
+    /// (see [`LitPart`]): a ray trembling on a button's edge copies a few kilobytes,
+    /// without drawing and without taking memory.
     pub fn render_if_dirty(&mut self) -> Option<&[u8]> {
-        if !self.dirty {
+        if !self.dirty && self.hovered == self.lit {
             return None;
         }
-        self.dirty = false;
-        self.render();
+        let mut damage = if self.dirty {
+            self.dirty = false;
+            self.render();
+            self.lit = None;
+            self.lit_parts.clear();
+            self.lit_pixels.clear();
+            None
+        } else {
+            Some(Area::EMPTY)
+        };
+        if self.hovered != self.lit {
+            if let Some(i) = self.lit
+                && let Some(part) = self.lit_parts.iter().find(|p| p.item == i)
+            {
+                let (area, at) = (part.area, part.plain);
+                copy_in(&mut self.pixmap, area, &self.lit_pixels[at..]);
+                damage = damage.map(|d| d.union(area));
+            }
+            if let Some(area) = self.hovered.and_then(|i| self.light(i)) {
+                damage = damage.map(|d| d.union(area));
+            }
+            self.lit = self.hovered;
+        }
+        self.damage = damage;
         Some(self.pixmap.data())
+    }
+
+    /// Item `i` drawn pointed at, over the picture drawn as not pointed at: its part
+    /// drawn the first time and kept, copied back after. Where, if anywhere.
+    fn light(&mut self, i: usize) -> Option<Area> {
+        if let Some(part) = self.lit_parts.iter().find(|p| p.item == i) {
+            let (area, at) = (part.area, part.lit);
+            copy_in(&mut self.pixmap, area, &self.lit_pixels[at..]);
+            return Some(area);
+        }
+        let area = self.lit_area(i)?;
+        let plain = self.lit_pixels.len();
+        copy_out(&self.pixmap, area, &mut self.lit_pixels);
+        let lit = self.lit_pixels.len();
+        self.draw_part(area, Some(i));
+        self.lit_pixels.extend_from_slice(&self.scratch);
+        self.lit_parts.push(LitPart {
+            item: i,
+            area,
+            plain,
+            lit,
+        });
+        copy_in(&mut self.pixmap, area, &self.lit_pixels[lit..]);
+        Some(area)
+    }
+
+    /// The part of the picture item `i` changes when pointed at: its own place, and the
+    /// whole name shown above a shortened one; none for what is not pointed at.
+    fn lit_area(&mut self, i: usize) -> Option<Area> {
+        let r = match self.items.get(i)? {
+            Item::Button {
+                rect: r,
+                label,
+                full: Some(full),
+                ..
+            } if full != label => {
+                let (r, full) = (*r, full.clone());
+                let (tip, _) = self.tip_rect(r, &full);
+                union(&r, &tip)
+            }
+            Item::Button { rect: r, .. } => *r,
+            Item::Wedge {
+                cx,
+                cy,
+                r0,
+                r1,
+                a0,
+                a1,
+                ..
+            } => sector_bounds(*cx, *cy, *r0, *r1, *a0, *a1),
+            Item::Note { rect: r, tip, .. } => match tip {
+                Some(_) => rect(
+                    r.left(),
+                    r.top() - NOTE_GAP,
+                    r.width(),
+                    r.height() + 2.0 * NOTE_GAP,
+                ),
+                None => *r,
+            },
+            _ => return None,
+        };
+        Area::around(r, LIT_MARGIN, self.pixmap.width(), self.pixmap.height())
+    }
+
+    /// `area` of the picture drawn anew into `scratch` (its rows one after another),
+    /// with item `lit` pointed at. Drawn a little larger and cut, so the edges of the
+    /// part are what drawing the whole picture makes there.
+    fn draw_part(&mut self, area: Area, lit: Option<usize>) {
+        let (pw, ph) = (self.pixmap.width(), self.pixmap.height());
+        let outer = area.grown(PART_PAD, pw, ph);
+        let mut scratch = std::mem::take(&mut self.scratch);
+        scratch.clear();
+        scratch.resize(outer.len(), 0);
+        let items = std::mem::take(&mut self.items);
+        if let Some(pm) = PixmapMut::from_bytes(&mut scratch, outer.w, outer.h) {
+            let mut c = Canvas {
+                pm,
+                at: (outer.x as i32, outer.y as i32),
+            };
+            self.paint(&mut c, &items, lit);
+        }
+        self.items = items;
+        // The inner part's rows, moved to the front.
+        let row = outer.w as usize * 4;
+        let (dx, dy) = ((area.x - outer.x) as usize * 4, (area.y - outer.y) as usize);
+        let inner = area.w as usize * 4;
+        for y in 0..area.h as usize {
+            let from = (dy + y) * row + dx;
+            scratch.copy_within(from..from + inner, y * inner);
+        }
+        scratch.truncate(area.len());
+        self.scratch = scratch;
     }
 
     /// The page `s` shows, and the note over it.
@@ -1774,6 +2094,7 @@ impl Panel {
             .sum()
     }
 
+    /// The whole picture drawn anew, nothing pointed at.
     fn render(&mut self) {
         let mut pixmap = std::mem::replace(
             &mut self.pixmap,
@@ -1781,13 +2102,24 @@ impl Panel {
         );
         pixmap.fill(tiny_skia::Color::TRANSPARENT);
         let items = std::mem::take(&mut self.items);
+        self.paint(&mut Canvas::whole(&mut pixmap), &items, None);
+        self.items = items;
+        self.pixmap = pixmap;
+    }
+
+    /// `items` drawn on `c`, with item `lit` pointed at. Shapes wholly outside `c`
+    /// are passed over.
+    fn paint(&mut self, c: &mut Canvas<'_>, items: &[Item], lit: Option<usize>) {
         for (i, item) in items.iter().enumerate() {
+            if item.bounds().is_some_and(|b| !c.meets(b)) {
+                continue;
+            }
             match item {
-                Item::Panel(r) => fill(&mut pixmap, rounded(*r, 36.0), [16, 18, 24, 240]),
+                Item::Panel(r) => fill(c, rounded(*r, 36.0), [16, 18, 24, 240]),
                 // Drawn last, over everything (see `Panel::draw_note`).
                 Item::Note { .. } => {}
-                Item::Box(r, color) => fill(&mut pixmap, rounded(*r, 14.0), *color),
-                Item::Dot { x, y, r, color } => fill(&mut pixmap, circle(*x, *y, *r), *color),
+                Item::Box(r, color) => fill(c, rounded(*r, 14.0), *color),
+                Item::Dot { x, y, r, color } => fill(c, circle(*x, *y, *r), *color),
                 Item::Text {
                     x,
                     baseline,
@@ -1796,7 +2128,7 @@ impl Panel {
                     color,
                     text,
                     ..
-                } => self.draw_text(&mut pixmap, *x, *baseline, *size, *medium, *color, text),
+                } => self.draw_text(c, *x, *baseline, *size, *medium, *color, text),
                 Item::Wedge {
                     cx,
                     cy,
@@ -1809,17 +2141,17 @@ impl Panel {
                     style,
                     ..
                 } => {
-                    let hovered = self.hovered == Some(i);
+                    let hovered = lit == Some(i);
                     let bg = match (style, hovered) {
                         (Style::Selected, _) => ACCENT,
                         (_, true) => [255, 255, 255, 52],
                         _ => [255, 255, 255, 20],
                     };
-                    fill(&mut pixmap, sector(*cx, *cy, *r0, *r1, *a0, *a1), bg);
+                    fill(c, sector(*cx, *cy, *r0, *r1, *a0, *a1), bg);
                     let (mx, my) = wedge_center(*cx, *cy, *r0, *r1, *a0, *a1);
                     let tw = self.text_width(label, *size, true);
                     self.draw_text(
-                        &mut pixmap,
+                        c,
                         mx - tw / 2.0,
                         my + size * 0.36,
                         *size,
@@ -1836,7 +2168,7 @@ impl Panel {
                     ..
                 } => {
                     let size = *size;
-                    let hovered = self.hovered == Some(i);
+                    let hovered = lit == Some(i);
                     let (bg, fg) = match (style, hovered) {
                         (Style::Selected, _) => (ACCENT, [255, 255, 255, 255]),
                         (Style::TabOn, _) => ([255, 255, 255, 34], [255, 255, 255, 255]),
@@ -1849,10 +2181,10 @@ impl Panel {
                         (_, true) => ([255, 255, 255, 46], [255, 255, 255, 255]),
                         _ => ([255, 255, 255, 20], TEXT),
                     };
-                    fill(&mut pixmap, rounded(*r, 12.0), bg);
+                    fill(c, rounded(*r, 12.0), bg);
                     match style {
                         Style::Disabled => {
-                            stroke(&mut pixmap, rounded(*r, 12.0), [255, 255, 255, 26], 1.5);
+                            stroke(c, rounded(*r, 12.0), [255, 255, 255, 26], 1.5);
                         }
                         // The current tab: an accent bar along its bottom edge. The
                         // primary monitor on the map can be narrower than a tab.
@@ -1864,14 +2196,14 @@ impl Panel {
                                 r.width() - 2.0 * inset,
                                 4.0,
                             );
-                            fill(&mut pixmap, rounded(bar, 2.0), ACCENT);
+                            fill(c, rounded(bar, 2.0), ACCENT);
                         }
                         _ => {}
                     }
                     let tw = self.text_width(label, size, true);
                     let baseline = r.top() + r.height() / 2.0 + size * 0.36;
                     self.draw_text(
-                        &mut pixmap,
+                        c,
                         r.left() + (r.width() - tw) / 2.0,
                         baseline,
                         size,
@@ -1882,7 +2214,6 @@ impl Panel {
                 }
             }
         }
-        // A name shortened on its button, pointed at: whole, above it.
         if let Some(Item::Note {
             rect: r,
             tip,
@@ -1895,29 +2226,25 @@ impl Panel {
             ..
         }) = items.iter().rev().find(|i| matches!(i, Item::Note { .. }))
         {
-            let hovered = matches!(
-                self.hovered.and_then(|i| items.get(i)),
-                Some(Item::Note { .. })
-            );
+            let hovered = matches!(lit.and_then(|i| items.get(i)), Some(Item::Note { .. }));
             self.draw_note(
-                &mut pixmap,
+                c,
                 (*r, *tip, *above, *kind, hovered),
                 (text, *size),
                 detail.as_deref().map(|d| (d, *detail_size)),
             );
         }
+        // A name shortened on its button, pointed at: whole, above it.
         if let Some(Item::Button {
             rect: r,
             label,
             full: Some(full),
             ..
-        }) = self.hovered.and_then(|i| items.get(i))
+        }) = lit.and_then(|i| items.get(i))
             && label != full
         {
-            self.draw_tip(&mut pixmap, *r, full);
+            self.draw_tip(c, *r, full);
         }
-        self.items = items;
-        self.pixmap = pixmap;
     }
 
     /// A note (see [`Item::Note`]): a dark box with an edge in its kind's colour, a
@@ -1925,7 +2252,7 @@ impl Panel {
     /// a "×" on its right (pressing anywhere on it takes it away).
     fn draw_note(
         &mut self,
-        pixmap: &mut Pixmap,
+        c: &mut Canvas<'_>,
         (r, tip, above, kind, hovered): (Rect, Option<f32>, bool, Kind, bool),
         (text, size): (&str, f32),
         detail: Option<(&str, f32)>,
@@ -1947,13 +2274,13 @@ impl Panel {
             pb.line_to(tx, point);
             pb.line_to(tx + 10.0, base);
             pb.close();
-            fill(pixmap, pb.finish(), edge);
+            fill(c, pb.finish(), edge);
         }
         let shape = rounded(r, 12.0);
-        fill(pixmap, shape.clone(), [26, 30, 40, 255]);
+        fill(c, shape.clone(), [26, 30, 40, 255]);
         let [er, eg, eb, _] = edge;
         let alpha = if hovered { 255 } else { 190 };
-        stroke(pixmap, shape, [er, eg, eb, alpha], 2.0);
+        stroke(c, shape, [er, eg, eb, alpha], 2.0);
         // In the middle of the box (which may have grown over what it covers), left
         // of the "×".
         let mid = r.top() + r.height() / 2.0;
@@ -1961,25 +2288,33 @@ impl Panel {
         let cw = self.text_width("×", 26.0, true);
         let cx = r.right() - NOTE_PAD / 2.0 - NOTE_CLOSE / 2.0 - cw / 2.0;
         let cy = mid.min(r.top() + 23.0) + 8.0;
-        self.draw_text(pixmap, cx, cy, 26.0, true, close, "×");
+        self.draw_text(c, cx, cy, 26.0, true, close, "×");
         let (left, room) = (r.left() + NOTE_PAD, r.width() - 2.0 * NOTE_PAD - NOTE_CLOSE);
         let tw = self.text_width(text, size, true);
         let x = left + (room - tw) / 2.0;
         match detail {
-            None => self.draw_text(pixmap, x, mid + size * 0.36, size, true, fg, text),
+            None => self.draw_text(c, x, mid + size * 0.36, size, true, fg, text),
             Some((detail, dsize)) => {
-                self.draw_text(pixmap, x, mid - 4.0, size, true, fg, text);
+                self.draw_text(c, x, mid - 4.0, size, true, fg, text);
                 let dw = self.text_width(detail, dsize, false);
                 let dx = left + (room - dw) / 2.0;
-                self.draw_text(pixmap, dx, mid + dsize + 4.0, dsize, false, MUTED, detail);
+                self.draw_text(c, dx, mid + dsize + 4.0, dsize, false, MUTED, detail);
             }
         }
     }
 
-    /// `text` on a dark label just above `over` (below it where there is no room above),
-    /// within the panel, drawn smaller where it is wide.
-    fn draw_tip(&mut self, pixmap: &mut Pixmap, over: Rect, text: &str) {
-        let (pw, ph) = (pixmap.width() as f32, pixmap.height() as f32);
+    /// The whole picture's size (the main menu's or the palm menu's).
+    fn picture_size(&self) -> (f32, f32) {
+        if self.wrist {
+            (WRIST_WIDTH as f32, WRIST_HEIGHT as f32)
+        } else {
+            (WIDTH as f32, HEIGHT as f32)
+        }
+    }
+
+    /// Where [`Panel::draw_tip`] puts `text` for `over`, and its size.
+    fn tip_rect(&mut self, over: Rect, text: &str) -> (Rect, f32) {
+        let (pw, ph) = self.picture_size();
         let size = self.fitting(text, 20.0, true, pw - 64.0);
         let tw = self.text_width(text, size, true);
         let (w, h) = (tw + 28.0, size + 18.0);
@@ -1989,13 +2324,19 @@ impl Panel {
         } else {
             (over.bottom() + 6.0).min(ph - h - 8.0)
         };
-        let r = rect(x, y, w, h);
-        fill(pixmap, rounded(r, 10.0), [16, 18, 24, 245]);
-        stroke(pixmap, rounded(r, 10.0), [255, 255, 255, 40], 1.5);
+        (rect(x, y, w, h), size)
+    }
+
+    /// `text` on a dark label just above `over` (below it where there is no room above),
+    /// within the panel, drawn smaller where it is wide.
+    fn draw_tip(&mut self, c: &mut Canvas<'_>, over: Rect, text: &str) {
+        let (r, size) = self.tip_rect(over, text);
+        fill(c, rounded(r, 10.0), [16, 18, 24, 245]);
+        stroke(c, rounded(r, 10.0), [255, 255, 255, 40], 1.5);
         self.draw_text(
-            pixmap,
-            x + 14.0,
-            y + h / 2.0 + size * 0.36,
+            c,
+            r.left() + 14.0,
+            r.top() + r.height() / 2.0 + size * 0.36,
             size,
             true,
             TEXT,
@@ -2006,7 +2347,7 @@ impl Panel {
     #[allow(clippy::too_many_arguments)]
     fn draw_text(
         &mut self,
-        pixmap: &mut Pixmap,
+        c: &mut Canvas<'_>,
         x: f32,
         baseline: f32,
         size: f32,
@@ -2014,22 +2355,28 @@ impl Panel {
         color: [u8; 4],
         s: &str,
     ) {
-        let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
-        let data = pixmap.data_mut();
+        let (pw, ph) = (c.pm.width() as i32, c.pm.height() as i32);
+        let (ox, oy) = c.at;
+        let data = c.pm.data_mut();
         // The cache and the fonts are separate fields: each glyph is borrowed from the
         // cache, not copied out of it.
         let font = if medium { &self.medium } else { &self.regular };
         let mut pen = x;
-        for c in s.chars() {
-            let (m, coverage) = cached_glyph(&mut self.glyphs, font, medium, c, size);
-            let gx = (pen + m.xmin as f32).round() as i32;
-            let gy = (baseline - m.height as f32 - m.ymin as f32).round() as i32;
+        for ch in s.chars() {
+            let (m, coverage) = cached_glyph(&mut self.glyphs, font, medium, ch, size);
+            // Where it is in the whole picture, then in the part drawn.
+            let gx = (pen + m.xmin as f32).round() as i32 - ox;
+            let gy = (baseline - m.height as f32 - m.ymin as f32).round() as i32 - oy;
+            pen += m.advance_width;
             let (w, h) = (m.width as i32, m.height as i32);
             // Only the part of the glyph inside the pixmap.
             let (rows, cols) = (
                 gy.max(0) - gy..h.min(ph - gy),
                 gx.max(0) - gx..w.min(pw - gx),
             );
+            if rows.is_empty() || cols.is_empty() {
+                continue;
+            }
             for row in rows {
                 let py = gy + row;
                 for col in cols.clone() {
@@ -2047,7 +2394,6 @@ impl Panel {
                     data[i + 3] = (a + data[i + 3] as u32 * (255 - a) / 255) as u8;
                 }
             }
-            pen += m.advance_width;
         }
     }
 }
@@ -2071,9 +2417,10 @@ impl Panel {
     /// Premultiplied RGBA.
     pub fn pill_image(&mut self, label: &str, width: u32, height: u32, lit: bool) -> Vec<u8> {
         let mut p = Pixmap::new(width, height).expect("pill size");
+        let c = &mut Canvas::whole(&mut p);
         let (w, h) = (width as f32, height as f32);
         let bg = if lit { ACCENT } else { [16, 18, 24, 235] };
-        fill(&mut p, rounded(rect(0.0, 0.0, w, h), h / 2.0), bg);
+        fill(c, rounded(rect(0.0, 0.0, w, h), h / 2.0), bg);
         let mut size = h * 0.4;
         while size > 12.0 && self.text_width(label, size, true) > w - h * 0.6 {
             size -= 1.0;
@@ -2081,7 +2428,7 @@ impl Panel {
         let tw = self.text_width(label, size, true);
         let fg = [255, 255, 255, 255];
         self.draw_text(
-            &mut p,
+            c,
             (w - tw) / 2.0,
             h / 2.0 + size * 0.36,
             size,
@@ -2097,15 +2444,16 @@ impl Panel {
     /// Premultiplied RGBA.
     pub fn placeholder_image(&mut self, label: &str, width: u32, height: u32) -> Vec<u8> {
         let mut p = Pixmap::new(width, height).expect("placeholder size");
+        let c = &mut Canvas::whole(&mut p);
         let (w, h) = (width as f32, height as f32);
         let edge = (w.min(h) * 0.02).max(4.0);
         fill(
-            &mut p,
+            c,
             rounded(rect(0.0, 0.0, w, h), edge * 3.0),
             [120, 160, 255, 150],
         );
         fill(
-            &mut p,
+            c,
             rounded(rect(edge, edge, w - 2.0 * edge, h - 2.0 * edge), edge * 2.0),
             [16, 18, 24, 170],
         );
@@ -2115,7 +2463,7 @@ impl Panel {
         }
         let tw = self.text_width(label, size, true);
         self.draw_text(
-            &mut p,
+            c,
             (w - tw) / 2.0,
             h / 2.0 + size * 0.36,
             size,
@@ -2131,18 +2479,15 @@ impl Panel {
     /// Premultiplied RGBA.
     pub fn toast_image(&mut self, message: &str, width: u32, height: u32) -> Vec<u8> {
         let mut p = Pixmap::new(width, height).expect("toast size");
+        let c = &mut Canvas::whole(&mut p);
         let (w, h) = (width as f32, height as f32);
-        fill(
-            &mut p,
-            rounded(rect(0.0, 0.0, w, h), 28.0),
-            [16, 18, 24, 235],
-        );
+        fill(c, rounded(rect(0.0, 0.0, w, h), 28.0), [16, 18, 24, 235]);
         let room = w - 72.0;
         let one = h * 0.3;
         if self.text_width(message, one, true) <= room {
             let tw = self.text_width(message, one, true);
             self.draw_text(
-                &mut p,
+                c,
                 (w - tw) / 2.0,
                 h / 2.0 + one * 0.36,
                 one,
@@ -2178,7 +2523,7 @@ impl Panel {
         for (k, line) in [first, second].iter().enumerate() {
             let tw = self.text_width(line, size, true).min(room);
             let baseline = h / 2.0 - size * 0.25 + k as f32 * size * 1.25;
-            self.draw_text(&mut p, (w - tw) / 2.0, baseline, size, k == 0, TEXT, line);
+            self.draw_text(c, (w - tw) / 2.0, baseline, size, k == 0, TEXT, line);
         }
         p.take()
     }
@@ -2188,22 +2533,24 @@ impl Panel {
 /// Premultiplied RGBA, `size`×`size`.
 pub fn cursor_image(size: u32) -> Vec<u8> {
     let mut p = Pixmap::new(size, size).expect("cursor size");
+    let canvas = &mut Canvas::whole(&mut p);
     let c = size as f32 / 2.0;
-    fill(&mut p, circle(c, c, c - 1.0), [20, 22, 28, 200]);
-    fill(&mut p, circle(c, c, c * 0.62), [255, 255, 255, 255]);
+    fill(canvas, circle(c, c, c - 1.0), [20, 22, 28, 200]);
+    fill(canvas, circle(c, c, c * 0.62), [255, 255, 255, 255]);
     p.take()
 }
 
 /// Round "☰" button that opens the menu. Premultiplied RGBA, `size`×`size`.
 pub fn menu_button_image(size: u32, hovered: bool) -> Vec<u8> {
     let mut p = Pixmap::new(size, size).expect("button size");
+    let c = &mut Canvas::whole(&mut p);
     let s = size as f32;
     let bg = if hovered { ACCENT } else { [16, 18, 24, 225] };
-    fill(&mut p, circle(s / 2.0, s / 2.0, s / 2.0 - 1.0), bg);
+    fill(c, circle(s / 2.0, s / 2.0, s / 2.0 - 1.0), bg);
     for i in -1..=1 {
         let y = s / 2.0 + i as f32 * s * 0.15;
         fill(
-            &mut p,
+            c,
             rounded(rect(s * 0.3, y - s * 0.035, s * 0.4, s * 0.07), s * 0.035),
             [255, 255, 255, 255],
         );
@@ -3860,7 +4207,16 @@ fn union(a: &Rect, b: &Rect) -> Rect {
 
 /// A circle, `None` if degenerate.
 fn circle(cx: f32, cy: f32, r: f32) -> Option<Path> {
-    let path = PathBuilder::from_circle(cx, cy, r);
+    let path = (r > 0.0 && r.is_finite())
+        .then(|| {
+            let n = (r * std::f32::consts::TAU / 3.0).ceil().clamp(12.0, 128.0) as usize;
+            let mut pb = PathBuilder::new();
+            pb.move_to(cx + r, cy);
+            arc(&mut pb, (cx, cy), r, 0.0, std::f32::consts::TAU, n);
+            pb.close();
+            pb.finish()
+        })
+        .flatten();
     debug_assert!(
         path.is_some(),
         "degenerate circle at {cx}, {cy}, radius {r}"
@@ -3964,27 +4320,40 @@ fn name_button(rect: Rect, name: &str, size: f32, style: Style, action: Option<A
 
 /// A rounded rectangle, `None` if degenerate.
 fn rounded(r: Rect, radius: f32) -> Option<Path> {
-    let rad = radius.min(r.width() / 2.0).min(r.height() / 2.0);
-    let k = rad * 0.552_284_8;
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let rad = radius.min(r.width() / 2.0).min(r.height() / 2.0).max(0.0);
     let (l, t, rt, b) = (r.left(), r.top(), r.right(), r.bottom());
+    // Each corner a few straight steps (a tenth of a pixel off the arc at most).
+    let n = (rad / 1.5).ceil().clamp(2.0, 24.0) as usize;
     let mut pb = PathBuilder::new();
     pb.move_to(l + rad, t);
     pb.line_to(rt - rad, t);
-    pb.cubic_to(rt - rad + k, t, rt, t + rad - k, rt, t + rad);
+    arc(&mut pb, (rt - rad, t + rad), rad, -FRAC_PI_2, 0.0, n);
     pb.line_to(rt, b - rad);
-    pb.cubic_to(rt, b - rad + k, rt - rad + k, b, rt - rad, b);
+    arc(&mut pb, (rt - rad, b - rad), rad, 0.0, FRAC_PI_2, n);
     pb.line_to(l + rad, b);
-    pb.cubic_to(l + rad - k, b, l, b - rad + k, l, b - rad);
+    arc(&mut pb, (l + rad, b - rad), rad, FRAC_PI_2, PI, n);
     pb.line_to(l, t + rad);
-    pb.cubic_to(l, t + rad - k, l + rad - k, t, l + rad, t);
+    arc(&mut pb, (l + rad, t + rad), rad, PI, 1.5 * PI, n);
     pb.close();
     let path = pb.finish();
     debug_assert!(path.is_some(), "degenerate rounded rect {r:?}");
     path
 }
 
+/// An arc around `center` of radius `r` from angle `a0` to `a1` (radians, clockwise on
+/// the screen from the right), in `n` straight steps, its start already in `pb`.
+/// Straight steps rather than curves: a shape cut at the edge of a part of the picture
+/// is then drawn there as it is in the whole picture (see `Panel::draw_part`).
+fn arc(pb: &mut PathBuilder, (cx, cy): (f32, f32), r: f32, a0: f32, a1: f32, n: usize) {
+    for i in 1..=n {
+        let a = a0 + (a1 - a0) * i as f32 / n as f32;
+        pb.line_to(cx + r * a.cos(), cy + r * a.sin());
+    }
+}
+
 /// Outlines `path`; nothing when there is none (a degenerate shape).
-fn stroke(pixmap: &mut Pixmap, path: Option<Path>, [r, g, b, a]: [u8; 4], width: f32) {
+fn stroke(c: &mut Canvas<'_>, path: Option<Path>, [r, g, b, a]: [u8; 4], width: f32) {
     let Some(path) = path else { return };
     let mut paint = Paint::default();
     paint.set_color_rgba8(r, g, b, a);
@@ -3993,22 +4362,18 @@ fn stroke(pixmap: &mut Pixmap, path: Option<Path>, [r, g, b, a]: [u8; 4], width:
         width,
         ..Stroke::default()
     };
-    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    let t = c.transform();
+    c.pm.stroke_path(&path, &paint, &stroke, t, None);
 }
 
 /// Fills `path`; nothing when there is none (a degenerate shape).
-fn fill(pixmap: &mut Pixmap, path: Option<Path>, [r, g, b, a]: [u8; 4]) {
+fn fill(c: &mut Canvas<'_>, path: Option<Path>, [r, g, b, a]: [u8; 4]) {
     let Some(path) = path else { return };
     let mut paint = Paint::default();
     paint.set_color_rgba8(r, g, b, a);
     paint.anti_alias = true;
-    pixmap.fill_path(
-        &path,
-        &paint,
-        FillRule::Winding,
-        Transform::identity(),
-        None,
-    );
+    let t = c.transform();
+    c.pm.fill_path(&path, &paint, FillRule::Winding, t, None);
 }
 
 #[cfg(test)]
@@ -4991,6 +5356,125 @@ mod tests {
         }
         problems.dedup();
         assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    /// Where two pictures `width` wide differ by more than `by`: none, or how many
+    /// bytes, by how much at most, and the box around them.
+    fn differ(a: &[u8], b: &[u8], width: u32, by: u8) -> Option<String> {
+        assert_eq!(a.len(), b.len());
+        let (mut n, mut most, mut bx) = (0, 0, (u32::MAX, u32::MAX, 0, 0));
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            if x.abs_diff(*y) > by {
+                n += 1;
+                most = most.max(x.abs_diff(*y));
+                let px = (i / 4) as u32;
+                let (cx, cy) = (px % width, px / width);
+                bx = (bx.0.min(cx), bx.1.min(cy), bx.2.max(cx), bx.3.max(cy));
+            }
+        }
+        (n > 0).then(|| format!("{n} bytes differ, by {most} at most, in {bx:?}"))
+    }
+
+    /// The whole picture with item `lit` pointed at, drawn at once.
+    fn drawn_whole(p: &mut Panel, lit: usize) -> Vec<u8> {
+        let mut pixmap = Pixmap::new(p.pixmap.width(), p.pixmap.height()).unwrap();
+        let items = std::mem::take(&mut p.items);
+        p.paint(&mut Canvas::whole(&mut pixmap), &items, Some(lit));
+        p.items = items;
+        pixmap.take()
+    }
+
+    /// Pointing at a button (a tab, a monitor on the map with its whole name above,
+    /// the note, a sector of the palm menu) draws only its part again, and the picture
+    /// is the one drawing it whole with that button pointed at makes (a curved edge cut
+    /// at the part's edge is smoothed by at most one step otherwise); going back to a
+    /// button already pointed at draws nothing (copied) and changes only its part;
+    /// pointing at nothing gives back the picture with nothing pointed at, to the bit.
+    #[test]
+    fn pointing_draws_only_its_part_as_the_whole_would() {
+        let mut monitors = sample_state();
+        monitors.monitors[0].label = "DELL U2720Q a very long name".into();
+        monitors.note = Some(Note::done(
+            Some(Action::Preset(Preset::Wall)),
+            "Розкладку змінено",
+        ));
+        let mut quick = sample_state();
+        quick.tab = Tab::Quick;
+        let mut pc = sample_state();
+        pc.tab = Tab::Settings(Section::Pc);
+        let mut checked = 0;
+        for (wrist, st) in [
+            (false, monitors),
+            (false, quick),
+            (false, pc),
+            (true, sample_state()),
+        ] {
+            let mut p = if wrist { Panel::wrist() } else { Panel::new() };
+            p.set_state(&st);
+            let plain = p.render_if_dirty().unwrap().to_vec();
+            assert_eq!(p.damage(), None, "drawn whole");
+            let points: Vec<(usize, (f32, f32))> = p
+                .items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| match item {
+                    Item::Button { rect: r, .. } | Item::Note { rect: r, .. } => {
+                        Some((i, (r.left() + r.width() / 2.0, r.top() + r.height() / 2.0)))
+                    }
+                    Item::Wedge { .. } => {
+                        let b = item.bounds()?;
+                        Some((i, (b.left() + b.width() / 2.0, b.top() + 30.0)))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let mut before: Option<usize> = None;
+            for &(i, at) in &points {
+                p.hover(Some(at));
+                if p.hovered != Some(i) {
+                    continue;
+                }
+                let drawn = p.render_if_dirty().expect("another button").to_vec();
+                let whole = drawn_whole(&mut p, i);
+                let w = p.pixmap.width();
+                let what = match &p.items[i] {
+                    Item::Button { label, rect, .. } => format!("{label:?} {rect:?}"),
+                    Item::Note { rect, .. } => format!("note {rect:?}"),
+                    _ => String::new(),
+                };
+                assert_eq!(
+                    differ(&drawn, &whole, w, 0),
+                    None,
+                    "item {i} {what} {:?} of {:?}",
+                    p.damage(),
+                    st.tab
+                );
+                let damage = p.damage().expect("a part");
+                assert!(
+                    damage.w * damage.h < p.pixmap.width() * p.pixmap.height() / 2,
+                    "only parts: {damage:?}"
+                );
+                if let Some(b) = before {
+                    // Back to the one before: its kept copies.
+                    let at = points.iter().find(|(j, _)| *j == b).unwrap().1;
+                    p.hover(Some(at));
+                    let back = p.render_if_dirty().unwrap().to_vec();
+                    assert_eq!(differ(&back, &drawn_whole(&mut p, b), w, 0), None);
+                    p.hover(Some(points.iter().find(|(j, _)| *j == i).unwrap().1));
+                    let again = p.render_if_dirty().unwrap().to_vec();
+                    assert_eq!(differ(&again, &drawn, w, 0), None);
+                }
+                before = Some(i);
+                checked += 1;
+            }
+            p.hover(None);
+            let w = p.pixmap.width();
+            let none = p.render_if_dirty().unwrap().to_vec();
+            assert_eq!(differ(&none, &plain, w, 0), None);
+
+            assert!(p.render_if_dirty().is_none(), "nothing changed");
+        }
+        assert!(checked > 60, "{checked} buttons");
     }
 
     /// The palm menu in every language, the longer one too, without text that does not
