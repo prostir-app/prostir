@@ -1,12 +1,12 @@
 //! The arrangement's hard rule over everything that changes it, on a few hundred
 //! random desks (the same ones every run): no two displays ever cut into each other in
 //! the room, and the PC's own displays glued on its desktop stand two of its pixels
-//! apart; and after the magnet, no monitor hides another from the eye (rays from the
-//! eye to a grid on each). Each desk is laid out as its monitors' pictures come, one by one, then goes
-//! through random steps: a monitor dropped next to another with the magnet on, one or
-//! two monitors added (the second asked before the first one's picture comes), two
-//! swapped, a stream coming back at another resolution, "Line up", and
-//! the PC's own displays shown as one group. With monitors far wider than the circle
+//! apart; and as laid out, after monitors arrive and after the magnet, no monitor
+//! hides another from the eye (rays from the eye to a grid on each). Each desk is laid
+//! out as its monitors' pictures come, one by one, then goes through random steps: a
+//! monitor dropped next to another with the magnet on, one or two monitors added (the
+//! second asked before the first one's picture comes), two swapped, a stream coming
+//! back at another resolution, "Line up", and the PC's own displays shown as one group. With monitors far wider than the circle
 //! (5120x1440) among them, every such monitor added is also in view, and after "Line
 //! up" no monitor is alone in a row out of view; after a preset nothing is out of view,
 //! and after "Line up" then neither. The same on a headset whose model is known, its
@@ -87,10 +87,10 @@ const HIDDEN: f32 = 0.03;
 /// grid here measures to a couple of percent.
 const SEAM_HIDDEN: f32 = 0.10;
 
-/// The points of a 16 by 16 grid over a flat rectangle (place, height), each in the
+/// The points of a 32 by 32 grid over a flat rectangle (place, height), each in the
 /// middle of its cell.
 fn grid(p: &Placement, h: f32) -> impl Iterator<Item = Vec3> + '_ {
-    const N: usize = 16;
+    const N: usize = 32;
     (0..N * N).map(move |i| {
         let (u, v) = (
             ((i % N) as f32 + 0.5) / N as f32 - 0.5,
@@ -532,17 +532,19 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
         let first: Vec<(u32, u32)> = (0..n).map(|_| sizes[rng.below(sizes.len())]).collect();
         let mut desk = Trial::of_on(&first, sizes, ppd);
         let mut done = vec!["laid out".to_owned()];
-        let at_first = desk.cutting();
-        if !at_first.is_empty() {
+        let (at_first, hid_first) = (desk.cutting(), desk.hiding());
+        if !at_first.is_empty() || !hid_first.is_empty() {
             failures.push(format!(
-                "{ppd:?} case {case} {first:?}: laid out: cut {at_first:?}"
+                "{ppd:?} case {case} {first:?}: laid out: cut {at_first:?}, hidden (by, share, \
+                 meeting) {hid_first:?}"
             ));
             continue;
         }
         for _ in 0..6 {
             let kind = steps[rng.below(steps.len())];
             let dropped = kind == Step::Drop;
-            let hidden_before = if dropped { desk.hiding() } else { Vec::new() };
+            let looked = matches!(kind, Step::Drop | Step::Add | Step::AddTwice);
+            let hidden_before = if looked { desk.hiding() } else { Vec::new() };
             let step = match kind {
                 Step::Drop => desk.drop_near(&mut rng),
                 Step::Add => desk.add(&mut rng, false),
@@ -556,12 +558,13 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
             desk.sim.after(1000);
             done.push(step);
             let (cutting, unglued) = (desk.cutting(), desk.unglued());
-            // After the magnet, nothing hides another that did not already; only the
-            // monitor dropped, over two glued ones, may be hidden a little.
-            let hiding: Vec<_> = if dropped {
+            // After the magnet or monitors arriving, nothing hides another that did not
+            // already; only the monitor dropped, over two glued ones, may be hidden a
+            // little.
+            let hiding: Vec<_> = if looked {
                 let was = |a: u32, b: u32| hidden_before.iter().any(|h| (h.0, h.1) == (a, b));
                 let may_hide = |hidden: u32| {
-                    if Some(hidden) == desk.dropped {
+                    if dropped && Some(hidden) == desk.dropped {
                         SEAM_HIDDEN
                     } else {
                         HIDDEN
