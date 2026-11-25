@@ -12,10 +12,13 @@
 #
 # One shortcut at a time: running it for another path replaces the first. Start Prostir
 # again afterwards. If KWin still refuses, log out and in once (KWin may hold an old
-# cache); `kwin_wayland --version` and the "kwin_core" log lines say more.
+# cache); `kwin_wayland --version` and the "kwin_core" log lines say more. As a last
+# resort for development only, KWIN_WAYLAND_NO_PERMISSION_CHECKS=1 in the environment of
+# kwin_wayland (for example in ~/.config/plasma-workspace/env/prostir.sh, then log in
+# again) lets every program use the interface: it turns the check off for all of them.
 set -euo pipefail
 
-usage() { sed -n '2,15s/^# \{0,1\}//p' "$0"; }
+usage() { sed -n '2,19s/^# \{0,1\}//p' "$0"; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -34,7 +37,11 @@ for arg in "$@"; do
     esac
 done
 
+# The cache file's name depends on the language and on XDG_DATA_DIRS, which a terminal
+# may have other than the session (and so KWin): the old files go, so that the one built
+# here is the only one, and KWin, which builds a missing one itself, reads this.
 refresh() {
+    rm -f "${XDG_CACHE_HOME:-$HOME/.cache}"/ksycoca6_*
     if command -v kbuildsycoca6 >/dev/null; then
         kbuildsycoca6 --noincremental >/dev/null 2>&1 || echo "kbuildsycoca6 failed: log out and in to refresh the cache." >&2
     else
@@ -60,6 +67,13 @@ if [[ ! -f "$TEMPLATE" ]]; then
 fi
 # KWin compares the file the process runs (/proc/<pid>/exe), which has no symbolic links.
 exe="$(readlink -f "$program")"
+# The path goes into a line of the entry and a command others copy: no character that
+# either would read otherwise.
+case "$exe" in
+    *[\$\`\"\\%\']*)
+        echo "$exe has a character of \$ \` \" \\ % ' in it: move or link the build to a plain path." >&2
+        exit 1 ;;
+esac
 
 # The program's path as one argument of the entry's Exec line: quoted where it has a
 # character the line would read otherwise, escaped for the quoting and then for the
@@ -79,8 +93,8 @@ sed_text() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
 # The packaged entry, its Exec on this build; hidden, and without the window class, so
 # it neither shows in the menu nor takes the settings window from the installed entry.
 install -Dm644 "$TEMPLATE" "$SHORTCUT"
-sed -i -e "s|^Exec=.*|Exec=$(sed_text "$(desktop_arg "$exe")")|" -e '/^StartupWMClass=/d' "$SHORTCUT"
-echo "NoDisplay=true" >> "$SHORTCUT"
+sed -i -e "s|^Exec=.*|Exec=$(sed_text "$(desktop_arg "$exe")")|" -e '/^StartupWMClass=/d' \
+    -e '/^\[Desktop Entry\]/a NoDisplay=true' "$SHORTCUT"
 refresh
 
 echo "Installed $SHORTCUT"

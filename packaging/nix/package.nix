@@ -138,8 +138,8 @@ rustPlatform.buildRustPackage {
     substitute packaging/io.github.prostir_app.Prostir.desktop \
       $out/share/applications/io.github.prostir_app.Prostir.Access.desktop \
       --replace-fail Exec=/usr/bin/prostir Exec=$out/bin/.prostir-wrapped
-    sed -i '/^StartupWMClass=/d' $out/share/applications/io.github.prostir_app.Prostir.Access.desktop
-    echo NoDisplay=true >> $out/share/applications/io.github.prostir_app.Prostir.Access.desktop
+    sed -i -e '/^StartupWMClass=/d' -e '/^\[Desktop Entry\]/a NoDisplay=true' \
+      $out/share/applications/io.github.prostir_app.Prostir.Access.desktop
     install -Dm644 packaging/prostir.svg $out/share/icons/hicolor/scalable/apps/prostir.svg
     # Not enabled here: Prostir's first start enables the socket for its user (on
     # NixOS, `systemd.packages = [ prostir ];` makes the units and the preset known);

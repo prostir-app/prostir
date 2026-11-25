@@ -779,7 +779,13 @@ The packages, the tarball's `install.sh` and the Nix package install that shortc
 When you run a build from the source folder, install one for it with
 `scripts/install-kde-shortcut.sh` (it takes the program's path, `target/release/prostir`
 by default; `--remove` removes it) and start Prostir again. Plasma 6.8 and newer need no
-shortcut. The window, the tray and the headset say this when it happens.
+shortcut. The window, the tray and the headset say this when it happens. If a shortcut is
+installed and KWin still refuses, log out and in once (KWin may hold an old cache); on
+NixOS install the package with `nix profile install` or in the system configuration first,
+`nix run` alone has no shortcut. As a last resort for development only,
+`KWIN_WAYLAND_NO_PERMISSION_CHECKS=1` in the environment of `kwin_wayland` (for example in
+`~/.config/plasma-workspace/env/prostir.sh`, then log in again) lets every program use the
+interface: it turns the check off for all of them.
 
 **Hyprland: no tray icon, no notifications, no autostart.** See [Hyprland](#hyprland).
 

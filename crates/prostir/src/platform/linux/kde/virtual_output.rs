@@ -396,7 +396,17 @@ impl Screencast {
                 .any(|g| g.interface == ZkdeScreencastUnstableV1::interface().name)
         });
         if !listed {
-            return Err(anyhow::Error::new(super::access::NotExposed));
+            // Interfaces only KWin has tell it from another compositor that names itself
+            // KDE.
+            let kwin = globals.contents().with_list(|list| {
+                list.iter().any(|g| {
+                    matches!(
+                        g.interface.as_str(),
+                        "kde_output_device_v2" | "org_kde_kwin_server_decoration_manager"
+                    )
+                })
+            });
+            return Err(anyhow::Error::new(super::access::NotExposed { kwin }));
         }
         let screencast: ZkdeScreencastUnstableV1 = globals.bind(&qh, 2..=4, ()).context(
             "KWin offers zkde_screencast_unstable_v1 in a version this program does not speak",

@@ -133,13 +133,14 @@ pc-tray-quality-high = Висока: 50 Мбіт/с
 
 ## src/platform/linux/kde/access.rs
 
-pc-kde-needs-wayland = Prostir потрібна сесія Plasma на Wayland, а ця працює на X11. Вийдіть і на екрані входу оберіть «Plasma (Wayland)».
-pc-kde-needs-shortcut-installed = KWin не дає Prostir доступу до екрана, бо жоден ярлик застосунку не вказує на цю програму. Установіть Prostir із пакета, щоб ярлик був, і запустіть її знову. Або оновіть Plasma до 6.8 чи новішої, їй ярлик не потрібен.
+pc-kde-needs-wayland = Програмі Prostir потрібна сесія Plasma на Wayland, а ця працює на X11. Вийдіть і на екрані входу оберіть «Plasma (Wayland)».
+pc-kde-needs-shortcut-installed = KWin не дає Prostir доступу до екрана, бо жоден ярлик застосунку не вказує на цю програму. Установіть Prostir із пакета (у Nix: nix profile install або додайте до конфігурації системи), щоб ярлик був, потім вийдіть і ввійдіть знову. Якщо вона вже встановлена, вийдіть і ввійдіть знову. Plasma 6.8 чи новішій ярлик не потрібен.
 # $exe: the path of the program that runs
-pc-kde-needs-shortcut-built = KWin не дає цій копії Prostir доступу до екрана, бо жоден ярлик застосунку не вказує на неї. У теці з вихідним кодом виконайте: scripts/install-kde-shortcut.sh { $exe } і запустіть Prostir знову. Plasma 6.8 чи новішій ярлик не потрібен.
+pc-kde-needs-shortcut-built = KWin не дає цій копії Prostir доступу до екрана, бо жоден ярлик застосунку не вказує на неї. У теці з вихідним кодом виконайте: scripts/install-kde-shortcut.sh '{ $exe }' і запустіть Prostir знову. Якщо ярлик уже встановлено, вийдіть і ввійдіть знову. Plasma 6.8 чи новішій ярлик не потрібен.
 # $version: KWin's version, like 6.5.6
 pc-kde-version = (KWin { $version })
 pc-kde-sandboxed = KWin { $version } не дає Prostir доступу до екрана, бо програма працює в пісочниці (Flatpak чи Snap). Запустіть Prostir із пакета чи зі збірки, поза пісочницею.
+pc-kde-not-offered = KWin не пропонує Prostir свій інтерфейс захоплення екрана. Якщо Plasma щойно оновлювалась, вийдіть і ввійдіть знову.
 
 ## src/platform/linux/dialogs.rs
 
