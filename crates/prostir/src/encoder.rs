@@ -285,6 +285,8 @@ pub enum EncoderEvent {
     Size {
         width: u32,
         height: u32,
+        /// The bitrate it encodes at, kbit/s.
+        kbps: u32,
     },
     Frame {
         pts_us: u64,
@@ -410,9 +412,11 @@ pub struct Encoder {
 
 /// What an encoder is tuned to for the size of its picture: the preset (see
 /// [`EncoderConfig::sharp`]), set again when the size is known or changes, before the
-/// encoder takes it.
+/// encoder takes it; and its bitrate.
 #[derive(Debug)]
 struct Tuning {
+    /// kbit/s.
+    kbps: u32,
     sharp: Option<bool>,
     size: Option<(u32, u32)>,
     /// What its encoder has now.
@@ -753,6 +757,7 @@ impl Encoder {
         let resumed = Arc::new(AtomicBool::new(false));
         let last_size = Mutex::new((0u32, 0u32));
         let tuning = Arc::new(Mutex::new(Tuning {
+            kbps: cfg.bitrate_kbps,
             sharp: cfg.sharp,
             size: None,
             target_usage: cfg.target_usage(None),
@@ -813,6 +818,7 @@ impl Encoder {
             let on_event = on_event.clone();
             let node = node.clone();
             let encoded = encoded.clone();
+            let tuned = tuning.clone();
             // An encoder a test asked to break: once it sent a frame, it fails as a
             // driver can in the middle of a stream.
             #[cfg(feature = "fake-desktop")]
@@ -840,6 +846,7 @@ impl Encoder {
                                 if on_event(EncoderEvent::Size {
                                     width: info.0,
                                     height: info.1,
+                                    kbps: tuned.lock().unwrap().kbps,
                                 }) {
                                     request_keyframe(sink);
                                 }
@@ -1100,6 +1107,7 @@ impl Encoder {
 
     /// Changes the target bitrate while running.
     pub fn set_bitrate(&self, kbps: u32) {
+        self.tuning.lock().unwrap().kbps = kbps;
         if let Some(enc) = self.pipeline.by_name("enc") {
             enc.set_property("bitrate", kbps);
         }

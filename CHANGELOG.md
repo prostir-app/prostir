@@ -9,6 +9,11 @@
   smaller. Larger monitors keep the faster setting, as the slower one takes longer than
   a frame to encode there. Turning Sharper text on or off applies to every monitor;
   settings of earlier versions keep it only where it was turned on.
+- After a big change of the picture (another file, another tab) the first frame is
+  coarse: once the screen is still, it is sharpened after 0.7 s instead of about 4 s,
+  once per pause. Typing and scrolling make no extra keyframes. On KDE a still screen
+  now sends its picture again every 0.5 s instead of 2 s (a frame of a few KB), so the
+  sharp picture comes at once.
 
 ### Sound, menu and video while the picture changes a lot
 

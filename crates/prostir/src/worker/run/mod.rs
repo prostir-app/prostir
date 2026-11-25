@@ -421,9 +421,14 @@ impl Worker {
         }
         let tuning = (wanted.encoding.bitrate_kbps, wanted.encoding.sharp);
         if self.tuning.is_some_and(|t| t != tuning) {
-            for e in self.slots.values().filter_map(|s| s.encoder.as_ref()) {
+            for (id, e) in self
+                .slots
+                .iter()
+                .filter_map(|(id, s)| Some((*id, s.encoder.as_ref()?)))
+            {
                 if tuning.0 != self.tuning.unwrap_or_default().0 {
                     e.set_bitrate(tuning.0);
+                    self.shared.router.set_bitrate(id, tuning.0);
                 }
                 if tuning.1 != self.tuning.unwrap_or_default().1 {
                     e.set_sharp(wanted.encoding.sharp);

@@ -154,6 +154,9 @@ pub struct StreamStats {
     /// Keyframes among them, and the largest.
     pub keyframes: u32,
     pub keyframe_max: u32,
+    /// Keyframes asked for early, to sharpen a still picture after a big change (see
+    /// [`Router::still_keyframes`]).
+    pub sharpened: u32,
     /// From a frame entering the converter to leaving the parser, microseconds.
     pub encode_us_avg: u32,
     pub encode_us_max: u32,
@@ -161,17 +164,20 @@ pub struct StreamStats {
 
 impl StreamStats {
     /// `encoded 600 frames (60.0/s, 0.5/s a still picture again), 24.1 Mbit/s,
-    /// keyframes 1, max 750 KB; encoder avg 4.3 max 9.1 ms`.
+    /// keyframes 1 (1 to sharpen a still picture), max 750 KB; encoder avg 4.3 max
+    /// 9.1 ms`.
     pub fn summary(&self) -> String {
         let secs = (f64::from(self.window_ms) / 1e3).max(1e-3);
         format!(
             "encoded {} frames ({:.1}/s, {:.1}/s a still picture again), {:.1} Mbit/s, \
-             keyframes {}, max {:.0} KB; encoder avg {:.1} max {:.1} ms",
+             keyframes {} ({} to sharpen a still picture), max {:.0} KB; encoder avg {:.1} \
+             max {:.1} ms",
             self.frames,
             f64::from(self.frames) / secs,
             f64::from(self.repeats) / secs,
             self.bytes as f64 * 8.0 / secs / 1e6,
             self.keyframes,
+            self.sharpened,
             f64::from(self.keyframe_max) / 1024.0,
             f64::from(self.encode_us_avg) / 1e3,
             f64::from(self.encode_us_max) / 1e3,
@@ -188,6 +194,7 @@ struct Tally {
     bytes: u64,
     keyframes: u32,
     keyframe_max: u32,
+    sharpened: u32,
     timed: u32,
     encode_us: u64,
     encode_us_max: u32,
@@ -223,6 +230,7 @@ impl Tally {
             bytes: t.bytes,
             keyframes: t.keyframes,
             keyframe_max: t.keyframe_max,
+            sharpened: t.sharpened,
             encode_us_avg: (t.encode_us / u64::from(t.timed.max(1))) as u32,
             encode_us_max: t.encode_us_max,
         }
@@ -266,6 +274,26 @@ struct StreamSlot {
     /// A frame of a new picture went since the last keyframe, and no keyframe was
     /// asked for since the screen went still (see [`Router::still_keyframes`]).
     unsettled: bool,
+    /// Its encoder's bitrate, kbit/s, as it last said (0: not yet).
+    kbps: u32,
+    /// A frame of a new picture since the last keyframe was big (a new file or tab:
+    /// see [`big_frame`]), so it went out coarse within one frame's budget: a still
+    /// picture after it is sharpened soon (see [`Router::still_keyframes`]).
+    coarse: bool,
+}
+
+/// A frame larger than this many frames of the stream's bitrate is big: the picture
+/// changed a lot at once (another file, another tab), more than one frame's budget
+/// holds, and went out coarse. Typing, scrolling and moving windows make frames within
+/// about one budget.
+const BIG_FRAMES: u64 = 4;
+/// The frame rate the budget of a frame is reckoned at: a faster monitor's frames are
+/// smaller, so fewer of its changes count as big.
+const BUDGET_RATE: u64 = 60;
+
+/// Whether a frame of `bytes` is big for a stream at `kbps` (see [`BIG_FRAMES`]).
+fn big_frame(bytes: usize, kbps: u32) -> bool {
+    kbps > 0 && bytes as u64 * 8 * BUDGET_RATE > BIG_FRAMES * u64::from(kbps) * 1000
 }
 
 /// Keyframes headsets ask for, of one stream, at most this often.
@@ -841,6 +869,8 @@ impl Router {
             measured: None,
             changed: None,
             unsettled: false,
+            kbps: 0,
+            coarse: false,
         };
         inner.streams.insert(id, slot);
         for r in inner.receivers.values_mut() {
@@ -886,7 +916,8 @@ impl Router {
     }
 
     /// A keyframe was asked of stream `id`, whose screen is still: on a still screen
-    /// the source sends nothing until its keepalive (2 s), so it is asked for a
+    /// the source sends nothing until its keepalive (500 ms on KDE, 2 s on Hyprland),
+    /// so it is asked for a
     /// picture now. A capture pushing its own frames sends its last one again
     /// (`keyframer`); a source that sends its picture when it starts (PipeWire on KDE)
     /// is started over by the control loop.
@@ -981,8 +1012,15 @@ impl Router {
     /// decoder. Keyframes come no other way but this and on request (see
     /// `encoder::X264_GOP`). It comes with the next frame the source sends (its
     /// keepalive on a still screen).
+    ///
+    /// After a big frame (see [`big_frame`]) the picture on the screen is coarse, and
+    /// would stay so until then: the keyframe is asked for `early` instead, which
+    /// sharpens it (once a pause: then it is settled), and the source is asked for its
+    /// picture at once where it can be (a capture that pushes its own frames; KWin's
+    /// stream sends it again within its keepalive). Small frames (typing, scrolling)
+    /// wait `after` as before.
     /// Returns how many it asked for.
-    pub fn still_keyframes(&self, after: Duration) -> usize {
+    pub fn still_keyframes(&self, after: Duration, early: Duration) -> usize {
         let now = Instant::now();
         let keyframers: Vec<_> = self
             .inner
@@ -990,18 +1028,42 @@ impl Router {
             .unwrap()
             .streams
             .values_mut()
-            .filter(|s| s.unsettled && s.changed.is_some_and(|t| now.duration_since(t) >= after))
+            .filter(|s| {
+                let wait = if s.coarse { early } else { after };
+                s.unsettled && s.changed.is_some_and(|t| now.duration_since(t) >= wait)
+            })
             .map(|s| {
                 s.unsettled = false;
-                debug!("{}: still, a keyframe", s.name);
-                s.keyframer.clone()
+                let sharpen = std::mem::take(&mut s.coarse);
+                if sharpen {
+                    s.tally.sharpened += 1;
+                    debug!(
+                        "{}: still after a big change, a keyframe to sharpen it",
+                        s.name
+                    );
+                } else {
+                    debug!("{}: still, a keyframe", s.name);
+                }
+                (s.keyframer.clone(), sharpen)
             })
             .collect();
         let n = keyframers.len();
-        for k in keyframers.into_iter().flatten() {
-            k.ask();
+        for (k, sharpen) in keyframers {
+            if let Some(k) = k {
+                k.ask();
+                if sharpen {
+                    k.picture_again();
+                }
+            }
         }
         n
+    }
+
+    /// The encoder of stream `id` encodes at `kbps` from now on.
+    pub fn set_bitrate(&self, id: ScreenId, kbps: u32) {
+        if let Some(slot) = self.inner.lock().unwrap().streams.get_mut(&id) {
+            slot.kbps = kbps;
+        }
     }
 
     /// Asks every running encoder for a keyframe.
@@ -1124,9 +1186,18 @@ impl Router {
             return false;
         };
         match event {
-            EncoderEvent::Size { width, height } => {
-                info!("{}: streaming {width}x{height}", slot.name);
+            EncoderEvent::Size {
+                width,
+                height,
+                kbps,
+            } => {
+                info!(
+                    "{}: streaming {width}x{height} at {} Mbit/s",
+                    slot.name,
+                    kbps / 1000
+                );
                 slot.size = Some((width, height));
+                slot.kbps = kbps;
                 let mut fit_one = false;
                 for r in receivers.values_mut() {
                     let too_big = r.too_big(slot);
@@ -1193,6 +1264,8 @@ impl Router {
                 } else if keyframe {
                     slot.unsettled = false;
                 }
+                // A keyframe is sharp; a big frame after it is not.
+                slot.coarse = !keyframe && (slot.coarse || big_frame(data.len(), slot.kbps));
                 if keyframe {
                     let mut wanted = self.snapshot.lock().unwrap();
                     if wanted.as_ref().is_some_and(|(want, _)| *want == id)

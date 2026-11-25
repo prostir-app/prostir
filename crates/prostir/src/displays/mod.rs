@@ -93,6 +93,12 @@ pub struct OutputEncoding {
 /// A screen that did not change for this long gets one keyframe (see
 /// [`Router::still_keyframes`]).
 const STILL: Duration = Duration::from_secs(3);
+/// The same after a big change (another file, another tab), whose picture went out
+/// coarse: it is sharpened this soon. A keyframe is the only way to sharpen a picture
+/// on VA-API (a change of bitrate on the way makes one), and one of `target-usage` 4
+/// is about as good as one with a constant quantiser of 10: measured on 2560x1440 text
+/// at 33 Mbit/s, from 34 to 53 dB (PSNR of the text), 3 s sooner than before.
+const STILL_EARLY: Duration = Duration::from_millis(700);
 
 /// A headset that waited this long for a fresh picture of a stream that sent nothing
 /// meanwhile gets it from the stream starting over.
@@ -638,7 +644,7 @@ impl Displays {
     /// primary output, window panels, the PC's own displays).
     pub fn tick(&mut self) {
         self.router.report();
-        self.router.still_keyframes(STILL);
+        self.router.still_keyframes(STILL, STILL_EARLY);
         self.router.pending_keyframes();
         self.sync_audio();
         // A way in for a recording that broke is made anew (nothing is asked), on the
