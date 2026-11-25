@@ -125,7 +125,13 @@ pub(super) fn quality(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
             .iter()
             .position(|b| *b == e.bitrate)
             .unwrap_or(usize::MAX);
-        let desc = tk.f("window-q-bitrate-desc", &[("n", e.bitrate.into())]);
+        let desc = match e.large {
+            Some(large) => tk.f(
+                "window-q-bitrate-desc-large",
+                &[("n", e.bitrate.into()), ("large", large.into())],
+            ),
+            None => tk.f("window-q-bitrate-desc", &[("n", e.bitrate.into())]),
+        };
         let ok = can(v, "set_quality");
         w::row(ui, tk, &tk.t("window-q-bitrate"), Some(&desc), |ui| {
             if let Some(i) = w::segmented(ui, tk, &labels, sel, ok) {
@@ -136,7 +142,12 @@ pub(super) fn quality(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
         w::divider(ui, tk);
         let label = tk.t("window-q-sharp");
         let ok = can(v, "set_sharp");
-        w::row(ui, tk, &label, Some(&tk.t("window-q-sharp-desc")), |ui| {
+        let desc = if e.sharp_by_size {
+            tk.t("window-q-sharp-desc-by-size")
+        } else {
+            tk.t("window-q-sharp-desc")
+        };
+        w::row(ui, tk, &label, Some(&desc), |ui| {
             if let Some(on) = w::switch(ui, tk, &label, e.sharp, ok) {
                 v.out.push(Action::Send(Request::SetSharp { on }));
             }

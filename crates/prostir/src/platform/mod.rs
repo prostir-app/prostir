@@ -303,6 +303,9 @@ pub struct TrayStatus {
     pub pairing: bool,
     /// The desktop does not respond (a call into it has hung for a while).
     pub desktop_stuck: bool,
+    /// Mbit/s for each monitor of 2560x1440 or more over USB, where another than the
+    /// quality (see `Displays::set_usb`).
+    pub usb_large: Option<u32>,
     /// The desktop is there but Prostir cannot use it, and the settings window says
     /// what to do (see [`Unusable`]).
     pub desktop_unusable: bool,

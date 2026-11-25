@@ -196,7 +196,7 @@ impl Worker {
                     encoder.force_keyframe();
                 }
             } else {
-                // A still screen sends nothing until its keepalive (2 s on KDE, as long
+                // A still screen sends nothing until its keepalive (up to 2 s, as long
                 // as the wait below): its stream starts over, as for a headset waiting
                 // for a fresh picture, and the source sends its picture at once.
                 info!("{id} is still: its stream starts over for the picture");

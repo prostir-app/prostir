@@ -225,6 +225,8 @@ impl Brain {
         }
         let worn = self.sessions.values().any(Session::worn);
         displays.worn(worn, &fresh);
+        let usb = !self.sessions.is_empty() && self.sessions.values().all(Session::by_usb);
+        displays.set_usb(usb);
         let mic = roles
             .mic
             .and_then(|key| self.sessions.get(&key))

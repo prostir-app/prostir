@@ -159,8 +159,9 @@ fn wanted(specs: &[(u32, u32, u32)]) -> Wanted {
         encoding: EncoderConfig {
             codec: Codec::H264,
             bitrate_kbps: 8000,
+            large_kbps: None,
             backend: Backend::X264,
-            sharp: false,
+            sharp: Some(false),
             rows_up: false,
         },
         streaming: true,
@@ -377,6 +378,8 @@ fn a_monitor_that_cannot_be_made_again_ends_its_stream() {
         crate::encoder::EncoderEvent::Size {
             width: 64,
             height: 32,
+            kbps: 30_000,
+            sharpens: false,
         },
     );
     router.on_event(

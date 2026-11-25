@@ -93,6 +93,16 @@ pub struct OutputEncoding {
 /// A screen that did not change for this long gets one keyframe (see
 /// [`Router::still_keyframes`]).
 const STILL: Duration = Duration::from_secs(3);
+/// The same after a big change (another file, another tab), whose picture went out
+/// coarse, where the encoder's keyframe is sharper (see `Router::still_keyframes`):
+/// asked for this soon, on time (the control loop wakes for it, see
+/// [`Displays::still_due`]). A capture that pushes its own frames sends its picture at
+/// once; KWin's stream sends it again 0.75 s after the last frame (its keepalive), so
+/// the keyframe comes then. A keyframe is the only way to sharpen a picture on VA-API
+/// (a change of bitrate on the way makes one), and one of `target-usage` 4 is about as
+/// good as one with a constant quantiser of 10: measured on 2560x1440 text at 33
+/// Mbit/s, from 34 to 53 dB (PSNR of the text), 3 s sooner than before.
+const STILL_EARLY: Duration = Duration::from_millis(650);
 
 /// A headset that waited this long for a fresh picture of a stream that sent nothing
 /// meanwhile gets it from the stream starting over.
@@ -200,6 +210,8 @@ pub struct Displays {
     streamed_at: Instant,
     pub router: Arc<Router>,
     cfg: EncoderConfig,
+    /// Every headset with a session is connected over USB (see [`Displays::set_usb`]).
+    usb: bool,
     primary: Option<ScreenId>,
     /// Whether to pick KDE's primary monitor ourselves.
     manage_primary: bool,
@@ -265,10 +277,12 @@ impl Displays {
             cfg: EncoderConfig {
                 codec: settings.codec,
                 bitrate_kbps: settings.bitrate * 1000,
+                large_kbps: None,
                 backend: Backend::X264,
                 sharp: settings.sharp,
                 rows_up: false,
             },
+            usb: false,
             primary: None,
             manage_primary,
             focus: None,
@@ -644,7 +658,6 @@ impl Displays {
     /// primary output, window panels, the PC's own displays).
     pub fn tick(&mut self) {
         self.router.report();
-        self.router.still_keyframes(STILL);
         self.router.pending_keyframes();
         self.sync_audio();
         // A way in for a recording that broke is made anew (nothing is asked), on the
@@ -677,12 +690,48 @@ impl Displays {
     pub fn apply(&mut self, wanted: &Settings) {
         let was = std::mem::replace(&mut self.settings, wanted.clone());
         self.cfg.bitrate_kbps = wanted.bitrate * 1000;
+        self.cfg.large_kbps = self.large_kbps();
         self.cfg.sharp = wanted.sharp;
         // Switched on by hand: tried right away.
         if wanted.audio != was.audio {
             self.by_hand += 1;
         }
         self.sync_audio();
+    }
+
+    /// Every headset with a session is connected over USB (`usb`) or not: while the
+    /// quality is not chosen, monitors of 2560x1440 or more stream at
+    /// [`crate::store::USB_LARGE`] then.
+    pub fn set_usb(&mut self, usb: bool) {
+        if usb == self.usb {
+            return;
+        }
+        self.usb = usb;
+        self.cfg.large_kbps = self.large_kbps();
+        if let Some(kbps) = self.cfg.large_kbps {
+            info!(
+                "over USB: {} Mbit/s for each monitor of 2560x1440 or more",
+                kbps / 1000
+            );
+        }
+    }
+
+    /// The bitrate of a picture of 2560x1440 or more, where it is another: over USB,
+    /// while the quality is not chosen and is less.
+    fn large_kbps(&self) -> Option<u32> {
+        Self::large_kbps_for(self.usb, &self.settings)
+    }
+
+    /// The same for `settings`, over USB (`usb`) or not.
+    fn large_kbps_for(usb: bool, settings: &Settings) -> Option<u32> {
+        let large = crate::store::USB_LARGE;
+        (usb && !settings.bitrate_chosen && large > settings.bitrate).then_some(large * 1000)
+    }
+
+    /// Mbit/s for each monitor of 2560x1440 or more now, where another than the quality
+    /// (see [`Displays::set_usb`]).
+    pub fn large_mbit(&self) -> Option<u32> {
+        self.cfg.large_kbps.map(|k| k / 1000)
     }
 
     /// The desktop worker's number, which the sound thread's news carry too.
@@ -783,6 +832,18 @@ impl Displays {
         } else {
             self.desk.ask(Job::Fresh([id].into()));
         }
+    }
+
+    /// When a still screen's keyframe is next to be asked for (see
+    /// [`Displays::still_keyframes`]): the control loop wakes then.
+    pub fn still_due(&self) -> Option<Instant> {
+        self.router.still_due(STILL, STILL_EARLY)
+    }
+
+    /// Asks for the keyframes of still screens that are due (see
+    /// [`Router::still_keyframes`]).
+    pub fn still_keyframes(&self) {
+        self.router.still_keyframes(STILL, STILL_EARLY);
     }
 
     /// Asks the encoder of screen `id` for a keyframe, without waiting for anyone.

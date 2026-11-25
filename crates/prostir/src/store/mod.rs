@@ -47,8 +47,9 @@ use screens::{migrate, parse_screens, screens_text};
 pub use settings::{Settings, is_word, perm_words};
 use settings::{hex, parse_settings, settings_text};
 
-/// The file format this version writes.
-const VERSION: u32 = 2;
+/// The file format this version writes. 3: clearer text is written only when chosen;
+/// 4: the quality too (see `settings::parse_settings`).
+const VERSION: u32 = 4;
 /// Numbers of screens are reserved this many at a time (see [`Store::new_id`]).
 pub const ID_BLOCK: u32 = 16;
 /// The first number the counter gives: above every number earlier builds gave out
@@ -61,6 +62,14 @@ const CLOSE_WAIT: Duration = Duration::from_secs(2);
 /// The video quality the PC offers, Mbit/s per monitor: a quality out of it (written
 /// into `settings.txt` by hand, `--bitrate`) holds at its nearest end.
 pub const BITRATES: std::ops::RangeInclusive<u32> = 5..=100;
+
+/// Mbit/s for each monitor of 2560x1440 or more over USB while the person did not
+/// choose the quality: text on a large monitor stays sharp through a big change (from
+/// 34 to 50 dB of the text's PSNR on the first frame of a new 2560x1440 picture against
+/// 33 Mbit/s). A cable carries it; more would add little (51 dB at 100), and CBR fills
+/// every frame up to its share, while the headset's low-latency decoder says it takes
+/// up to 70 Mbit/s.
+pub const USB_LARGE: u32 = 60;
 
 /// `mbps` in [`BITRATES`].
 pub fn bitrate_in_range(mbps: u32) -> u32 {
@@ -382,6 +391,7 @@ impl Store {
     pub fn wanted(&self) -> Settings {
         Settings {
             bitrate: bitrate_in_range(self.run.bitrate.unwrap_or(self.settings.bitrate)),
+            bitrate_chosen: self.settings.bitrate_chosen || self.run.bitrate.is_some(),
             codec: self.run.codec.unwrap_or(self.settings.codec),
             software: self.run.software.unwrap_or(self.settings.software),
             ..self.settings.clone()
@@ -398,7 +408,10 @@ impl Store {
     /// Video quality chosen while running: from now on it holds, over the command line.
     pub fn set_bitrate(&mut self, mbps: u32) {
         self.run.bitrate = None;
-        self.change(|s| s.bitrate = mbps);
+        self.change(|s| {
+            s.bitrate = mbps;
+            s.bitrate_chosen = true;
+        });
     }
 
     /// How to encode, chosen in the headset menu: it holds from now on, over the
@@ -408,8 +421,13 @@ impl Store {
         self.run.codec = None;
         self.run.software = None;
         self.change(|s| {
-            s.bitrate = bitrate;
-            s.sharp = sharp;
+            // Chosen when it changes: a headset that sends what it shows changes
+            // nothing.
+            if bitrate != s.bitrate {
+                s.bitrate = bitrate;
+                s.bitrate_chosen = true;
+            }
+            s.choose_clear_text(sharp);
             s.codec = codec;
             s.software = software;
         });

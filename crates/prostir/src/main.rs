@@ -164,6 +164,12 @@ impl Brain {
                 // housekeeping after it.
                 self.sessions.values().filter_map(gone_at).min(),
                 self.desk_due(),
+                // A still screen's keyframe on time: the one that sharpens a coarse
+                // picture is due 0.65 s after it, not at the next housekeeping.
+                self.displays
+                    .as_ref()
+                    .filter(|_| !self.sessions.is_empty())
+                    .and_then(Displays::still_due),
                 self.door.due(),
                 // Looked at again now and then, by a program that leaves when idle,
                 // while a Quest on USB waits for its `adb reverse` or, with nothing
@@ -419,6 +425,7 @@ impl Brain {
             s.volume_due();
             s.publish(displays, &self.store, self.focus);
         }
+        displays.still_keyframes();
         displays.push();
         self.store.flush();
         let busy = started.elapsed();

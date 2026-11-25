@@ -371,6 +371,11 @@ impl Session {
         self.publisher.caps()
     }
 
+    /// The headset is connected over USB.
+    pub fn by_usb(&self) -> bool {
+        self.via == via_name(Via::Usb)
+    }
+
     /// On the head (a headset that never said counts as worn).
     pub fn worn(&self) -> bool {
         self.taken_off_at.is_none()

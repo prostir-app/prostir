@@ -48,7 +48,8 @@ fn every_old_monitors_txt_moves_over() {
         s,
         Settings {
             bitrate: 40,
-            sharp: true,
+            bitrate_chosen: true,
+            sharp: Some(true),
             codec: Codec::H264,
             software: true,
             audio: false,
@@ -86,6 +87,91 @@ fn the_window_look_is_kept() {
     let (s, kept) = parse_settings("window-theme purple\nwindow-palette a b\n");
     assert_eq!(s.window, prostir_api::WindowLook::default());
     assert_eq!(kept.unknown.len(), 2);
+}
+
+/// Clearer text is not chosen by default (on where it fits in a frame's time), and a
+/// `sharp off` line is no choice before version 3, where it was the default written
+/// for everyone: from version 3 on, on or off is a choice, written as such, and no
+/// line is none.
+#[test]
+fn clearer_text_by_default() {
+    assert_eq!(Settings::default().sharp, None);
+    assert!(Settings::default().clear_text());
+    for (text, sharp) in [
+        ("bitrate 30\n", None),
+        ("version 2\nsharp off\n", None),
+        ("version 2\nsharp on\n", Some(true)),
+        // 0.1's monitors.txt, which has no version.
+        ("sharp off\n", None),
+        ("version 3\nsharp off\n", Some(false)),
+        ("version 3\nsharp on\n", Some(true)),
+        ("version 3\n", None),
+        // A newer version's choice too.
+        ("version 4\nsharp off\n", Some(false)),
+    ] {
+        let (s, kept) = parse_settings(text);
+        assert_eq!(s.sharp, sharp, "{text}");
+        // Written as it holds, and read back so.
+        let again = settings_text(&s, &kept);
+        assert!(again.starts_with(&format!("version {}\n", kept.version.max(4))));
+        assert_eq!(again.contains("sharp"), sharp.is_some(), "{again}");
+        assert_eq!(parse_settings(&again).0.sharp, sharp, "{again}");
+    }
+    assert_eq!(migrate("2560x1440\nsharp off\n").0.sharp, None);
+    // Chosen only when what shows changes: a headset that sends what it shows keeps
+    // it by size.
+    let mut s = Settings::default();
+    s.choose_clear_text(true);
+    assert_eq!(s.sharp, None);
+    s.choose_clear_text(false);
+    assert_eq!(s.sharp, Some(false));
+    s.choose_clear_text(true);
+    assert_eq!(s.sharp, Some(true));
+}
+
+/// The quality is a choice only once chosen: before version 3 `bitrate 30` was the
+/// default written for everyone, another quality was chosen; from version 3 on a
+/// `bitrate` line is a choice, written only then. Chosen here, from the command line,
+/// or by a headset that changes it (not one that sends what it shows).
+#[test]
+fn the_quality_is_chosen_only_once_chosen() {
+    assert!(!Settings::default().bitrate_chosen);
+    for (text, bitrate, chosen) in [
+        ("", 30, false),
+        ("version 2\nbitrate 30\n", 30, false),
+        ("version 2\nbitrate 50\n", 50, true),
+        ("bitrate 30\n", 30, false),
+        // Builds of version 3 wrote it for everyone too.
+        ("version 3\nbitrate 30\n", 30, false),
+        ("version 3\nbitrate 50\n", 50, true),
+        ("version 4\nbitrate 30\n", 30, true),
+        ("version 4\n", 30, false),
+    ] {
+        let (s, kept) = parse_settings(text);
+        assert_eq!((s.bitrate, s.bitrate_chosen), (bitrate, chosen), "{text}");
+        let again = settings_text(&s, &kept);
+        assert_eq!(again.contains("bitrate"), chosen, "{again}");
+        let (back, _) = parse_settings(&again);
+        assert_eq!((back.bitrate, back.bitrate_chosen), (bitrate, chosen));
+    }
+    let mut store = Store::open(None, Run::default());
+    assert!(!store.wanted().bitrate_chosen);
+    store.set_encoding(30, true, Codec::H265, false);
+    assert!(!store.wanted().bitrate_chosen, "what it showed");
+    store.set_encoding(50, true, Codec::H265, false);
+    assert!(store.wanted().bitrate_chosen);
+    let mut store = Store::open(None, Run::default());
+    store.set_bitrate(30);
+    assert!(store.wanted().bitrate_chosen);
+    let store = Store::open(
+        None,
+        Run {
+            bitrate: Some(30),
+            ..Run::default()
+        },
+    );
+    assert!(store.wanted().bitrate_chosen, "for this run");
+    assert!(!store.settings.bitrate_chosen);
 }
 
 /// The choice to start with the session is kept once made, and written only then:
@@ -186,7 +272,7 @@ fn the_six_monitors_move_over() {
     let lens: Vec<usize> = set.rows.iter().map(Vec::len).collect();
     assert_eq!(lens, [1, 4, 1]);
     assert_eq!(set.primary, Some(ScreenId::saved(2)));
-    assert!(s.sharp && s.mirror);
+    assert!(s.sharp == Some(true) && s.mirror);
     // Read back from the new file as it was moved over.
     let text = screens_text(&set, &Kept::default(), FIRST_ID);
     assert_eq!(parse_screens(&text).0, set);
@@ -196,12 +282,13 @@ fn the_six_monitors_move_over() {
 fn files_round_trip_and_keep_unknown_lines() {
     let settings = Settings {
         bitrate: 50,
+        bitrate_chosen: true,
         codec: Codec::H264,
         count: Counting::No,
         ..Settings::default()
     };
     let kept = Kept {
-        version: 3,
+        version: 4,
         unknown: vec!["theme dark".into()],
         ..Kept::default()
     };

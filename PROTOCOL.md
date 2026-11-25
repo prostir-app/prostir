@@ -43,6 +43,7 @@ Contents:
 5. [Message reference](#5-message-reference)
 6. [Streams, sound and microphone](#6-streams-sound-and-microphone)
 7. [Layout](#7-layout)
+8. [What a headset decides for itself](#8-what-a-headset-decides-for-itself)
 
 ## 1. Overview
 
@@ -61,9 +62,16 @@ and [Framing](#3-framing)). There are two ways to reach the host:
 
 - **Wi-Fi or Ethernet**: the client connects to the host's address on the local network.
 - **USB**: the host keeps `adb reverse tcp:47830 tcp:47830` set up for every headset
-  attached over USB (re-checked every 3 s), so the client reaches the host at
-  `127.0.0.1:47830`. The protocol is the same. The host's `--no-adb` option turns this
-  off.
+  attached over USB, so the client reaches the host at `127.0.0.1:47830`. The protocol
+  is the same. The host's `--no-adb` option turns this off. How the current host does
+  it is implementation-defined: it learns of a headset plugged in from the kernel's USB
+  events (every 10 s it looks instead where there are none) and of its USB debugging
+  being allowed from `adb track-devices`, tries a failed `adb reverse` again after 5,
+  10, 20 up to 60 s, and removes the reverses it set up when it quits with nothing left
+  to listen on the port, so a headset is not left with a port that nobody answers on.
+  Because a reverse can still outlive the program behind it (it was killed, or adb
+  restarted), a client must treat a connection to `127.0.0.1:47830` that closes before
+  the host says anything as "no PC on the cable", not as a PC that refused it.
 
 ### Discovery
 
@@ -166,7 +174,7 @@ handshake. Typing the PC's address and USB work whether the PC answers or not
 
 **Implementation-defined**, the host: a query from a headset that is not its own and
 looks for a PC to pair with (it gives its name), while the host does not answer it
-(paired, pairing closed), shows a notification on the PC, "New headset nearby. Pair?",
+(paired, pairing closed), shows a notification on the PC, "New headset nearby. Pair it?",
 with a button that opens the pairing window, at most once a minute. A query without a
 name (a paired headset that has no tag of this PC yet, say right after an update)
 brings no notice. The headsets that asked with a name recently are the local API's
@@ -184,12 +192,15 @@ sockets' watcher starts the program for any connection.
 #### How the current client picks a host (implementation-defined)
 
 Source: `crates/prostir-client/src/session/mod.rs` (whom and when) and
-`crates/prostir-client/src/net/discovery.rs` (the queries). The headset keeps, for each
-PC it trusts, the find secret its sessions gave and the last address it had a session
-at (written only once that PC proved its key in the handshake and its session
-opened; never from an answer). A round of its search goes:
+`crates/prostir-client/src/net/discovery.rs` (the queries). The headset names each PC it
+trusts by a `PcId`: the first 8 bytes of the SHA-256 of the PC's public key (16 hex
+digits in its files). It is never sent; the headset knows it from the handshake, and a
+PC is the same PC at every address and over every link. The headset keeps, for each PC
+it trusts, the find secret its sessions gave and the last address it had a session at
+(written only once that PC proved its key in the handshake and its session opened;
+never from an answer). A round of its search goes:
 
-1. `127.0.0.1:47830` (USB);
+1. `127.0.0.1:47830` (USB), once its rest is over (see below);
 2. a PC picked in the menu (or its address typed there);
 3. a query, as a broadcast (to `255.255.255.255` and to the broadcast address of each
    interface) and straight to the last address of each trusted PC, the address in
@@ -223,6 +234,32 @@ another), after 5 s, how to open pairing on the PC, to type its address (the PC'
 settings window shows it where it pairs) or to use a USB cable; with trusted PCs, after
 30 s without an answer or a connection, that the PC does not answer, to check that
 Prostir runs there and is on the same network.
+
+**The cable.** The cable's end is dialed first in every round, but it is not known whose
+PC is there until the handshake shows the key. So the dial carries the PCs it may take
+(`Takes`): any PC that is not already in a session or being connected to (a PC on Wi-Fi
+gets no handshake each round); after "Change PC" or a forget, any but the PC just left
+on the cable; for a PC the user picked (or, once a session opened from a pick, for the
+PCs picked), that PC alone. A PC the dial may not take is let go right after the
+handshake, before a word, and the cable then rests for 10 s, so a PC that is not wanted
+is not knocked on every second; a pick ends the rest. A session running over Wi-Fi is
+never moved to the cable by itself. The menu's list marks a PC the last dial found at
+the cable's end, and picking it goes over USB to that PC alone; a mark that went stale
+(the cable was pulled) costs one dial that finds nothing, and the pick then goes over
+the network.
+
+**A stale `adb reverse`.** A reverse that outlives the PC program makes
+`127.0.0.1:47830` accept a connection that closes before any word. The client counts that as no PC at the cable: the round goes on with the next
+step instead of starting over at USB, so the PC is reached on Wi-Fi.
+
+**Picking and "Change PC".** A PC picked in the menu (or typed) is tried before anything
+else, and the PCs a session opened from a pick for are the only ones the search then
+connects to by itself (their answers, their last addresses, the cable when the
+handshake shows one of them), until the user picks again or forgets one. "Change PC"
+leaves the PC in use (goodbye `2` from the headset); nothing then connects on its own
+over the network until the user picks, but the cable is still tried (a cable is a
+choice of its own), except back to the PC just left on it. A PC the user forgot is not
+connected to on its own either.
 
 There is no probe of the local network: a home network carries the broadcast; a VPN
 and separate subnets carry neither a broadcast nor a probe, but the direct query to
@@ -760,20 +797,20 @@ the table says. A new value later comes with a capability and a fallback of its 
 | Host features | | Headset features | |
 |---:|---|---:|---|
 | 1 | moves the mouse | 1 | takes commands |
-| 2 | a screenshot of one display | 2 | one volume with the PC |
+| 2 | a screenshot of one display | 2 | one volume with the PC (see [Volume](#volume)) |
 | 3 | window panels | 3 | the microphone as an up stream |
 | 4 | displays of the PC itself | 4 | the camera |
-| 5 | one volume with the headset | 5 | poses |
-| 6 | notifications | 6 | says where the user looks |
+| 5 | one volume with the headset (see [Volume](#volume)) | 5 | poses |
+| 6 | notifications | 6 | says where the user looks (see [Gaze](#gaze)) |
 | 7 | which display the sound comes from | 7 | shows displays of the PC itself |
 | 8 | commands | 8 | shows window panels |
-| 9 | "No limits" | 9 | wants a stream's rows bottom first |
-| 10 | monitors with a scale | | |
+| 9 | "No limits" | 9 | wants a stream's rows bottom first (see [Frames](#frames)) |
+| 10 | monitors with a scale | 10 | draws the PC's mouse pointer itself (see [The mouse pointer](#the-mouse-pointer)) |
 | 11 | the microphone as an up stream | | |
 | 12 | the camera | | |
 | 13 | poses | | |
-| 14 | takes `Gaze` (for which display gets the most bits, from step 10) | 10 | draws the PC's mouse pointer itself |
-| 16 | tells the mouse pointer apart from the pictures | | |
+| 14 | takes `Gaze` (see [Gaze](#gaze)) | | |
+| 16 | tells the mouse pointer apart from the pictures (see [The mouse pointer](#the-mouse-pointer)) | | |
 
 | Enum | Value | Needs | Without it |
 |---|---|---|---|
@@ -787,6 +824,8 @@ the table says. A new value later comes with a capability and a fallback of its 
 | `Primary` | `Display` | headset 7 (it names a display of the PC) | |
 | `Outcome` | all | the request's kind | |
 | `VolumeAsk` | | host 5 and headset 2, and only to the main headset | the PC's volume and the headset's are separate |
+| `Gaze` | | host 14 | the headset sends none |
+| `Frame` rows | bottom first | headset 9, on every headset with a session | top first |
 | `Command` | | headset 1 | no commands |
 | `CursorShape`, `CursorAt` | | host 16, and headset 10 named by every headset with a session | the pointer is in the pictures, as in every older build (see [The mouse pointer](#the-mouse-pointer)) |
 
@@ -828,8 +867,12 @@ go to the main headset, else to the first connected.
 ### Volume
 
 One volume for the PC's slider and the headset's buttons, where both sides name the
-capability (the host names it only to the main headset: a guest's volume is its own). The headset owns the level (its system volume is the sound); `level` is a
-percent, `0..=100`. Two counters keep the two from fighting: the headset's `seq` counts
+capability (the host names it only to the main headset: a guest's volume is its own).
+The current host names it (feature 5) when it has a sound device to follow it with; the
+current headset names it (feature 2) only where its system lets the app set the media
+volume and the level could be read at the start (some headsets fix it). The headset
+owns the level (its system volume is the sound); `level` is a percent, `0..=100`, and
+`muted` is the mute. Two counters keep the two from fighting: the headset's `seq` counts
 only its own changes (its buttons, its system menu), the host's `ask` counts its
 requests.
 
@@ -850,17 +893,80 @@ requests.
   saw every change of the headset's), it takes the level, keeps `seq`, and answers
   at once `Volume{the level it took, seq, ask}`. Otherwise its own change wins, and it
   answers `Volume{its level, seq, ask}`. A headset whose volume goes in steps takes the
-  next step the way the slider moved (higher: the step at or above `level`, lower: the
-  one at or below), so a slider moved by 1 % is not stuck between two steps; requests
-  of one drag (less than 100 ms apart) go on from the level the last one asked for.
-  The steps are the headset's own: they are not on the wire. Should its system then
-  hold another level (a limit of its own), that is a change of the headset's own.
+  next step the way the slider moved, so a slider moved by 1 % is not stuck between two
+  steps (the rounding below); requests of one drag (less than 100 ms apart) go on from
+  the level the last one asked for. The steps are the headset's own: they are not on
+  the wire. Should its system then hold another level (a limit of its own), that is a
+  change of the headset's own.
 - **The host gets `Volume`**: if `ask` is older than its newest request not answered
   yet, it leaves the device alone (the slider is still moving, it does not jump back).
   Otherwise it sets the device to `level`, so the slider rests on the headset's step.
-- `Volume` is in `Open`, so the PC takes the headset's level at the start.
+- `Volume` is in `Open`, so the PC takes the headset's level at the start. A host with
+  other headsets in a session does not take a new one's level: it asks the new headset
+  to take the PC's, so the sound the others hear does not jump.
+
+**Rounding.** A headset whose system volume has `n` steps above silence says the level
+of step `i` as `round(100 * i / n)` percent (halves up) and puts a level `p` at the
+step `round(p * n / 100)` when it is not a move of the PC's slider. A request of the
+PC's slider is rounded with its direction: asked higher than the headset's level, to
+the step at or above the asked level (`ceil(asked * n / 100)`) and always at least one
+step above where the headset is; asked lower, to the step at or below
+(`floor(asked * n / 100)`) and at least one below; asked the same, nowhere. So a slider
+moved by 1 % always moves a headset of 15 steps, and one dragged never goes back.
+`volume::level_of`, `index_of` and `toward` in `crates/prostir-proto/src/volume.rs` are
+these rules.
+
+**Echo.** Writing a level to the PC's sound device makes the device report it. The
+host takes the first change of the device after its write, to exactly the level it
+wrote and within a second, as the write's echo, and asks nothing; so is a change to
+where the device already was. A change that is not an echo (the person's, a 1 % one
+too, from the slider, the volume keys or another program) is the person's, asked of
+the headset as above. When the PC's own settings window sets the level, the device
+goes there unmuted and the headset is asked for it as for a move of the slider, and
+that write's echo asks nothing. Before the host has read its device, the level it
+last wrote is the device's level, so a new main headset's sound device is not taken
+for the person's move.
+
+**Mute.** Muting is a change like any other. A headset whose system says step 0 while
+it is muted (as Android does, and mutes when step 0 is set) says a muted volume at the
+level last heard unmuted, with `muted: true`, so the PC keeps its slider where it was
+and unmuting brings it back. Silence the app was asked for (level 0, not muted) is said
+as `level: 0, muted: false`, so an unmute then stays unmuted. A request is put in
+place in this order: the level, then the mute. The headset reads its volume every
+250 ms while a session is open and every second without one (so `Open` says it as it
+is), and not while it is not worn; a change it did not make itself is one of the
+headset's own (`seq + 1`). These are implementation-defined.
 
 `crates/prostir-proto/src/volume.rs` has both sides of this as plain functions.
+
+### Gaze
+
+`Gaze{display, u, v}` tells the host which of its displays the user looks at. It is for
+a host that can use it, for example to give the display looked at the most bits. The
+host says so with feature 14 (`HostCaps`), and the headset sends `Gaze` only to a host
+that did; a host that did not name 14 never gets one. The headset names feature 6 for
+what it can say, and the host does not need it. No right is needed.
+
+- `display` is a display of this host's `Displays`, and `u`, `v` are where on its
+  picture the user looks, from `0` to `65535` from the top left. `display` none, with
+  `u` and `v` `0`, says the user looks at none of this host's displays (at another PC's
+  monitor, or at nothing).
+- It is a change, not a stream. The current headset says it only when the display
+  looked at has changed and stayed the one looked at for 150 ms (a gaze that flickers
+  over the seam between two monitors says nothing), and at most one message every
+  250 ms, four a second. While the user looks at one display nothing is sent, so `u`
+  and `v` are where the gaze was as it settled there.
+- Each PC hears only about its own displays. When the gaze goes from one PC's monitor to
+  another's, the first PC hears "none" and the second hears its display. A PC that is
+  gone by then is not told, and a message to it does not count against the pace of the
+  next one. A new session starts as if nothing was told, so a headset that is looking
+  at a monitor says so soon after it.
+- The headset's "where the user looks" is the head's forward ray, the same one its
+  menu pointing and the mouse that follows the gaze work from, not eye tracking. It is
+  worked out only while the headset app has the focus.
+- The current host only writes the message at debug level in its log; nothing on the PC
+  depends on it yet. The rate and the 150 ms are the current headset's
+  (implementation-defined); a host must take any rate.
 
 ### Steady state
 
@@ -1013,7 +1119,7 @@ are marked as such (their bytes never change). "Part" marks a part of the state 
 | 140 | `Up` | `up:u8, data:bytes*` | A piece of up stream `up`. Lane 1. |
 | 141 | `UpEnd` | `up:u8` | Up stream `up` ended. Lane 1. |
 | 133 | `Arrange` | `rows:list<Row>(max 32)` | How the displays stand around the user (see [Layout](#7-layout)). |
-| 137 | `Gaze` | `display:opt<DisplayId>, u:u16, v:u16` | The display the user looks at, and where on it (0 to 65535 from the top left); none (with `u` and `v` 0): none of this host's displays. The headset sends it only to a host that listed feature 14, only when the display looked at has changed and rested a moment (not for a move across one display), and at most four times a second. The host only logs it for now. |
+| 137 | `Gaze` | `display:opt<DisplayId>, u:u16, v:u16` | The display the user looks at, and where on it (0 to 65535 from the top left); none (with `u` and `v` 0): none of this host's displays. The headset sends it only to a host that listed feature 14, only when the display looked at has changed and rested a moment (not for a move across one display), and at most four times a second (see [Gaze](#gaze)). The current host only logs it. |
 | 131 | `Request` | `req:u32, kind:u8, fields` | A change of the host's state (see [Requests](#requests)). |
 | 132 | `Reply` | `req:u32, outcome:Outcome` | The answer to the host's `Command` `req`, after the parts it changed. |
 | 124 | `MouseTo` | `id:DisplayId, u:u16, v:u16` | Put the mouse on display `id`, at `u`, `v` across its picture (0 to 65535). |
@@ -1212,9 +1318,16 @@ in either order.
 - No B-frames: decode order is display order.
 - Rows go top first, except to a headset that names capability 9: its compositor shows
   a stream's rows bottom first (an Android surface without a way to turn a layer
-  over), so the host turns the picture over before encoding it. One picture goes to
-  every headset with a session, so the host turns it over only when all of them name
-  9.
+  over, which the current headset finds out from the compositor, not from its model), so
+  the host sends the picture upside down, the bottom row first, and it shows the right
+  way up there. The picture is a decoded one like any other: the headset does nothing
+  else to it, and where the user points at it is the same. One picture goes to every
+  headset with a session, so the host turns it over only when all of them name 9; when
+  that changes (a headset that does not name it joins or leaves), the encoders start
+  again and the streams begin with a new `StreamStart`. The host turns the picture over
+  in its colour conversion (implementation-defined): where an encoder's converter
+  cannot do it (a VA-API card whose converter does not keep the direction), that
+  encoder is not used for such a headset and the host takes the next way to encode.
 - `pts_us` is the presentation timestamp in microseconds from the host's capture clock
   (0 if the encoder gave none). Its starting point is implementation-defined; use it to
   order frames and for latency figures, not as wall-clock time.
@@ -1472,3 +1585,66 @@ the client uses too to plan the desktop it sends and shows on its map.)
 
 `SetDisplays` replaces the layout with one row in the order of its `modes`, with no
 positions, until the next `Arrange`.
+
+## 8. What a headset decides for itself
+
+Nothing here is on the wire as a rule: it is what the current headset does with what
+the host sends, written down for someone who writes another client. Everything in this
+section is implementation-defined, and the host relies on none of it except what
+[Capabilities](#capabilities) and [Streams](#6-streams-sound-and-microphone) say.
+
+**What it says it can do** (`HeadsetCaps`). Nothing comes from a headset's name: the
+features and sizes are read from what the system and the compositor offer, and `model`
+is only a label (the host shows it in its local API).
+
+- `decoders`: for each codec the headset plays, the widest picture and the tallest one
+  at that width, stepped down through standard heights (8K, 5K, 4K, 1600p, 1440p,
+  1200p, 1080p, 720p) until the system says it decodes it at 60 frames a second;
+  `DecoderPixels` has the pixels a picture may have for that. A decoder that gives no
+  size is told as the sizes taken for granted for its codec (see
+  [The version handshake](#the-version-handshake-frozen)).
+- `layers_max`: the compositor's limit of layers in a frame, at least the 16 every
+  OpenXR runtime takes. `streams_max`: the least of what each decoder takes at once
+  (16 where it does not say) and `layers_max` less 7, at least 1. The 7 are kept for
+  the app's own layers (the background, the menu, its button, the hands, the dots of
+  the two pointing rays and the toast), so pointing or a message never pushes a monitor
+  out. The host does not use `layers_max`; it counts streams by `streams_max`.
+- Features 1 (commands), 3 (microphone), 6 (gaze), 7 (displays of the PC) and 8 (window
+  panels) always; 2 (volume) where the system lets the app set the media volume; 9
+  (rows bottom first) where the compositor cannot turn a layer over.
+
+**What it shows.** Each stream is a layer of its own, with the room and the menu around
+it. When the compositor takes fewer layers than the headset would draw, it leaves out,
+in this order: the words over a monitor that still shows its picture, the farthest
+monitors, the sign of a monitor being added and the toast, the keyboard window and the
+background, and last the pointing dots, the menu and the hands. The user is told once
+when monitors are left out. Nothing of this reaches the host.
+
+**Video that breaks.** The headset never tells the host that a stream failed; it asks
+for a keyframe (`RequestKeyframe`, at most every 300 ms per stream) and goes on.
+
+- A passing failure (a codec error, a broken frame, a surface gone for a moment) makes
+  the decoder again after 0.2, 0.5, 1, 2 and then 5 s at most, asking for a keyframe
+  each time; after 3 in a row the compositor's surface is made again with it. It never
+  gives up on a stream that has shown a picture in its generation. A picture that does not come for 2 s after a
+  failure shows "recovering" over the monitor.
+- A lasting failure (no decoder for the codec in `decoders`, a size it refuses, no
+  surface for the stream) is not tried again until the host starts the stream anew
+  (a new generation). A stream that gave no picture in its generation and fails for
+  30 s is given up the same way, with a reason of its own.
+- A monitor that cannot be shown keeps its place in the headset's arrangement (and in
+  the `Arrange` it sends) and in its menu, with the reason drawn in its place, so a
+  display that comes back is where it was.
+
+**How large a monitor looks.** The host knows a monitor only in pixels; how large it is
+in the room is the headset's. The current headset makes a new monitor as large as its
+own pixels, one pixel of the PC for one of the headset's, from a table of the pixels
+per degree of the headsets it knows, and a monitor added beside another is as much
+larger or smaller than its own size as that one is; on a headset it does not know the
+size is a standard one. It also decides how a monitor's picture is filtered (smoothed
+only while shown smaller than the headset's pixels, sharpened always).
+
+**The room.** The background that shows the room is made the first way the
+runtime offers: the passthrough extension of its maker, then that of another maker, and
+last the compositor's alpha blend (with a black layer to dim it); glasses that add light
+always show the room and offer no such background. None of this is known to the host.

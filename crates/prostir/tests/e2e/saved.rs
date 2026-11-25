@@ -197,17 +197,18 @@ fn a_tray_change_without_monitors_survives_quitting() {
     let dir = TestDir::new("tray-offline");
     dir.save_monitors(TWO_MONITORS);
     let mut pc = Pc::start(&dir, &Options::default());
-    pc.tray("sharp on");
-    pc.wait_log(SOON, "clearer text: true");
+    // On by default; switched back.
+    pc.tray("sharp off");
+    pc.wait_log(SOON, "clearer text: false");
     pc.quit();
     assert!(
-        dir.saved("settings.txt").contains("sharp on\n"),
+        dir.saved("settings.txt").contains("sharp off\n"),
         "{}",
         dir.saved("settings.txt")
     );
     // The options of that run were not saved.
     assert!(dir.saved("settings.txt").contains("software off\n"));
-    assert!(dir.saved("settings.txt").contains("bitrate 30\n"));
+    assert!(!dir.saved("settings.txt").contains("bitrate"), "not chosen");
 }
 
 /// Killed while the headset changes the layout over and over, the PC app leaves files
