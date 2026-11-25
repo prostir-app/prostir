@@ -385,68 +385,62 @@ fn mute_media(env: &mut Env<'_>, manager: &JObject<'_>, muted: bool) -> jni::err
     Ok(())
 }
 
-/// The step `index` in percent of `steps`, and muted, as read.
-fn in_percent((index, muted): (i32, bool), steps: u8) -> (u8, bool) {
-    let index = u8::try_from(index.max(0)).unwrap_or(u8::MAX);
-    (prostir_proto::volume::level_of(index, steps), muted)
+/// The media volume through the system's `AudioManager`, asked of the system once and
+/// kept (a global reference) for the calls after.
+#[derive(Default)]
+pub struct AndroidMedia {
+    manager: Option<jni::refs::Global<JObject<'static>>>,
+}
+
+impl AndroidMedia {
+    /// `f` with the `AudioManager`; `None` when the system could not be asked.
+    fn with<T>(
+        &mut self,
+        f: impl FnOnce(&mut Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
+    ) -> Option<T> {
+        if self.manager.is_none() {
+            self.manager = with_app_context(|env, context| {
+                let manager = audio_manager(env, context)?;
+                if manager.is_null() {
+                    return Ok(None);
+                }
+                Ok(Some(env.new_global_ref(manager)?))
+            })
+            .flatten();
+        }
+        let manager = self.manager.as_ref()?;
+        with_app_context(|env, _| f(env, manager))
+    }
+}
+
+impl crate::platform::media_volume::Media for AndroidMedia {
+    fn read(&mut self) -> Option<(i32, bool)> {
+        self.with(media_volume)
+    }
+
+    fn set_step(&mut self, index: i32) -> Option<()> {
+        self.with(|env, manager| set_media_index(env, manager, index))
+    }
+
+    fn mute(&mut self, muted: bool) -> Option<()> {
+        self.with(|env, manager| mute_media(env, manager, muted))
+    }
 }
 
 /// The media volume now: percent of its `steps` above silence, and whether it is
-/// muted. `None` when the system could not be asked.
+/// muted (see [`crate::platform::media_volume`]). `None` when the system could not be
+/// asked.
 pub fn volume_now(steps: u8) -> Option<(u8, bool)> {
-    with_app_context(|env, context| {
-        let manager = audio_manager(env, context)?;
-        if manager.is_null() {
-            return Ok(None);
-        }
-        Ok(Some(in_percent(media_volume(env, &manager)?, steps)))
-    })
-    .flatten()
+    crate::platform::media_volume::MediaVolume::new(steps).read(&mut AndroidMedia::default())
 }
 
-/// Puts the media volume at `level` percent of its `steps` above silence, muted or
-/// not, without the system's own display of it; what it is after, as
-/// [`volume_now`] says it (the system may keep to a limit of its own). The level first,
-/// then the mute: setting a step may unmute.
-pub fn set_volume(steps: u8, level: u8, muted: bool) -> Option<(u8, bool)> {
-    with_app_context(|env, context| {
-        let manager = audio_manager(env, context)?;
-        if manager.is_null() {
-            return Ok(None);
-        }
-        let index = i32::from(prostir_proto::volume::index_of(level, steps));
-        let (_, was_muted) = media_volume(env, &manager)?;
-        if !muted && was_muted {
-            mute_media(env, &manager, false)?;
-        }
-        set_media_index(env, &manager, index)?;
-        if muted {
-            mute_media(env, &manager, true)?;
-        }
-        Ok(Some(in_percent(media_volume(env, &manager)?, steps)))
-    })
-    .flatten()
-}
-
-/// Whether the system takes the app's setting of its media volume: one step off and
-/// back, without the system's display of it (the selftest asks; the app never does
-/// this). `None` when the system could not be asked.
-pub fn volume_settable() -> Option<bool> {
-    with_app_context(|env, context| {
-        let manager = audio_manager(env, context)?;
-        if manager.is_null() {
-            return Ok(None);
-        }
-        let (index, _) = media_volume(env, &manager)?;
-        let other = if index > 0 { index - 1 } else { index + 1 };
-        set_media_index(env, &manager, other)?;
-        let (became, _) = media_volume(env, &manager)?;
-        set_media_index(env, &manager, index)?;
-        let (back, _) = media_volume(env, &manager)?;
-        log::info!("volume: at step {index}, set to {other}: {became}, back: {back}");
-        Ok(Some(became == other && back == index))
-    })
-    .flatten()
+/// What the system takes of the app's setting of its media volume: a step off and
+/// back, a mute and an unmute, the volume left as it was (the selftest asks; the app
+/// never does this). `None` when the system could not be asked.
+pub fn volume_probe(steps: u8) -> Option<crate::platform::media_volume::Probe> {
+    let found = crate::platform::media_volume::probe(&mut AndroidMedia::default(), steps);
+    log::info!("volume: the system's media volume takes {found:?}");
+    found
 }
 
 /// The system's volume for media (`AudioManager.STREAM_MUSIC`): its steps above

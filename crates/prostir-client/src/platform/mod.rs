@@ -7,11 +7,12 @@
 //! The core sees none of it: what the headset can do comes to it as [`crate::caps::Caps`],
 //! made here at the start ([`caps`]).
 //!
-//! The controllers' table, the stores and the microphone's wait for access build on
-//! any system (they are data, an interface and plain logic); the rest only for
-//! Android.
+//! The controllers' table, the stores, the microphone's wait for access and the media
+//! volume's rules build on any system (they are data, an interface and plain logic);
+//! the rest only for Android.
 
 pub mod controllers;
+pub mod media_volume;
 pub mod mic_permission;
 pub mod store;
 

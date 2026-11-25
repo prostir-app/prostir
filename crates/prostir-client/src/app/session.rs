@@ -166,7 +166,6 @@ impl Model {
                 self.menu.notes.forget_requests(pc);
                 self.menu.physical_asked.retain(|(k, _)| k.pc != pc);
                 self.sessions.remove(&pc);
-                self.watch_volume();
                 self.videos.pc_ended(pc);
                 // Its streams went with it, also one whose end the network never said.
                 self.effects.extend(
@@ -217,7 +216,6 @@ impl Model {
             self.say_paired(host);
         }
         self.sessions.insert(pc);
-        self.watch_volume();
         self.world.connected(pc);
         if language.is_some() && language != self.settings.pc_language {
             self.settings.pc_language = language;

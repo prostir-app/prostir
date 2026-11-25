@@ -126,8 +126,9 @@ pub struct Device {
     /// Writes asked for (by the control loop), and done (by the writer, under `one`).
     asked: AtomicU64,
     done: AtomicU64,
-    /// The last reading.
+    /// The last reading, and the last level asked to be written.
     last: Mutex<Option<(u8, bool)>>,
+    wanted: Mutex<Option<(u8, bool)>>,
     /// To the writer's thread, once there is one.
     writer: Mutex<Option<mpsc::Sender<Write>>>,
 }
@@ -140,6 +141,7 @@ impl Device {
             asked: AtomicU64::new(0),
             done: AtomicU64::new(0),
             last: Mutex::new(None),
+            wanted: Mutex::new(None),
             writer: Mutex::new(None),
         })
     }
@@ -154,6 +156,7 @@ impl Device {
     /// the newest asked for first (those it overtakes are dropped).
     fn set(self: &Arc<Self>, level: u8, muted: bool) {
         let n = self.asked.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.wanted.lock().unwrap() = Some((level.min(100), muted));
         let mut writer = self.writer.lock().unwrap();
         let mut write = Write { n, level, muted };
         if let Some(to) = writer.as_ref() {
@@ -251,9 +254,11 @@ impl SinkVolume {
         self.0.set(level, muted);
     }
 
-    /// Where the device was when last read, if it was.
+    /// Where the device was when last read; before any reading, where the PC last
+    /// asked to put it (so a new main headset is asked for the PC's level meanwhile).
     pub fn level(&self) -> Option<(u8, bool)> {
-        *self.0.last.lock().unwrap()
+        let last = *self.0.last.lock().unwrap();
+        last.or_else(|| *self.0.wanted.lock().unwrap())
     }
 
     /// Whether a reading of the device taken after `writes` writes were done is old:

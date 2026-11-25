@@ -5,6 +5,8 @@
 //! says it is, if it is something else (its own steps, a limit of its own, its menu,
 //! the buttons), is a change of the headset's own, as for the buttons.
 
+use std::time::Duration;
+
 use log::info;
 use prostir_proto::ClientMsg;
 use prostir_proto::state::{Volume, VolumeAsk};
@@ -12,6 +14,13 @@ use prostir_proto::volume::{HeadsetVolume, Steps};
 
 use super::{Effect, Model, SoundCmd, SystemCmd};
 use crate::ids::PcId;
+use crate::presence;
+
+/// How often the system's volume is read in a session (its buttons and menu change it
+/// with no word to the app), and without one (so the next `Open` says it as it is).
+/// Not while the headset is not worn: nobody changes it then, and it sleeps.
+pub const READ_IN_SESSION: Duration = Duration::from_millis(250);
+pub const READ_WITHOUT_SESSION: Duration = Duration::from_secs(1);
 
 /// The headset's volume, shared with the PC.
 #[derive(Debug)]
@@ -21,8 +30,9 @@ pub(super) struct SharedVolume {
     /// The sets asked of the system so far: a reading from before the newest is done
     /// is old (its own reading follows).
     sets: u32,
-    /// The system's volume is followed (while a session is open).
-    watched: bool,
+    /// How often the system's volume is read, as the shell was last told (`None`:
+    /// not told yet).
+    watched: Option<Option<Duration>>,
     /// Changed since the next `Open` was last told.
     changed: bool,
 }
@@ -34,7 +44,7 @@ impl SharedVolume {
             level: HeadsetVolume::new(level, muted),
             steps: Steps::new(steps),
             sets: 0,
-            watched: false,
+            watched: None,
             changed: false,
         }
     }
@@ -44,10 +54,10 @@ impl SharedVolume {
         self.level.now()
     }
 
-    /// Whether the system's volume is followed now.
+    /// How often the system's volume is read now (`None`: not now).
     #[cfg(test)]
-    pub(super) fn watched(&self) -> bool {
-        self.watched
+    pub(super) fn watched(&self) -> Option<Duration> {
+        self.watched.flatten()
     }
 }
 
@@ -106,17 +116,23 @@ impl Model {
         }
     }
 
-    /// The system's volume is followed while a session is open, and not otherwise.
+    /// The system's volume is read every [`READ_IN_SESSION`] while a session is open,
+    /// every [`READ_WITHOUT_SESSION`] without one, and not while the headset is not worn
+    /// (it is read at once when it is again). Once a pass; the shell hears of a change.
     pub(super) fn watch_volume(&mut self) {
-        let watch = !self.sessions.is_empty();
+        let every = match self.presence.state() {
+            presence::State::Worn if !self.sessions.is_empty() => Some(READ_IN_SESSION),
+            presence::State::Worn => Some(READ_WITHOUT_SESSION),
+            presence::State::Off | presence::State::Asleep => None,
+        };
         let Some(v) = &mut self.volume else {
             return;
         };
-        if v.watched != watch {
-            v.watched = watch;
-            let steps = watch.then(|| v.steps.steps());
+        if v.watched != Some(every) {
+            v.watched = Some(every);
+            let steps = v.steps.steps();
             self.effects
-                .push(Effect::System(SystemCmd::WatchVolume(steps)));
+                .push(Effect::System(SystemCmd::WatchVolume { steps, every }));
         }
     }
 

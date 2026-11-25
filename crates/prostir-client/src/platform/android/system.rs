@@ -1,8 +1,9 @@
 //! What the app asks the system. The `system` thread asks now and then, away from the
 //! frame (a call into Java takes its time): the battery, once a minute and every 15 s
-//! while the palm menu shows, read afresh when it appears; the media volume, while the
-//! app follows it (a session with a PC is open), every 250 ms, soon after a volume
-//! button and right after the app set it. It also sets the volume as the app asks, and
+//! while the palm menu shows, read afresh when it appears; the media volume as often as
+//! the app asks (every 250 ms in a session, every second without one, not while the
+//! headset is not worn), soon after a volume button and right after the app set it. It
+//! also sets the volume as the app asks (see [`crate::platform::media_volume`]), and
 //! reads the language files when the menu's language changes (see [`crate::lang`]).
 //! What does not change (the headset's model, its language) is asked once at the
 //! start.
@@ -19,15 +20,13 @@ use std::time::{Duration, Instant};
 use log::warn;
 
 use crate::lang::{Known, Lang, Loader, Texts};
+use crate::platform::media_volume::MediaVolume;
 
 /// How often the battery is read, and while the palm menu shows it.
 const BATTERY_EVERY: Duration = Duration::from_secs(60);
 const BATTERY_EVERY_ON_PALM: Duration = Duration::from_secs(15);
 /// How long the app waits for the thread when it closes.
 const STOP_WITHIN: Duration = Duration::from_millis(300);
-/// How often the volume is read while it is followed. Without code of its own in Java
-/// the app hears of no change of the system's (its menu, its buttons): it looks.
-const VOLUME_EVERY: Duration = Duration::from_millis(250);
 /// After a volume button, the system has changed the volume by then.
 const AFTER_BUTTON: Duration = Duration::from_millis(50);
 
@@ -52,8 +51,10 @@ enum SystemCmd {
     Language(Lang),
     /// List the language files again.
     Languages,
-    /// Follow the volume, of this many steps (`None`: no more).
-    WatchVolume(Option<u8>),
+    /// Follow the volume, of `steps` above silence, read this often (`None`: only
+    /// after a set or a button). Without code of its own in Java the app hears of no
+    /// change of the system's (its menu, its buttons): it looks.
+    WatchVolume { steps: u8, every: Option<Duration> },
     /// Set the volume: the `n`th set.
     SetVolume { level: u8, muted: bool, n: u32 },
     /// A volume button was pressed.
@@ -106,10 +107,11 @@ impl System {
         self.send(SystemCmd::Languages);
     }
 
-    /// Follow the media volume, of `steps` above silence (`None`: no more);
-    /// [`SystemEvent::Volume`] says what it is now, and each change.
-    pub fn watch_volume(&self, steps: Option<u8>) {
-        self.send(SystemCmd::WatchVolume(steps));
+    /// Follow the media volume, of `steps` above silence, read `every` so often
+    /// (`None`: only after a set or a button); [`SystemEvent::Volume`] says what it is
+    /// now, and each change.
+    pub fn watch_volume(&self, steps: u8, every: Option<Duration>) {
+        self.send(SystemCmd::WatchVolume { steps, every });
     }
 
     /// Put the media volume at `level` percent, muted or not: the `n`th set (its
@@ -149,8 +151,11 @@ impl Drop for System {
 /// The media volume as the thread follows it.
 #[derive(Default)]
 struct Volume {
-    /// Its steps above silence, while it is followed.
-    steps: Option<u8>,
+    media: super::AndroidMedia,
+    /// In percent of its steps, once the app said them.
+    follow: Option<MediaVolume>,
+    /// How often it is read (`None`: only after a set or a button).
+    every: Option<Duration>,
     /// When it is read next.
     at: Option<Instant>,
     /// What it was last read as.
@@ -163,21 +168,23 @@ struct Volume {
 impl Volume {
     /// When it is to be read next, while it is followed.
     fn due(&self) -> Option<Instant> {
-        self.steps.and(self.at)
+        self.follow.as_ref().and(self.at)
     }
 
-    /// Followed with `steps` from now (read at once), or no more.
-    fn watch(&mut self, steps: Option<u8>) {
-        self.steps = steps;
-        self.last = None;
-        self.at = Some(Instant::now());
+    /// Followed with `steps`, read `every` so often from now (at once).
+    fn watch(&mut self, steps: u8, every: Option<Duration>) {
+        if self.follow.as_ref().is_none_or(|f| f.steps() != steps) {
+            self.follow = Some(MediaVolume::new(steps));
+        }
+        self.every = every;
+        self.at = every.map(|_| Instant::now());
     }
 
     /// Sets it as asked, the `n`th set; read right after.
     fn set(&mut self, level: u8, muted: bool, n: u32) {
         self.done = n;
-        if let Some(steps) = self.steps {
-            let now = super::set_volume(steps, level, muted);
+        if let Some(follow) = &mut self.follow {
+            let now = follow.set(&mut self.media, level, muted);
             if now != Some((level, muted)) {
                 warn!("volume: set to {level} (muted: {muted}), the system has {now:?}");
             }
@@ -194,12 +201,12 @@ impl Volume {
 
     /// Reads it if it is time: what to say, when it changed or was just set.
     fn read(&mut self, now: Instant) -> Option<SystemEvent> {
-        let steps = self.steps?;
+        let follow = self.follow.as_mut()?;
         if self.at.is_none_or(|at| now < at) {
             return None;
         }
-        self.at = Some(now + VOLUME_EVERY);
-        let read = super::volume_now(steps)?;
+        self.at = self.every.map(|every| now + every);
+        let read = follow.read(&mut self.media)?;
         if !self.set && self.last == Some(read) {
             return None;
         }
@@ -232,8 +239,8 @@ fn run(cmds: &Receiver<SystemCmd>, events: &Sender<SystemEvent>, mut loader: Loa
                 palm = shown;
                 appeared
             }
-            Ok(SystemCmd::WatchVolume(steps)) => {
-                volume.watch(steps);
+            Ok(SystemCmd::WatchVolume { steps, every }) => {
+                volume.watch(steps, every);
                 false
             }
             Ok(SystemCmd::SetVolume { level, muted, n }) => {

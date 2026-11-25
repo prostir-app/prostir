@@ -268,9 +268,9 @@ pub enum SystemCmd {
     /// The menu opened: the person may have put a language file or a background
     /// picture on the headset meanwhile.
     LookForFiles,
-    /// Follow the system's volume, of this many steps above silence (`None`: no more):
-    /// read now and then, and as soon as it is followed again.
-    WatchVolume(Option<u8>),
+    /// Follow the system's volume, of `steps` above silence, read this often (`None`:
+    /// only after a set or a volume button), and at once when this starts.
+    WatchVolume { steps: u8, every: Option<Duration> },
 }
 
 /// A short message shown on its own, below the line of sight.
@@ -788,6 +788,7 @@ impl Model {
         for file in self.saves.take() {
             self.effects.push(Effect::Save(file));
         }
+        self.watch_volume();
         let volume = self.volume_changed();
         if self.profiles_changed {
             self.tell_profiles();

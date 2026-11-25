@@ -186,11 +186,20 @@ pub enum Act {
     Write { level: u8, muted: bool },
 }
 
+/// The person's moves of the device this close together are one gesture: the next
+/// may go on from the one before, whatever the PC wrote between (see
+/// [`PcVolume::device`]).
+pub const ONE_GESTURE: Duration = Duration::from_secs(1);
+
 /// The PC's side, for one session.
 #[derive(Debug, Clone, Default)]
 pub struct PcVolume {
     /// Where the device was last said to be.
     known: Option<(u8, bool)>,
+    /// The person's last move of the device, and when.
+    own: Option<(u8, Instant)>,
+    /// The headset's level, as it last said.
+    headset: Option<(u8, bool)>,
     /// What the PC wrote to the device and when, until the device's next change.
     echo: Option<(u8, bool, Instant)>,
     /// The newest change of the headset's own that came.
@@ -211,6 +220,7 @@ impl PcVolume {
     pub fn from_headset(&mut self, v: &Volume, now: Instant) -> Option<Act> {
         self.seen = self.seen.max(v.seq);
         self.answered = self.answered.max(v.ask);
+        self.headset = Some((v.level.min(100), v.muted));
         // A newer request is on its way: this level is already old.
         if self.answered < self.asked || self.waiting.is_some() {
             return None;
@@ -220,6 +230,15 @@ impl PcVolume {
     }
 
     /// The device changed (the slider, the volume keys): what to do now.
+    ///
+    /// The person's move asks the headset only once it passed the headset's level the
+    /// way it went (up: above it, down: below it); short of it, the device goes back to
+    /// the headset's step once it rests. The way is from the person's last move of the
+    /// same gesture ([`ONE_GESTURE`]), or from where the device stood, whichever is
+    /// nearer: a slider dragged slowly goes on from under the mouse though the PC wrote
+    /// the headset's step meanwhile, a key goes on from the step written. So a slow
+    /// drag never asks below the step the headset went up to, nor flips between two
+    /// steps.
     pub fn device(&mut self, level: u8, muted: bool, now: Instant) -> Option<Act> {
         let level = level.min(100);
         if self.known == Some((level, muted)) {
@@ -227,15 +246,43 @@ impl PcVolume {
             self.echo.take_if(|(l, m, _)| (*l, *m) == (level, muted));
             return None;
         }
-        self.known = Some((level, muted));
+        let stood = self.known.replace((level, muted)).map(|(l, _)| l);
         if self.echo.take().is_some_and(|(l, m, at)| {
             (l, m) == (level, muted) && now.saturating_duration_since(at) < ECHO_WITHIN
         }) {
             return None;
         }
-        self.answer = None;
-        self.waiting = Some((level.min(100), muted));
+        let own = self
+            .own
+            .filter(|(l, at)| *l != level && now.saturating_duration_since(*at) < ONE_GESTURE)
+            .map(|(l, _)| l);
+        let from = match (own, stood) {
+            (Some(o), Some(s)) if s.abs_diff(level) < o.abs_diff(level) => Some(s),
+            (Some(o), _) => Some(o),
+            (None, s) => s,
+        };
+        self.own = Some((level, now));
         self.last_move = Some(now);
+        // With a request on its way, the headset's level is not known yet.
+        let settled = self.answered >= self.asked;
+        let passes = match self.headset {
+            Some((h, h_muted)) if settled => {
+                h_muted != muted
+                    || match from.map(|f| level.cmp(&f)) {
+                        Some(std::cmp::Ordering::Greater) => level > h,
+                        Some(std::cmp::Ordering::Less) => level < h,
+                        _ => level != h,
+                    }
+            }
+            _ => true,
+        };
+        if passes {
+            self.answer = None;
+            self.waiting = Some((level, muted));
+        } else {
+            self.waiting = None;
+            self.answer = self.headset;
+        }
         self.tick(now)
     }
 
@@ -499,6 +546,43 @@ mod tests {
                     last < dragged_until + 200 + 2 * latency,
                     "quiet after ({case})"
                 );
+            }
+            // Dragged slowly, 1 % every 120 or 200 ms, up and then down: the PC writes
+            // the headset's step while the slider goes on (it rests long enough), yet
+            // the headset never goes back the other way, nor does the device, and both
+            // end on the step at or past where the slider stopped.
+            for per in [120, 200] {
+                for latency in [5, 30] {
+                    let case = format!("{steps} steps, {per} ms per 1 %, {latency} ms");
+                    let mut w = World::new(latency, 40, steps);
+                    w.run(300);
+                    for (to_level, d) in [(60u8, 1i16), (20, -1)] {
+                        let answers = w.answers.len();
+                        let writes = w.writes.len();
+                        let mut slider = w.device.0;
+                        while slider != to_level {
+                            slider = (i16::from(slider) + d) as u8;
+                            w.slide(slider);
+                            w.run(w.ms + per);
+                        }
+                        w.run(w.ms + 1000);
+                        let gone = |levels: Vec<u8>| {
+                            levels
+                                .windows(2)
+                                .all(|p| i16::from(p[1]) * d >= i16::from(p[0]) * d)
+                        };
+                        let answered = w.answers[answers..].to_vec();
+                        assert!(
+                            gone(answered.clone()),
+                            "headset back ({case}): {answered:?}"
+                        );
+                        let written: Vec<u8> = w.writes[writes..].iter().map(|w| w.1).collect();
+                        assert!(gone(written.clone()), "device back ({case}): {written:?}");
+                        let at = to((i16::from(to_level) - d) as u8, to_level, steps);
+                        assert_eq!(w.headset.now().level, at, "{case}, to {to_level}");
+                        assert_eq!(w.device.0, at, "{case}, to {to_level}");
+                    }
+                }
             }
         }
     }

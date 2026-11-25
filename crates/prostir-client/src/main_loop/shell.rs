@@ -138,7 +138,9 @@ impl Shell<'_> {
             Effect::Sound(SoundCmd::SetVolume { level, muted, n }) => {
                 self.system.set_volume(level, muted, n);
             }
-            Effect::System(SystemCmd::WatchVolume(steps)) => self.system.watch_volume(steps),
+            Effect::System(SystemCmd::WatchVolume { steps, every }) => {
+                self.system.watch_volume(steps, every);
+            }
             Effect::Mic(MicCmd::Allowed(on)) => self.mic.set_allowed(on),
             Effect::Mic(MicCmd::AskAgain) => self.mic.ask_again(),
             Effect::Mic(MicCmd::RefreshPermission) => self.mic.refresh_permission(),

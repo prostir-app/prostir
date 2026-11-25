@@ -1871,12 +1871,13 @@ fn one_volume_with_the_pc() {
     assert!(open.caps.unwrap().has(caps::headset::VOLUME));
     assert_eq!(open.volume, Some(heard(40, 0, 0)));
     sim.connect(&[1]);
-    assert!(
+    let read_every = |sim: &Sim| {
         sim.m
             .volume
             .as_ref()
-            .is_some_and(volume::SharedVolume::watched)
-    );
+            .and_then(volume::SharedVolume::watched)
+    };
+    assert_eq!(read_every(&sim), Some(volume::READ_IN_SESSION));
 
     // Up by 1 %: the step above, at once.
     sim.net(volume_ask(41, 0, 1));
@@ -1938,7 +1939,7 @@ fn one_volume_with_the_pc() {
     sim.m.end_pass();
     assert!(sim.take().is_empty(), "told once");
 
-    // The session ends: no longer followed.
+    // The session ends: read less often, so the next `Open` says it as it is.
     sim.net(NetEvent::Ended {
         step: StepId(1),
         pc: Some(PC),
@@ -1946,10 +1947,92 @@ fn one_volume_with_the_pc() {
         ended: Ended::default(),
         lasted: Duration::from_secs(60),
     });
-    assert!(
-        sim.take()
-            .contains(&Effect::System(SystemCmd::WatchVolume(None)))
-    );
+    sim.m.end_pass();
+    let watch = SystemCmd::WatchVolume {
+        steps: 15,
+        every: Some(volume::READ_WITHOUT_SESSION),
+    };
+    assert!(sim.take().contains(&Effect::System(watch)));
+    // Taken off: not read at all until it is worn again.
+    sim.handle(Event::Platform(PlatformEvent::Paused(true)));
+    sim.after(Duration::from_secs(10));
+    sim.m.end_pass();
+    let watch = SystemCmd::WatchVolume {
+        steps: 15,
+        every: None,
+    };
+    assert!(sim.take().contains(&Effect::System(watch)), "not worn");
+    assert_eq!(read_every(&sim), None);
+}
+
+/// The PC mutes and unmutes, and asks for silence, on a headset whose system keeps
+/// Android's rules (muted it says step 0, step 0 mutes): what the system then says is
+/// what the headset answered, never a change of the headset's own, so the PC keeps its
+/// level while muted, and an unmute stays.
+#[test]
+fn mute_and_silence_on_androids_rules() {
+    use crate::platform::media_volume::{AndroidRules, MediaVolume};
+    let mut sim = Sim::of(Caps {
+        volume_steps: Some(15),
+        ..test_caps()
+    });
+    sim.connect(&[1]);
+    let mut media = AndroidRules {
+        max: 15,
+        index: 6,
+        muted: false,
+    };
+    let mut system = MediaVolume::new(15);
+    assert_eq!(system.read(&mut media), Some((40, false)));
+    let asked = [
+        ((40, true), (40, true)),
+        ((40, false), (40, false)),
+        ((0, false), (0, false)),
+        ((41, false), (47, false)),
+        ((47, true), (47, true)),
+        ((47, false), (47, false)),
+    ];
+    for (ask, ((level, muted), answered)) in (1..).zip(asked) {
+        sim.after(Duration::from_millis(300));
+        sim.net(NetEvent::VolumeAsk {
+            pc: PC,
+            asked: state::VolumeAsk {
+                level,
+                muted,
+                seen: 0,
+                ask,
+            },
+        });
+        let fx = sim.take();
+        let case = format!("asked {level}, muted {muted}");
+        let answer = volumes(&fx);
+        assert_eq!(
+            answer
+                .iter()
+                .map(|v| (v.level, v.muted))
+                .collect::<Vec<_>>(),
+            [answered],
+            "{case}"
+        );
+        for (l, m, n) in volume_sets(&fx) {
+            // As the system thread says it: right after the set, and at the next read.
+            let (l, m) = system.set(&mut media, l, m).unwrap();
+            sim.handle(Event::Platform(PlatformEvent::Volume {
+                level: l,
+                muted: m,
+                done: n,
+            }));
+            let (l, m) = system.read(&mut media).unwrap();
+            sim.handle(Event::Platform(PlatformEvent::Volume {
+                level: l,
+                muted: m,
+                done: n,
+            }));
+        }
+        let told = volumes(&sim.take());
+        assert!(told.is_empty(), "a change of its own ({case}): {told:?}");
+    }
+    assert_eq!((media.index, media.muted), (7, false), "the unmute stays");
 }
 
 /// A headset whose system volume the app cannot set: `Open` neither names the shared
