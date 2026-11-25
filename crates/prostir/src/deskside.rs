@@ -38,6 +38,7 @@ impl Brain {
         match news {
             DeskNews::None => {}
             DeskNews::Connected => {
+                self.desk_unusable = None;
                 // The sessions that waited for the desktop open now.
                 for accepted in std::mem::take(&mut self.waiting_desk) {
                     self.open_session(accepted);
@@ -45,6 +46,11 @@ impl Brain {
             }
             DeskNews::NoDesktop(e) => {
                 error!("{e:#}");
+                // What the person can do about it shows in the settings window and
+                // the tray until the desktop connects.
+                self.desk_unusable = e
+                    .downcast_ref::<crate::platform::Unusable>()
+                    .map(|u| u.0.clone());
                 // Tell the headsets why, instead of a snapshot.
                 for accepted in std::mem::take(&mut self.waiting_desk) {
                     turn_away(accepted.conn, format!("{e:#}"));

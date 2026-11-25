@@ -247,6 +247,16 @@ impl ksni::Tray for Tray {
                 .into(),
             );
         }
+        if self.status.desktop_unusable {
+            items.push(
+                StandardItem {
+                    label: t("pc-tray-no-access-to-the-desktop").into(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
         if let Some(encoding) = &self.status.encoding {
             items.push(
                 StandardItem {

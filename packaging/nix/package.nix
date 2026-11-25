@@ -123,8 +123,23 @@ rustPlatform.buildRustPackage {
   ];
 
   postInstall = ''
+    # The menu entry starts the wrapper, which sets up the environment the program needs.
     install -Dm644 packaging/io.github.prostir_app.Prostir.desktop \
       $out/share/applications/io.github.prostir_app.Prostir.desktop
+    substituteInPlace $out/share/applications/io.github.prostir_app.Prostir.desktop \
+      --replace-fail Exec=/usr/bin/prostir Exec=$out/bin/prostir
+    # Up to Plasma 6.7, KWin lets a program use its restricted screencast interface
+    # (X-KDE-Wayland-Interfaces) only if some entry's Exec is the file the process runs
+    # (/proc/<pid>/exe), not a script that starts it. The wrapper starts
+    # `.prostir-wrapped`, so that is the file, and the entry above (the wrapper) never
+    # matches. This second entry names the real file and is hidden from the menus. Its
+    # window class is dropped: the first entry owns the window. Plasma 6.8 and newer
+    # do not look at either.
+    substitute packaging/io.github.prostir_app.Prostir.desktop \
+      $out/share/applications/io.github.prostir_app.Prostir.Access.desktop \
+      --replace-fail Exec=/usr/bin/prostir Exec=$out/bin/.prostir-wrapped
+    sed -i -e '/^StartupWMClass=/d' -e '/^\[Desktop Entry\]/a NoDisplay=true' \
+      $out/share/applications/io.github.prostir_app.Prostir.Access.desktop
     install -Dm644 packaging/prostir.svg $out/share/icons/hicolor/scalable/apps/prostir.svg
     # Not enabled here: Prostir's first start enables the socket for its user (on
     # NixOS, `systemd.packages = [ prostir ];` makes the units and the preset known);
