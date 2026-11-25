@@ -1,7 +1,9 @@
 //! The automatic arrangement (only on request: a preset, or the first start): the
 //! widening circle. One row around the user at 1.1 m while it fits in [`ARC`]; else the
 //! smallest radius that fits; past [`MAX_RADIUS`], two rows, then three, the main row at
-//! eye level and the others above it.
+//! eye level and the others above it. A row over the main one never leaves out of view
+//! ([`in_view`]) a monitor alone in it or one too wide for the circle it starts from
+//! ([`RADIUS`]): then one row fewer, on the larger radius that needs.
 //!
 //! A flat monitor `w` wide with both vertical edges on a cylinder of radius `R` around
 //! the eye takes the angle `a(w, R) = 2 asin(w / 2R)` (needs `R >= w / 2`). A row fits
@@ -16,7 +18,7 @@ use std::ops::Range;
 
 use glam::{Quat, Vec3};
 
-use crate::space::{METRES_PER_PIXEL, PixelSize, Placement, facing};
+use crate::space::{METRES_PER_PIXEL, PixelSize, Placement, facing, in_view};
 
 /// Distance from the eye to the monitors' edges by default.
 pub const RADIUS: f32 = 1.1;
@@ -162,36 +164,82 @@ pub fn split(widths: &[f32], limits: &Limits) -> (Vec<Range<usize>>, f32) {
     if n <= 1 || one <= limits.max_radius {
         return (vec![0..n], one);
     }
-    let mut best: Option<(f32, f32, Vec<Range<usize>>)> = None;
+    let mut best = None;
     for k in 2..=limits.max_rows.min(n) {
-        best = None;
-        for cuts in cut_sets(n, k) {
-            let rows: Vec<Range<usize>> = std::iter::once(0)
-                .chain(cuts.iter().copied())
-                .zip(cuts.iter().copied().chain(std::iter::once(n)))
-                .map(|(a, b)| a..b)
-                .collect();
-            let radius = rows
-                .iter()
-                .map(|r| fit_radius(&widths[r.clone()], limits))
-                .fold(0.0f32, f32::max);
-            let widest_arc = rows
-                .iter()
-                .map(|r| row_arc(&widths[r.clone()], radius, limits.gap))
-                .fold(0.0f32, f32::max);
-            let better = match &best {
-                None => true,
-                Some((r, a, _)) => radius < *r || (radius == *r && widest_arc < *a),
-            };
-            if better {
-                best = Some((radius, widest_arc, rows));
-            }
-        }
-        if best.as_ref().is_some_and(|b| b.0 <= limits.max_radius) {
+        best = Some(cut_into(widths, k, limits));
+        if best.as_ref().is_some_and(|b| b.1 <= limits.max_radius) {
             break;
         }
     }
-    let (radius, _, rows) = best.expect("at least two monitors");
+    best.expect("at least two monitors")
+}
+
+/// Monitors of `widths` (in this order) in `k` rows (`1..=widths.len()`), cut so the
+/// largest radius any row needs is the smallest (ties: the row arcs most even, then the
+/// earliest cuts), and that radius.
+fn cut_into(widths: &[f32], k: usize, limits: &Limits) -> (Vec<Range<usize>>, f32) {
+    let n = widths.len();
+    let mut best: Option<(f32, f32, Vec<Range<usize>>)> = None;
+    for cuts in cut_sets(n, k) {
+        let rows: Vec<Range<usize>> = std::iter::once(0)
+            .chain(cuts.iter().copied())
+            .zip(cuts.iter().copied().chain(std::iter::once(n)))
+            .map(|(a, b)| a..b)
+            .collect();
+        let radius = rows
+            .iter()
+            .map(|r| fit_radius(&widths[r.clone()], limits))
+            .fold(0.0f32, f32::max);
+        let widest_arc = rows
+            .iter()
+            .map(|r| row_arc(&widths[r.clone()], radius, limits.gap))
+            .fold(0.0f32, f32::max);
+        let better = match &best {
+            None => true,
+            Some((r, a, _)) => radius < *r || (radius == *r && widest_arc < *a),
+        };
+        if better {
+            best = Some((radius, widest_arc, rows));
+        }
+    }
+    let (radius, _, rows) = best.unwrap_or_else(|| (fit_radius(widths, limits), 0.0, vec![0..n]));
+    (rows, radius)
+}
+
+/// The rows of `sorted` around the user and their radius, as [`split`] cuts them; but
+/// while a row stacked over the main one has a monitor whose middle is out of view and
+/// that is alone there or too wide for the circle at `limits.radius` (a flat monitor
+/// far wider than the others comes close to the eye, and so high, over them), one row
+/// fewer, on the larger radius that needs (one row is always in view).
+fn rows_in_view<K: Copy + Ord>(
+    sorted: &[Item<K>],
+    primary: Option<K>,
+    y: f32,
+    limits: &Limits,
+) -> (Vec<Range<usize>>, f32) {
+    let widths: Vec<f32> = sorted.iter().map(|m| m.1).collect();
+    let main = primary
+        .and_then(|p| sorted.iter().position(|m| m.0 == p))
+        .unwrap_or_else(|| sorted.len().saturating_sub(1) / 2);
+    let (mut rows, mut radius) = split(&widths, limits);
+    while rows.len() > 1 {
+        let mut out = BTreeMap::new();
+        let lay =
+            |items: &[Item<K>], row_y: &dyn Fn(usize) -> f32, out: &mut BTreeMap<K, Placement>| {
+                arc_row(items, row_y, radius, limits.gap, out);
+            };
+        stack_rows(sorted, &rows, primary, y, lay, &mut out);
+        let unseen = rows.iter().filter(|r| !r.contains(&main)).any(|r| {
+            r.clone().any(|i| {
+                let wide = least_radius(widths[i]) > limits.radius;
+                (r.len() == 1 || wide) && out.get(&sorted[i].0).is_some_and(|p| !in_view(p))
+            })
+        });
+        if !unseen {
+            break;
+        }
+        (rows, radius) = cut_into(&widths, rows.len() - 1, limits);
+    }
     (rows, radius)
 }
 
@@ -224,14 +272,57 @@ fn wall_fits(width: f32, distance: f32) -> bool {
 
 /// The radius [`arrange`] puts `monitors` on for `preset` (a wall's distance), which a
 /// curved monitor's cylinder grows with.
-pub fn radius_of<K>(preset: Preset, monitors: &[(K, PixelSize)], limits: &Limits) -> f32 {
-    let widths: Vec<f32> = monitors
-        .iter()
-        .map(|(_, px)| px.w as f32 * METRES_PER_PIXEL)
-        .collect();
+/// `primary`: as for [`arrange`].
+pub fn radius_of<K: Copy + Ord>(
+    preset: Preset,
+    monitors: &[(K, PixelSize)],
+    primary: Option<K>,
+    limits: &Limits,
+) -> f32 {
+    rows(preset, monitors, primary, limits).1
+}
+
+/// The rows [`arrange`] puts `monitors` (in this order) in for `preset`, `primary` in
+/// the main one, as ranges of them, and the radius (a wall's distance): as [`split`]
+/// cuts them around the user, but with none stacked out of view where fewer rows on a
+/// larger radius can help it (see `rows_in_view`).
+pub fn rows<K: Copy + Ord>(
+    preset: Preset,
+    monitors: &[(K, PixelSize)],
+    primary: Option<K>,
+    limits: &Limits,
+) -> (Vec<Range<usize>>, f32) {
+    let sorted = items(monitors);
     match preset {
-        Preset::Arc | Preset::Overhead => split(&widths, limits).1,
-        Preset::Wall => split_wall(&widths, limits, wall_fits).1,
+        Preset::Arc | Preset::Overhead => rows_in_view(&sorted, primary, row_level(preset), limits),
+        Preset::Wall => {
+            let widths: Vec<f32> = sorted.iter().map(|m| m.1).collect();
+            split_wall(&widths, limits, wall_fits)
+        }
+    }
+}
+
+/// `monitors` as the arrangement takes them: key, width and height in metres.
+fn items<K: Copy>(monitors: &[(K, PixelSize)]) -> Vec<Item<K>> {
+    monitors
+        .iter()
+        .map(|&(id, px)| {
+            (
+                id,
+                px.w as f32 * METRES_PER_PIXEL,
+                px.h as f32 * METRES_PER_PIXEL,
+            )
+        })
+        .collect()
+}
+
+/// The height of the main row's middle around the user: a little below the eye
+/// sitting, at the eye lying down (the whole is tilted up then).
+fn row_level(preset: Preset) -> f32 {
+    if preset == Preset::Arc {
+        -EYE_DROP
+    } else {
+        0.0
     }
 }
 
@@ -274,28 +365,15 @@ pub fn arrange<K: Copy + Ord>(
     curve: Option<f32>,
     limits: &Limits,
 ) -> BTreeMap<K, Placement> {
-    let sorted: Vec<Item<K>> = monitors
-        .iter()
-        .map(|&(id, px)| {
-            (
-                id,
-                px.w as f32 * METRES_PER_PIXEL,
-                px.h as f32 * METRES_PER_PIXEL,
-            )
-        })
-        .collect();
+    let sorted = items(monitors);
     let height_of = |id: K| sorted.iter().find(|m| m.0 == id).map_or(0.0, |m| m.2);
     let widths: Vec<f32> = sorted.iter().map(|m| m.1).collect();
 
     let mut out = BTreeMap::new();
     let radius = match preset {
         Preset::Arc | Preset::Overhead => {
-            let y = if preset == Preset::Arc {
-                -EYE_DROP
-            } else {
-                0.0
-            };
-            let (rows, radius) = split(&widths, limits);
+            let y = row_level(preset);
+            let (rows, radius) = rows_in_view(&sorted, primary, y, limits);
             let lay = |items: &[Item<K>],
                        row_y: &dyn Fn(usize) -> f32,
                        out: &mut BTreeMap<K, Placement>| {

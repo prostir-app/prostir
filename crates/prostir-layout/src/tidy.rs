@@ -61,10 +61,11 @@ use std::collections::BTreeMap;
 
 use glam::{Mat3, Quat, Vec3};
 
+use crate::circle::least_radius;
 use crate::desk::TOUCH_GAP;
 use crate::rows::rows_of;
 use crate::space::Side;
-use crate::space::{Frame, Monitor, PixelSize, Placement, covers, facing, unwrap};
+use crate::space::{Frame, Monitor, PixelSize, Placement, covers, cuts, facing, unwrap};
 use crate::view::{Room, reach_pair, relate_pair};
 
 /// A row of one or two monitors keeps an axis of its own only past this angle from the
@@ -748,11 +749,14 @@ fn lined_up<K>(row: &[(K, Placement, PixelSize)], flat: bool) -> bool {
             );
             c.cross(f).length() <= square
         };
-        poses.iter().all(|p| {
-            facing_axis(p)
-                && (radius(p) - radius(first)).abs() <= SNUG
-                && (level(sides(p).1).length() - radius(first)).abs() <= SNUG
-        })
+        // On a circle wide enough for the widest (see `straighten`).
+        let widest = poses.iter().map(|p| p.width).fold(0.0f32, f32::max);
+        radius(first) >= least_radius(widest) - SNUG
+            && poses.iter().all(|p| {
+                facing_axis(p)
+                    && (radius(p) - radius(first)).abs() <= SNUG
+                    && (level(sides(p).1).length() - radius(first)).abs() <= SNUG
+            })
     };
     if !together || !around {
         return false;
@@ -785,8 +789,10 @@ fn straighten<K: Copy + Ord>(row: &[(K, Placement, PixelSize)]) -> Vec<(K, Place
             .map(|p| (flat_distance(p.centre).powi(2) + p.width.powi(2) / 4.0).sqrt())
             .sum::<f32>()
             / poses.len() as f32;
+        // A monitor far wider than the others' circle would come right up to the eye
+        // on it: the row goes out to where it takes no more than `MAX_ONE`.
         let widest = poses.iter().map(|p| p.width).fold(0.0f32, f32::max);
-        r.max(widest / 2.0 * 1.0001)
+        r.max(widest / 2.0 * 1.0001).max(least_radius(widest))
     };
     let half = |w: f32| f64::from((w / 2.0 / radius).min(1.0).asin());
     // Directions around the axis, each near the one before it in the row, so the row
@@ -917,12 +923,16 @@ fn apart<K: Copy + Ord>(
             width: p.width,
         }
     };
-    let corners = |k: K| placed(k).corners(placed(k).width * size(k).aspect());
+    let height = |k: K| placed(k).width * size(k).aspect();
+    let corners = |k: K| placed(k).corners(height(k));
+    // Seen over it, or through it in the room: the middle of a flat monitor far wider
+    // than the others bulges towards the eye beyond what its corners say.
     let covering = || {
         row.iter().any(|&u| {
-            inner
-                .iter()
-                .any(|&p| covers(&corners(p), &corners(u), 0.001))
+            inner.iter().any(|&p| {
+                covers(&corners(p), &corners(u), 0.001)
+                    || cuts(&placed(p), height(p), &placed(u), height(u))
+            })
         })
     };
     if covering_counts && covering() {

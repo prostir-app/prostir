@@ -59,7 +59,7 @@ fn a_profile_is_renamed() {
         session.profile = Some("Робота".into());
     });
     let (mut h, handle) = window(mock, Setup::default());
-    open(&mut h, Page::Headsets);
+    open(&mut h, Page::Monitors);
     assert_eq!(h.query_all_by_label("Увімкнено зараз").count(), 1);
     press(&mut h, "Перейменувати Профіль 1");
     h.get_by_label("Нова назва для Профіль 1").focus();
@@ -114,8 +114,14 @@ fn a_profile_is_renamed() {
         session.profile = Some("Робота".into());
     });
     let (mut h, _) = window(mock, Setup::default());
-    open(&mut h, Page::Headsets);
+    open(&mut h, Page::Monitors);
     assert_eq!(h.query_all_by_label("Увімкнено зараз").count(), 1);
+    // Under the arrangement, further down the page.
+    h.query_all_by_label("Перейменувати Робота")
+        .next()
+        .unwrap()
+        .scroll_to_me();
+    h.run_steps(4);
     h.query_all_by_label("Перейменувати Робота")
         .next()
         .unwrap()

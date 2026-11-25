@@ -1079,7 +1079,7 @@ impl World {
         if self.lineup.is_empty() {
             return;
         }
-        self.radius = layout::preset_radius(s.preset, &self.lineup);
+        self.radius = layout::preset_radius(s.preset, &self.lineup, self.primary());
         self.tilt = layout::tilt(s.preset);
         let laid = self.around_user(layout::arrange(
             s.preset,
@@ -1139,7 +1139,7 @@ impl World {
             }
             // Where its placeholder stood, for the monitor being added, while nothing
             // took that place meanwhile.
-            let at = match &self.adding {
+            let (at, push) = match &self.adding {
                 Some(a)
                     if a.id == Some(m.0)
                         && !layout::covers_any(
@@ -1151,17 +1151,21 @@ impl World {
                             (self.center, self.tilt),
                         ) =>
                 {
-                    a.place
+                    (a.place, false)
                 }
                 _ => self.place_for_new((m.1, m.2), gaze),
             };
             info!("monitor {} placed next to the others", m.0);
             self.placements.insert(m.0, at);
+            if push {
+                // Into the main row: its neighbours there make room along it.
+                self.make_room_for(s, m.0);
+            }
             placed = true;
             // A placeholder still waiting (another monitor asked for meanwhile) moves
             // to where its monitor goes now, out of the way of this one.
             if let Some(a) = self.adding.filter(|a| a.id != Some(m.0)) {
-                let place = self.place_for_new(a.size, a.gaze);
+                let (place, _) = self.place_for_new(a.size, a.gaze);
                 if let Some(a) = &mut self.adding {
                     a.place = place;
                 }
@@ -1181,9 +1185,16 @@ impl World {
     }
 
     /// Where a new monitor of `size` pixels goes next to the others (it has no place
-    /// yet), near where the head looks (`gaze`).
-    fn place_for_new(&self, size: (u32, u32), gaze: Vec3) -> Placement {
-        layout::place_new(
+    /// yet), near where the head looks (`gaze`), in view; `true` when that is in the
+    /// main row and its neighbours there are to make room (see `layout::place_in_view`).
+    fn place_for_new(&self, size: (u32, u32), gaze: Vec3) -> (Placement, bool) {
+        self.place_in_view(size, gaze, false)
+    }
+
+    /// [`Self::place_for_new`]; `any`: any monitor may go into the main row, not only
+    /// one too wide for its circle.
+    fn place_in_view(&self, size: (u32, u32), gaze: Vec3, any: bool) -> (Placement, bool) {
+        layout::place_in_view(
             &self.placements,
             &self.sizes,
             size,
@@ -1192,7 +1203,22 @@ impl World {
             gaze,
             self.sent_rows(),
             self.radius,
+            any,
         )
+    }
+
+    /// The monitors beside `id` in its row that it covers are pushed aside along the
+    /// row, the PC's own displays as one piece (see `layout::make_room`).
+    fn make_room_for(&mut self, s: &Settings, id: DisplayKey) {
+        let group = self.placed_group();
+        layout::make_room(
+            &mut self.placements,
+            &self.sizes,
+            (self.center, self.tilt),
+            s.preset == Preset::Wall,
+            &group,
+            id,
+        );
     }
 
     /// A new window panel: in front of the user, a little closer than the monitors and
@@ -1530,7 +1556,7 @@ impl World {
             Some(Adding {
                 req,
                 pc: self.pc()?,
-                place: self.place_for_new(size, gaze),
+                place: self.place_for_new(size, gaze).0,
                 size,
                 id: None,
                 since: now,
@@ -1663,10 +1689,53 @@ impl World {
             return;
         }
         self.line_up_rows();
+        if self.bring_into_view(s) {
+            self.line_up_rows();
+        }
         self.rearranged = true;
         self.held = [None, None];
         self.save_layout();
         self.send_layout(now);
+    }
+
+    /// Every monitor alone in a row whose middle is out of view (right over the head,
+    /// say) placed again as a new one would be, near where it was around the user: by
+    /// another row, or into the main row with its neighbours making room (see
+    /// `layout::place_in_view`). The PC's own displays stay with their group. Whether
+    /// any moved.
+    fn bring_into_view(&mut self, s: &Settings) -> bool {
+        let group: Vec<DisplayKey> = self.physical().iter().map(|p| p.0).collect();
+        let monitors: Vec<(DisplayKey, u32, u32)> = self
+            .sizes
+            .iter()
+            .filter(|m| !group.contains(&m.0))
+            .copied()
+            .collect();
+        let at = (self.center, self.tilt);
+        let out = layout::alone_out_of_view(&self.placements, &monitors, at, self.sent_rows());
+        let mut moved = false;
+        for id in out {
+            let (Some(was), Some(&(_, w, h))) = (
+                self.placements.remove(&id),
+                monitors.iter().find(|m| m.0 == id),
+            ) else {
+                continue;
+            };
+            let gaze = layout::level_towards(&was, at);
+            let (p, push) = self.place_in_view((w, h), gaze, true);
+            // Only for a place in view: else it stays where the person left it.
+            if !push && !layout::in_view(&p, at) {
+                self.placements.insert(id, was);
+                continue;
+            }
+            info!("monitor {id} out of view, placed again");
+            self.placements.insert(id, p);
+            if push {
+                self.make_room_for(s, id);
+            }
+            moved = true;
+        }
+        moved
     }
 
     /// Every row of the desk arrangement lined up (see `layout::line_up`), the PC's own
@@ -1709,6 +1778,32 @@ impl World {
             for id in &others {
                 if let Some(p) = self.placements.get_mut(id) {
                     *p = layout::kept_to(*p, from, to);
+                }
+            }
+        }
+        // Where one of them then goes through a monitor lined up next to it (a wide one
+        // beside the group), the whole group goes down out of its way, as one piece.
+        let group: Vec<DisplayKey> = lid.into_iter().chain(others).collect();
+        let rest: Vec<(DisplayKey, u32, u32)> = self
+            .sizes
+            .iter()
+            .filter(|m| !group.contains(&m.0))
+            .copied()
+            .collect();
+        let rest = self.placed_heights(&rest);
+        let frame = layout::frame(self.center, self.tilt);
+        let down = group
+            .iter()
+            .filter_map(|id| {
+                let p = *self.placements.get(id)?;
+                let h = self.height_at(*id, &p)?;
+                Some(layout::clear_along_up(p, h, &rest, &frame, -1.0))
+            })
+            .fold(0.0f32, f32::max);
+        if down > 0.0 {
+            for id in &group {
+                if let Some(p) = self.placements.get_mut(id) {
+                    *p = layout::lifted(*p, &frame, -down);
                 }
             }
         }

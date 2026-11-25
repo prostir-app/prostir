@@ -5,7 +5,9 @@
 //! through random steps: a monitor dropped next to another with the magnet on, one or
 //! two monitors added (the second asked before the first one's picture comes), two
 //! swapped, a stream coming back at another resolution, "Line up", and
-//! the PC's own displays shown as one group.
+//! the PC's own displays shown as one group. With monitors far wider than the circle
+//! (5120x1440) among them, every such monitor added is also in view, and after "Line
+//! up" no monitor is alone in a row out of view.
 
 use super::*;
 
@@ -35,6 +37,9 @@ const SIZES: [(u32, u32); 5] = [
     (1440, 2560),
     (3840, 2160),
 ];
+
+/// Sizes with monitors far wider than the circle they stand on among them.
+const WIDE: [(u32, u32); 4] = [(2560, 1440), (5120, 1440), (1920, 1080), (3840, 2160)];
 
 /// How far a display may reach into another before it counts (a millimetre): edges
 /// that meet do not, and neither do the last bits of a float.
@@ -77,10 +82,17 @@ struct Trial {
     req: u32,
     /// The PC's own displays shown, with where each is on its desktop.
     pcs: Vec<(u32, (u32, u32), [i32; 4])>,
+    /// The sizes monitors added and refitted get.
+    sizes: &'static [(u32, u32)],
 }
 
 impl Trial {
     fn new(sizes: &[(u32, u32)]) -> Self {
+        Self::of(sizes, &SIZES)
+    }
+
+    /// Laid out with `sizes`, monitors added and refitted later getting one of `later`.
+    fn of(sizes: &[(u32, u32)], later: &'static [(u32, u32)]) -> Self {
         let mut sim = Sim::new(None);
         sim.connect(PC);
         let list: Vec<Display> = sizes
@@ -99,6 +111,7 @@ impl Trial {
             next: sizes.len() as u32 + 1,
             req: 0,
             pcs: Vec::new(),
+            sizes: later,
         }
     }
 
@@ -244,7 +257,9 @@ impl Trial {
         if room < count {
             return None;
         }
-        let sizes: Vec<(u32, u32)> = (0..count).map(|_| SIZES[rng.below(SIZES.len())]).collect();
+        let sizes: Vec<(u32, u32)> = (0..count)
+            .map(|_| self.sizes[rng.below(self.sizes.len())])
+            .collect();
         let mut made = Vec::new();
         for &size in &sizes {
             self.req += 1;
@@ -279,7 +294,7 @@ impl Trial {
     fn refit(&mut self, rng: &mut Lcg) -> Option<String> {
         let ms = self.monitors();
         let n = ms[rng.below(ms.len())];
-        let size = SIZES[rng.below(SIZES.len())];
+        let size = self.sizes[rng.below(self.sizes.len())];
         self.sim.world.stream_ended(k(n));
         for d in &mut self.list {
             if d.id.0 == n {
@@ -289,6 +304,33 @@ impl Trial {
         self.sim.list(self.list.clone());
         self.sim.stream(n, size);
         Some(format!("refit {n} to {size:?}"))
+    }
+
+    /// The monitors whose middle is out of view: every one, or with `alone` only those
+    /// alone in a row.
+    fn out_of_view(&self, alone: bool) -> Vec<u32> {
+        let world = &self.sim.world;
+        let at = (world.center, world.tilt);
+        let monitors: Vec<(DisplayKey, u32, u32)> = self
+            .monitors()
+            .into_iter()
+            .map(|n| {
+                let (w, h) = self.size_of(n);
+                (k(n), w, h)
+            })
+            .collect();
+        if alone {
+            return layout::alone_out_of_view(&world.placements, &monitors, at, world.sent_rows())
+                .iter()
+                .map(|k| k.id.0)
+                .collect();
+        }
+        monitors
+            .iter()
+            .map(|m| m.0)
+            .filter(|n| world.placement(*n).is_some_and(|p| !layout::in_view(p, at)))
+            .map(|n| n.id.0)
+            .collect()
     }
 
     fn line_up(&mut self) -> Option<String> {
@@ -335,16 +377,21 @@ enum Step {
 /// `cases` random desks of two to four monitors (the same every run), each through six
 /// random steps of `steps`: the rule holds after every one.
 fn holds_through(steps: &[Step], cases: usize) {
+    holds_through_with(&SIZES, steps, cases);
+}
+
+/// [`holds_through`] with monitors of `sizes`.
+fn holds_through_with(sizes: &'static [(u32, u32)], steps: &[Step], cases: usize) {
     let mut rng = Lcg(42);
     let mut failures = Vec::new();
     for case in 0..cases {
         let n = 2 + rng.below(3);
-        let sizes: Vec<(u32, u32)> = (0..n).map(|_| SIZES[rng.below(SIZES.len())]).collect();
-        let mut desk = Trial::new(&sizes);
+        let first: Vec<(u32, u32)> = (0..n).map(|_| sizes[rng.below(sizes.len())]).collect();
+        let mut desk = Trial::of(&first, sizes);
         let mut done = vec!["laid out".to_owned()];
         let at_first = desk.cutting();
         if !at_first.is_empty() {
-            failures.push(format!("case {case} {sizes:?}: laid out: cut {at_first:?}"));
+            failures.push(format!("case {case} {first:?}: laid out: cut {at_first:?}"));
             continue;
         }
         for _ in 0..6 {
@@ -363,7 +410,7 @@ fn holds_through(steps: &[Step], cases: usize) {
             let (cutting, unglued) = (desk.cutting(), desk.unglued());
             if !cutting.is_empty() || !unglued.is_empty() {
                 failures.push(format!(
-                    "case {case} {sizes:?}: {done:?}: cut {cutting:?}, glued apart {unglued:?}"
+                    "case {case} {first:?}: {done:?}: cut {cutting:?}, glued apart {unglued:?}"
                 ));
                 break;
             }
@@ -433,5 +480,73 @@ fn no_arrangement_step_cuts_one_display_into_another() {
             Step::PcDisplays,
         ],
         300,
+    );
+}
+
+/// Each step on its own with monitors far wider than the circle (5120x1440) among
+/// them: nothing cuts, and the PC's own displays stay glued.
+#[test]
+fn each_step_with_wide_monitors_cuts_into_nothing() {
+    for step in [
+        Step::Add,
+        Step::AddTwice,
+        Step::Swap,
+        Step::Refit,
+        Step::LineUp,
+        Step::PcDisplays,
+    ] {
+        holds_through_with(&WIDE, &[step], 300);
+    }
+}
+
+/// A 5120x1440 monitor added to two or three 1920x1080 and 2560x1440 ones (the PC's own
+/// displays shown under them on some desks): it goes into the row, in view, and so does
+/// every other; "Line up" leaves none out of view, and so does the preset. Nothing cuts
+/// and the PC's own displays stay glued all the while.
+#[test]
+fn a_wide_monitor_added_is_in_view() {
+    const SMALL: [(u32, u32); 2] = [(1920, 1080), (2560, 1440)];
+    let mut rng = Lcg(7);
+    let mut failures = Vec::new();
+    for case in 0..200 {
+        let n = 2 + rng.below(2);
+        let first: Vec<(u32, u32)> = (0..n).map(|_| SMALL[rng.below(SMALL.len())]).collect();
+        let mut desk = Trial::of(&first, &[(5120, 1440)]);
+        let mut done = vec!["laid out".to_owned()];
+        if rng.below(3) == 0 {
+            done.extend(desk.show_pc_displays(&mut rng));
+            desk.sim.after(1000);
+        }
+        let mut check = |desk: &mut Trial, step: Option<String>, alone: bool| {
+            done.extend(step);
+            desk.sim.after(1000);
+            let (cutting, unglued, unseen) =
+                (desk.cutting(), desk.unglued(), desk.out_of_view(alone));
+            let fine = cutting.is_empty() && unglued.is_empty() && unseen.is_empty();
+            if !fine {
+                failures.push(format!(
+                    "case {case} {first:?}: {done:?}: cut {cutting:?}, glued apart {unglued:?}, \
+                     out of view {unseen:?}"
+                ));
+            }
+            fine
+        };
+        let step = desk.add(&mut rng, false);
+        if !check(&mut desk, step, false) {
+            continue;
+        }
+        let step = desk.line_up();
+        if !check(&mut desk, step, true) {
+            continue;
+        }
+        let sim = &mut desk.sim;
+        sim.world.preset_chosen(&sim.s, sim.now);
+        check(&mut desk, Some("preset".into()), false);
+    }
+    assert!(
+        failures.is_empty(),
+        "{} desks:\n{}",
+        failures.len(),
+        failures.join("\n")
     );
 }

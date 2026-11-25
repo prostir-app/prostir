@@ -138,7 +138,7 @@ fn presets_never_overlap() {
             }
         }
         // The circle they stand on is the preset's radius.
-        let radius = preset_radius(Preset::Arc, &mons);
+        let radius = preset_radius(Preset::Arc, &mons, primary);
         for (&(_, w, _), p) in mons.iter().map(|m| (m, l[&m.0])) {
             let half = w as f32 * METRES_PER_PIXEL / 2.0;
             let edge =
@@ -644,7 +644,7 @@ fn six_overlapping_monitors_make_no_staircase() {
     same_on_the_pc(&desktop, &m, Some(2));
     let fresh = arrange(Preset::Arc, &m, Some(2), None, None);
     assert!(!covered(&fresh, &m));
-    assert!(preset_radius(Preset::Arc, &m) > RADIUS);
+    assert!(preset_radius(Preset::Arc, &m, Some(2)) > RADIUS);
     let desktop = desktop_of(&fresh, &m, Preset::Arc, Some(2));
     assert_eq!(desktop.rows.len(), 2, "{:?}", desktop.rows);
     rows_on_a_line(&desktop);
@@ -2385,4 +2385,110 @@ fn a_monitor_grown_pushes_past_the_pcs_displays() {
         let gap = of(b).left - of(a).right;
         assert!(gap.abs() < 1e-4, "{a} and {b} meet: {gap}");
     }
+}
+
+/// Whether two of `m` placed in `p` go through each other in the room.
+fn cut_through(p: &HashMap<u32, Placement>, m: &[(u32, u32, u32)]) -> bool {
+    let all = placed(p, m);
+    all.iter().enumerate().any(|(i, a)| {
+        all[i + 1..]
+            .iter()
+            .any(|b| cuts(&a.placement, a.height(), &b.placement, b.height()))
+    })
+}
+
+/// The owner's report of 2026-11-25: a 5120x1440 monitor added next to two or three
+/// others went right over (or under) the head, and neither "Line up" nor the preset
+/// brought it back. Now, on an arc (flat, and curved with the laptop's panel under the
+/// primary) it goes into the row, which makes room, the laptop's panel out of its way;
+/// on a wall at the end of the row. Every monitor is then in view, nothing goes through
+/// anything, and "Line up" and the preset keep it so.
+#[test]
+fn a_wide_monitor_goes_into_the_row_in_view() {
+    let center = (Vec3::ZERO, 0.0);
+    let wide = (9, 5120, 1440);
+    let lid = (100, 2880, 1800);
+    for (n, preset, curve) in [
+        (2u32, Preset::Arc, None),
+        (3, Preset::Arc, None),
+        (2, Preset::Arc, Some(2.0)),
+        (3, Preset::Arc, Some(2.0)),
+        (2, Preset::Wall, None),
+        (3, Preset::Wall, None),
+    ] {
+        let case = format!("{n} on {preset:?}, curve {curve:?}");
+        let mut m: Vec<(u32, u32, u32)> = (0..n).map(|i| (i, 2560, 1440)).collect();
+        let mirror = curve.map(|_| lid);
+        let mut p = arrange(preset, &m, Some(0), mirror, curve);
+        let mut all = m.clone();
+        all.extend(mirror);
+        let rows = desktop_of(&p, &all, preset, Some(0)).rows;
+        let radius = preset_radius(preset, &m, Some(0));
+        let (at, push) = place_in_view(
+            &p,
+            &all,
+            (wide.1, wide.2),
+            center,
+            tilt(preset),
+            -Vec3::Z,
+            &rows,
+            radius,
+            false,
+        );
+        assert_eq!(push, preset == Preset::Arc, "{case}: into the row");
+        p.insert(wide.0, at);
+        m.push(wide);
+        all.push(wide);
+        if push {
+            let group: Vec<u32> = mirror.iter().map(|l| l.0).collect();
+            make_room(&mut p, &all, (center, 0.0), false, &group, wide.0);
+        }
+        let seen = |p: &HashMap<u32, Placement>, what: &str| {
+            assert!(
+                !cut_through(p, &all),
+                "{case}, {what}: nothing goes through"
+            );
+            for (id, ..) in &m {
+                assert!(
+                    in_view(&p[id], (center, 0.0)),
+                    "{case}, {what}: {id} in view"
+                );
+            }
+            let rows = desktop_of(p, &m, preset, Some(0)).rows;
+            assert_eq!(rows.len(), 1, "{case}, {what}: one row {rows:?}");
+        };
+        seen(&p, "added");
+        let rows = desktop_of(&p, &all, preset, Some(0)).rows;
+        let lined = line_up(
+            &p,
+            &all,
+            center,
+            tilt(preset),
+            Some(0),
+            &rows,
+            mirror.map(|l| l.0),
+        );
+        seen(&lined, "lined up");
+        assert!(
+            alone_out_of_view(&lined, &m, (center, 0.0), &rows).is_empty(),
+            "{case}"
+        );
+        let laid = arrange(preset, &m, Some(0), mirror, curve);
+        seen(&laid, "the preset");
+        assert!(!covered(&laid, &m), "{case}: the preset covers nothing");
+    }
+}
+
+/// A row of one monitor right over the head (as a wide monitor went before, the rows
+/// kept with it): it is out of view, and "Line up" finds it.
+#[test]
+fn a_monitor_over_the_head_is_out_of_view() {
+    let center = (Vec3::ZERO, 0.0);
+    let m = [(0, 2560, 1440), (1, 2560, 1440), (9, 5120, 1440)];
+    let mut p = arrange(Preset::Arc, &m[..2], Some(0), None, None);
+    p.insert(9, circle::on_cylinder(0.0, 0.67, 2.5, 1.25 * 1.001));
+    let rows = desktop_of(&p, &m, Preset::Arc, Some(0)).rows;
+    assert_eq!(rows, vec![vec![9], vec![0, 1]]);
+    assert_eq!(alone_out_of_view(&p, &m, (center, 0.0), &rows), [9]);
+    assert!(in_view(&p[&0], (center, 0.0)));
 }
