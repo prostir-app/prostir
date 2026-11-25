@@ -7,7 +7,8 @@
 //! swapped, a stream coming back at another resolution, "Line up", and
 //! the PC's own displays shown as one group. With monitors far wider than the circle
 //! (5120x1440) among them, every such monitor added is also in view, and after "Line
-//! up" no monitor is alone in a row out of view.
+//! up" no monitor is alone in a row out of view; after a preset nothing is out of view,
+//! and after "Line up" then neither.
 
 use super::*;
 
@@ -542,6 +543,53 @@ fn a_wide_monitor_added_is_in_view() {
         let sim = &mut desk.sim;
         sim.world.preset_chosen(&sim.s, sim.now);
         check(&mut desk, Some("preset".into()), false);
+    }
+    assert!(
+        failures.is_empty(),
+        "{} desks:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Desks of one to four monitors of common sizes (the same every run), the laptop's
+/// 2880x1800 lid among them, laid out by each preset: every monitor is in view, and so
+/// after "Line up" then, and nothing cuts.
+#[test]
+fn presets_and_line_up_leave_nothing_out_of_view() {
+    const COMMON: [(u32, u32); 7] = [
+        (1920, 1080),
+        (2560, 1440),
+        (3440, 1440),
+        (3840, 2160),
+        (5120, 1440),
+        (1440, 2560),
+        (2880, 1800),
+    ];
+    let mut rng = Lcg(11);
+    let mut failures = Vec::new();
+    for preset in [Preset::Arc, Preset::Overhead, Preset::Wall] {
+        for case in 0..150 {
+            let n = 1 + rng.below(4);
+            let first: Vec<(u32, u32)> = (0..n).map(|_| COMMON[rng.below(COMMON.len())]).collect();
+            let mut desk = Trial::of(&first, &COMMON);
+            let mut check = |desk: &mut Trial, what: &str| {
+                desk.sim.after(1000);
+                let (cutting, unseen) = (desk.cutting(), desk.out_of_view(false));
+                if !cutting.is_empty() || !unseen.is_empty() {
+                    failures.push(format!(
+                        "{preset:?} case {case} {first:?}: {what}: cut {cutting:?}, out of view \
+                         {unseen:?}"
+                    ));
+                }
+            };
+            let sim = &mut desk.sim;
+            sim.s.preset = preset;
+            sim.world.preset_chosen(&sim.s, sim.now);
+            check(&mut desk, "preset");
+            desk.line_up();
+            check(&mut desk, "line up");
+        }
     }
     assert!(
         failures.is_empty(),

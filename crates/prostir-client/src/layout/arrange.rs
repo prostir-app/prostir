@@ -350,6 +350,37 @@ pub fn place_in_view<K: Key>(
     )
 }
 
+/// Where the placeholder of a new monitor of `size` pixels stands while its picture is
+/// on the way, when [`place_in_view`] puts it into the main row (its neighbours make
+/// room there only once it comes): where it covers nothing and goes through nothing.
+/// Over or under a row on a wider circle (see [`FAR_ONE`]) where that is in view, else
+/// where [`place_new`] puts it. The arguments are those of [`place_in_view`].
+#[allow(clippy::too_many_arguments)]
+pub fn place_waiting<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    size: (u32, u32),
+    center: (Vec3, f32),
+    tilt: f32,
+    gaze: Vec3,
+    previous: &[Vec<K>],
+    radius: f32,
+) -> Placement {
+    let frame = frame(center, tilt);
+    let all = placed(placements, monitors);
+    let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
+    let px = prostir_layout::space::PixelSize::new(size.0, size.1);
+    let limits = Limits {
+        radius,
+        ..Limits::default()
+    };
+    let far = place::place_within(&all, &frame, gaze, px, Some(&rows), &limits, FAR_ONE);
+    if in_view(&far, (center, tilt)) {
+        return far;
+    }
+    place::place_new(&all, &frame, gaze, px, Some(&rows), &limits)
+}
+
 /// The most a monitor too wide for every row's circle takes around the user, over or
 /// under a row, where the row has no room for it (90°): further away than where it takes
 /// `circle::MAX_ONE`, and so seen nearer eye level.
@@ -384,6 +415,27 @@ pub fn alone_out_of_view<K: Key>(
 /// `prostir_layout::space::in_view`).
 pub fn in_view(p: &Placement, (center, tilt): ((Vec3, f32), f32)) -> bool {
     prostir_layout::space::in_view(&frame(center, tilt).unplace(*p))
+}
+
+/// `p` carried straight away from the up axis through the eye of `frame`, at the same
+/// height and turned the same way, as if the circle it stands on were `k` times as
+/// large: its vertical edges `k` times as far from the axis (a row of monitors of any
+/// widths on one circle stays on one circle). Where it was around the user, seen nearer
+/// eye level and smaller. On a wall (`wall`) its middle goes `k` times as far, so the
+/// wall stays one plane.
+pub fn further(p: Placement, frame: &Frame, k: f32, wall: bool) -> Placement {
+    let mut local = frame.unplace(p);
+    let along = Vec3::new(local.position.x, 0.0, local.position.z).length();
+    let scale = if wall || along < 1e-6 {
+        k
+    } else {
+        let half = local.width / 2.0;
+        let edge = (along * along + half * half).sqrt() * k;
+        (edge * edge - half * half).max(0.0).sqrt() / along
+    };
+    local.position.x *= scale;
+    local.position.z *= scale;
+    frame.place(local)
 }
 
 /// The direction at eye level from `center` (tilted up by `tilt`) towards where `p`
@@ -421,6 +473,16 @@ pub fn covers_any<K: Key>(
             let oh = m.height();
             covers(&o.corners(oh), &corners, SLACK) || cuts(&o, oh, &mine, height)
         })
+}
+
+/// Whether two of the placed ones of `monitors` go through each other in the room.
+pub fn cut_any<K: Key>(placements: &HashMap<K, Placement>, monitors: &[(K, u32, u32)]) -> bool {
+    let all = placed(placements, monitors);
+    all.iter().enumerate().any(|(i, a)| {
+        all[i + 1..]
+            .iter()
+            .any(|b| cuts(&a.placement, a.height(), &b.placement, b.height()))
+    })
 }
 
 /// `p` for a stream now `now` pixels in size instead of `was`: the same size of a

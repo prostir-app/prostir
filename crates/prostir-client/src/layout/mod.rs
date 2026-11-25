@@ -22,9 +22,9 @@ mod stick;
 mod tests;
 
 pub use arrange::{
-    Physical, ahead, alone_out_of_view, arrange, carried, clear_along_up, covers_any, edge_to,
-    facing_yaw, frame, in_view, kept_to, left_of, level_towards, lifted, line_up, make_room,
-    place_in_view, place_new, preset_radius, refit, spread, tilt,
+    Physical, ahead, alone_out_of_view, arrange, carried, clear_along_up, covers_any, cut_any,
+    edge_to, facing_yaw, frame, further, in_view, kept_to, left_of, level_towards, lifted, line_up,
+    make_room, place_in_view, place_new, place_waiting, preset_radius, refit, spread, tilt,
 };
 pub use cinema::{cinema, cinema_choice};
 pub use desktop::{Desktop, DesktopMemo};
@@ -36,7 +36,7 @@ pub use saved::{Arrangement, Desk, PixelSize, parse_keyboard, write_keyboard};
 pub(crate) use saved::{parse_place, parse_radius, parse_tilt, placed_well, upright, write_place};
 pub use stick::{Stick, StickScratch, stick, stick_on_wall};
 
-pub use prostir_layout::circle::{OVERHEAD_PITCH, RADIUS};
+pub use prostir_layout::circle::{OVERHEAD_PITCH, RADIUS, VIEW_RADIUS};
 
 /// What the arrangement's rules take a monitor's number to be: a display of a PC in
 /// the headset ([`crate::ids::DisplayKey`]), any number in the tests. The rules never

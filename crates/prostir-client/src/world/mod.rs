@@ -142,6 +142,9 @@ pub struct Adding {
     pub place: Placement,
     pub size: (u32, u32),
     pub id: Option<DisplayKey>,
+    /// Its monitor goes into the main row, whose monitors make room only once it is
+    /// there: `place` is only where it waits (see `World::waiting_place`).
+    into_row: bool,
     since: Instant,
     /// Where the head looked when it was asked for: its place is near there.
     gaze: Vec3,
@@ -1142,6 +1145,7 @@ impl World {
             let (at, push) = match &self.adding {
                 Some(a)
                     if a.id == Some(m.0)
+                        && !a.into_row
                         && !layout::covers_any(
                             &self.placements,
                             &self.sizes,
@@ -1165,9 +1169,10 @@ impl World {
             // A placeholder still waiting (another monitor asked for meanwhile) moves
             // to where its monitor goes now, out of the way of this one.
             if let Some(a) = self.adding.filter(|a| a.id != Some(m.0)) {
-                let (place, _) = self.place_for_new(a.size, a.gaze);
+                let (place, into_row) = self.waiting_place(a.size, a.gaze);
                 if let Some(a) = &mut self.adding {
                     a.place = place;
+                    a.into_row = into_row;
                 }
             }
         }
@@ -1189,6 +1194,28 @@ impl World {
     /// main row and its neighbours there are to make room (see `layout::place_in_view`).
     fn place_for_new(&self, size: (u32, u32), gaze: Vec3) -> (Placement, bool) {
         self.place_in_view(size, gaze, false)
+    }
+
+    /// Where the placeholder of a new monitor of `size` pixels waits for its picture:
+    /// where the monitor goes (see [`Self::place_for_new`]); but where that is in the
+    /// main row, whose monitors make room only once it comes, where it covers nothing
+    /// (see `layout::place_waiting`), and then `true`.
+    fn waiting_place(&self, size: (u32, u32), gaze: Vec3) -> (Placement, bool) {
+        let (place, into_row) = self.place_for_new(size, gaze);
+        if !into_row {
+            return (place, false);
+        }
+        let waits = layout::place_waiting(
+            &self.placements,
+            &self.sizes,
+            size,
+            self.center,
+            self.tilt,
+            gaze,
+            self.sent_rows(),
+            self.radius,
+        );
+        (waits, true)
     }
 
     /// [`Self::place_for_new`]; `any`: any monitor may go into the main row, not only
@@ -1544,7 +1571,8 @@ impl World {
     /// Monitor `size` was asked for with request `req` (none: not asked): shown at once
     /// as a placeholder where it will appear, near where the head looks (`gaze`), and
     /// the monitor takes that place once its picture comes (not in cinema, where new
-    /// monitors are not placed).
+    /// monitors are not placed). One that goes into the main row, whose monitors make
+    /// room for it only then, waits where it covers none of them.
     pub fn adding_started(
         &mut self,
         req: Option<ReqId>,
@@ -1553,12 +1581,14 @@ impl World {
         now: Instant,
     ) {
         self.adding = req.filter(|_| !self.cinema).and_then(|req| {
+            let (place, into_row) = self.waiting_place(size, gaze);
             Some(Adding {
                 req,
                 pc: self.pc()?,
-                place: self.place_for_new(size, gaze).0,
+                place,
                 size,
                 id: None,
+                into_row,
                 since: now,
                 gaze,
             })
@@ -1681,8 +1711,10 @@ impl World {
 
     /// The A button: lines up what the user arranged by hand, row by row (see
     /// `layout::line_up`), instead of replacing it with the preset: every row keeps its
-    /// place and the way it stands, tilted back or overhead too. Cinema rebuilds its
-    /// own view. What the hands held is let go.
+    /// place and the way it stands, tilted back or overhead too; but a monitor out of
+    /// view is brought into view (see [`Self::bring_into_view`] and
+    /// [`Self::further_into_view`]). Cinema rebuilds its own view. What the hands held
+    /// is let go.
     pub fn tidy_up(&mut self, s: &Settings, now: Instant) {
         if self.cinema || self.placements.is_empty() {
             self.arrange_all(s, now);
@@ -1692,6 +1724,7 @@ impl World {
         if self.bring_into_view(s) {
             self.line_up_rows();
         }
+        self.further_into_view(s);
         self.rearranged = true;
         self.held = [None, None];
         self.save_layout();
@@ -1736,6 +1769,80 @@ impl World {
             moved = true;
         }
         moved
+    }
+
+    /// A monitor still out of view (rows of ordinary monitors stacked high, say): the
+    /// whole arrangement a little further away, a centimetre of its radius at a time,
+    /// as a preset takes it (see `prostir_layout::circle`), each monitor where it was
+    /// around the user and so seen nearer eye level (see `layout::further`), and lined
+    /// up again; the PC's own displays carried as one piece, window panels left where
+    /// they are. The first such place where every monitor is in view and nothing goes
+    /// through anything, no further than `layout::VIEW_RADIUS`; with none, everything
+    /// stays as it was.
+    fn further_into_view(&mut self, s: &Settings) {
+        /// How much further at a time (a centimetre).
+        const STEP: f32 = 0.01;
+        /// How many times it is lined up again at most.
+        const TRIES: u32 = 10;
+        let group = self.placed_group();
+        let at = (self.center, self.tilt);
+        let laid: Vec<(DisplayKey, u32, u32)> = self
+            .sizes
+            .iter()
+            .filter(|m| self.placements.contains_key(&m.0))
+            .copied()
+            .collect();
+        let unseen = |placements: &HashMap<DisplayKey, Placement>| {
+            laid.iter().filter(|m| !group.contains(&m.0)).any(|m| {
+                placements
+                    .get(&m.0)
+                    .is_some_and(|p| !layout::in_view(p, at))
+            })
+        };
+        if !unseen(&self.placements) || self.radius <= 0.0 {
+            return;
+        }
+        let frame = layout::frame(self.center, self.tilt);
+        let wall = s.preset == Preset::Wall;
+        let (was, was_radius) = (self.placements.clone(), self.radius);
+        let lead = group.first().and_then(|id| was.get(id)).copied();
+        // Lined up again only from where it is all in view as carried, and a few
+        // centimetres on: further, the rows lined up go through each other the same.
+        let mut tries = 0;
+        for step in 1u32.. {
+            let radius = was_radius + step as f32 * STEP;
+            if radius > layout::VIEW_RADIUS || tries == TRIES {
+                break;
+            }
+            let k = radius / was_radius;
+            let carry = lead.map_or(Vec3::ZERO, |p| {
+                layout::further(p, &frame, k, wall).position - p.position
+            });
+            for m in &laid {
+                let (Some(from), Some(to)) = (was.get(&m.0), self.placements.get_mut(&m.0)) else {
+                    continue;
+                };
+                *to = if group.contains(&m.0) {
+                    Placement {
+                        position: from.position + carry,
+                        ..*from
+                    }
+                } else {
+                    layout::further(*from, &frame, k, wall)
+                };
+            }
+            if tries == 0 && unseen(&self.placements) {
+                continue;
+            }
+            tries += 1;
+            self.line_up_rows();
+            if !unseen(&self.placements) && !layout::cut_any(&self.placements, &laid) {
+                info!("out of view: the arrangement taken {radius:.2} m away");
+                self.radius = radius;
+                return;
+            }
+        }
+        self.placements = was;
     }
 
     /// Every row of the desk arrangement lined up (see `layout::line_up`), the PC's own
