@@ -577,7 +577,8 @@ const fn cursor_meta_size(w: usize, h: usize) -> i32 {
 pub const DAMAGE_RECTS: usize = 16;
 
 /// What the frames of a chosen format are to come in, as `pipewiresrc` asked
-/// (`Buffers`: 16 buffers, GPU buffers only with a modifier, else also shared or
+/// (`Buffers`: 16 buffers, and at least 4, so the frames the encoder holds never leave
+/// KWin without one; GPU buffers only with a modifier, else also shared or
 /// plain memory) with the metadata it asked for (`Meta`: header, crop, transform, the
 /// pointer up to 384x384), and the changed parts of the picture.
 pub fn buffer_params(modifier: bool) -> Vec<Vec<u8>> {
@@ -596,7 +597,7 @@ pub fn buffer_params(modifier: bool) -> Vec<Vec<u8>> {
         type_: ss::SPA_TYPE_OBJECT_ParamBuffers,
         id: ss::SPA_PARAM_Buffers,
         properties: vec![
-            prop(ss::SPA_PARAM_BUFFERS_buffers, range(16, 1, i32::MAX)),
+            prop(ss::SPA_PARAM_BUFFERS_buffers, range(16, 4, i32::MAX)),
             prop(ss::SPA_PARAM_BUFFERS_blocks, range(0, 1, i32::MAX)),
             prop(ss::SPA_PARAM_BUFFERS_size, range(0, 1, i32::MAX)),
             prop(ss::SPA_PARAM_BUFFERS_stride, range(0, 0, i32::MAX)),

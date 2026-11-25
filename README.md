@@ -364,6 +364,16 @@ sudo firewall-cmd --add-port=47830/tcp --add-port=47831/udp --permanent \
 
 ### From source
 
+Building the PC app needs Rust (see `rust-toolchain.toml`), pkg-config, a C
+compiler, and the development files of GStreamer (`-base` too), GBM and PipeWire, with
+libclang (the PipeWire bindings are generated from its headers):
+
+| Distribution | Build packages |
+|---|---|
+| Debian, Ubuntu | `pkg-config clang libclang-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgbm-dev libpipewire-0.3-dev` |
+| Fedora | `pkgconf-pkg-config clang clang-devel gstreamer1-devel gstreamer1-plugins-base-devel mesa-libgbm-devel pipewire-devel` |
+| Arch | `base-devel clang gstreamer gst-plugins-base-libs mesa pipewire` |
+
 ```sh
 # PC
 cargo build --release -p prostir

@@ -58,19 +58,21 @@ const FIRST_WORD: Duration = Duration::from_secs(3);
 /// 0.3.65) do not name it, and a PipeWire that does not know it leaves it be.
 const ASYNC: StreamFlags = StreamFlags::from_bits_retain(1 << 10);
 
-/// What the feed's thread is told.
+/// How long dropping a feed waits for its thread to end (a driver that hangs in a
+/// call holds it): then it is left behind, said once in the log.
+const STOP_WAIT: Duration = Duration::from_secs(2);
+
+/// What the feed's thread is told, besides frames let go (which wake it through the
+/// same file, see `frames.rs`).
 enum Say {
     /// The encoder's pause changed, or a picture is asked again.
     Look,
-    /// GStreamer let go of the frame of the stream's buffer at this address (with
-    /// its id).
-    Back(usize, u64),
     Stop,
 }
 
-/// What other threads (and the feed's own) tell the feed's thread: a queue, and an
-/// eventfd that wakes PipeWire's loop. Not PipeWire's channel: it calls back with its
-/// lock held, so a frame let go there (a picture replaced) could never say so.
+/// What other threads tell the feed's thread: a queue, and an eventfd that wakes
+/// PipeWire's loop. Not PipeWire's channel: it calls back with its lock held, so a
+/// frame let go there (a picture replaced) could never say so.
 #[derive(Clone)]
 struct Mail {
     queue: mpsc::Sender<Say>,
@@ -92,9 +94,7 @@ impl Mail {
 
     fn send(&self, say: Say) {
         if self.queue.send(say).is_ok() {
-            let one = 1u64;
-            // SAFETY: an eventfd takes 8 bytes, which live through the call.
-            unsafe { libc::write(self.wake.as_raw_fd(), (&raw const one).cast(), 8) };
+            frames::wake(&self.wake);
         }
     }
 
@@ -111,7 +111,10 @@ pub struct Feed {
     say: Mail,
     pause: Arc<Pause>,
     seen: Sightings,
+    label: String,
     thread: Option<JoinHandle<()>>,
+    /// Says when the thread ended.
+    ended: mpsc::Receiver<()>,
 }
 
 impl Feed {
@@ -128,6 +131,7 @@ impl Feed {
     ) -> Result<Self> {
         let (say, hear) = Mail::new()?;
         let (started, first) = mpsc::channel();
+        let (end, ended) = mpsc::channel();
         let seen = Sightings::default();
         {
             let say = say.clone();
@@ -146,13 +150,18 @@ impl Feed {
             };
             std::thread::Builder::new()
                 .name(format!("pw-{label}"))
-                .spawn(move || run(setup, hear))?
+                .spawn(move || {
+                    run(setup, hear);
+                    let _ = end.send(());
+                })?
         };
         let feed = Self {
             say,
             pause,
             seen,
+            label: label.to_owned(),
             thread: Some(thread),
+            ended,
         };
         match first.recv_timeout(FIRST_WORD) {
             Ok(Ok(())) => Ok(feed),
@@ -178,8 +187,19 @@ impl Drop for Feed {
     fn drop(&mut self) {
         self.pause.tell(None);
         self.say.send(Say::Stop);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        match self.ended.recv_timeout(STOP_WAIT) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = thread.join();
+            }
+            // Left behind: its stream and buffers go when it ends.
+            Err(mpsc::RecvTimeoutError::Timeout) => warn!(
+                "{}: the stream's thread did not stop in {} s; left behind",
+                self.label,
+                STOP_WAIT.as_secs()
+            ),
         }
     }
 }
@@ -201,7 +221,6 @@ struct Setup {
 struct State {
     label: String,
     appsrc: gst_app::AppSrc,
-    say: Mail,
     seen: Sightings,
     /// Told once whether the stream started; none after.
     started: Option<mpsc::Sender<Result<(), String>>>,
@@ -304,7 +323,9 @@ fn layout_of(caps: &gst::CapsRef) -> Option<gst_video::VideoInfo> {
 /// KWin chose a format (none: the one it had is gone).
 fn format_chosen(stream: &Stream, state: &Shared, format: Option<&Pod>) {
     let Some(format) = format else {
-        state.borrow_mut().layout = None;
+        let mut st = state.borrow_mut();
+        st.layout = None;
+        st.pictures.forget();
         return;
     };
     let chosen = {
@@ -322,6 +343,10 @@ fn format_chosen(stream: &Stream, state: &Shared, format: Option<&Pod>) {
     let started = {
         let mut st = state.borrow_mut();
         debug!("{}: KWin sends {caps}", st.label);
+        // A picture of the format before never goes again under these caps.
+        if st.layout.as_ref() != Some(&layout) {
+            st.pictures.forget();
+        }
         st.appsrc.set_caps(Some(&caps));
         st.layout = Some(layout);
         st.started.take()
@@ -348,11 +373,11 @@ fn frames_came(stream: &Stream, state: &Shared) {
             break;
         }
         // SAFETY: a buffer just dequeued, valid until queued back.
-        let (metas, picture) = unsafe { (meta::metas((*b).buffer), frames::has_picture(b)) };
-        let cursor = metas.cursor.and_then(meta::read_cursor);
-        let damage = picture.then(|| metas.damage.map_or(meta::Damage::Whole, meta::read_damage));
+        let metas = unsafe { meta::metas((*b).buffer) };
+        // SAFETY: as above.
+        let picture = unsafe { frames::has_picture(b, metas.header) };
         let crop = metas.crop.and_then(frames::read_crop);
-        seen.saw(cursor, damage);
+        seen.saw_frame(metas.cursor, metas.damage, picture);
         if picture && let Some((older, _)) = newest.replace((b, crop)) {
             // SAFETY: dequeued above, not handed to anyone.
             unsafe { stream.queue_raw_buffer(older) };
@@ -369,14 +394,9 @@ fn frames_came(stream: &Stream, state: &Shared) {
         let st = &mut *st;
         match &st.layout {
             Some(layout) if !st.paused && !st.over => {
-                let say = st.say.clone();
                 // SAFETY: dequeued, and queued back only once the frame is let go (or
                 // when PipeWire removes it).
-                let frame = unsafe {
-                    st.slots.frame(b, layout, crop, move |at, id| {
-                        say.send(Say::Back(at, id));
-                    })
-                };
+                let frame = unsafe { st.slots.frame(b, layout, crop) };
                 if let Some(f) = &frame {
                     st.pictures.push(f.clone(), Instant::now());
                 }
@@ -406,15 +426,23 @@ fn look(stream: &Stream, state: &Shared, pause: &Pause, node: u32) {
         }
         return;
     }
+    // Resumed: the stream starts over, so KWin sends the picture it has now (what
+    // was queued before the pause is flushed by the encoder, see `Encoder::set_paused`).
+    // A fresh picture asked of a running stream (a still screen) is the last one
+    // again; only with none is the stream started over for it.
     let restart = {
         let mut st = state.borrow_mut();
-        let restart = st.paused || fresh;
+        let restart = if st.paused {
+            true
+        } else if (fresh || again) && !st.over && st.pictures.again(Instant::now()) {
+            false
+        } else {
+            fresh
+        };
         if restart {
             st.paused = false;
             st.pictures.forget();
             st.leaving = true;
-        } else if again && !st.over {
-            st.pictures.again(Instant::now());
         }
         restart
     };
@@ -436,7 +464,7 @@ fn run(setup: Setup, hear: mpsc::Receiver<Say>) {
         appsrc,
         pause,
         every,
-        say,
+        say: mail,
         started,
         seen,
     } = setup;
@@ -470,12 +498,11 @@ fn run(setup: Setup, hear: mpsc::Receiver<Say>) {
         label: label.clone(),
         pictures: Pictures::new(appsrc.clone(), every),
         appsrc,
-        say,
         seen,
         started: Some(started),
         possible: gst::Caps::new_empty(),
         layout: None,
-        slots: Slots::default(),
+        slots: Slots::new(mail.wake.clone()),
         paused: false,
         leaving: false,
         over: false,
@@ -532,7 +559,6 @@ fn run(setup: Setup, hear: mpsc::Receiver<Say>) {
             .register()
     };
     let quit = Rc::new(std::cell::Cell::new(false));
-    let mail = state.borrow().say.clone();
     let _heard = {
         let (stream, state, quit) = (stream.clone(), state.clone(), quit.clone());
         let wake = mail.wake.as_raw_fd();
@@ -542,18 +568,16 @@ fn run(setup: Setup, hear: mpsc::Receiver<Say>) {
                 while let Ok(said) = hear.try_recv() {
                     match said {
                         Say::Look => look(&stream, &state, &pause, node),
-                        Say::Back(at, id) => {
-                            if state.borrow_mut().slots.returned(at, id) {
-                                // SAFETY: a buffer of this stream that PipeWire has
-                                // not removed (`returned` checked), lent out until now.
-                                unsafe {
-                                    stream.queue_raw_buffer(at as *mut pw::sys::pw_buffer);
-                                };
-                            }
-                        }
                         Say::Stop => quit.set(true),
                     }
                 }
+                // Frames GStreamer let go: their buffers go back to KWin.
+                state.borrow_mut().slots.take_back(|b| {
+                    // SAFETY: a buffer of this stream that PipeWire has not removed
+                    // (removing it takes it out of the slots), lent out until now;
+                    // queueing it calls nothing back.
+                    unsafe { stream.queue_raw_buffer(b) };
+                });
             })
     };
     if let Err(why) = connect(&stream, &state, node) {

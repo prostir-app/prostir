@@ -1195,6 +1195,15 @@ impl Encoder {
         } else {
             gst::State::Playing
         };
+        if !paused && self.paused.is_on() && !self.restart_on_resume {
+            // Frames a capture pushed just before the pause wait in the queues: let go,
+            // so the headset coming back sees no old picture before the capture's new
+            // one (which the keyframe asked for below comes with).
+            if let Some(src) = self.pipeline.by_name("src") {
+                src.send_event(gst::event::FlushStart::new());
+                src.send_event(gst::event::FlushStop::new(false));
+            }
+        }
         self.paused.set(paused);
         if !paused {
             self.resumed.store(true, Ordering::Relaxed);
@@ -1635,6 +1644,89 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(*told.lock().unwrap(), 0, "not told as the encoder's");
+    }
+
+    /// Resuming lets go of what waited from before the pause (see
+    /// `Encoder::set_paused`) and keeps the keyframe asked for: the first frame the
+    /// capture pushes then comes out, a keyframe, and nothing from before it.
+    #[test]
+    fn resuming_lets_old_frames_go_and_the_next_is_a_keyframe() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        use super::{Backend, Encoder, EncoderConfig, EncoderEvent, GpuDevices, Input};
+        gst::init().unwrap();
+        if gst::ElementFactory::find("x264enc").is_none() {
+            eprintln!("skipped: no x264enc");
+            return;
+        }
+        let input = Input {
+            source: "appsrc name=src is-live=true format=time do-timestamp=true \
+                     max-buffers=2 leaky-type=downstream \
+                     caps=video/x-raw,format=I420,width=64,height=64,framerate=30/1"
+                .into(),
+            label: "test".into(),
+            frame_rate: None,
+            live: true,
+        };
+        let cfg = EncoderConfig {
+            codec: prostir_proto::Codec::H264,
+            bitrate_kbps: 1000,
+            large_kbps: None,
+            backend: Backend::X264,
+            sharp: Some(false),
+            rows_up: false,
+        };
+        let frames = Arc::new(Mutex::new(0));
+        let keyframes = Arc::new(Mutex::new(Vec::new()));
+        let (kept, keys) = (frames.clone(), keyframes.clone());
+        let encoder = Encoder::start(&input, &cfg, None, &GpuDevices::default(), move |e| {
+            if let EncoderEvent::Frame { keyframe, .. } = e {
+                *kept.lock().unwrap() += 1;
+                keys.lock().unwrap().push(keyframe);
+            }
+            false
+        })
+        .unwrap();
+        let src = encoder
+            .pipeline
+            .by_name("src")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSrc>()
+            .unwrap();
+        let push = || {
+            let _ = src.push_buffer(gst::Buffer::from_mut_slice(vec![128u8; 64 * 64 * 3 / 2]));
+        };
+        let came = |n: usize| {
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            while *frames.lock().unwrap() < n && std::time::Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            *frames.lock().unwrap()
+        };
+        push();
+        assert_eq!(came(1), 1);
+        push();
+        assert_eq!(came(2), 2);
+        encoder.set_paused(true);
+        push();
+        push();
+        std::thread::sleep(Duration::from_millis(300));
+        let before = *frames.lock().unwrap();
+        encoder.set_paused(false);
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            *frames.lock().unwrap(),
+            before,
+            "the old frames were let go"
+        );
+        push();
+        assert_eq!(came(before + 1), before + 1, "a new frame goes through");
+        assert_eq!(
+            keyframes.lock().unwrap()[before..],
+            [true],
+            "a keyframe after resuming"
+        );
     }
 
     /// The slower preset as chosen for every picture; not chosen, for pictures smaller

@@ -9,12 +9,20 @@
 //! until GStreamer lets the frame go; only then does KWin get it back. The memory
 //! outlives the buffer (its own descriptor), so a frame GStreamer still holds when
 //! PipeWire removes the buffers stays readable.
+//!
+//! A frame takes no memory of Rust's: the buffer's holder (a GStreamer buffer the
+//! frame keeps as its parent, as `pipewiresrc` keeps its own) is made once with the
+//! buffer and comes back to life each time a frame lets it go, which it says through
+//! a flag and the feed's wake-up file.
 
 use std::collections::HashMap;
-use std::os::fd::{BorrowedFd, IntoRawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, IntoRawFd, OwnedFd};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use gstreamer as gst;
+use gstreamer::glib;
+use gstreamer::glib::translate::IntoGlib;
 use gstreamer_allocators::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
@@ -22,22 +30,155 @@ use log::warn;
 use pipewire::spa::sys as ss;
 use pipewire::sys as pw;
 
+/// Whether a frame of a buffer came back, shared by the buffer's holder (on whatever
+/// thread GStreamer lets the frame go) and the feed.
+struct Back {
+    gate: Mutex<Gate>,
+    /// The feed's wake-up file.
+    wake: Arc<OwnedFd>,
+}
+
+struct Gate {
+    /// The buffer is still the stream's: its holder comes back to life when let go.
+    alive: bool,
+    /// Its holder came back to life; the feed takes it again.
+    returned: bool,
+}
+
+/// The key under which a holder keeps its [`Back`].
+fn back_key() -> glib::Quark {
+    static KEY: OnceLock<glib::Quark> = OnceLock::new();
+    *KEY.get_or_init(|| glib::Quark::from_str("prostir-feed-back"))
+}
+
+/// Frees a holder's [`Back`] with the holder.
+unsafe extern "C" fn free_back(data: glib::ffi::gpointer) {
+    // SAFETY: the box `Slot::new` gave the holder, freed once, with it.
+    drop(unsafe { Box::from_raw(data.cast::<Arc<Back>>()) });
+}
+
+/// A holder's last reference went: while its buffer is the stream's, it comes back
+/// to life (as `pipewiresrc`'s pool buffers do) and the feed is woken to give the
+/// buffer back to PipeWire; else it is freed. Takes no memory.
+unsafe extern "C" fn holder_let_go(object: *mut gst::ffi::GstMiniObject) -> glib::ffi::gboolean {
+    // SAFETY: GStreamer calls it with the holder, whose key holds its `Back`.
+    let back = unsafe { gst::ffi::gst_mini_object_get_qdata(object, back_key().into_glib()) }
+        .cast::<Arc<Back>>();
+    if back.is_null() {
+        return glib::ffi::GTRUE;
+    }
+    // SAFETY: freed only with the holder, which is alive in this call.
+    let back = unsafe { &*back };
+    let mut gate = back.gate.lock().unwrap_or_else(PoisonError::into_inner);
+    if !gate.alive {
+        return glib::ffi::GTRUE;
+    }
+    gate.returned = true;
+    // SAFETY: back to life with one reference, which the feed takes.
+    unsafe { gst::ffi::gst_mini_object_ref(object) };
+    drop(gate);
+    wake(&back.wake);
+    glib::ffi::GFALSE
+}
+
+/// Wakes the feed (its eventfd).
+pub fn wake(fd: &OwnedFd) {
+    let one = 1u64;
+    // SAFETY: an eventfd takes 8 bytes, which live through the call.
+    unsafe { libc::write(fd.as_raw_fd(), (&raw const one).cast(), 8) };
+}
+
 /// The GStreamer memory of one of the stream's buffers.
 struct Slot {
-    /// Tells this buffer from one PipeWire adds later at the same address.
-    id: u64,
     /// One for each of its planes; none for memory of the stream's own process
     /// (copied each frame instead).
     memories: Vec<Option<gst::Memory>>,
-    /// A frame of it is in GStreamer's hands.
+    /// The holder a frame keeps as its parent; out while a frame of it is.
+    holder: Option<gst::Buffer>,
+    /// The holder's address, to take it again when it came back.
+    raw: *mut gst::ffi::GstBuffer,
+    back: Arc<Back>,
+    /// A frame of it is in GStreamer's hands (until its holder is taken again).
     lent: bool,
 }
 
+impl Slot {
+    fn new(memories: Vec<Option<gst::Memory>>, wake: Arc<OwnedFd>) -> Self {
+        let back = Arc::new(Back {
+            gate: Mutex::new(Gate {
+                alive: true,
+                returned: false,
+            }),
+            wake,
+        });
+        let holder = gst::Buffer::new();
+        let raw = holder.as_ptr().cast_mut();
+        let object = raw.cast::<gst::ffi::GstMiniObject>();
+        // SAFETY: a new buffer, ours alone: its `Back` goes with it, and it comes back
+        // to life when let go (see `holder_let_go`).
+        unsafe {
+            gst::ffi::gst_mini_object_set_qdata(
+                object,
+                back_key().into_glib(),
+                Box::into_raw(Box::new(back.clone())).cast(),
+                Some(free_back),
+            );
+            (*object).dispose = Some(holder_let_go);
+        }
+        Self {
+            memories,
+            holder: Some(holder),
+            raw,
+            back,
+            lent: false,
+        }
+    }
+
+    /// Takes the holder again if it came back; whether it did.
+    fn take_back(&mut self) -> bool {
+        let came = std::mem::take(
+            &mut self
+                .back
+                .gate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .returned,
+        );
+        if came {
+            // SAFETY: the one reference it came back to life with, the feed's now.
+            self.holder = Some(unsafe { gst::Buffer::from_glib_full(self.raw) });
+            self.lent = false;
+        }
+        came
+    }
+}
+
+impl Drop for Slot {
+    /// The buffer is no longer the stream's: its holder is freed, now or when the
+    /// frame that keeps it lets it go.
+    fn drop(&mut self) {
+        let came = {
+            let mut gate = self
+                .back
+                .gate
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            gate.alive = false;
+            std::mem::take(&mut gate.returned)
+        };
+        if came {
+            // SAFETY: as in `take_back`; dropped at once, it is freed.
+            drop(unsafe { gst::Buffer::from_glib_full(self.raw) });
+        }
+    }
+}
+
 /// The stream's buffers, by address.
-#[derive(Default)]
 pub struct Slots {
     slots: HashMap<usize, Slot>,
-    next: u64,
+    wake: Arc<OwnedFd>,
+    /// A frame was dropped already (said once).
+    dropped: bool,
 }
 
 /// The planes of a buffer.
@@ -106,38 +247,50 @@ fn wrap(d: &ss::spa_data) -> Option<gst::Memory> {
     Some(memory)
 }
 
-/// Whether a buffer carries a picture: KWin sends buffers with the pointer alone (its
-/// metadata, every plane empty), which do not go to the encoder.
+/// Whether a buffer carries a picture. When only the pointer moved, KWin sends a
+/// buffer with the pointer's metadata alone: KWin 6.8 marks it corrupted
+/// (`SPA_CHUNK_FLAG_CORRUPTED`) and leaves its size at the whole buffer's. Such a
+/// buffer, one the header (`header`, `SPA_META_Header`) says is corrupted, and one
+/// with every plane empty do not go to the encoder.
 ///
 /// # Safety
 /// As [`datas`].
-pub unsafe fn has_picture(buffer: *mut pw::pw_buffer) -> bool {
+pub unsafe fn has_picture(buffer: *mut pw::pw_buffer, header: Option<&[u8]>) -> bool {
+    let corrupted = header
+        .filter(|h| h.len() >= size_of::<ss::spa_meta_header>())
+        // SAFETY: the metadata holds a header (checked), plain numbers.
+        .map(|h| unsafe { h.as_ptr().cast::<ss::spa_meta_header>().read_unaligned() })
+        .is_some_and(|h| h.flags & ss::SPA_META_HEADER_FLAG_CORRUPTED != 0);
+    if corrupted {
+        return false;
+    }
+    let mut any = false;
     // SAFETY: as the caller says.
-    unsafe { datas(buffer) }
-        .iter()
-        // SAFETY: a plane's chunk is valid with it.
-        .any(|d| !d.chunk.is_null() && unsafe { (*d.chunk).size } > 0)
-}
-
-/// Sends a buffer back to PipeWire once the frame made of it is let go: kept with the
-/// frame (a parent buffer of it), it calls `back` when GStreamer frees it.
-struct Holder(Option<Box<dyn FnOnce() + Send>>);
-
-impl AsRef<[u8]> for Holder {
-    fn as_ref(&self) -> &[u8] {
-        &[]
-    }
-}
-
-impl Drop for Holder {
-    fn drop(&mut self) {
-        if let Some(back) = self.0.take() {
-            back();
+    for d in unsafe { datas(buffer) } {
+        if d.chunk.is_null() {
+            return false;
         }
+        // SAFETY: a plane's chunk is valid with it.
+        let chunk = unsafe { &*d.chunk };
+        if chunk.flags as u32 & ss::SPA_CHUNK_FLAG_CORRUPTED != 0 {
+            return false;
+        }
+        any |= chunk.size > 0;
     }
+    any
 }
 
 impl Slots {
+    /// The stream's buffers, which wake the feed through `wake` when a frame of one is
+    /// let go.
+    pub fn new(wake: Arc<OwnedFd>) -> Self {
+        Self {
+            slots: HashMap::new(),
+            wake,
+            dropped: false,
+        }
+    }
+
     /// PipeWire added `buffer` to the stream.
     ///
     /// # Safety
@@ -151,15 +304,8 @@ impl Slots {
                 _ => None,
             })
             .collect();
-        self.next += 1;
-        self.slots.insert(
-            buffer as usize,
-            Slot {
-                id: self.next,
-                memories,
-                lent: false,
-            },
-        );
+        self.slots
+            .insert(buffer as usize, Slot::new(memories, self.wake.clone()));
     }
 
     /// PipeWire removes `buffer`: whether a frame of it is still out (it is then given
@@ -170,21 +316,27 @@ impl Slots {
             .is_some_and(|s| s.lent)
     }
 
-    /// GStreamer let go of the frame of buffer `at` (`id`): whether it goes back to
-    /// PipeWire now (not when PipeWire removed it meanwhile).
-    pub fn returned(&mut self, at: usize, id: u64) -> bool {
-        match self.slots.get_mut(&at) {
-            Some(s) if s.id == id && s.lent => {
-                s.lent = false;
-                true
+    /// The buffers whose frames GStreamer let go since, each given to `back` (to go
+    /// back to PipeWire). Takes no memory.
+    pub fn take_back(&mut self, mut back: impl FnMut(*mut pw::pw_buffer)) {
+        for (at, slot) in &mut self.slots {
+            if slot.take_back() {
+                back(*at as *mut pw::pw_buffer);
             }
-            _ => false,
         }
     }
 
-    /// The picture of `buffer` as a frame in the layout `info`, which calls `back` with
-    /// the buffer's address and id once GStreamer lets it go; none when it has no
-    /// picture (the buffer then stays the caller's).
+    /// Says once that a frame could not be made of a buffer.
+    fn drop_frame(&mut self, why: &str) -> Option<gst::Buffer> {
+        if !std::mem::replace(&mut self.dropped, true) {
+            warn!("a frame of the stream was dropped: {why} (said once)");
+        }
+        None
+    }
+
+    /// The picture of `buffer` as a frame in the layout `info`, which gives the buffer
+    /// back (see [`Slots::take_back`]) once GStreamer lets it go; none when it has no
+    /// picture (the buffer then stays the caller's). Takes no memory of Rust's.
     ///
     /// # Safety
     /// `buffer` is a valid `pw_buffer` of this stream, dequeued, and stays valid until
@@ -194,80 +346,82 @@ impl Slots {
         buffer: *mut pw::pw_buffer,
         info: &gst_video::VideoInfo,
         crop: Option<Crop>,
-        back: impl FnOnce(usize, u64) + Send + 'static,
     ) -> Option<gst::Buffer> {
-        let at = buffer as usize;
-        let slot = self.slots.get_mut(&at)?;
         // SAFETY: as the caller says.
         let datas = unsafe { datas(buffer) };
-        let mut frame = gst::Buffer::new();
-        {
-            let f = frame.get_mut().expect("new buffer");
-            let planes = info.n_planes() as usize;
-            let mut offsets = info.offset()[..planes].to_vec();
-            let mut strides = info.stride()[..planes].to_vec();
-            let mut size = 0;
-            for (i, d) in datas.iter().enumerate() {
-                if d.chunk.is_null() {
-                    return None;
-                }
-                // SAFETY: a plane's chunk is valid with it.
-                let chunk = unsafe { &*d.chunk };
-                if i < planes {
-                    offsets[i] = size;
-                    strides[i] = chunk.stride;
-                }
-                size += chunk.size as usize;
-            }
-            for (i, d) in datas.iter().enumerate() {
-                // SAFETY: as above.
-                let chunk = unsafe { &*d.chunk };
-                let (start, len) = (chunk.offset as usize, chunk.size as usize);
-                if len == 0 {
-                    continue;
-                }
-                let memory = match slot.memories.get(i).and_then(Option::as_ref) {
-                    Some(m) if start + len <= m.size() => m.share(start..start + len),
-                    Some(_) => return None,
-                    // Memory of the stream's own process: copied.
-                    None if d.type_ == ss::SPA_DATA_MemPtr
-                        && !d.data.is_null()
-                        && start + len <= d.maxsize as usize =>
-                    {
-                        // SAFETY: the plane's memory is `maxsize` bytes, the chunk
-                        // within it.
-                        let bytes = unsafe {
-                            std::slice::from_raw_parts(d.data.cast::<u8>().add(start), len)
-                        };
-                        gst::Memory::from_slice(bytes.to_vec())
-                    }
-                    None => return None,
-                };
-                f.append_memory(memory);
-                if chunk.flags as u32 & ss::SPA_CHUNK_FLAG_CORRUPTED != 0 {
-                    f.set_flags(gst::BufferFlags::CORRUPTED);
-                }
-            }
-            if f.size() == 0 {
-                return None;
-            }
-            gst_video::VideoMeta::add_full(
-                f,
-                gst_video::VideoFrameFlags::empty(),
-                info.format(),
-                info.width(),
-                info.height(),
-                &offsets,
-                &strides,
-            )
-            .ok()?;
-            if let Some(rect) = crop {
-                gst_video::VideoCropMeta::add(f, rect);
-            }
-            let id = slot.id;
-            let holder = gst::Buffer::from_slice(Holder(Some(Box::new(move || back(at, id)))));
-            gst::ParentBufferMeta::add(f, &holder);
+        let Some(slot) = self.slots.get_mut(&(buffer as usize)) else {
+            return self.drop_frame("a buffer PipeWire never added");
+        };
+        if slot.holder.is_none() {
+            return self.drop_frame("a buffer still in the encoder's hands");
         }
+        let mut frame = gst::Buffer::new();
+        let f = frame.get_mut().expect("new buffer");
+        let planes = (info.n_planes() as usize).min(4);
+        let (mut offsets, mut strides) = ([0usize; 4], [0i32; 4]);
+        offsets[..planes].copy_from_slice(&info.offset()[..planes]);
+        strides[..planes].copy_from_slice(&info.stride()[..planes]);
+        let mut size = 0;
+        for (i, d) in datas.iter().enumerate() {
+            if d.chunk.is_null() {
+                return self.drop_frame("a plane with no chunk");
+            }
+            // SAFETY: a plane's chunk is valid with it.
+            let chunk = unsafe { &*d.chunk };
+            if i < planes {
+                offsets[i] = size;
+                strides[i] = chunk.stride;
+            }
+            size += chunk.size as usize;
+        }
+        for (i, d) in datas.iter().enumerate() {
+            // SAFETY: as above.
+            let chunk = unsafe { &*d.chunk };
+            let (start, len) = (chunk.offset as usize, chunk.size as usize);
+            if len == 0 {
+                continue;
+            }
+            let memory = match slot.memories.get(i).and_then(Option::as_ref) {
+                Some(m) if start + len <= m.size() => m.share(start..start + len),
+                Some(_) => return self.drop_frame("a chunk past the end of its memory"),
+                // Memory of the stream's own process: copied (KWin sends none).
+                None if d.type_ == ss::SPA_DATA_MemPtr
+                    && !d.data.is_null()
+                    && start + len <= d.maxsize as usize =>
+                {
+                    // SAFETY: the plane's memory is `maxsize` bytes, the chunk
+                    // within it.
+                    let bytes =
+                        unsafe { std::slice::from_raw_parts(d.data.cast::<u8>().add(start), len) };
+                    gst::Memory::from_slice(bytes.to_vec())
+                }
+                None => return self.drop_frame("a plane of memory that cannot be read"),
+            };
+            f.append_memory(memory);
+        }
+        if f.size() == 0 {
+            return None;
+        }
+        if gst_video::VideoMeta::add_full(
+            f,
+            gst_video::VideoFrameFlags::empty(),
+            info.format(),
+            info.width(),
+            info.height(),
+            &offsets[..planes],
+            &strides[..planes],
+        )
+        .is_err()
+        {
+            return self.drop_frame("its layout");
+        }
+        if let Some(rect) = crop {
+            gst_video::VideoCropMeta::add(f, rect);
+        }
+        let holder = slot.holder.take().expect("checked above");
+        gst::ParentBufferMeta::add(f, &holder);
+        // The frame's parent meta holds it from here.
+        drop(holder);
         slot.lent = true;
         Some(frame)
     }
@@ -477,84 +631,263 @@ mod tests {
         assert_eq!(read_crop(&[0; size_of::<ss::spa_meta_region>()]), None);
     }
 
-    /// A buffer of shared memory, as PipeWire hands it over: one frame shares its
-    /// memory with the part the chunk says, in the layout it says, and the buffer goes
-    /// back only once GStreamer let go of the frame, once.
+    /// A buffer of shared memory as PipeWire hands it over, its parts boxed so they
+    /// stay where they are.
+    struct Given {
+        _file: std::fs::File,
+        chunk: Box<ss::spa_chunk>,
+        _data: Box<ss::spa_data>,
+        _spa: Box<ss::spa_buffer>,
+        pwb: Box<pw::pw_buffer>,
+    }
+
+    impl Given {
+        /// One plane of `stride * rows` bytes, each 7.
+        fn new(stride: usize, rows: usize) -> Self {
+            use std::os::fd::AsRawFd;
+            let size = stride * rows;
+            let file = tempfile_with(&vec![7u8; size]);
+            let mut chunk = Box::new(ss::spa_chunk {
+                offset: 0,
+                size: size as u32,
+                stride: stride as i32,
+                flags: 0,
+            });
+            // SAFETY: one of SPA's structs of numbers and pointers, for which all zero
+            // is a value.
+            let mut data: Box<ss::spa_data> = Box::new(unsafe { std::mem::zeroed() });
+            data.type_ = ss::SPA_DATA_MemFd;
+            data.flags = ss::SPA_DATA_FLAG_READABLE | ss::SPA_DATA_FLAG_MAPPABLE;
+            data.fd = i64::from(file.as_raw_fd());
+            data.maxsize = size as u32;
+            data.chunk = &raw mut *chunk;
+            // SAFETY: as above.
+            let mut spa: Box<ss::spa_buffer> = Box::new(unsafe { std::mem::zeroed() });
+            spa.n_datas = 1;
+            spa.datas = &raw mut *data;
+            // SAFETY: as above.
+            let mut pwb: Box<pw::pw_buffer> = Box::new(unsafe { std::mem::zeroed() });
+            pwb.buffer = &raw mut *spa;
+            Self {
+                _file: file,
+                chunk,
+                _data: data,
+                _spa: spa,
+                pwb,
+            }
+        }
+
+        fn ptr(&mut self) -> *mut pw::pw_buffer {
+            &raw mut *self.pwb
+        }
+    }
+
+    /// The feed's wake-up file.
+    fn wake_file() -> Arc<OwnedFd> {
+        use std::os::fd::FromRawFd;
+        // SAFETY: a new eventfd; checked below.
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        assert!(fd >= 0);
+        // SAFETY: a descriptor just made, owned by nobody else.
+        Arc::new(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// Whether the wake-up file was written to (and clears it).
+    fn woken(fd: &OwnedFd) -> bool {
+        let mut n = 0u64;
+        // SAFETY: 8 bytes to fill, alive through the call.
+        unsafe { libc::read(fd.as_raw_fd(), (&raw mut n).cast(), 8) == 8 }
+    }
+
+    /// A buffer of shared memory: a frame shares its memory with the part the chunk
+    /// says, in the layout it says, and the buffer goes back only once GStreamer let
+    /// go of the frame, once, waking the feed; again and again.
     #[test]
     fn a_shared_memory_buffer_as_a_frame() {
-        use std::io::Write as _;
-        use std::os::fd::AsRawFd;
         gst::init().unwrap();
         let (w, h, stride) = (4u32, 2u32, 16usize);
-        let mut file = tempfile_with(&[7u8; 64]);
-        file.flush().unwrap();
-        let mut chunk = ss::spa_chunk {
-            offset: 0,
-            size: (stride * h as usize) as u32,
-            stride: stride as i32,
-            flags: 0,
-        };
-        // SAFETY: one of SPA's structs of numbers and pointers, for which all zero is a value.
-        let mut data: ss::spa_data = unsafe { std::mem::zeroed() };
-        data.type_ = ss::SPA_DATA_MemFd;
-        data.flags = ss::SPA_DATA_FLAG_READABLE | ss::SPA_DATA_FLAG_MAPPABLE;
-        data.fd = i64::from(file.as_raw_fd());
-        data.maxsize = 64;
-        data.chunk = &raw mut chunk;
-        // SAFETY: one of SPA's structs of numbers and pointers, for which all zero is a value.
-        let mut spa: ss::spa_buffer = unsafe { std::mem::zeroed() };
-        spa.n_datas = 1;
-        spa.datas = &raw mut data;
-        // SAFETY: one of SPA's structs of numbers and pointers, for which all zero is a value.
-        let mut pwb: pw::pw_buffer = unsafe { std::mem::zeroed() };
-        pwb.buffer = &raw mut spa;
-        let b = &raw mut pwb;
-
-        let mut slots = Slots::default();
+        let mut given = Given::new(stride, h as usize);
+        let b = given.ptr();
+        let wake = wake_file();
+        let mut slots = Slots::new(wake.clone());
         // SAFETY: the buffer and its parts live through the test.
         unsafe { slots.add(b) };
-        // SAFETY: the buffer and its parts live through the test.
-        assert!(unsafe { has_picture(b) });
+        // SAFETY: as above.
+        assert!(unsafe { has_picture(b, None) });
         let info = gst_video::VideoInfo::builder(gst_video::VideoFormat::Bgrx, w, h)
             .build()
             .unwrap();
-        let back = Arc::new(Mutex::new(Vec::new()));
-        let told = back.clone();
-        // SAFETY: as above.
-        let frame = unsafe {
-            slots.frame(b, &info, None, move |at, id| {
-                told.lock().unwrap().push((at, id));
-            })
+        let back = |slots: &mut Slots| {
+            let mut given = Vec::new();
+            slots.take_back(|b| given.push(b));
+            given
+        };
+        for _ in 0..3 {
+            // SAFETY: as above.
+            let frame = unsafe { slots.frame(b, &info, None) }.unwrap();
+            assert_eq!(frame.size(), stride * h as usize);
+            let meta = frame.meta::<gst_video::VideoMeta>().unwrap();
+            assert_eq!(
+                (meta.width(), meta.height(), meta.stride()[0]),
+                (w, h, stride as i32)
+            );
+            assert_eq!(
+                frame.map_readable().unwrap()[0],
+                7,
+                "the file's bytes, not a copy of them"
+            );
+            assert!(
+                // SAFETY: as above.
+                unsafe { slots.frame(b, &info, None) }.is_none(),
+                "lent: no second frame of it"
+            );
+            let again = frame.clone();
+            drop(frame);
+            assert!(back(&mut slots).is_empty(), "still held");
+            assert!(!woken(&wake));
+            drop(again);
+            assert!(woken(&wake), "the feed is woken");
+            assert_eq!(back(&mut slots), [b]);
+            assert!(back(&mut slots).is_empty(), "once");
         }
-        .unwrap();
-        assert_eq!(frame.size(), stride * h as usize);
-        let meta = frame.meta::<gst_video::VideoMeta>().unwrap();
-        assert_eq!(
-            (meta.width(), meta.height(), meta.stride()[0]),
-            (w, h, stride as i32)
-        );
-        assert_eq!(
-            frame.map_readable().unwrap()[0],
-            7,
-            "the file's bytes, not a copy of them"
-        );
-        let again = frame.clone();
-        drop(frame);
-        assert!(back.lock().unwrap().is_empty(), "still held");
-        drop(again);
-        let given = back.lock().unwrap().clone();
-        assert_eq!(given.len(), 1);
-        assert!(slots.returned(given[0].0, given[0].1));
-        assert!(!slots.returned(given[0].0, given[0].1), "once");
 
-        // A buffer with the pointer alone carries no picture.
-        // SAFETY: the chunk the plane points to, alive through the test.
-        unsafe { (*data.chunk).size = 0 };
-        // SAFETY: the buffer and its parts live through the test.
-        assert!(!unsafe { has_picture(b) });
+        // A frame out when PipeWire removes the buffer: given back then; the frame
+        // still reads its memory, and letting it go later wakes nobody.
         // SAFETY: as above.
-        assert!(unsafe { slots.frame(b, &info, None, |_, _| {}) }.is_none());
-        assert!(!slots.remove(b), "not lent");
+        let frame = unsafe { slots.frame(b, &info, None) }.unwrap();
+        assert!(slots.remove(b), "lent");
+        assert_eq!(frame.map_readable().unwrap()[0], 7);
+        drop(frame);
+        assert!(!woken(&wake));
+        assert!(back(&mut slots).is_empty());
+    }
+
+    /// A buffer with the pointer alone carries no picture: KWin 6.8 marks it
+    /// corrupted and leaves its size; one the header says is corrupted neither, nor
+    /// one with every plane empty.
+    #[test]
+    fn a_buffer_with_the_pointer_alone_has_no_picture() {
+        let mut given = Given::new(16, 2);
+        let b = given.ptr();
+        // SAFETY: the buffer and its parts live through the test.
+        assert!(unsafe { has_picture(b, None) });
+        given.chunk.flags = ss::SPA_CHUNK_FLAG_CORRUPTED as i32;
+        // SAFETY: as above.
+        assert!(!unsafe { has_picture(b, None) }, "corrupted, its size kept");
+        given.chunk.flags = 0;
+        // SAFETY: one of SPA's structs of numbers, for which all zero is a value.
+        let mut header: ss::spa_meta_header = unsafe { std::mem::zeroed() };
+        header.flags = ss::SPA_META_HEADER_FLAG_CORRUPTED;
+        // SAFETY: a plain struct of numbers, read as its bytes.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::from_ref(&header).cast::<u8>(),
+                size_of::<ss::spa_meta_header>(),
+            )
+        };
+        assert!(
+            // SAFETY: as above.
+            !unsafe { has_picture(b, Some(bytes)) },
+            "the header says so"
+        );
+        given.chunk.size = 0;
+        // SAFETY: as above.
+        assert!(!unsafe { has_picture(b, None) }, "empty");
+    }
+
+    /// A frame of the feed takes no memory of Rust's (only GStreamer's, as
+    /// `pipewiresrc`'s did): made of a buffer, pushed to the encoder, its pointer and
+    /// changed parts seen, the buffer taken back; counted on this thread.
+    #[test]
+    fn a_frame_takes_no_memory() {
+        let (pipeline, appsrc, seen) = pipeline();
+        let wake = wake_file();
+        let mut slots = Slots::new(wake);
+        let mut given = [Given::new(4, 1), Given::new(4, 1)];
+        let info = gst_video::VideoInfo::builder(gst_video::VideoFormat::Gray8, 4, 1)
+            .build()
+            .unwrap();
+        for g in &mut given {
+            // SAFETY: the buffers and their parts live through the test.
+            unsafe { slots.add(g.ptr()) };
+        }
+        let mut pictures = Pictures::new(appsrc, Duration::from_secs(1));
+        let sightings = super::super::meta::Sightings::default();
+        let cursor = super::super::meta::tests::cursor_meta(1, (3, 4), (0, 0), None);
+        let damage = super::super::meta::tests::damage_meta(&[(0, 0, 2, 1)], 4);
+        let mut count = 0;
+        let mut taken = 0u64;
+        for i in 0..40 {
+            let b = given[i % 2].ptr();
+            // Waits for the encoder to let go of this buffer's frame of two frames ago.
+            let until = Instant::now() + Duration::from_secs(10);
+            loop {
+                let before = allocations();
+                let mut back = 0;
+                slots.take_back(|_| back += 1);
+                taken += allocations() - before;
+                count += back;
+                // SAFETY: the buffers and their parts live through the test.
+                let free = unsafe { slots.frame(b, &info, None) };
+                if let Some(frame) = free {
+                    let before = allocations();
+                    sightings.saw_frame(Some(&cursor), Some(&damage), true);
+                    pictures.push(frame, Instant::now());
+                    if i >= 4 {
+                        taken += allocations() - before;
+                    }
+                    break;
+                }
+                assert!(Instant::now() < until, "buffer {} never came back", i % 2);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        assert!(count >= 30, "{count} buffers back");
+        assert!(seen.lock().unwrap().len() >= 30);
+        assert_eq!(taken, 0, "allocations in the feed's frames");
+        drop(pictures);
+        pipeline.set_state(gst::State::Null).unwrap();
+    }
+
+    thread_local! {
+        /// Allocations made on this thread (other tests run on threads of their own).
+        static ALLOCS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The system's allocator, counting this thread's allocations for
+    /// `a_frame_takes_no_memory` (the only allocator of the program's tests).
+    struct Counting;
+
+    fn count() {
+        let _ = ALLOCS.try_with(|n| n.set(n.get() + 1));
+    }
+
+    // SAFETY: every call is passed on to the system's allocator as it came; counting
+    // touches only a thread-local number, which needs no memory.
+    unsafe impl std::alloc::GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            count();
+            // SAFETY: as the caller promised for `alloc`.
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            // SAFETY: as the caller promised for `dealloc`.
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+            count();
+            // SAFETY: as the caller promised for `realloc`.
+            unsafe { std::alloc::System.realloc(ptr, layout, size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+
+    fn allocations() -> u64 {
+        ALLOCS.with(std::cell::Cell::get)
     }
 
     /// A file of `bytes` in memory.

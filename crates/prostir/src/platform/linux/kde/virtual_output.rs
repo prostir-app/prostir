@@ -113,9 +113,10 @@ fn input_for(node: u32, refresh: u32) -> Input {
     Input {
         // Caps are set by the feed once KWin chose a format; on a still screen KWin
         // sends nothing and the feed sends the last frame again every 750 ms (see
-        // `KEEPALIVE_MS`).
+        // `KEEPALIVE_MS`). One frame waits in it at most, a newer one taking its
+        // place: the encoder lagging holds few of KWin's buffers.
         source: "appsrc name=src is-live=true format=time do-timestamp=true \
-                 max-buffers=2 leaky-type=downstream"
+                 max-buffers=1 leaky-type=downstream"
             .to_owned(),
         label: format!("node {node}"),
         frame_rate: Some(frame_rate(refresh)),

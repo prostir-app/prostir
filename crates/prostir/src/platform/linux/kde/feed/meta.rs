@@ -52,24 +52,6 @@ pub enum Damage {
 /// Parts kept apart before they count as the whole picture.
 const PARTS_AT_MOST: usize = 64;
 
-impl Damage {
-    /// This and `more` together.
-    pub fn add(&mut self, more: Self) {
-        *self = match (std::mem::take(self), more) {
-            (Self::Whole, _) | (_, Self::Whole) => Self::Whole,
-            (Self::None, other) | (other, Self::None) => other,
-            (Self::Parts(mut a), Self::Parts(b)) => {
-                a.extend(b);
-                if a.len() > PARTS_AT_MOST {
-                    Self::Whole
-                } else {
-                    Self::Parts(a)
-                }
-            }
-        };
-    }
-}
-
 /// What one buffer said of the pointer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorMeta {
@@ -158,34 +140,25 @@ pub fn read_cursor(meta: &[u8]) -> Option<CursorMeta> {
 }
 
 /// The changed parts a `SPA_META_VideoDamage` lists (`meta`): rectangles up to the
-/// first empty one.
-pub fn read_damage(meta: &[u8]) -> Damage {
+/// first empty one. Takes no memory.
+pub fn damage_parts(meta: &[u8]) -> impl Iterator<Item = Rect> + '_ {
     let step = size_of::<ss::spa_meta_region>();
-    let mut parts = Vec::new();
-    for at in (0..meta.len() / step).map(|i| i * step) {
-        let Some(r) = read::<ss::spa_meta_region>(meta, at) else {
-            break;
-        };
-        let (w, h) = (r.region.size.width, r.region.size.height);
-        if w == 0 || h == 0 {
-            break;
-        }
-        parts.push(Rect {
-            x: r.region.position.x,
-            y: r.region.position.y,
-            w,
-            h,
-        });
-    }
-    if parts.is_empty() {
-        Damage::None
-    } else {
-        Damage::Parts(parts)
-    }
+    (0..meta.len() / step)
+        .map_while(move |i| read::<ss::spa_meta_region>(meta, i * step))
+        .map_while(|r| {
+            let (w, h) = (r.region.size.width, r.region.size.height);
+            (w > 0 && h > 0).then_some(Rect {
+                x: r.region.position.x,
+                y: r.region.position.y,
+                w,
+                h,
+            })
+        })
 }
 
 /// The metadata of one buffer, by kind.
 pub struct Metas<'a> {
+    pub header: Option<&'a [u8]>,
     pub cursor: Option<&'a [u8]>,
     pub damage: Option<&'a [u8]>,
     pub crop: Option<&'a [u8]>,
@@ -197,6 +170,7 @@ pub struct Metas<'a> {
 /// `buffer` is a valid `spa_buffer` whose metadata is valid for `'a`.
 pub unsafe fn metas<'a>(buffer: *const ss::spa_buffer) -> Metas<'a> {
     let mut found = Metas {
+        header: None,
         cursor: None,
         damage: None,
         crop: None,
@@ -215,6 +189,7 @@ pub unsafe fn metas<'a>(buffer: *const ss::spa_buffer) -> Metas<'a> {
         // SAFETY: each meta's data is `size` bytes.
         let bytes = unsafe { std::slice::from_raw_parts(m.data.cast::<u8>(), m.size as usize) };
         match m.type_ {
+            ss::SPA_META_Header => found.header = Some(bytes),
             ss::SPA_META_Cursor => found.cursor = Some(bytes),
             ss::SPA_META_VideoDamage => found.damage = Some(bytes),
             ss::SPA_META_VideoCrop => found.crop = Some(bytes),
@@ -226,29 +201,71 @@ pub unsafe fn metas<'a>(buffer: *const ss::spa_buffer) -> Metas<'a> {
 
 /// What the stream said so far, for whoever draws the pointer apart from the
 /// picture: where the pointer is, its look, and the parts of the picture that changed
-/// since they were last taken.
-#[derive(Debug, Default)]
+/// since they were last taken. A frame adds to it without taking memory (the parts'
+/// room is made once); only a new look of the pointer takes some.
+#[derive(Debug)]
 pub struct Seen {
     pub pointer: Option<Pointer>,
     pub shape: Option<Arc<Shape>>,
     /// Counts the looks seen: a new number, a new look.
     pub shapes: u64,
-    pub damage: Damage,
+    /// All of the picture changed (or was not said), else the parts that did.
+    whole: bool,
+    parts: Vec<Rect>,
+}
+
+impl Default for Seen {
+    fn default() -> Self {
+        Self {
+            pointer: None,
+            shape: None,
+            shapes: 0,
+            whole: false,
+            parts: Vec::with_capacity(PARTS_AT_MOST),
+        }
+    }
 }
 
 impl Seen {
-    /// What one buffer said: `cursor`, and `damage` when it carries a picture (none
-    /// said: all of it changed).
-    pub fn saw(&mut self, cursor: Option<CursorMeta>, damage: Option<Damage>) {
-        if let Some(c) = cursor {
+    /// What one buffer said: its pointer's metadata (`cursor`), and, when it carries a
+    /// picture, its changed parts (`damage`; none said: all of it changed).
+    pub fn saw_frame(&mut self, cursor: Option<&[u8]>, damage: Option<&[u8]>, picture: bool) {
+        if let Some(c) = cursor.and_then(read_cursor) {
             self.pointer = c.pointer;
             if let Some(shape) = c.shape {
                 self.shape = Some(Arc::new(shape));
                 self.shapes += 1;
             }
         }
-        if let Some(d) = damage {
-            self.damage.add(d);
+        if !picture || self.whole {
+            return;
+        }
+        let Some(damage) = damage else {
+            self.whole = true;
+            self.parts.clear();
+            return;
+        };
+        for part in damage_parts(damage) {
+            if self.parts.len() == PARTS_AT_MOST {
+                self.whole = true;
+                self.parts.clear();
+                return;
+            }
+            self.parts.push(part);
+        }
+    }
+
+    /// The parts of the picture changed since this was last asked.
+    fn take_damage(&mut self) -> Damage {
+        if std::mem::take(&mut self.whole) {
+            self.parts.clear();
+            Damage::Whole
+        } else if self.parts.is_empty() {
+            Damage::None
+        } else {
+            let parts = self.parts.clone();
+            self.parts.clear();
+            Damage::Parts(parts)
         }
     }
 }
@@ -258,8 +275,12 @@ impl Seen {
 pub struct Sightings(Arc<Mutex<Seen>>);
 
 impl Sightings {
-    pub fn saw(&self, cursor: Option<CursorMeta>, damage: Option<Damage>) {
-        self.0.lock().unwrap().saw(cursor, damage);
+    /// See [`Seen::saw_frame`].
+    pub fn saw_frame(&self, cursor: Option<&[u8]>, damage: Option<&[u8]>, picture: bool) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .saw_frame(cursor, damage, picture);
     }
 
     /// Where the pointer is now, and its look with the number it was counted under.
@@ -272,13 +293,22 @@ impl Sightings {
     /// The parts of the picture changed since this was last asked.
     #[cfg_attr(not(test), expect(dead_code, reason = "step 2 of the cursor layer"))]
     pub fn take_damage(&self) -> Damage {
-        std::mem::take(&mut self.0.lock().unwrap().damage)
+        self.0.lock().unwrap().take_damage()
     }
 }
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    fn read_damage(meta: &[u8]) -> Damage {
+        let parts: Vec<Rect> = damage_parts(meta).collect();
+        if parts.is_empty() {
+            Damage::None
+        } else {
+            Damage::Parts(parts)
+        }
+    }
 
     /// A struct of SPA's as its bytes.
     fn bytes_of<T>(value: &T) -> Vec<u8> {
@@ -446,68 +476,49 @@ pub mod tests {
     #[test]
     fn changed_parts_add_up_until_taken() {
         let seen = Sightings::default();
-        let part = |x| {
-            Damage::Parts(vec![Rect {
-                x,
-                y: 0,
-                w: 1,
-                h: 1,
-            }])
-        };
-        seen.saw(None, Some(part(1)));
-        seen.saw(None, Some(Damage::None));
-        seen.saw(None, Some(part(2)));
+        let part = |x| damage_meta(&[(x, 0, 1, 1)], 2);
+        seen.saw_frame(None, Some(&part(1)), true);
+        seen.saw_frame(None, Some(&damage_meta(&[], 2)), true);
+        seen.saw_frame(None, Some(&part(2)), true);
+        seen.saw_frame(None, None, false);
         assert!(matches!(seen.take_damage(), Damage::Parts(p) if p.len() == 2));
         assert_eq!(seen.take_damage(), Damage::None, "taken");
-        seen.saw(None, Some(part(1)));
-        seen.saw(None, Some(Damage::Whole));
-        seen.saw(None, Some(part(3)));
-        assert_eq!(seen.take_damage(), Damage::Whole);
+        seen.saw_frame(None, Some(&part(1)), true);
+        seen.saw_frame(None, None, true);
+        seen.saw_frame(None, Some(&part(3)), true);
+        assert_eq!(seen.take_damage(), Damage::Whole, "a picture saying none");
         for x in 0..=PARTS_AT_MOST as i32 {
-            seen.saw(None, Some(part(x)));
+            seen.saw_frame(None, Some(&part(x)), true);
         }
         assert_eq!(seen.take_damage(), Damage::Whole, "too many parts");
+        // The pointer alone: no part of the picture changed.
+        seen.saw_frame(None, Some(&part(1)), false);
+        assert_eq!(seen.take_damage(), Damage::None);
     }
 
     #[test]
     fn the_look_is_counted_once_per_change() {
         let seen = Sightings::default();
-        let look = Shape {
-            w: 1,
-            h: 1,
-            rgba: vec![0; 4],
-        };
+        let px = [1, 2, 3, 4];
+        let look = cursor_meta(
+            1,
+            (1, 0),
+            (0, 0),
+            Some((ss::SPA_VIDEO_FORMAT_RGBA, 1, 1, &px)),
+        );
         let at = |x| Pointer {
             x,
             y: 0,
             hot_x: 0,
             hot_y: 0,
         };
-        seen.saw(
-            Some(CursorMeta {
-                pointer: Some(at(1)),
-                shape: Some(look.clone()),
-            }),
-            None,
-        );
-        seen.saw(
-            Some(CursorMeta {
-                pointer: Some(at(2)),
-                shape: None,
-            }),
-            None,
-        );
+        seen.saw_frame(Some(&look), None, false);
+        seen.saw_frame(Some(&cursor_meta(1, (2, 0), (0, 0), None)), None, false);
         let (pointer, shape) = seen.pointer();
         assert_eq!(pointer, Some(at(2)));
         let (n, s) = shape.unwrap();
-        assert_eq!((n, &*s), (1, &look));
-        seen.saw(
-            Some(CursorMeta {
-                pointer: None,
-                shape: None,
-            }),
-            None,
-        );
+        assert_eq!((n, s.rgba.as_slice()), (1, px.as_slice()));
+        seen.saw_frame(Some(&cursor_meta(0, (0, 0), (0, 0), None)), None, false);
         assert_eq!(seen.pointer().0, None, "hidden; its look is kept");
         assert!(seen.pointer().1.is_some());
     }

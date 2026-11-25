@@ -158,6 +158,13 @@ fn a_pipewire_nodes_frames_reach_the_encoder() {
     pause.picture_again();
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(frames.lock().unwrap().len(), before + 1);
+    // A fresh picture asked of the running stream (a still screen): the last one
+    // again, the stream not started over.
+    pause.set(false);
+    std::thread::sleep(Duration::from_millis(100));
+    let fresh = frames.lock().unwrap()[before..].to_vec();
+    assert_eq!(fresh.len(), 2, "{fresh:?}");
+    assert_eq!(fresh[0], fresh[1], "the same picture");
     provider.set_state(gst::State::Playing).unwrap();
 
     // Paused: nothing at all.
