@@ -387,9 +387,11 @@ pub struct Encoder {
     sink: gst_app::AppSink,
     stop: Arc<AtomicBool>,
     paused: Arc<Pause>,
-    /// The source sends nothing after a pause until the screen changes (PipeWire from
-    /// KWin): it is started over on resuming. A capture pushing its own frames
-    /// (`appsrc`) repeats the last one by itself.
+    /// The source sends nothing after a pause until the screen changes (a source
+    /// inside the pipeline, as `pipewiresrc` was for KWin's streams): it is started
+    /// over on resuming. A capture pushing its own frames (`appsrc`) hears of the
+    /// resume through its [`Pause`] and sends a picture by itself (KWin's feed starts
+    /// its stream over).
     restart_on_resume: bool,
     /// It takes frames straight from GPU buffers (dmabuf), so a capture hands it those.
     takes_dmabuf: bool,
@@ -1225,7 +1227,8 @@ impl Encoder {
     }
 }
 
-/// Whether an encoder is paused, which a capture feeding it sleeps on.
+/// Whether an encoder is paused, which a capture feeding it sleeps on, or hears of
+/// through [`Pause::tell`] when it waits in a loop of its own.
 #[derive(Debug, Default)]
 pub struct Pause {
     on: Mutex<bool>,
@@ -1233,6 +1236,22 @@ pub struct Pause {
     /// A keyframe was asked of a still screen: a capture sends its last picture again
     /// at once, instead of at its next keepalive.
     again: AtomicBool,
+    /// It was resumed, also when it was not paused (the stream is to start over): a
+    /// source that sends a picture only when the screen changes starts over, so the
+    /// desktop sends the picture it has now.
+    fresh: AtomicBool,
+    /// Called after each change, on the thread that made it.
+    told: Told,
+}
+
+/// What a capture asked to be called with when its encoder's pause changes.
+#[derive(Default)]
+struct Told(Mutex<Option<Box<dyn Fn() + Send>>>);
+
+impl std::fmt::Debug for Told {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Told")
+    }
 }
 
 impl Pause {
@@ -1245,13 +1264,49 @@ impl Pause {
         self.again.swap(false, Ordering::Relaxed)
     }
 
+    /// Whether the encoder was resumed since this was last asked: a capture whose
+    /// desktop sends a picture only when the screen changes starts its stream over.
+    #[cfg_attr(
+        feature = "fake-desktop",
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
+    pub fn take_fresh(&self) -> bool {
+        self.fresh.swap(false, Ordering::Relaxed)
+    }
+
     pub fn is_on(&self) -> bool {
         *self.on.lock().unwrap()
     }
 
-    fn set(&self, on: bool) {
+    /// The capture is to send its last picture again at once.
+    pub fn picture_again(&self) {
+        self.again.store(true, Ordering::Relaxed);
+        self.poke();
+    }
+
+    pub(crate) fn set(&self, on: bool) {
+        if !on {
+            self.fresh.store(true, Ordering::Relaxed);
+        }
         *self.on.lock().unwrap() = on;
         self.changed.notify_all();
+        self.poke();
+    }
+
+    /// `then` is called after each change of the pause and each picture asked again
+    /// (none: no longer), on the thread that made it; it is to return at once.
+    #[cfg_attr(
+        feature = "fake-desktop",
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
+    pub fn tell(&self, then: Option<Box<dyn Fn() + Send>>) {
+        *self.told.0.lock().unwrap() = then;
+    }
+
+    fn poke(&self) {
+        if let Some(then) = &*self.told.0.lock().unwrap() {
+            then();
+        }
     }
 
     /// Wakes whoever waits (a capture that is to stop).
@@ -1294,7 +1349,7 @@ impl Keyframer {
     /// The source is to send its picture again at once (a keyframe asked of a still
     /// screen comes with the next frame): a capture pushing its own frames does so.
     pub fn picture_again(&self) {
-        self.pause.again.store(true, Ordering::Relaxed);
+        self.pause.picture_again();
     }
 }
 
@@ -1316,9 +1371,9 @@ impl Drop for Encoder {
                 "prostir-stop",
             )));
         }
-        // A PipeWire source whose stream failed waits up to 30 s for a format that
-        // never comes before it stops (gst-plugin-pipewire 1.6, `wait_negotiated`):
-        // stopped on a thread of its own, holding nobody up; the graphics devices go
+        // A source whose stream failed may take long to stop (`pipewiresrc` of
+        // gst-plugin-pipewire 1.6 waited up to 30 s for a format that never came,
+        // `wait_negotiated`): stopped on a thread of its own, holding nobody up; the graphics devices go
         // to it once it runs, and after the pipeline stopped.
         let stopper = self.gate.failed.load(Ordering::Relaxed).then(|| {
             let pipeline = self.pipeline.clone();

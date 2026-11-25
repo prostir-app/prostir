@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly gstreamer1.0-pipewire gstreamer1.0-vaapi \
     libgl1-mesa-dri libegl1 libgbm1 libwayland-client0 libwayland-cursor0 libwayland-egl1 libxkbcommon0 wayland-utils \
-    build-essential pkg-config clang libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+    build-essential pkg-config clang libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libpipewire-0.3-dev libclang-dev \
     libglib2.0-dev libgbm-dev libdrm-dev libwayland-dev libxkbcommon-dev libdbus-1-dev \
     procps iproute2 curl ca-certificates file binutils \
  && rm -rf /var/lib/apt/lists/*

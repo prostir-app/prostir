@@ -163,7 +163,7 @@ Notes on the distributions (November 2026):
 
 | | openSUSE | Fedora | Debian, Ubuntu |
 |---|---|---|---|
-| Build | `cargo`, `rust`, `gcc`, `pkgconfig(gbm)`, `pkgconfig(gstreamer-1.0)`, `-app-`, `-video-`, `-allocators-` (spec) | same names as openSUSE | `cargo` or `cargo-1.NN`, `pkgconf`, `libgbm-dev`, `libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev` |
+| Build | `cargo`, `rust`, `gcc`, `pkgconfig(gbm)`, `pkgconfig(gstreamer-1.0)`, `-app-`, `-video-`, `-allocators-`, `pkgconfig(libpipewire-0.3)`, `clang-devel` (spec) | same names as openSUSE | `cargo` or `cargo-1.NN`, `pkgconf`, `libgbm-dev`, `libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev`, `libpipewire-0.3-dev`, `libclang-dev` |
 | VA encoders, h264parse, h265parse | `gstreamer-plugins-bad` | `gstreamer1-plugins-bad-free` | `gstreamer1.0-plugins-bad`; the va plugin is in `gstreamer1.0-plugins-extra` on Ubuntu 26.04 and newer |
 | pipewiresrc | `gstreamer-plugin-pipewire` | `pipewire-gstreamer` | `gstreamer1.0-pipewire` |
 | pulsesrc | `gstreamer-plugins-good` | `gstreamer1-plugins-good` | `gstreamer1.0-plugins-good` |

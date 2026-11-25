@@ -114,12 +114,15 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     pkg-config
     makeWrapper
+    # The PipeWire bindings are generated from its headers at build time.
+    rustPlatform.bindgenHook
   ];
   buildInputs = [
     gst_all_1.gstreamer
     gst_all_1.gst-plugins-base
     gst_all_1.gst-plugins-bad
     libgbm
+    pipewire
   ];
 
   postInstall = ''

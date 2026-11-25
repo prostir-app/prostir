@@ -2,6 +2,7 @@
 //! shell keeps its panel and wallpapers.
 
 pub mod access;
+pub mod feed;
 pub mod kscreen;
 pub mod plasma;
 pub mod virtual_output;
@@ -18,6 +19,7 @@ use crate::platform::{
     Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec,
     Windows,
 };
+use feed::Feed;
 use virtual_output::{Screencast, VirtualOutput};
 use windows::KdeWindows;
 
@@ -226,7 +228,10 @@ impl Desktop for Kde {
 struct KdeOutput {
     key: OutputKey,
     origin: Origin,
-    // Field order matters: the stream closes before its own KWin connection.
+    // Field order matters: the feed stops before KWin's stream closes, and the
+    // stream before its own KWin connection.
+    /// KWin's frames going into the current encoder.
+    feed: Option<Feed>,
     stream: VirtualOutput,
     /// The connection of a display of the PC shown (see [`Kde::show`]).
     _connection: Option<Screencast>,
@@ -237,6 +242,7 @@ impl KdeOutput {
         Self {
             key: OutputKey::new(stream.output_name()),
             origin,
+            feed: None,
             stream,
             _connection: connection,
         }
@@ -268,12 +274,20 @@ impl Output for KdeOutput {
         }
     }
 
-    /// KWin feeds the encoder through PipeWire by itself.
-    fn attach(&mut self, _encoder: &Encoder) -> Result<()> {
+    /// KWin's stream is read from PipeWire into the encoder (see [`feed`]); a stream
+    /// that cannot start fails as the source.
+    fn attach(&mut self, encoder: &Encoder) -> Result<()> {
+        self.feed = None;
+        let appsrc = encoder
+            .appsrc()
+            .ok_or_else(|| anyhow::anyhow!("the encoder takes no pushed frames"))?;
+        self.feed = Some(self.stream.feed(appsrc, encoder.paused())?);
         Ok(())
     }
 
-    fn detach(&mut self) {}
+    fn detach(&mut self) {
+        self.feed = None;
+    }
 
     fn make_primary(&self) {
         self.stream.make_primary();

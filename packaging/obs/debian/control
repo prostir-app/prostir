@@ -10,7 +10,9 @@ Build-Depends: debhelper-compat (= 13),
                pkgconf | pkg-config,
                libgbm-dev,
                libgstreamer1.0-dev (>= 1.24),
-               libgstreamer-plugins-base1.0-dev (>= 1.24)
+               libgstreamer-plugins-base1.0-dev (>= 1.24),
+               libpipewire-0.3-dev,
+               libclang-dev
 Standards-Version: 4.7.0
 Homepage: https://prostir.ishawyha.dev
 Vcs-Browser: https://github.com/prostir-app/prostir

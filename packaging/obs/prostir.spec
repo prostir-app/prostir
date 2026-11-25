@@ -25,6 +25,9 @@ BuildRequires:  pkgconfig(gstreamer-1.0) >= 1.24
 BuildRequires:  pkgconfig(gstreamer-allocators-1.0) >= 1.24
 BuildRequires:  pkgconfig(gstreamer-app-1.0) >= 1.24
 BuildRequires:  pkgconfig(gstreamer-video-1.0) >= 1.24
+BuildRequires:  pkgconfig(libpipewire-0.3)
+# The PipeWire bindings are generated from its headers at build time (bindgen).
+BuildRequires:  clang-devel
 
 # The libraries the program links come from rpm's automatic requirements. These are
 # the GStreamer plugins and the commands Prostir runs, and the libraries the settings
