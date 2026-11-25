@@ -215,7 +215,10 @@ fn set_up(
                     let accepted = Accepted { conn, open, from };
                     events.send(Event::Accepted(Box::new(accepted)));
                 }
-                Err(e) if e.is::<pairing::TurnedAwayAgain>() => {
+                Err(e)
+                    if e.is::<pairing::TurnedAwayAgain>()
+                        || e.is::<pairing::HungUpBeforeHello>() =>
+                {
                     debug!("rejected connection from {from}: {e:#}");
                 }
                 Err(e) => warn!("rejected connection from {from}: {e:#}"),
