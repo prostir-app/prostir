@@ -21,7 +21,7 @@ use super::*;
 use crate::connecting::Ended;
 use crate::ids::Thing;
 use crate::interaction::{HandState, Hands, Menu, Menus};
-use crate::layout::Desk;
+use crate::layout::{Desk, Ray};
 use crate::platform::store::Store as _;
 use crate::session::{Disconnect, StepId};
 use crate::ui::UiState;
@@ -1802,4 +1802,131 @@ fn a_keyboard_window_that_fails_is_said_and_kept() {
     assert!(!view.keyboard_available, "not offered now");
     assert!(sim.m.settings().keyboard_window, "kept as chosen");
     assert_eq!(sim.saves(), [], "nothing changed to save");
+}
+
+impl Sim {
+    /// The PC says it can do `features`.
+    fn host_can(&mut self, features: Vec<state::Feature>) {
+        let part = state::HostCaps { features };
+        self.net(NetEvent::Part(PC, HostMsg::HostCaps { part }));
+    }
+
+    /// Frames of 11 ms for `d` with the head turned to look along `forward`.
+    fn look(&mut self, forward: Vec3, d: Duration) {
+        let end = self.now + d;
+        while self.now < end {
+            self.now += 11 * MS;
+            let mut input = frame(HandState::default());
+            input.head = Some(Head { forward, ..head() });
+            self.m.tick(self.now, &input);
+            self.m.animate(self.now, &input);
+            self.check_view();
+        }
+    }
+
+    /// The direction from the head to monitor `n`.
+    fn towards(&self, n: u32) -> Vec3 {
+        let at = self.m.world().shown(k(n)).expect("drawn").position;
+        (at - self.m.head.0).normalize()
+    }
+}
+
+/// The `Gaze` messages sent to the PC among `fx`.
+fn gazes(fx: &[Effect]) -> Vec<(Option<DisplayId>, u16, u16)> {
+    sent(fx)
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Gaze { display, u, v } => Some((*display, *u, *v)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A PC that takes the gaze (feature 14) hears which monitor is looked at, once for each
+/// time it changes (not every frame), and that none is looked at any more; the menu
+/// shows none of it.
+#[test]
+fn the_pc_that_takes_the_gaze_hears_the_monitor_looked_at() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    // The first run's tips opened the menu in front of the monitors.
+    sim.menu(Action::Close);
+    sim.host_can(vec![caps::pc::GAZE]);
+    let (one, two) = (sim.towards(1), sim.towards(2));
+    assert_ne!(one, two);
+    let rev = sim.m.rev();
+
+    sim.look(one, Duration::from_secs(2));
+    let fx = sim.take();
+    let told = gazes(&fx);
+    assert_eq!(told.len(), 1, "once, not every frame: {told:?}");
+    assert_eq!(told[0].0, Some(DisplayId(1)));
+    sim.look(one, Duration::from_secs(2));
+    assert_eq!(gazes(&sim.take()), [], "nothing while it stays");
+
+    sim.look(two, Duration::from_secs(2));
+    let told = gazes(&sim.take());
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0].0, Some(DisplayId(2)));
+
+    // Over the monitors: none looked at.
+    sim.look(Vec3::Y, Duration::from_secs(2));
+    assert_eq!(gazes(&sim.take()), [(None, 0, 0)]);
+    sim.look(Vec3::Y, Duration::from_secs(2));
+    assert_eq!(gazes(&sim.take()), []);
+    assert_eq!(sim.m.rev(), rev, "the menu shows none of it");
+}
+
+/// A PC that did not name feature 14 never hears `Gaze`, whatever is looked at; one that
+/// names it later hears where the gaze is then.
+#[test]
+fn a_pc_that_does_not_take_the_gaze_hears_none() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    // The first run's tips opened the menu in front of the monitors.
+    sim.menu(Action::Close);
+    sim.host_can(vec![caps::pc::SCALE]);
+    let (one, two) = (sim.towards(1), sim.towards(2));
+    for forward in [one, two, Vec3::Y, one] {
+        sim.look(forward, Duration::from_secs(2));
+    }
+    assert_eq!(gazes(&sim.take()), []);
+    sim.host_can(vec![caps::pc::GAZE]);
+    sim.look(one, Duration::from_secs(1));
+    let told = gazes(&sim.take());
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0].0, Some(DisplayId(1)));
+}
+
+/// Without a frame (the headset off the head) the gaze is on no monitor.
+#[test]
+fn a_pass_without_a_frame_looks_at_none() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    // The first run's tips opened the menu in front of the monitors.
+    sim.menu(Action::Close);
+    sim.host_can(vec![caps::pc::GAZE]);
+    let one = sim.towards(1);
+    sim.look(one, Duration::from_secs(1));
+    assert_eq!(gazes(&sim.take()).len(), 1);
+    sim.after(Duration::from_secs(1));
+    sim.after(Duration::from_secs(1));
+    assert_eq!(gazes(&sim.take()), [(None, 0, 0)]);
+}
+
+/// A new session starts with the PC knowing nothing: the monitor looked at is told
+/// again.
+#[test]
+fn a_pc_that_comes_back_hears_the_gaze_again() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    // The first run's tips opened the menu in front of the monitors.
+    sim.menu(Action::Close);
+    sim.host_can(vec![caps::pc::GAZE]);
+    let one = sim.towards(1);
+    sim.look(one, Duration::from_secs(1));
+    assert_eq!(gazes(&sim.take()).len(), 1);
+    sim.m.gaze_told.forget(PC);
+    sim.look(one, Duration::from_secs(1));
+    assert_eq!(gazes(&sim.take()).len(), 1);
 }

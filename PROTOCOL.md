@@ -996,7 +996,7 @@ are marked as such (their bytes never change). "Part" marks a part of the state 
 | 140 | `Up` | `up:u8, data:bytes*` | A piece of up stream `up`. Lane 1. |
 | 141 | `UpEnd` | `up:u8` | Up stream `up` ended. Lane 1. |
 | 133 | `Arrange` | `rows:list<Row>(max 32)` | How the displays stand around the user (see [Layout](#7-layout)). |
-| 137 | `Gaze` | `display:opt<DisplayId>, u:u16, v:u16` | The display the user looks at, and where on it (0 to 65535 from the top left). |
+| 137 | `Gaze` | `display:opt<DisplayId>, u:u16, v:u16` | The display the user looks at, and where on it (0 to 65535 from the top left); none (with `u` and `v` 0): none of this host's displays. The headset sends it only to a host that listed feature 14, only when the display looked at has changed and rested a moment (not for a move across one display), and at most four times a second. The host only logs it for now. |
 | 131 | `Request` | `req:u32, kind:u8, fields` | A change of the host's state (see [Requests](#requests)). |
 | 132 | `Reply` | `req:u32, outcome:Outcome` | The answer to the host's `Command` `req`, after the parts it changed. |
 | 124 | `MouseTo` | `id:DisplayId, u:u16, v:u16` | Put the mouse on display `id`, at `u`, `v` across its picture (0 to 65535). |

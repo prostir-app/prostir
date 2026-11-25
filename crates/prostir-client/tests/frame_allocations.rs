@@ -32,10 +32,10 @@ use prostir::session::NetCmd;
 use prostir::settings::Settings;
 use prostir::ui::Action;
 use prostir::view::View;
-use prostir_proto::HostMsg;
 use prostir_proto::state::{
-    Display, DisplayId, DisplayKind, DisplayState, Displays, Mode, permission,
+    Display, DisplayId, DisplayKind, DisplayState, Displays, HostCaps, Mode, permission,
 };
+use prostir_proto::{ClientMsg, HostMsg};
 
 thread_local! {
     /// Allocations made on this thread (other tests run on threads of their own).
@@ -119,23 +119,36 @@ struct Loop {
     main_rev: Option<u64>,
     /// How many times the menu's state was made.
     builds: u64,
+    /// Where the head looks.
+    forward: Vec3,
+    /// How many `Gaze` messages the model sent.
+    gazes: u64,
 }
 
 impl Loop {
+    fn take(&mut self) {
+        self.m.take_effects(&mut self.fx);
+        self.gazes += self
+            .fx
+            .iter()
+            .filter(|e| matches!(e, Effect::Send(_, ClientMsg::Gaze { .. })))
+            .count() as u64;
+    }
+
     fn handle(&mut self, event: Event) {
         self.m.handle(self.now, event);
-        self.m.take_effects(&mut self.fx);
+        self.take();
     }
 
     fn frame(&mut self, right: HandState) {
         self.now += FRAME;
         let now = self.now;
         self.m.end_pass();
-        self.m.take_effects(&mut self.fx);
+        self.take();
         let input = FrameInput {
             head: Some(Head {
                 position: Vec3::ZERO,
-                forward: -Vec3::Z,
+                forward: self.forward,
                 right: Vec3::X,
             }),
             dt: FRAME.as_secs_f32(),
@@ -148,18 +161,18 @@ impl Loop {
             align: false,
         };
         self.m.tick(now, &input);
-        self.m.take_effects(&mut self.fx);
+        self.take();
         self.hands.buttons(now, &input, &mut self.m);
-        self.m.take_effects(&mut self.fx);
+        self.take();
         let rev = Some(self.m.rev());
         if self.m.world().wrist().is_some() && rev != self.palm_rev {
             let _ = self.view.state(&self.m);
             self.palm_rev = rev;
         }
         self.hands.step(now, &input, &mut self.m, &mut Pictures);
-        self.m.take_effects(&mut self.fx);
+        self.take();
         self.m.animate(now, &input);
-        self.m.take_effects(&mut self.fx);
+        self.take();
         if self.m.menu().open {
             let rev = Some(self.m.rev());
             if rev != self.main_rev {
@@ -242,6 +255,8 @@ fn connected() -> Loop {
         palm_rev: None,
         main_rev: None,
         builds: 0,
+        forward: -Vec3::Z,
+        gazes: 0,
     };
     l.now += Duration::from_millis(1);
     l.m.tick(l.now, &FrameInput::hidden(None));
@@ -279,6 +294,11 @@ fn connected() -> Loop {
         primary: Some(DisplayId(1)),
     };
     l.handle(Event::Net(NetEvent::Part(PC, HostMsg::Displays { part })));
+    // The PC takes the gaze: every frame works out which monitor is looked at.
+    let part = HostCaps {
+        features: vec![prostir_proto::state::caps::pc::GAZE],
+    };
+    l.handle(Event::Net(NetEvent::Part(PC, HostMsg::HostCaps { part })));
     for n in [1, 2] {
         l.handle(Event::StreamStarted {
             id: DisplayKey::new(PC, DisplayId(n)),
@@ -358,6 +378,35 @@ fn a_frame_takes_no_memory() {
     let drag = move |i: u32| drag_at(beside, i);
     assert_eq!(l.measure(300, drag), (0, 0), "a drag, the menu open");
     assert!(monitor(&l), "the drag held a monitor");
+}
+
+/// The gaze goes from one monitor to the other and to none, and back, for a PC that
+/// takes it: the monitor looked at is worked out each frame and the PC told of each
+/// change, with no memory taken.
+#[test]
+fn telling_the_gaze_takes_no_memory() {
+    let mut l = connected();
+    let at = |l: &Loop, n: u32| {
+        let p = l.m.world().shown(DisplayKey::new(PC, DisplayId(n)));
+        (p.expect("drawn").position - Vec3::ZERO).normalize()
+    };
+    let (one, two) = (at(&l, 1), at(&l, 2));
+    // Every 25 frames (275 ms) the head turns to the next of the two monitors and the
+    // ceiling.
+    let turns = [one, two, Vec3::Y];
+    let gazes = l.gazes;
+    for round in 0..4 {
+        let before = allocations();
+        for i in 0..90 {
+            l.forward = turns[(i / 25 + round) % 3];
+            l.frame(HandState::default());
+        }
+        // The first round makes room for what the model keeps; later ones take none.
+        if round > 0 {
+            assert_eq!(allocations() - before, 0, "round {round}");
+        }
+    }
+    assert!(l.gazes - gazes > 6, "told {}", l.gazes - gazes);
 }
 
 /// The menu's picture as the ray goes over it, button to button and off it, twice: the

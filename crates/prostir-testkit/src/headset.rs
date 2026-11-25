@@ -602,6 +602,7 @@ impl FakeHeadset {
                     caps::headset::COMMANDS,
                     caps::headset::MIC,
                     caps::headset::VOLUME,
+                    caps::headset::GAZE,
                 ],
                 decoders: vec![
                     Decoder {

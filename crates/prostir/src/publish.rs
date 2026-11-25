@@ -227,6 +227,8 @@ fn host_caps(displays: &Displays, volume: bool) -> HostCaps {
         caps::pc::NO_LIMITS,
         caps::pc::SCALE,
         caps::pc::COMMANDS,
+        // Takes the headset's `Gaze` (for now it only writes it in its log).
+        caps::pc::GAZE,
     ];
     if displays.moves_mouse() {
         features.push(caps::pc::MOVE_MOUSE);

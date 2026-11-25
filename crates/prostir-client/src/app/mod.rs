@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 mod actions;
+mod gaze;
 mod hands;
 mod session;
 #[cfg(test)]
@@ -37,7 +38,7 @@ use crate::caps::{Caps, Offer};
 use crate::ids::{DisplayKey, PcId};
 use crate::interaction::{FrameInput, Head};
 use crate::lang::{Known, Lang, LangState, Moment, Texts};
-use crate::layout::{self, Desk, Placement, Ray};
+use crate::layout::{self, Desk, Placement};
 use crate::net::NetEvent;
 use crate::note::{self, Note, Notes};
 use crate::pending;
@@ -439,6 +440,8 @@ pub struct Model {
     gaze_on: Option<(DisplayKey, Instant)>,
     /// When the mouse was last sent somewhere by the gaze.
     gaze_moved: Option<Instant>,
+    /// What the PCs were told of the monitor looked at (see `gaze`).
+    gaze_told: gaze::Told,
     /// Time worn since the last rest reminder.
     worn_for: Duration,
     /// Since when the headset is off the head (for rest reminders).
@@ -540,6 +543,7 @@ impl Model {
             finder: None,
             gaze_on: None,
             gaze_moved: None,
+            gaze_told: gaze::Told::default(),
             worn_for: Duration::ZERO,
             off_since: None,
             system_lang,
@@ -836,6 +840,8 @@ impl Model {
         self.expire_shown();
         if let Some(head) = input.head {
             self.frame(input, head);
+        } else {
+            self.tell_gaze(None);
         }
     }
 
@@ -913,8 +919,10 @@ impl Model {
         }
         self.place_sound();
         self.remind_rest(input.dt);
+        let looked = self.looked(input.focused);
+        self.tell_gaze(looked);
         if input.focused {
-            self.follow_gaze();
+            self.follow_gaze(looked);
         }
         self.hands_in_view = input.joints.iter().any(Option::is_some);
         // Pairing needs the menu, and so do the first-run tips: open it where the
@@ -1250,24 +1258,13 @@ impl Model {
 
     /// Mouse follows the gaze: after resting on another monitor for a moment, the
     /// mouse goes to where the user looks on it (as drawn).
-    fn follow_gaze(&mut self) {
+    fn follow_gaze(&mut self, looked: Option<(DisplayKey, Vec2)>) {
         let busy = self.world.wrist().is_some() || self.world.holding() || self.settings.cinema;
         let main = self.session.main();
         if !self.settings.gaze_mouse || !self.can_move_mouse() || main.is_none() || busy {
             self.gaze_on = None;
             return;
         }
-        let (head, forward) = self.head;
-        let ray = Ray {
-            origin: head,
-            dir: forward.normalize_or(-Vec3::Z),
-        };
-        let session = &self.session;
-        let looked = self
-            .world
-            .looked_at(ray, &self.settings, self.menu.open, |k| {
-                session.waits(ui::Asked::Remove(k))
-            });
         let Some((id, uv)) = looked else {
             self.gaze_on = None;
             return;

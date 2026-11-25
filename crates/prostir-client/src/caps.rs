@@ -361,6 +361,8 @@ impl Caps {
             caps::headset::WINDOWS,
             caps::headset::COMMANDS,
             caps::headset::MIC,
+            // The head's ray, which the menu's pointing already works from.
+            caps::headset::GAZE,
         ];
         // The compositor shows a surface's rows bottom first and cannot turn the layer
         // over: the PC turns the picture over instead.
@@ -606,6 +608,8 @@ mod tests {
         assert_eq!(told.streams_max, 4);
         assert_eq!(told.layers_max, LAYERS_AT_LEAST);
         assert_eq!(told.model, "Test");
+        // The head's ray is always there.
+        assert!(told.has(caps::headset::GAZE));
     }
 
     /// The rate by the rule: the highest up to 90 as usual, the lowest from 72 to save
