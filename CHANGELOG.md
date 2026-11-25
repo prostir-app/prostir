@@ -127,6 +127,58 @@
 - Each monitor's picture is smoothed by the headset only while it is shown smaller than
   the headset's pixels, and sharpened always; before, it was smoothed always, which
   blurs a picture shown at full size.
+- The magnet (stick together) no longer folds one monitor over another, hangs one in
+  front of or behind another as you see them, or lays two monitors that stand almost in
+  one plane over each other. A monitor dropped over the seam between two glued ones is
+  turned there the way Line up would turn it, and hides at most a sliver of them. A
+  monitor a layout or Line up pushes into a row no longer hides the ones over or under
+  it, and a monitor that arrives never hides another.
+- A layout, Line up and a new monitor keep every row in view: a row of ordinary monitors
+  is no longer stacked out of view (past 40 degrees up or down), and a monitor far wider
+  than the circle goes into the row in view. Whether one monitor covers another is now
+  worked out exactly, wherever they stand around you, so fewer monitors are left out of
+  view.
+- Every display of the PC itself has a switch in the Monitors page of the headset menu,
+  named by its maker and model (the laptop screen as such), with a page to turn when
+  there are many. Displays that cover each other on the PC's desktop (a cloned desktop)
+  stand side by side in the headset, and one that you start showing is placed beside the
+  ones already shown.
+- Profiles have a page of their own in the headset menu, ten to a page and up to
+  twenty: switch to one, save the setup over one (press twice), delete one (press
+  twice) or save a new one. The first three stay on the Quick page. Name a profile in
+  the Prostir window on the PC, or with `prostir ctl profile rename 2 Work`.
+- Where the PC makes monitors at a scale, the menu offers it for a monitor you pick and
+  for one you add (100 %, 125 %, 150 %, larger text).
+- A display the headset cannot decode in time (by its width, its height, or the pixels
+  per second at 60 frames) is shown as failed with the reason, and the PC makes no
+  monitor the headset cannot take.
+- Hyprland: Prostir finds out once which form of commands this Hyprland takes (older and
+  newer versions differ), instead of trying two forms for each command.
+
+### Picture and video in the headset
+
+- A monitor whose picture breaks starts again by itself: the headset makes its video
+  decoder again after a short pause (0.2 s, growing to 5 s), asks the PC for a fresh
+  picture, and after a few failures in a row makes its picture surface for the monitor again.
+  If no picture comes for 2 s, the monitor says "No picture, recovering".
+- A monitor that cannot be shown for good (the headset has no decoder for its codec, or
+  refuses its size) keeps its place in your arrangement and in the menu, and says why
+  where it stands ("Not shown: this headset has no H.265 decoder"). It comes back when
+  the PC starts its picture anew.
+- Pictures show the right way up on headsets whose display system cannot turn a layer
+  over: the PC then sends the picture upside down on purpose, and turns it over where it
+  converts the colours, on the graphics card where it can. Where a graphics card cannot,
+  Prostir uses another way to encode.
+- The room behind the monitors works on any headset that can show it: Prostir uses
+  whichever way the headset offers, so the "Room" backgrounds are not limited to one
+  maker's headsets.
+- When there is more to show than the headset's display system takes at once, the
+  farthest monitors are hidden first and Prostir says "Too much to show at once: the
+  farthest monitor is hidden for now" once. Room is kept for the background, the menu,
+  its button, the hands, the dots of the pointing rays and that message, so pointing or a
+  message never pushes a monitor out, and the menu and your hands are the last to go.
+- The headset tells the PC which of its monitors you look at. Nothing changes in the
+  picture for now.
 
 ### Settings
 
@@ -140,6 +192,9 @@
   where you put it in the headset.
 - The codec you choose in the headset stays chosen when the graphics card has to use
   another one.
+- The PC, its window and the headset take their texts from one file per language, and
+  a language can be added with a file of your own (see the README); it then shows in the
+  language choice.
 
 ### Counting users only with your yes
 
@@ -189,8 +244,9 @@
   is paired, then only its own, so others nearby do not see it. A headset the PC
   forgot can no longer find it. A headset can also ask
   a PC it knows straight at its address, through a VPN such as Tailscale or WireGuard
-  too, with no port opened on the router. The PC still announces itself while it
-  runs, for headsets that do not ask yet.
+  too, with no port opened on the router. The PC no longer announces itself, and the
+  headset no longer scans the local network for it: it asks, and a PC answers only the
+  headsets it should.
 - "Pair a new headset" in the tray, the settings window or `prostir ctl pair` lets a
   new headset find the PC for 3 minutes, until it pairs or "Stop pairing". When a new
   headset asks for a paired PC, the PC shows "New headset nearby. Pair it?" with a
@@ -238,9 +294,27 @@
   after a minute.
 - The PC's sound no longer stays silent for the rest of a session when the headset's
   sound output does not open for a moment: it is tried again until it plays.
+- One volume for the headset and the PC, where the headset lets apps set its volume: the
+  headset's volume buttons move the PC's volume for the headset, and the PC's
+  volume slider, volume keys or the settings window's slider move the headset's volume.
+  The headset goes to the nearest step of its own in the direction you moved, so a
+  change of 1 % still changes it, and a slow drag no longer jumps between two steps.
+  Mute and unmute on either side apply on both. Only the main headset's volume is
+  shared.
 
 ### Connection
 
+- While no PC answers, the headset says what to do: with no paired PC, after 5 s, how to
+  open pairing on the PC, to type its address (the settings window shows it where you
+  pair) or to use a USB cable; with a paired PC, after 30 s, that the PC does not
+  answer and that Prostir must run on it, on the same network. The headset asks nobody
+  while you do not wear it or while a PC is in use.
+- A USB cable now works with the other ways of reaching a PC. The headset tries the
+  cable first, but takes only the PC you want: after "Change PC" it does not go back to
+  the PC you just left, and a PC you picked is the only one it connects to by itself.
+  A USB setup left behind after Prostir quit no longer stops the headset from finding
+  the PC on Wi-Fi, and Prostir takes its USB setup away when it quits. The PC notices a
+  headset plugged in at once, with no check every few seconds.
 - A PC picked in the menu, or paired with over USB, no longer holds the headset to
   that address: once its session is open, the headset finds the PC again over Wi-Fi
   when the cable is pulled, or at its new address when it gets one.

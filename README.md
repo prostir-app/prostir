@@ -429,9 +429,9 @@ use Wi-Fi only.
    computer" and allow.
 5. Check that `adb devices` lists the headset as `device`. If it says `unauthorized`,
    unplug, plug in again and answer the question in the headset.
-6. Start Prostir on the PC (or leave it running). Every few seconds it looks for
-   headsets on USB and runs `adb reverse tcp:47830 tcp:47830` for each, so the headset
-   reaches the PC at 127.0.0.1.
+6. Start Prostir on the PC (or leave it running). It notices a headset plugged in over
+   USB and runs `adb reverse tcp:47830 tcp:47830` for it, so the headset reaches the PC
+   at 127.0.0.1. It takes this away again when it quits.
 7. Open Prostir in the headset. It tries the cable before Wi-Fi, and the menu says
    "Connected to PC (USB)". Pairing is the same as over Wi-Fi, once per PC.
 
@@ -505,7 +505,8 @@ down or cinema, and not while dragging all together.
   rate (90 Hz, or 72 Hz to save battery: the video is 60 frames a second either way),
   and whether the round menu button shows by the monitor.
 - **Sound**: where PC sound plays, which microphone the PC uses, and sound from the
-  screen.
+  screen. Where the headset lets apps set its volume, its volume buttons and the PC's
+  volume slider are one volume.
 - **Language**: like the PC, Ukrainian or English; the palm menu's clock in 24 or 12
   hours (14:05 or 2:05 PM) and its date in the menu's language, Ukrainian, English or
   numbers.
