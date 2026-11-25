@@ -1789,19 +1789,23 @@ fn line_up_brings_a_row_over_the_head_into_view() {
         let glued = sim.world.glued_now();
         assert!(!glued.is_empty(), "{case}: glued {glued:?}");
         let laid = sim.world.sizes.clone();
-        let before = layout::seam_gaps(&sim.world.placements, &laid, at, &glued);
+        let meeting = layout::meeting_pairs(&sim.world.placements, &laid, at, 1.5e-3);
+        let before = layout::seam_gaps(&sim.world.placements, &laid, at, &meeting);
         sim.world.tidy_up(&sim.s, sim.now);
         sim.settled();
         all_in_view(&sim, &[1, 2, 3, 4], &case);
         let rows = row_ids(sim.arranged.last().expect("told"));
         assert_eq!(rows, [vec![3, 4], vec![1, 2]], "{case}: the same rows");
         assert!(sim.world.radius > layout::RADIUS, "{case}: further away");
-        let after = layout::seam_gaps(&sim.world.placements, &laid, at, &glued);
-        for ((pair, was), now) in glued.iter().zip(&before).zip(&after) {
+        let after = layout::seam_gaps(&sim.world.placements, &laid, at, &meeting);
+        for ((pair, was), now) in meeting.iter().zip(&before).zip(&after) {
             let (p, u) = (pair.0.id.0, pair.1.id.0);
+            let (Some(was), Some(now)) = (was, now) else {
+                panic!("{case}: {u} and {p} no longer one over the other");
+            };
             assert!(
                 now - was < 5e-4,
-                "{case}: the seam of {u} over {p} opens: {was} to {now}"
+                "{case}: the seam of {u} and {p} opens: {was} to {now}"
             );
         }
     }
@@ -1845,7 +1849,7 @@ fn a_monitor_added_over_a_row_is_in_view() {
             &sim.world.glued_now()
         )
         .iter()
-        .all(|g| g.abs() < 1e-3),
+        .all(|g| g.is_some_and(|g| g.abs() < 1e-3)),
         "resting on the row as seen"
     );
 }

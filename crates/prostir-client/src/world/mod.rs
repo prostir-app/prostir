@@ -1162,8 +1162,11 @@ impl World {
             info!("monitor {} placed next to the others", m.0);
             self.placements.insert(m.0, at);
             if push {
-                // Into the main row: its neighbours there make room along it.
+                // Into the main row: its neighbours there make room along it. What
+                // that lifts out of its way out of view (a row over them), the whole
+                // further away brings back.
                 self.make_room_for(s, m.0);
+                self.further_into_view(s, &[]);
             }
             placed = true;
             // A placeholder still waiting (another monitor asked for meanwhile) moves
@@ -1782,20 +1785,23 @@ impl World {
     /// it stood kept glued (their seams, opened in the room by the carry, close again);
     /// the PC's own displays carried as one piece, window panels left where they are.
     /// At the least radius at which everything carried is in view (found by halving:
-    /// carrying is cheap), or 5 cm further where lining up took a monitor out of view
-    /// again: where every monitor is in view, nothing goes through anything and no
-    /// seam closed before is open; no further than `layout::VIEW_RADIUS`. Else
-    /// everything stays as it was.
-    /// `glued`: the pairs lining up kept glued as it stands now (see
-    /// [`Self::line_up_rows`]).
+    /// carrying is cheap) and 2 cm more, for rows lining up pushes apart, lined up
+    /// once: there if every monitor is in view, nothing goes through anything and no
+    /// seam seen closed before (to within a few pixels) is open; no further than
+    /// `layout::VIEW_RADIUS`. Else everything stays as it was. `glued`: the pairs
+    /// lining up kept glued as it stands now (see [`Self::line_up_rows`]), kept glued
+    /// too.
     fn further_into_view(&mut self, s: &Settings, glued: &[(DisplayKey, DisplayKey)]) {
         /// Past the least radius in view as carried, how much further it is lined up
-        /// again (lined up, rows pushed apart may come out of view again; each time
-        /// costs a lining up, some milliseconds on the headset).
-        const ON: [f32; 2] = [0.0, 0.05];
+        /// again (lined up, rows pushed apart may come a little out of view again);
+        /// once, as a lining up costs some milliseconds on the headset.
+        const MORE: f32 = 0.02;
         /// How much a seam closed as seen may open, as seen (radians: half a millimetre
         /// a metre away).
         const OPEN: f32 = 5e-4;
+        /// A seam seen closed to within this is kept closed (radians: about three pixels
+        /// a metre away).
+        const MEETING: f32 = 1.5e-3;
         let group = self.placed_group();
         let at = (self.center, self.tilt);
         let laid: Vec<(DisplayKey, u32, u32)> = self
@@ -1838,7 +1844,7 @@ impl World {
                 };
             }
         };
-        // The least radius in view as carried, halved down to a millimetre: carried
+        // The least radius in view as carried, halved down to 5 mm: carried
         // further, every monitor is seen nearer eye level.
         let mut next = was.clone();
         carry(layout::VIEW_RADIUS, &mut next);
@@ -1846,7 +1852,7 @@ impl World {
             return;
         }
         let (mut lo, mut hi) = (was_radius, layout::VIEW_RADIUS);
-        while hi - lo > 0.001 {
+        while hi - lo > 0.005 {
             let mid = (lo + hi) / 2.0;
             carry(mid, &mut next);
             if unseen(&next) {
@@ -1855,29 +1861,33 @@ impl World {
                 hi = mid;
             }
         }
-        let gaps_was = layout::seam_gaps(&was, &laid, at, glued);
-        for on in ON {
-            let radius = hi + on;
-            if radius > layout::VIEW_RADIUS {
-                break;
+        // The seams to keep closed: those lining up keeps glued, and every other one
+        // seen closed as it stands (a monitor over another that lining up does not take
+        // for glued, a row resting on a row of other widths).
+        let mut pairs = layout::meeting_pairs(&was, &laid, at, MEETING);
+        for g in glued {
+            if !pairs.contains(g) {
+                pairs.push(*g);
             }
-            carry(radius, &mut self.placements);
-            self.line_up_keeping(glued);
-            let gaps = layout::seam_gaps(&self.placements, &laid, at, glued);
-            let opened = gaps
-                .iter()
-                .zip(&gaps_was)
-                .any(|(now, was)| now - was > OPEN);
-            let still = unseen(&self.placements);
-            if !opened && !still && !layout::cut_any(&self.placements, &laid) {
-                info!("out of view: the arrangement taken {radius:.2} m away");
-                self.radius = radius;
-                return;
-            }
-            // Further on helps only what lining up took out of view again.
-            if !still {
-                break;
-            }
+        }
+        let gaps_was = layout::seam_gaps(&was, &laid, at, &pairs);
+        let radius = (hi + MORE).min(layout::VIEW_RADIUS);
+        carry(radius, &mut self.placements);
+        self.line_up_keeping(&pairs);
+        let gaps = layout::seam_gaps(&self.placements, &laid, at, &pairs);
+        // Open, or no longer one over the other.
+        let opened = gaps
+            .iter()
+            .zip(&gaps_was)
+            .any(|(now, was)| match (now, was) {
+                (Some(now), Some(was)) => now - was > OPEN,
+                (None, Some(_)) => true,
+                _ => false,
+            });
+        if !opened && !unseen(&self.placements) && !layout::cut_any(&self.placements, &laid) {
+            info!("out of view: the arrangement taken {radius:.2} m away");
+            self.radius = radius;
+            return;
         }
         self.placements = was;
     }
