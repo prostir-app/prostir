@@ -13,7 +13,7 @@ src/platform/htc.rs htc: the module of that maker's extensions
 src/platform/mod.rs htc: the module of that maker's extensions, named
 src/platform/openxr/mod.rs htc: turns on that maker's extensions, through its module
 src/platform/room.rs htc: the room by that maker's extension, through its module
-src/main_loop.rs meta: calls into the module of that maker's extensions
+src/main_loop/ meta: calls into the module of that maker's extensions
 src/platform/store/meta.rs horizon: the store's own name
 src/platform/controllers.rs oculus: an interaction profile's path, as OpenXR names it
 src/platform/controllers.rs htc: an interaction profile's path, as OpenXR names it
