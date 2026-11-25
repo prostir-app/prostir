@@ -224,8 +224,9 @@ const RATE_SLACK: f32 = 0.5;
 /// The layers every OpenXR runtime takes (`XR_MIN_COMPOSITION_LAYERS_SUPPORTED`).
 pub const LAYERS_AT_LEAST: u8 = 16;
 /// The layers the app keeps for its own things, not the streams: the background, the
-/// menu, its button, the hands and rays.
-pub const RESERVED_LAYERS: u8 = 4;
+/// menu, its button, the hands and rays, the dots where the two rays point and the
+/// toast, so pointing or a message never pushes a monitor out (see `layers`).
+pub const RESERVED_LAYERS: u8 = 7;
 
 /// The frame rate a decoder must keep at the size the PC is told: the PC sends 60.
 pub const DECODE_RATE: f64 = 60.0;
@@ -740,7 +741,7 @@ mod tests {
     #[test]
     fn streams_and_volume_from_what_the_system_says() {
         assert_eq!(streams_max([Some(16), Some(6)], 16), 6);
-        assert_eq!(streams_max([None, Some(0), Some(10)], 16), 10);
+        assert_eq!(streams_max([None, Some(0), Some(10)], 32), 10);
         // No more than the layers the app's own things leave.
         assert_eq!(streams_max([None, Some(32)], 16), 16 - RESERVED_LAYERS);
         assert_eq!(streams_max([Some(1000)], 64), 64 - RESERVED_LAYERS);
