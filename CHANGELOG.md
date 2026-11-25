@@ -2,6 +2,25 @@
 
 ## 0.2.0 (not released yet)
 
+### Clearer text
+
+- Sharper text is on by default for monitors smaller than 2560×1440 (with VA-API): at
+  the same bitrate small text is much clearer, and the keyframe of a 1080p monitor even
+  smaller. Larger monitors keep the faster setting, as the slower one takes longer than
+  a frame to encode there. Turning Sharper text on or off applies to every monitor;
+  settings of earlier versions keep it only where it was turned on.
+- After a big change of the picture (another file, another tab) the first frame is
+  coarse: with Sharper text, once the screen is still, it is sharpened after about
+  0.7 s instead of about 4 s, once per pause (the faster setting cannot make a still
+  picture sharper than that first frame, so it keeps the keyframe after 3 s). Typing
+  and scrolling make no extra keyframes. On KDE a still screen now sends its picture
+  again every 0.75 s instead of 2 s (a frame of a few KB), so the sharp picture comes
+  then.
+- Over USB, monitors of 2560×1440 and larger stream at 60 Mbit/s instead of 30 while
+  you have not chosen a quality yourself: the first frame after a big change is then
+  nearly as sharp as a still one. A quality you choose holds for every monitor. The
+  tray and the settings window say when this applies.
+
 ### Sound, menu and video while the picture changes a lot
 
 - Sound, the microphone, focus and the menu's answers no longer wait while the PC sends

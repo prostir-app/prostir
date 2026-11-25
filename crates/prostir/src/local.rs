@@ -437,7 +437,7 @@ impl Brain {
                 done()
             }
             Request::SetSharp { on } => {
-                self.store.change(|s| s.sharp = on);
+                self.store.change(|s| s.choose_clear_text(on));
                 done()
             }
             Request::SetCodec { codec, cpu } => {
@@ -610,7 +610,8 @@ impl Brain {
             });
         }
         let now = self.store.wanted();
-        self.store.set_encoding(now.bitrate, now.sharp, codec, cpu);
+        self.store
+            .set_encoding(now.bitrate, now.clear_text(), codec, cpu);
         match self.displays.as_mut() {
             Some(d) => {
                 d.apply(&self.store.wanted());
@@ -1035,7 +1036,12 @@ impl Brain {
             },
             encoding: api::Encoding {
                 bitrate: wanted.bitrate,
-                sharp: wanted.sharp,
+                large: self
+                    .displays
+                    .as_ref()
+                    .and_then(crate::displays::Displays::large_mbit),
+                sharp: wanted.clear_text(),
+                sharp_by_size: wanted.sharp.is_none(),
                 codec: codec(wanted.codec),
                 cpu: wanted.software,
                 using: self.displays.as_ref().map(|d| {

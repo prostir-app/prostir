@@ -8,8 +8,15 @@ use super::*;
 pub struct Settings {
     /// Mbit/s per monitor.
     pub bitrate: u32,
-    /// Clearer-text encoder preset.
-    pub sharp: bool,
+    /// The person chose the quality (a `bitrate` line): it then holds for every
+    /// monitor. Not chosen, a monitor of 2560x1440 or more streams at
+    /// [`USB_LARGE`] over USB.
+    pub bitrate_chosen: bool,
+    /// The clearer-text encoder preset (VA-API's `target-usage` 4), as chosen: on or
+    /// off for every monitor. Not chosen (`None`, written as no line): on for monitors
+    /// smaller than 2560x1440, where it keeps text far clearer at the same bitrate
+    /// within the time of a frame (see `encoder::slow_fits`).
+    pub sharp: Option<bool>,
     pub codec: Codec,
     /// Encode on the CPU.
     pub software: bool,
@@ -33,6 +40,19 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// Whether clearer text shows as on: chosen so, or not chosen (on where it fits).
+    pub fn clear_text(&self) -> bool {
+        self.sharp.unwrap_or(true)
+    }
+
+    /// Clearer text chosen `on`: a choice only when it changes what shows, so a
+    /// headset that sends what it shows changes nothing.
+    pub fn choose_clear_text(&mut self, on: bool) {
+        if on != self.clear_text() {
+            self.sharp = Some(on);
+        }
+    }
+
     /// The role and rights of the headset with key `key`.
     pub fn access_of(&self, key: &[u8; 32]) -> Access {
         self.access.get(&hex(key)).copied().unwrap_or(Access::MAIN)
@@ -111,7 +131,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             bitrate: 30,
-            sharp: false,
+            bitrate_chosen: false,
+            sharp: None,
             codec: Codec::H265,
             software: false,
             audio: true,
@@ -164,6 +185,13 @@ pub fn is_word(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// The settings in `text`. Before version 3 clearer text was off by default and
+/// `sharp off` was written all the same, so it was mostly the default nobody chose:
+/// it is no choice (as `count on` is no answer); `sharp on` was chosen and stays. So
+/// is `bitrate 30` before version 4, the default (builds of version 3 still wrote it
+/// for everyone); another quality was chosen. From those versions on, a `sharp` or
+/// `bitrate` line is a choice and there is none without one. 0.1's `monitors.txt` has
+/// no version: as the oldest.
 pub(super) fn parse_settings(text: &str) -> (Settings, Kept) {
     let mut s = Settings::default();
     let mut kept = Kept::default();
@@ -179,7 +207,10 @@ pub(super) fn parse_settings(text: &str) -> (Settings, Kept) {
             ("version", _) => value.parse().map(|v| kept.version = v).is_ok(),
             ("bitrate", _) => value
                 .parse()
-                .map(|v| s.bitrate = bitrate_in_range(v))
+                .map(|v| {
+                    s.bitrate = bitrate_in_range(v);
+                    s.bitrate_chosen = true;
+                })
                 .is_ok(),
             ("codec", _) => match value {
                 "h264" => Some(Codec::H264),
@@ -190,7 +221,7 @@ pub(super) fn parse_settings(text: &str) -> (Settings, Kept) {
             .map(|c| s.codec = c)
             .is_some(),
             ("sharp", Some(v)) => {
-                s.sharp = v;
+                s.sharp = Some(v);
                 true
             }
             ("software", Some(v)) => {
@@ -257,21 +288,37 @@ pub(super) fn parse_settings(text: &str) -> (Settings, Kept) {
             kept.unknown.push(line.to_owned());
         }
     }
+    if kept.version < SHARP_CHOSEN && s.sharp == Some(false) {
+        s.sharp = None;
+    }
+    if kept.version < BITRATE_CHOSEN {
+        // The default, written for everyone.
+        s.bitrate_chosen &= s.bitrate != Settings::default().bitrate;
+    }
     (s, kept)
 }
 
+/// The first versions of `settings.txt` whose `sharp` and `bitrate` lines are always a
+/// choice.
+const SHARP_CHOSEN: u32 = 3;
+const BITRATE_CHOSEN: u32 = 4;
+
 pub(super) fn settings_text(s: &Settings, kept: &Kept) -> String {
     let mut text = format!(
-        "{}bitrate {}\nsharp {}\ncodec {}\nsoftware {}\naudio {}\nmirror {}\ncount {}\n",
+        "{}codec {}\nsoftware {}\naudio {}\nmirror {}\ncount {}\n",
         kept.head(),
-        s.bitrate,
-        on_off(s.sharp),
         codec_name(s.codec),
         on_off(s.software),
         on_off(s.audio),
         on_off(s.mirror),
         counting_name(s.count),
     );
+    if s.bitrate_chosen {
+        let _ = writeln!(text, "bitrate {}", s.bitrate);
+    }
+    if let Some(on) = s.sharp {
+        let _ = writeln!(text, "sharp {}", on_off(on));
+    }
     if let Some(on) = s.autostart {
         let _ = writeln!(text, "autostart {}", on_off(on));
     }

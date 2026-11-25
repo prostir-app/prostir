@@ -259,6 +259,10 @@ enum Out {
     Other(usize),
 }
 
+/// The bitrates (kbit/s, and for a large picture where another) and the text preset
+/// of the encoders (see `EncoderConfig`).
+type Tuning = ((u32, Option<u32>), Option<bool>);
+
 pub struct Worker {
     // Field order matters: the outputs go before the desktop connection.
     slots: BTreeMap<ScreenId, Slot>,
@@ -269,7 +273,7 @@ pub struct Worker {
     /// The wanted state worked on; none until the first comes.
     wanted: Option<Wanted>,
     /// The bitrate and the text preset the encoders have.
-    tuning: Option<(u32, bool)>,
+    tuning: Option<Tuning>,
     /// The primary output as last made primary.
     primary_made: Option<OutputKey>,
     /// A monitor or panel was made: the others' wallpaper goes to it.
@@ -419,15 +423,24 @@ impl Worker {
         if was.is_none_or(|w| w.layout != wanted.layout) {
             self.layout_due = true;
         }
-        let tuning = (wanted.encoding.bitrate_kbps, wanted.encoding.sharp);
+        let tuning = (
+            (wanted.encoding.bitrate_kbps, wanted.encoding.large_kbps),
+            wanted.encoding.sharp,
+        );
         if self.tuning.is_some_and(|t| t != tuning) {
-            for e in self.slots.values().filter_map(|s| s.encoder.as_ref()) {
+            for (id, e) in self
+                .slots
+                .iter()
+                .filter_map(|(id, s)| Some((*id, s.encoder.as_ref()?)))
+            {
                 if tuning.0 != self.tuning.unwrap_or_default().0 {
-                    e.set_bitrate(tuning.0);
+                    e.set_bitrate(tuning.0.0, tuning.0.1);
                 }
                 if tuning.1 != self.tuning.unwrap_or_default().1 {
-                    e.set_target_usage(wanted.encoding.target_usage());
+                    e.set_sharp(wanted.encoding.sharp);
                 }
+                let (kbps, sharpens) = e.tuned();
+                self.shared.router.set_tuning(id, kbps, sharpens);
             }
         }
         self.tuning = Some(tuning);

@@ -159,7 +159,9 @@ fn base() -> State {
         },
         encoding: Encoding {
             bitrate: 30,
-            sharp: false,
+            large: None,
+            sharp: true,
+            sharp_by_size: true,
             codec: Codec::H265,
             cpu: false,
             using: None,
@@ -657,7 +659,10 @@ impl Inner {
                 }
                 s.encoding.bitrate = *mbit;
             }
-            Request::SetSharp { on } => s.encoding.sharp = *on,
+            Request::SetSharp { on } => {
+                s.encoding.sharp_by_size &= *on == s.encoding.sharp;
+                s.encoding.sharp = *on;
+            }
             Request::SetCodec { codec, cpu } => {
                 s.encoding.codec = match codec {
                     CodecChoice::H264 => Codec::H264,

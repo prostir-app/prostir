@@ -44,9 +44,14 @@ const POINTER_EMBEDDED: u32 = 2;
 /// How often the last frame of a still screen is sent again, in ms. The session
 /// needs none of it (pings keep it), and with the frame rate and liveness told (see
 /// [`input_for`]) no encoder holds a frame back waiting for the next; it is what
-/// still pushes out the one keyframe a still screen gets, and each costs an encoding
-/// on the PC and a decoding and a wake-up of the radio in the headset.
-const KEEPALIVE_MS: u32 = 2000;
+/// pushes out the keyframe a still screen gets, which after a big change sharpens the
+/// picture: asked for 0.65 s after the change (`displays::STILL_EARLY`), it comes with
+/// the repeat at 0.75 s. Nothing else here can make KWin's stream send its picture
+/// again without starting it over, and a repeat comes only this long after the frame
+/// before (at 0.5 s the keyframe came with the second one, at 1 s). Each costs an
+/// encoding on the PC (a frame of 0 to 3 KB, the picture unchanged) and a decoding and
+/// a wake-up of the radio in the headset: 1.3 a second for each still monitor.
+const KEEPALIVE_MS: u32 = 750;
 
 /// The refresh rate in mHz of an output whose rate KWin did not say.
 const DEFAULT_REFRESH: u32 = 60_000;
@@ -86,7 +91,7 @@ fn frame_rate(mhz: u32) -> gstreamer::Fraction {
 fn input_for(node: u32, refresh: u32) -> Input {
     Input {
         // On a still screen KWin sends nothing; PipeWire's source repeats the last
-        // frame every 2 s (see `KEEPALIVE_MS`).
+        // frame every 750 ms (see `KEEPALIVE_MS`).
         source: format!(
             "pipewiresrc path={node} do-timestamp=true keepalive-time={KEEPALIVE_MS} \
              always-copy=false stream-properties=\"props,node.dont-fallback=true\""
@@ -938,8 +943,9 @@ mod tests {
         let cfg = EncoderConfig {
             codec,
             bitrate_kbps: 8000,
+            large_kbps: None,
             backend,
-            sharp: false,
+            sharp: Some(false),
             rows_up: false,
         };
         let kept = frames.clone();
@@ -1024,9 +1030,10 @@ mod tests {
         assert!(new.len() >= 4, "{new:?}");
         // The first opens the encoder.
         assert!(new[1..].iter().all(|ms| *ms < 100), "{new:?}");
-        // A repeat is only PipeWire's keepalive (2 s after a picture, as often as the
-        // pictures come), none made here.
-        assert!(again <= new.len(), "{again} repeats");
+        // A repeat is only PipeWire's keepalive (every 750 ms after a picture: two
+        // between pictures 2 s apart), none made here.
+        let between = (2000 / KEEPALIVE_MS) as usize;
+        assert!(again <= new.len() * between, "{again} repeats");
     }
 
     /// KWin's node gone: the encoder's start says its source failed at once (not after
@@ -1044,8 +1051,9 @@ mod tests {
         let cfg = EncoderConfig {
             codec: prostir_proto::Codec::H264,
             bitrate_kbps: 4000,
+            large_kbps: None,
             backend: Backend::X264,
-            sharp: false,
+            sharp: Some(false),
             rows_up: false,
         };
         let told = Arc::new(Mutex::new(Vec::new()));
