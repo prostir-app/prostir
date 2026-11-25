@@ -1,9 +1,12 @@
 //! The automatic arrangement (only on request: a preset, or the first start): the
 //! widening circle. One row around the user at 1.1 m while it fits in [`ARC`]; else the
 //! smallest radius that fits; past [`MAX_RADIUS`], two rows, then three, the main row at
-//! eye level and the others above it. A row over the main one never leaves out of view
-//! ([`in_view`]) a monitor alone in it or one too wide for the circle it starts from
-//! ([`RADIUS`]): then one row fewer, on the larger radius that needs.
+//! eye level and the others above it. A row over the main one leaves no monitor out of
+//! view ([`in_view`]) where that can be helped: for one alone in it or too wide for the
+//! circle it starts from ([`RADIUS`]), one row fewer, on the larger radius that needs;
+//! for others, the same rows a little further away (seen lower) or one row fewer,
+//! whichever is nearer, up to [`VIEW_RADIUS`]. On a wall the same, its distance for the
+//! radius.
 //!
 //! A flat monitor `w` wide with both vertical edges on a cylinder of radius `R` around
 //! the eye takes the angle `a(w, R) = 2 asin(w / 2R)` (needs `R >= w / 2`). A row fits
@@ -41,6 +44,9 @@ pub const WALL_HALF_ANGLE: f32 = 75.0 * std::f32::consts::PI / 180.0;
 /// through the eye. Below 1.9 m (3840 pixels at the default size) it changes nothing
 /// at 1.1 m.
 pub const MAX_ONE: f32 = 2.0 * std::f32::consts::PI / 3.0;
+/// The rows of ordinary monitors go no further than this from the eye to bring one into
+/// view (see `in_view_rows`): text would get too small to read.
+pub const VIEW_RADIUS: f32 = 2.0;
 
 /// Which arrangement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,11 +212,8 @@ fn cut_into(widths: &[f32], k: usize, limits: &Limits) -> (Vec<Range<usize>>, f3
     (rows, radius)
 }
 
-/// The rows of `sorted` around the user and their radius, as [`split`] cuts them; but
-/// while a row stacked over the main one has a monitor whose middle is out of view and
-/// that is alone there or too wide for the circle at `limits.radius` (a flat monitor
-/// far wider than the others comes close to the eye, and so high, over them), one row
-/// fewer, on the larger radius that needs (one row is always in view).
+/// The rows of `sorted` around the user and their radius, as [`split`] cuts them, but
+/// with none stacked out of view where that can be helped (see [`in_view_rows`]).
 fn rows_in_view<K: Copy + Ord>(
     sorted: &[Item<K>],
     primary: Option<K>,
@@ -218,27 +221,101 @@ fn rows_in_view<K: Copy + Ord>(
     limits: &Limits,
 ) -> (Vec<Range<usize>>, f32) {
     let widths: Vec<f32> = sorted.iter().map(|m| m.1).collect();
+    in_view_rows(
+        sorted,
+        primary,
+        y,
+        split(&widths, limits),
+        limits,
+        |k| cut_into(&widths, k, limits),
+        |items, row_y, radius, out| arc_row(items, row_y, radius, limits.gap, out),
+    )
+}
+
+/// The rows of a wall and its distance, as [`split_wall`] cuts them, but with none
+/// stacked out of view where that can be helped (see [`in_view_rows`]).
+fn wall_rows_in_view<K: Copy + Ord>(
+    sorted: &[Item<K>],
+    primary: Option<K>,
+    limits: &Limits,
+) -> (Vec<Range<usize>>, f32) {
+    let widths: Vec<f32> = sorted.iter().map(|m| m.1).collect();
+    in_view_rows(
+        sorted,
+        primary,
+        -EYE_DROP,
+        split_wall(&widths, limits, wall_fits),
+        limits,
+        |k| wall_into(&widths, k, limits),
+        wall_row,
+    )
+}
+
+/// How much further the rows go at a time to bring one into view (a centimetre).
+const FURTHER: f32 = 0.01;
+
+/// `rows` of `sorted` on `radius` (a wall's distance), stacked from `y` (see
+/// [`stack_rows`]; `lay` puts a row in place on a radius), unless a row over the main
+/// one has a monitor whose middle is out of view (see [`in_view`]). For a monitor
+/// alone in its row, or one too wide for the circle at `limits.radius` (a flat monitor
+/// far wider than the others comes close to the eye, and so high), one row fewer
+/// (`fewer` cuts the monitors into that many rows) on the larger radius that needs.
+/// For rows of others (tall monitors stacked high, wide ones whose middles come close
+/// to the eye): the same rows a little further away, where the rows over the main one
+/// are seen lower, or one row fewer, whichever is nearer; neither past [`VIEW_RADIUS`].
+/// One row is always in view. Only when something is out of view, so rows already in
+/// view stay as they are.
+fn in_view_rows<K: Copy + Ord>(
+    sorted: &[Item<K>],
+    primary: Option<K>,
+    y: f32,
+    (mut rows, mut radius): (Vec<Range<usize>>, f32),
+    limits: &Limits,
+    fewer: impl Fn(usize) -> (Vec<Range<usize>>, f32),
+    lay: impl Fn(&[Item<K>], &dyn Fn(usize) -> f32, f32, &mut BTreeMap<K, Placement>),
+) -> (Vec<Range<usize>>, f32) {
     let main = primary
         .and_then(|p| sorted.iter().position(|m| m.0 == p))
         .unwrap_or_else(|| sorted.len().saturating_sub(1) / 2);
-    let (mut rows, mut radius) = split(&widths, limits);
-    while rows.len() > 1 {
+    // Every monitor out of view in a row over the main one, on `radius`: whether it is
+    // alone in its row or too wide for the circle.
+    let unseen = |rows: &[Range<usize>], radius: f32| -> Vec<bool> {
         let mut out = BTreeMap::new();
-        let lay =
+        let on =
             |items: &[Item<K>], row_y: &dyn Fn(usize) -> f32, out: &mut BTreeMap<K, Placement>| {
-                arc_row(items, row_y, radius, limits.gap, out);
+                lay(items, row_y, radius, out);
             };
-        stack_rows(sorted, &rows, primary, y, lay, &mut out);
-        let unseen = rows.iter().filter(|r| !r.contains(&main)).any(|r| {
-            r.clone().any(|i| {
-                let wide = least_radius(widths[i]) > limits.radius;
-                (r.len() == 1 || wide) && out.get(&sorted[i].0).is_some_and(|p| !in_view(p))
+        stack_rows(sorted, rows, primary, y, on, &mut out);
+        rows.iter()
+            .filter(|r| !r.contains(&main))
+            .flat_map(|r| {
+                r.clone()
+                    .filter(|&i| out.get(&sorted[i].0).is_some_and(|p| !in_view(p)))
+                    .map(|i| r.len() == 1 || least_radius(sorted[i].1) > limits.radius)
             })
-        });
-        if !unseen {
+            .collect()
+    };
+    while rows.len() > 1 {
+        let out = unseen(&rows, radius);
+        if out.is_empty() {
             break;
         }
-        (rows, radius) = cut_into(&widths, rows.len() - 1, limits);
+        let (cut, needs) = fewer(rows.len() - 1);
+        if !out.contains(&true) {
+            let furthest = needs.min(VIEW_RADIUS);
+            let further = (1..)
+                .map(|k| radius + k as f32 * FURTHER)
+                .take_while(|&r| r <= furthest)
+                .find(|&r| unseen(&rows, r).is_empty());
+            if let Some(further) = further {
+                radius = further;
+                break;
+            }
+            if needs > VIEW_RADIUS {
+                break;
+            }
+        }
+        (rows, radius) = (cut, needs);
     }
     (rows, radius)
 }
@@ -284,8 +361,8 @@ pub fn radius_of<K: Copy + Ord>(
 
 /// The rows [`arrange`] puts `monitors` (in this order) in for `preset`, `primary` in
 /// the main one, as ranges of them, and the radius (a wall's distance): as [`split`]
-/// cuts them around the user, but with none stacked out of view where fewer rows on a
-/// larger radius can help it (see `rows_in_view`).
+/// cuts them around the user (a wall as `split_wall` does), but with none stacked out
+/// of view where that can be helped (see `in_view_rows`).
 pub fn rows<K: Copy + Ord>(
     preset: Preset,
     monitors: &[(K, PixelSize)],
@@ -295,10 +372,7 @@ pub fn rows<K: Copy + Ord>(
     let sorted = items(monitors);
     match preset {
         Preset::Arc | Preset::Overhead => rows_in_view(&sorted, primary, row_level(preset), limits),
-        Preset::Wall => {
-            let widths: Vec<f32> = sorted.iter().map(|m| m.1).collect();
-            split_wall(&widths, limits, wall_fits)
-        }
+        Preset::Wall => wall_rows_in_view(&sorted, primary, limits),
     }
 }
 
@@ -367,7 +441,6 @@ pub fn arrange<K: Copy + Ord>(
 ) -> BTreeMap<K, Placement> {
     let sorted = items(monitors);
     let height_of = |id: K| sorted.iter().find(|m| m.0 == id).map_or(0.0, |m| m.2);
-    let widths: Vec<f32> = sorted.iter().map(|m| m.1).collect();
 
     let mut out = BTreeMap::new();
     let radius = match preset {
@@ -383,7 +456,7 @@ pub fn arrange<K: Copy + Ord>(
             radius
         }
         Preset::Wall => {
-            let (rows, distance) = split_wall(&widths, limits, wall_fits);
+            let (rows, distance) = wall_rows_in_view(&sorted, primary, limits);
             let lay = |items: &[Item<K>],
                        row_y: &dyn Fn(usize) -> f32,
                        out: &mut BTreeMap<K, Placement>| {
@@ -689,30 +762,53 @@ fn split_wall(
         let distance = limits.radius.max(total / (2.0 * WALL_HALF_ANGLE.tan()));
         return (vec![0..n], if n <= 1 { distance } else { limits.radius });
     }
-    let mut best: Option<(f32, Vec<Range<usize>>)> = None;
+    let mut best = None;
     for k in 2..=limits.max_rows.min(n) {
-        best = None;
-        for cuts in cut_sets(n, k) {
-            let rows: Vec<Range<usize>> = std::iter::once(0)
-                .chain(cuts.iter().copied())
-                .zip(cuts.iter().copied().chain(std::iter::once(n)))
-                .map(|(a, b)| a..b)
-                .collect();
-            let widest = rows
-                .iter()
-                .map(|r| widths[r.clone()].iter().sum::<f32>())
-                .fold(0.0f32, f32::max);
-            if best.as_ref().is_none_or(|(w, _)| widest < *w) {
-                best = Some((widest, rows));
-            }
-        }
-        if best.as_ref().is_some_and(|(w, _)| fits(*w, limits.radius)) {
+        let (rows, widest) = wall_cut(widths, k);
+        let done = fits(widest, limits.radius);
+        best = Some((rows, widest));
+        if done {
             break;
         }
     }
-    let (widest, rows) = best.expect("at least two monitors");
-    let distance = limits.radius.max(widest / (2.0 * WALL_HALF_ANGLE.tan()));
-    (rows, distance)
+    let (rows, widest) = best.expect("at least two monitors");
+    (rows, wall_distance(widest, limits))
+}
+
+/// A wall of `widths` (in this order) in `k` rows (`1..=widths.len()`), cut as
+/// [`split_wall`] cuts them, and its distance.
+fn wall_into(widths: &[f32], k: usize, limits: &Limits) -> (Vec<Range<usize>>, f32) {
+    let (rows, widest) = wall_cut(widths, k);
+    (rows, wall_distance(widest, limits))
+}
+
+/// Monitors of `widths` (in this order) in `k` rows, cut so the widest row is the
+/// narrowest (ties: the earliest cuts), and how wide that one is.
+fn wall_cut(widths: &[f32], k: usize) -> (Vec<Range<usize>>, f32) {
+    let n = widths.len();
+    let mut best: Option<(f32, Vec<Range<usize>>)> = None;
+    for cuts in cut_sets(n, k) {
+        let rows: Vec<Range<usize>> = std::iter::once(0)
+            .chain(cuts.iter().copied())
+            .zip(cuts.iter().copied().chain(std::iter::once(n)))
+            .map(|(a, b)| a..b)
+            .collect();
+        let widest = rows
+            .iter()
+            .map(|r| widths[r.clone()].iter().sum::<f32>())
+            .fold(0.0f32, f32::max);
+        if best.as_ref().is_none_or(|(w, _)| widest < *w) {
+            best = Some((widest, rows));
+        }
+    }
+    let (widest, rows) = best.unwrap_or_else(|| (widths.iter().sum(), vec![0..n]));
+    (rows, widest)
+}
+
+/// How far away a wall whose widest row is `widest` stands: at `limits.radius`, or
+/// further, where that row is seen within [`WALL_HALF_ANGLE`] to either side.
+fn wall_distance(widest: f32, limits: &Limits) -> f32 {
+    limits.radius.max(widest / (2.0 * WALL_HALF_ANGLE.tan()))
 }
 
 /// Tilts everything up for the overhead preset.
@@ -733,6 +829,214 @@ mod tests {
 
     fn widths(px: &[u32]) -> Vec<f32> {
         px.iter().map(|&p| p as f32 * METRES_PER_PIXEL).collect()
+    }
+
+    /// Common sizes: full HD, QHD, ultrawide, 4K, super ultrawide, a portrait QHD and
+    /// a laptop's lid.
+    const COMMON: [(u32, u32); 7] = [
+        (1920, 1080),
+        (2560, 1440),
+        (3440, 1440),
+        (3840, 2160),
+        (5120, 1440),
+        (1440, 2560),
+        (2880, 1800),
+    ];
+
+    /// Every desk of `counts` monitors of [`COMMON`] sizes, in every order.
+    fn desks(counts: std::ops::RangeInclusive<u32>) -> Vec<Vec<(u32, PixelSize)>> {
+        let mut out = Vec::new();
+        for n in counts {
+            for code in 0..COMMON.len().pow(n) {
+                let mut c = code;
+                let desk = (0..n)
+                    .map(|i| {
+                        let (w, h) = COMMON[c % COMMON.len()];
+                        c /= COMMON.len();
+                        (i, PixelSize::new(w, h))
+                    })
+                    .collect();
+                out.push(desk);
+            }
+        }
+        out
+    }
+
+    /// The rows `preset` took before 2026-11-25, kept to check that the rule since
+    /// changes nothing already in view: around the user a row over the main one went
+    /// only for a monitor out of view in it that was alone there or too wide for the
+    /// circle at `limits.radius`, and a wall never took fewer rows.
+    fn rows_before(
+        preset: Preset,
+        sorted: &[Item<u32>],
+        primary: Option<u32>,
+        limits: &Limits,
+    ) -> (Vec<Range<usize>>, f32) {
+        let widths: Vec<f32> = sorted.iter().map(|m| m.1).collect();
+        if preset == Preset::Wall {
+            return split_wall(&widths, limits, wall_fits);
+        }
+        let main = primary
+            .and_then(|p| sorted.iter().position(|m| m.0 == p))
+            .unwrap_or_else(|| sorted.len().saturating_sub(1) / 2);
+        let (mut rows, mut radius) = split(&widths, limits);
+        while rows.len() > 1 {
+            let out = laid(preset, sorted, primary, &rows, radius, limits);
+            let unseen = rows.iter().filter(|r| !r.contains(&main)).any(|r| {
+                r.clone().any(|i| {
+                    let wide = least_radius(widths[i]) > limits.radius;
+                    (r.len() == 1 || wide) && !in_view(&out[&sorted[i].0])
+                })
+            });
+            if !unseen {
+                break;
+            }
+            (rows, radius) = cut_into(&widths, rows.len() - 1, limits);
+        }
+        (rows, radius)
+    }
+
+    /// `sorted` in `rows` on `radius` (a wall's distance) as `preset` stacks them, not
+    /// yet tilted overhead.
+    fn laid(
+        preset: Preset,
+        sorted: &[Item<u32>],
+        primary: Option<u32>,
+        rows: &[Range<usize>],
+        radius: f32,
+        limits: &Limits,
+    ) -> BTreeMap<u32, Placement> {
+        let mut out = BTreeMap::new();
+        let lay = |items: &[Item<u32>],
+                   row_y: &dyn Fn(usize) -> f32,
+                   out: &mut BTreeMap<u32, Placement>| {
+            if preset == Preset::Wall {
+                wall_row(items, row_y, radius, out);
+            } else {
+                arc_row(items, row_y, radius, limits.gap, out);
+            }
+        };
+        let y = if preset == Preset::Wall {
+            -EYE_DROP
+        } else {
+            row_level(preset)
+        };
+        stack_rows(sorted, rows, primary, y, lay, &mut out);
+        out
+    }
+
+    /// Whether every monitor `preset` places is in view (see [`in_view`]).
+    fn all_in_view(preset: Preset, placed: &BTreeMap<u32, Placement>) -> bool {
+        let pitch = if preset == Preset::Overhead {
+            OVERHEAD_PITCH
+        } else {
+            0.0
+        };
+        let frame = crate::space::Frame::tilted(Vec3::ZERO, 0.0, pitch);
+        placed.values().all(|p| in_view(&frame.unplace(*p)))
+    }
+
+    /// Every one of `desks` with every primary (and none), for each of `presets`: each
+    /// monitor the preset places is in view (its middle at most 40 degrees up or down);
+    /// where every monitor was in view by the rule before (see [`rows_before`]), the
+    /// rows and the radius are what they were; and the circle is no further than
+    /// [`VIEW_RADIUS`] unless it was so before.
+    fn presets_bring_into_view(presets: &[Preset], desks: &[Vec<(u32, PixelSize)>]) {
+        let limits = Limits::default();
+        let mut failures = Vec::new();
+        for &preset in presets {
+            for desk in desks {
+                let sorted = items(desk);
+                for primary in std::iter::once(None).chain((0..desk.len() as u32).map(Some)) {
+                    let sizes: Vec<(u32, u32)> = desk.iter().map(|m| (m.1.w, m.1.h)).collect();
+                    let case = format!("{preset:?} {sizes:?}, primary {primary:?}");
+                    let (now, radius) = rows(preset, desk, primary, &limits);
+                    let placed = arrange(preset, desk, primary, None, None, &limits);
+                    if !all_in_view(preset, &placed) {
+                        failures.push(format!("{case}: out of view, radius {radius}"));
+                    }
+                    let (was, was_radius) = rows_before(preset, &sorted, primary, &limits);
+                    let before = laid(preset, &sorted, primary, &was, was_radius, &limits);
+                    let same = (&was, was_radius) == (&now, radius);
+                    if before.values().all(in_view) && !same {
+                        failures.push(format!(
+                            "{case}: in view in {was:?} on {was_radius}, now {now:?} on {radius}"
+                        ));
+                    }
+                    if radius > VIEW_RADIUS && !same {
+                        failures.push(format!("{case}: {now:?} on {radius}, before {was_radius}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} desks:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    /// One to four monitors of common sizes, in every order, for every preset.
+    #[test]
+    fn presets_leave_nothing_out_of_view() {
+        presets_bring_into_view(
+            &[Preset::Arc, Preset::Overhead, Preset::Wall],
+            &desks(1..=4),
+        );
+    }
+
+    /// The owner's cases of 2026-11-25, rows of ordinary monitors stacked out of view by
+    /// the rule before: four 3440x1440 (the upper row 41 degrees up), 3840x2160 primary
+    /// with two 3440x1440 (59.5) and 5120x1440 primary with 3840x2160 and 1920x1080 (43).
+    /// Now in view.
+    #[test]
+    fn the_owners_rows_come_into_view() {
+        let limits = Limits::default();
+        for (sizes, primary) in [
+            (&[(3440, 1440); 4][..], None),
+            (&[(3840, 2160), (3440, 1440), (3440, 1440)][..], Some(0)),
+            (&[(5120, 1440), (3840, 2160), (1920, 1080)][..], Some(0)),
+        ] {
+            let desk: Vec<(u32, PixelSize)> = (0..)
+                .zip(sizes)
+                .map(|(i, &(w, h))| (i, PixelSize::new(w, h)))
+                .collect();
+            let sorted = items(&desk);
+            let (was, radius) = rows_before(Preset::Arc, &sorted, primary, &limits);
+            let before = laid(Preset::Arc, &sorted, primary, &was, radius, &limits);
+            assert!(
+                !all_in_view(Preset::Arc, &before),
+                "{sizes:?} out of view before"
+            );
+            let placed = arrange(Preset::Arc, &desk, primary, None, None, &limits);
+            assert!(all_in_view(Preset::Arc, &placed), "{sizes:?} in view now");
+        }
+    }
+
+    /// Five to seven monitors of common sizes on a wall (a few thousand of them, the same
+    /// every run): three rows would stand a row out of view, two do not.
+    #[test]
+    fn a_wall_of_five_to_seven_leaves_nothing_out_of_view() {
+        let mut seed: u64 = 1;
+        let mut below = |n: usize| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 33) as usize) % n
+        };
+        let desks: Vec<Vec<(u32, PixelSize)>> = (0..3000)
+            .map(|_| {
+                let n = 5 + below(3) as u32;
+                (0..n)
+                    .map(|i| {
+                        let (w, h) = COMMON[below(COMMON.len())];
+                        (i, PixelSize::new(w, h))
+                    })
+                    .collect()
+            })
+            .collect();
+        presets_bring_into_view(&[Preset::Wall], &desks);
     }
 
     #[test]
