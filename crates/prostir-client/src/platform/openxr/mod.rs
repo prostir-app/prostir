@@ -486,6 +486,22 @@ impl ImageLayer {
         }
     }
 
+    /// The part `w`x`h` at the bottom left of the image as given (top row first): the
+    /// first `w` columns of GL's first `h` rows, where an OpenGL image's rectangle
+    /// starts.
+    pub fn sub_image_part(&self, w: u32, h: u32) -> xr::sys::SwapchainSubImage {
+        xr::sys::SwapchainSubImage {
+            image_rect: xr::Rect2Di {
+                offset: xr::Offset2Di { x: 0, y: 0 },
+                extent: xr::Extent2Di {
+                    width: w.min(self.width) as i32,
+                    height: h.min(self.height) as i32,
+                },
+            },
+            ..self.sub_image()
+        }
+    }
+
     /// A camera-facing quad of this image, alpha-blended over what is behind it.
     pub fn quad(
         &self,

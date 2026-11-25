@@ -41,6 +41,8 @@ pub struct Buffers {
     pub plan: Plan,
     /// Each monitor's colour scale, in the plan's order.
     dims: Vec<xr::sys::CompositionLayerColorScaleBiasKHR>,
+    /// Each PC pointer's colour scale (its monitor's), in the plan's order.
+    pointer_dims: Vec<xr::sys::CompositionLayerColorScaleBiasKHR>,
     /// The flat layers and the curved ones, in the plan's order.
     quads: Vec<xr::sys::CompositionLayerQuad>,
     cylinders: Vec<xr::sys::CompositionLayerCylinderKHR>,
@@ -123,10 +125,7 @@ impl layers::Ready for Have<'_> {
     }
 
     fn pc_cursor(&self, pc: PcId, shape: u32) -> bool {
-        self.pictures
-            .pc_cursors
-            .iter()
-            .any(|(p, s, _)| *p == pc && *s == shape)
+        self.pictures.pc_cursors.iter().any(|p| p.shows(pc, shape))
     }
 }
 
@@ -143,15 +142,11 @@ fn picture_of<'p>(pictures: &'p Pictures, layer: &Layer) -> Option<(&'p ImageLay
         Layer::Attach(quad) => (&pictures.attach_layer, quad),
         Layer::Palm(quad) => (&pictures.wrist_layer, quad),
         Layer::Cursor(quad) => (&pictures.cursor_layer, quad),
-        Layer::PcCursor { pc, shape, quad } => (
-            &pictures
-                .pc_cursors
-                .iter()
-                .find(|(p, s, _)| *p == pc && *s == shape)?
-                .2,
-            quad,
-        ),
-        Layer::Background | Layer::KeyboardWindow | Layer::Monitor(_) | Layer::Hands => {
+        Layer::Background
+        | Layer::KeyboardWindow
+        | Layer::Monitor(_)
+        | Layer::Hands
+        | Layer::PcCursor { .. } => {
             return None;
         }
     })
@@ -329,6 +324,29 @@ pub fn end(
         }),
         _ => None,
     }));
+    // The PCs' pointers', their monitors' brightness and fading.
+    let pointer_dims = &mut buffers.pointer_dims;
+    pointer_dims.clear();
+    pointer_dims.extend(plan.layers().iter().filter_map(|l| match *l {
+        Layer::PcCursor { bright, alpha, .. } => Some(xr::sys::CompositionLayerColorScaleBiasKHR {
+            ty: xr::sys::CompositionLayerColorScaleBiasKHR::TYPE,
+            next: ptr::null(),
+            color_scale: xr::Color4f {
+                r: bright,
+                g: bright,
+                b: bright,
+                a: alpha,
+            },
+            color_bias: xr::Color4f {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            },
+        }),
+        _ => None,
+    }));
+    let mut pointer_dims = pointer_dims.iter();
     let (quads, cylinders) = (&mut buffers.quads, &mut buffers.cylinders);
     quads.clear();
     cylinders.clear();
@@ -340,6 +358,31 @@ pub fn end(
             Layer::Background => Made::Background,
             Layer::KeyboardWindow => Made::KeyboardWindow,
             Layer::Hands => Made::Hands,
+            Layer::PcCursor {
+                pc, shape, quad, ..
+            } => {
+                let dim = pointer_dims.next();
+                let picture = pictures.pc_cursors.iter().find(|p| p.shows(*pc, *shape));
+                match (picture, dim) {
+                    (Some(picture), Some(dim)) => match picture.layer.as_ref() {
+                        Some(layer) => {
+                            let Quad { at, height } = *quad;
+                            let mut q = layer.quad(local, posef(&at), at.width, height);
+                            q.sub_image = layer.sub_image_part(picture.size.0, picture.size.1);
+                            let scale = dim.color_scale;
+                            if exts.khr_composition_layer_color_scale_bias
+                                && (scale.r < 1.0 || scale.a < 1.0)
+                            {
+                                q.next = ptr::from_ref(dim).cast();
+                            }
+                            quads.push(q);
+                            Made::Quad(quads.len() - 1)
+                        }
+                        None => Made::Nothing,
+                    },
+                    _ => Made::Nothing,
+                }
+            }
             Layer::Monitor(m) => match dims.next() {
                 Some(dim) => monitor(
                     m,

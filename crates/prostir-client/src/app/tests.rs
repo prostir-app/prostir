@@ -2407,19 +2407,34 @@ fn the_pcs_pointer_is_drawn_over_its_monitor() {
         .iter()
         .position(|l| matches!(l, Layer::PcCursor { .. }))
         .expect("the pointer is drawn");
-    let (Layer::Monitor(m), Layer::PcCursor { pc, shape, quad }) = (layers[i - 1], layers[i])
+    let (
+        Layer::Monitor(m),
+        Layer::PcCursor {
+            pc,
+            shape,
+            quad,
+            bright,
+            alpha,
+        },
+    ) = (layers[i - 1], layers[i])
     else {
         panic!("right after its monitor: {layers:?}");
     };
     assert_eq!((m.id, pc, shape), (k(2), PC, 7));
-    // 32 of the picture's 2560 pixels wide, square.
+    assert_eq!(
+        (bright, alpha),
+        (m.bright, m.alpha),
+        "dimmed with its monitor"
+    );
+    // 32 of the picture's 2560 pixels wide (along the arc on a curve), 32 of its 1440
+    // high.
     let p = m.quad.at;
     let width = layout::image_width(&p, m.curve);
     assert!(
         (quad.at.width - width * 32.0 / 2560.0).abs() < 1e-5,
         "{quad:?}"
     );
-    assert!((quad.height - quad.at.width).abs() < 1e-6);
+    assert!((quad.height - m.quad.height * 32.0 / 1440.0).abs() < 1e-6);
     // Its top left corner (the pixel it points with) at the picture's top left.
     let corner = quad.at.position
         + quad.at.rotation * Vec3::new(-quad.at.width / 2.0, quad.height / 2.0, 0.0);

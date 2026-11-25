@@ -128,11 +128,13 @@ pub enum Layer {
     /// A pointer dot: where a ray meets something, or under a fingertip near the menu.
     Cursor(Quad),
     /// PC `pc`'s mouse pointer in its look `shape`, over its monitor (the layer
-    /// before it).
+    /// before it), as bright and as far faded in as that monitor.
     PcCursor {
         pc: PcId,
         shape: u32,
         quad: Quad,
+        bright: f32,
+        alpha: f32,
     },
 }
 
@@ -372,6 +374,8 @@ pub fn plan(model: &Model, hands: &Hands, ready: &impl Ready, plan: &mut Plan) {
                     pc: id.pc,
                     shape: shown.shape,
                     quad,
+                    bright,
+                    alpha: t,
                 };
                 plan.push(layer, Rank::DOT);
             }
@@ -501,21 +505,22 @@ pub fn pointer_quad(
     let to_middle = |f: f32, n: u32| (f * (n.max(1) - 1) as f32 + 0.5) / n.max(1) as f32;
     let uv = Vec2::new(to_middle(shown.uv.x, w), to_middle(shown.uv.y, h));
     let (point, rotation) = image_frame(p, height, curve, uv);
-    // Metres a pixel of the picture takes.
-    let pixel = image_width(p, curve) / w.max(1) as f32;
+    // Metres a pixel of the picture takes, across (along the arc on a curve) and down.
+    let across = image_width(p, curve) / w.max(1) as f32;
+    let down = height / h.max(1) as f32;
     let look = shown.look;
     let (lw, lh) = (f32::from(look.w), f32::from(look.h));
     // From the middle of the pixel it points with to the middle of the look, right and
     // up.
-    let right = (lw / 2.0 - (f32::from(look.hot_x) + 0.5)) * pixel;
-    let up = ((f32::from(look.hot_y) + 0.5) - lh / 2.0) * pixel;
+    let right = (lw / 2.0 - (f32::from(look.hot_x) + 0.5)) * across;
+    let up = ((f32::from(look.hot_y) + 0.5) - lh / 2.0) * down;
     Quad {
         at: Placement {
             position: point + rotation * Vec3::new(right, up, 0.0),
             rotation,
-            width: lw * pixel,
+            width: lw * across,
         },
-        height: lh * pixel,
+        height: lh * down,
     }
 }
 

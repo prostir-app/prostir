@@ -274,6 +274,8 @@ fn with_pointer(on: u32) -> Plan {
                 pc: PcId([7; 8]),
                 shape: 1,
                 quad: quad(),
+                bright: 1.0,
+                alpha: 1.0,
             };
             p.push(pointer, Rank::DOT);
         }

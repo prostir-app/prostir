@@ -29,8 +29,9 @@ pub const OWN_FOR: Duration = Duration::from_millis(200);
 /// caught up, across the picture (1 %).
 const CAUGHT_UP: u16 = 655;
 
-/// A look of a pointer: its picture, `w`x`h` pixels of RGBA in sRGB (not
-/// premultiplied), top row first, pointing at `hot_x`, `hot_y`.
+/// A look of a pointer: its picture, `w`x`h` pixels of RGBA in sRGB, top row first,
+/// pointing at `hot_x`, `hot_y`. The PC sends it straight; it is kept premultiplied
+/// (see [`premultiply`]), as the compositor blends every layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Look {
     pub w: u16,
@@ -106,8 +107,10 @@ impl Cursors {
         &mut self.pcs[i]
     }
 
-    /// PC `pc` sent look `shape` (checked by the protocol: numbered, its picture whole).
-    pub fn take_look(&mut self, pc: PcId, shape: u32, look: Look) {
+    /// PC `pc` sent look `shape` (checked by the protocol: numbered, its picture whole),
+    /// its pixels straight: kept premultiplied.
+    pub fn take_look(&mut self, pc: PcId, shape: u32, mut look: Look) {
+        premultiply(&mut look.rgba);
         let p = self.pc_mut(pc);
         // Sent again: it counts as new, as the PC counts it.
         p.looks.retain(|(n, _)| *n != shape);
@@ -126,6 +129,9 @@ impl Cursors {
         p.shape = shape;
         if shape != 0 {
             p.last_shape = shape;
+        } else if display.is_none() {
+            // Back into the pictures: the headset moving the mouse draws none.
+            p.last_shape = 0;
         }
         if let (Some((own, _)), Some(at)) = (p.own, p.at)
             && own.display == at.display
@@ -140,11 +146,17 @@ impl Cursors {
     /// `display`, at `now`: its pointer is drawn there for now.
     pub fn moved_here(&mut self, pc: PcId, display: DisplayId, u: u16, v: u16, now: Instant) {
         let p = self.pc_mut(pc);
-        // A PC that never said its pointer draws none: its pictures have it.
-        if p.last_shape == 0 {
+        // A PC whose pictures have the pointer draws none here, nor one that hides it
+        // (touch, a game).
+        if p.last_shape == 0 || p.shape == 0 {
             return;
         }
         p.own = Some((Place { display, u, v }, now));
+    }
+
+    /// Whether PC `pc` said anything of its pointer this session.
+    pub fn knows(&self, pc: PcId) -> bool {
+        self.pcs.iter().any(|p| p.pc == pc)
     }
 
     /// PC `pc`'s session ended: its looks and pointer go with it.
@@ -185,6 +197,16 @@ impl Cursors {
     }
 }
 
+/// Straight RGBA made premultiplied, in place: each colour times its alpha, rounded.
+pub fn premultiply(rgba: &mut [u8]) {
+    for p in rgba.as_chunks_mut::<4>().0 {
+        let a = u16::from(p[3]);
+        for c in &mut p[..3] {
+            *c = ((u16::from(*c) * a + 127) / 255) as u8;
+        }
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::disallowed_methods,
@@ -195,14 +217,58 @@ mod tests {
 
     const PC: PcId = PcId([1; 8]);
 
+    /// An opaque look of grey `fill`.
     fn look(fill: u8) -> Look {
         Look {
             w: 2,
             h: 2,
             hot_x: 0,
             hot_y: 1,
-            rgba: vec![fill; 16],
+            rgba: [fill, fill, fill, 255].repeat(4),
         }
+    }
+
+    /// A look comes straight and is kept premultiplied: a clear pixel with a colour
+    /// is clear (nothing of its colour added over the monitor), a half one half.
+    #[test]
+    fn a_look_is_kept_premultiplied() {
+        let now = Instant::now();
+        let mut c = Cursors::default();
+        c.take_look(
+            PC,
+            5,
+            Look {
+                w: 3,
+                h: 1,
+                hot_x: 0,
+                hot_y: 0,
+                rgba: vec![200, 100, 50, 0, 200, 100, 50, 128, 200, 100, 50, 255],
+            },
+        );
+        c.take_at(PC, Some(DisplayId(1)), 0, 0, 5);
+        let s = c.of(PC, now).expect("drawn");
+        assert_eq!(
+            s.look.rgba,
+            [0, 0, 0, 0, 100, 50, 25, 128, 200, 100, 50, 255]
+        );
+    }
+
+    /// Back in the pictures (`CursorAt` nowhere and hidden), or hidden by the PC, the
+    /// headset moving the mouse draws no pointer either.
+    #[test]
+    fn no_pointer_for_the_headsets_move_while_the_pc_has_none() {
+        let t0 = Instant::now();
+        let mut c = Cursors::default();
+        let one = DisplayId(1);
+        c.take_look(PC, 5, look(1));
+        c.take_at(PC, Some(one), 100, 100, 5);
+        c.take_at(PC, Some(one), 100, 100, 0);
+        c.moved_here(PC, one, 30_000, 20_000, t0);
+        assert!(c.of(PC, t0).is_none(), "hidden by the PC");
+        c.take_at(PC, None, 0, 0, 0);
+        c.take_at(PC, None, 0, 0, 0);
+        c.moved_here(PC, one, 30_000, 20_000, t0);
+        assert!(c.of(PC, t0).is_none(), "in the pictures");
     }
 
     /// The PC's word says where the pointer is and how it looks; hidden, off its
