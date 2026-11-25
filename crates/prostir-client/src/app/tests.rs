@@ -14,7 +14,7 @@ use glam::Vec3;
 use prostir_proto::HostMsg;
 use prostir_proto::request::{Asked, Command};
 use prostir_proto::state::{
-    Display, DisplayKind, DisplayState, Displays, ErrorCode, Mode, permission,
+    Display, DisplayKind, DisplayState, Displays, ErrorCode, Mode, Row, permission,
 };
 
 use super::*;
@@ -1011,7 +1011,7 @@ fn each_display_of_the_pc_has_its_switch() {
 
 /// Scenario 15 (step 7 note, 10.1): a stream started again in a new generation for the
 /// same display counts from then on, and what comes of the old one is let go; a
-/// lasting failure takes the monitor out of the room, keeps it in the menu with its
+/// lasting failure keeps the monitor where it stands, shows it in the menu with its
 /// reason, is said once and asks nothing again, until the next generation.
 #[test]
 fn streams_by_generation_and_a_failure_said_once() {
@@ -1050,9 +1050,9 @@ fn streams_by_generation_and_a_failure_said_once() {
     assert!(sim.m.toast().is_none());
     assert!(sim.m.rev() > rev);
     sim.take();
-    // The new one fails for good: out of the room, in the menu with why, said once.
+    // The new one fails for good: where it stood, in the menu with why, said once.
     sim.handle(video(2, Happened::Failed(Why::BadSize)));
-    assert!(!sim.m.world().streams(k(1)));
+    assert!(sim.m.world().streams(k(1)), "it keeps its place");
     let Some(ui::Picture::NotShown(why)) = picture(&sim, 1) else {
         panic!("the menu shows it with its reason");
     };
@@ -1061,7 +1061,7 @@ fn streams_by_generation_and_a_failure_said_once() {
         "{why}"
     );
     let toast = sim.m.toast().expect("said").n;
-    assert!(sim.m.toast().unwrap().text.contains(&why));
+    assert!(sim.m.toast().unwrap().text.contains("7680 × 2160"));
     // Nothing is asked again: no retry, no message to the PC, no video command.
     let fx = sim.take();
     assert!(
@@ -1091,6 +1091,45 @@ fn streams_by_generation_and_a_failure_said_once() {
         id: DisplayId(1),
     });
     assert_eq!(sim.m.videos().failed().count(), 0);
+}
+
+/// A monitor whose video fails for good keeps its place in the rows the PC hears: the
+/// PC's desktop does not move the others into its place.
+#[test]
+fn a_failed_monitor_keeps_its_place_on_the_pcs_desktop() {
+    use crate::video::{Happened, VideoEvent, Why};
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2, 3]);
+    sim.handle(Event::Video(VideoEvent {
+        id: k(2),
+        generation: Gen(1),
+        what: Happened::Failed(Why::NoDecoder),
+    }));
+    // Nothing to tell for it: the PC's desktop stays as it is.
+    sim.frames(Duration::from_secs(3));
+    let fx = sim.take();
+    assert!(
+        !sent(&fx)
+            .iter()
+            .any(|m| matches!(m, ClientMsg::Arrange { .. })),
+        "{:?}",
+        sent(&fx)
+    );
+    // The arrangement told again, changed by hand: with the failed one in it.
+    sim.menu(Action::Move { id: k(1), delta: 1 });
+    sim.frames(Duration::from_secs(3));
+    let fx = sim.take();
+    let rows = sent(&fx)
+        .into_iter()
+        .rev()
+        .find_map(|m| match m {
+            ClientMsg::Arrange { rows } => Some(rows.clone()),
+            _ => None,
+        })
+        .expect("the arrangement told");
+    let mut ids: Vec<u32> = rows.iter().flat_map(Row::ids).map(|id| id.0).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2, 3], "{rows:?}");
 }
 
 /// The PC's own displays shown stand under the primary monitor as one group, as they

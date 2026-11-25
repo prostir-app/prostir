@@ -71,10 +71,13 @@ pub fn build(m: &Model) -> UiState {
     windows.sort_unstable_by_key(|w| w.id);
     let videos = m.videos();
     let picture = |id| match videos.health(id) {
-        Health::Fine | Health::Failed(_) => ui::Picture::Shows,
+        Health::Fine => ui::Picture::Shows,
         Health::Trouble => ui::Picture::Recovering,
+        Health::Failed(_) => videos.failure(id).map_or(ui::Picture::Shows, |f| {
+            ui::Picture::NotShown(video::shown_text(&f, m.texts()))
+        }),
     };
-    let mut monitors: Vec<MonitorEntry> = world
+    let monitors: Vec<MonitorEntry> = world
         .monitors()
         .iter()
         .enumerate()
@@ -89,28 +92,6 @@ pub fn build(m: &Model) -> UiState {
             picture: picture(id),
         })
         .collect();
-    // The monitors whose video cannot be shown are out of the room, but still in the
-    // menu with their reason (their place kept), as long as the PC lists them.
-    let failed = |id| {
-        videos
-            .failed()
-            .any(|f| f.id == id && m.display(id).is_some())
-    };
-    monitors.extend(
-        videos
-            .failed()
-            .filter(|f| m.display(f.id).is_some() && !world.streams(f.id))
-            .map(|f| MonitorEntry {
-                id: f.id,
-                label: m.label_of(f.id).unwrap_or_default(),
-                width: f.size.0,
-                height: f.size.1,
-                place: ui::Place::Unknown,
-                seen: None,
-                scale: m.display(f.id).map_or(100, |d| d.mode.scale),
-                picture: ui::Picture::NotShown(video::why_text(&f, m.texts())),
-            }),
-    );
     UiState {
         host: session.host().map(str::to_owned),
         found: search
@@ -139,7 +120,7 @@ pub fn build(m: &Model) -> UiState {
         windows,
         primary: world.primary(),
         cinema_screen: world.desk().cinema(),
-        selected: menu.selected.filter(|id| world.streams(*id) || failed(*id)),
+        selected: menu.selected.filter(|id| world.streams(*id)),
         physical_seen: world
             .physical()
             .iter()

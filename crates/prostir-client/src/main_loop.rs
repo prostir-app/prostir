@@ -14,7 +14,7 @@
     reason = "the loop is the shell: it takes the time once a pass, starts the threads and looks for the person's files"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
@@ -385,12 +385,19 @@ impl Shell<'_> {
                 feedback,
             } => {
                 let id = DisplayKey::new(pc, id);
+                let said = self
+                    .model
+                    .headset()
+                    .caps
+                    .decoder(codec)
+                    .map(|d| (d.max_w, d.max_h));
                 let spec = video::Spec {
                     id,
                     generation,
                     codec,
                     width,
                     height,
+                    said,
                 };
                 let mut events = std::mem::take(&mut self.video_events);
                 self.video
@@ -460,6 +467,8 @@ struct LayerBuffers {
     quads: Vec<xr::sys::CompositionLayerQuad>,
     cylinders: Vec<xr::sys::CompositionLayerCylinderKHR>,
     cursors: Vec<xr::sys::CompositionLayerQuad>,
+    /// What is wrong with a monitor's picture, over it or in its place.
+    troubles: Vec<xr::sys::CompositionLayerQuad>,
     /// The layers' list for `end`: its memory only, empty between frames (see
     /// [`reuse`]).
     layers: Vec<&'static xr::CompositionLayerBase<'static, Gfx>>,
@@ -636,6 +645,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     // The placeholder of a monitor being added: its layer, made for a size and
     // language.
     let mut placeholder: Option<(ImageLayer, (u32, u32), Texts)> = None;
+    // What is wrong with each monitor's picture, in words, for what it is now and the
+    // language it was drawn in.
+    let mut trouble_layers: HashMap<DisplayKey, (crate::video::Health, Texts, ImageLayer)> =
+        HashMap::new();
     // The toast drawn last (see `Toast::n`).
     let mut toast_drawn = 0;
     cursor_layer.upload(&gl, &ui::cursor_image(CURSOR_PX))?;
@@ -1307,6 +1320,27 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             )?;
             placeholder = Some((layer, a.size, model.texts().clone()));
         }
+        // What is wrong with a monitor's picture, in words: over it while it recovers,
+        // in its place while it cannot be shown. Made again only when that changes.
+        let videos = model.videos();
+        trouble_layers.retain(|id, (h, t, _)| videos.health(*id) == *h && t == model.texts());
+        for &(id, w, h) in world.monitors() {
+            let health = videos.health(id);
+            if health == crate::video::Health::Fine || trouble_layers.contains_key(&id) {
+                continue;
+            }
+            let text = match videos.failure(id) {
+                Some(f) => crate::video::shown_text(&f, model.texts()),
+                None => model.texts().t("headset-video-trouble").to_owned(),
+            };
+            let px_h = (PLACEHOLDER_PX * h / w.max(1)).clamp(64, 4 * PLACEHOLDER_PX);
+            let mut layer = ImageLayer::new(&session, format, PLACEHOLDER_PX, px_h, true)?;
+            layer.upload(
+                &gl,
+                &panels.main.placeholder_image(&text, PLACEHOLDER_PX, px_h),
+            )?;
+            trouble_layers.insert(id, (health, model.texts().clone(), layer));
+        }
         // Only what changed is uploaded: pointing at another button changes its part.
         if world.wrist().is_some() && panels.palm.render_if_dirty().is_some() {
             wrist_layer.upload_part(&gl, panels.palm.pixels(), panels.palm.damage())?;
@@ -1690,6 +1724,14 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         layers.extend(keyboard_layer.iter().map(as_layer));
         layers.extend(cylinders.iter().map(as_layer));
         layers.extend(quads.iter().map(as_layer));
+        let troubles = &mut buffers.troubles;
+        troubles.clear();
+        for (_, id) in order {
+            if let (Some((_, _, l)), Some(p)) = (trouble_layers.get(id), world.shown(*id)) {
+                troubles.push(l.quad(&local, posef(p), p.width, world.height_of(*id)));
+            }
+        }
+        layers.extend(troubles.iter().map(as_layer));
         let placeholder_quad = world.adding().and_then(|a| {
             let (layer, _, _) = placeholder.as_ref()?;
             Some(layer.quad(&local, posef(&a.place), a.place.width, a.height()))

@@ -66,6 +66,10 @@ pub struct DecoderJob {
     /// Passing failures in a row so far: kept when the thread is made again with a new
     /// surface, so the pauses go on growing.
     pub failures: u32,
+    /// The largest picture the headset said this codec decodes (`Caps.decoders`;
+    /// `None`: it said it has no such decoder). A refusal within it, or a decoder not
+    /// found though said, fails for a moment, not for good.
+    pub said: Option<(u32, u32)>,
 }
 
 /// What the shell watches of a decoder thread: since when it fails without a picture,
@@ -78,6 +82,8 @@ pub struct Status {
     failing: AtomicU64,
     /// A [`Fault`] to cause (see [`Status::fault_code`]); 0: none.
     fault: AtomicU8,
+    /// A picture came out in this generation (with any of its surfaces).
+    pictured: AtomicBool,
 }
 
 impl Status {
@@ -86,6 +92,7 @@ impl Status {
             epoch: Instant::now(),
             failing: AtomicU64::new(0),
             fault: AtomicU8::new(0),
+            pictured: AtomicBool::new(false),
         }
     }
 
@@ -110,6 +117,7 @@ impl Status {
     /// A picture came out.
     fn picture(&self) {
         self.failing.store(0, Ordering::Relaxed);
+        self.pictured.store(true, Ordering::Relaxed);
     }
 
     /// Asks the decoder thread to fail as `fault` says (its next look, once).
@@ -334,6 +342,7 @@ fn run(job: &mut DecoderJob) -> End {
         ref stop,
         ref status,
         failures,
+        said,
     } = *job;
     // The selftest against a real PC reads the time code out of one stream's pictures
     // (the PC's time of their capture): they go to a reader instead of the compositor,
@@ -386,7 +395,8 @@ fn run(job: &mut DecoderJob) -> End {
     // it takes; every third in a row, the surface too. A lasting one ends the thread.
     let end = loop {
         let told = Arc::new(Mutex::new(Told::new()));
-        let result = match start_decoder(codec, width, height, window, &told, d.failures) {
+        let size = (width, height);
+        let result = match start_decoder(codec, size, said, window, &told, d.failures) {
             Ok(decoder) => {
                 d.free.clear();
                 d.ready.clear();
@@ -412,19 +422,30 @@ fn run(job: &mut DecoderJob) -> End {
         };
         status.failed(now);
         d.failures = d.failures.saturating_add(1);
-        if surface || video::new_surface_due(d.failures) {
-            warn!(
-                "decoder {}: {e:#} ({} in a row); a new surface",
-                stream.id.0, d.failures
+        // No picture at all in this generation, for long: it cannot be decoded.
+        let pictured = status.pictured.load(Ordering::Relaxed);
+        if let Some(since) = status.failing_since()
+            && video::gives_up(pictured, since, now)
+        {
+            error!(
+                "decoder {}: {e:#}; no picture in {} s of failing, given up",
+                stream.id.0,
+                video::GIVE_UP_WITHOUT_PICTURE.as_secs()
             );
-            break End::NewSurface;
+            break End::Failed(Why::Undecodable);
         }
+        let new_surface = surface || video::new_surface_due(d.failures);
         let pause = video::retry_pause(d.failures);
         warn!(
-            "decoder {}: {e:#}; made again in {} ms ({} in a row)",
+            "decoder {}: {e:#}; made again in {} ms ({} in a row){}",
             stream.id.0,
             pause.as_millis(),
-            d.failures
+            d.failures,
+            if new_surface {
+                ", with a new surface"
+            } else {
+                ""
+            }
         );
         // A pause, cut short when the monitor goes.
         let until = now + pause;
@@ -435,6 +456,9 @@ fn run(job: &mut DecoderJob) -> End {
         }
         if d.stop.load(Ordering::Relaxed) {
             break End::Ended;
+        }
+        if new_surface {
+            break End::NewSurface;
         }
         d.gate.wait();
     };
@@ -552,23 +576,26 @@ fn passing(e: MediaError) -> bool {
 }
 
 /// A codec for `codec` decoding `width`×`height` into `window`, told what happens in
-/// `told`. Without a decoder for the codec, and (on its first try, `failures` 0) when
-/// it refuses the size, the failure lasts.
+/// `told`. The failure lasts only where the headset said so too (`said`, the largest
+/// picture it said the codec decodes): no decoder for a codec it said it has none of,
+/// or (on its first try, `failures` 0) a refusal of a size beyond what it said.
 fn start_decoder(
     codec: Codec,
-    width: u32,
-    height: u32,
+    (width, height): (u32, u32),
+    said: Option<(u32, u32)>,
     window: &NativeWindow,
     told: &Arc<Mutex<Told>>,
     failures: u32,
 ) -> Result<MediaCodec, Fail> {
     let mime = codec.mime();
     let Some(mut decoder) = MediaCodec::from_decoder_type(mime) else {
-        return Err(Fail::Lasting(
-            Why::NoDecoder,
-            anyhow::anyhow!("no decoder for {mime}"),
-        ));
+        let e = anyhow::anyhow!("no decoder for {mime}");
+        return Err(match said {
+            None => Fail::Lasting(Why::NoDecoder, e),
+            Some(_) => Fail::Passing(e),
+        });
     };
+    let beyond = said.is_none_or(|(w, h)| width > w || height > h);
     // Before `configure`: a codec takes it only then.
     decoder
         .set_async_notify_callback(Some(callbacks(told, std::thread::current())))
@@ -593,7 +620,7 @@ fn start_decoder(
     // one that refuses it from the start, with a reason other than being short of
     // codecs, refuses its size.
     let refused = |e: MediaError, what: &str| {
-        let lasting = failures == 0 && !passing(e);
+        let lasting = failures == 0 && beyond && !passing(e);
         let e = anyhow::Error::from(e).context(format!("{what} {width}x{height}"));
         if lasting {
             Fail::Lasting(Why::BadSize, e)

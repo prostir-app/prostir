@@ -73,6 +73,8 @@ pub struct Spec {
     pub codec: Codec,
     pub width: u32,
     pub height: u32,
+    /// The largest picture the headset said the codec decodes (`None`: none of it).
+    pub said: Option<(u32, u32)>,
 }
 
 impl SurfaceVideo {
@@ -99,6 +101,7 @@ impl SurfaceVideo {
             codec,
             width,
             height,
+            said,
         } = spec;
         self.monitors.remove(&id);
         let stop = Arc::new(AtomicBool::new(false));
@@ -129,6 +132,7 @@ impl SurfaceVideo {
                     stop,
                     status,
                     failures: 0,
+                    said,
                 }));
                 monitor.swapchain = Some(swapchain);
             }

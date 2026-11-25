@@ -131,6 +131,7 @@ const KEYS: &[&str] = &[
     "decoder_recovered_ms",
     "decoder_error_recovered_ms",
     "surface_recreated_ms",
+    "corrupt_frame_recovered_ms",
     "stream_restart_ms",
     "stream_unfreeze_ms",
     "keyframe_asks_ignored",
@@ -220,6 +221,8 @@ enum Phase {
     DecoderError,
     /// Its surface counts as lost (the hook); until a picture in the new one.
     SurfaceLost,
+    /// A frame spoiled before the codec takes it (the hook); until a picture after it.
+    CorruptFrame,
     /// A stream started over in a new generation.
     Restart,
     /// The stream started over without its keyframe, and the fake PC ignored the
@@ -283,6 +286,7 @@ pub struct Selftest {
     fault: Option<(DisplayId, Instant)>,
     fault_recovered_ms: Option<f64>,
     surface_ms: Option<f64>,
+    corrupt_ms: Option<f64>,
     restart: Option<DisplayId>,
     restart_ms: Option<f64>,
     /// The stream started over without its keyframe, and when; its first picture
@@ -540,6 +544,7 @@ impl Selftest {
             fault: None,
             fault_recovered_ms: None,
             surface_ms: None,
+            corrupt_ms: None,
             restart: None,
             restart_ms: None,
             frozen: None,
@@ -1139,6 +1144,10 @@ impl Selftest {
                 self.inject(Fault::SurfaceLost, now)
             }
             Phase::SurfaceLost if self.surface_ms.is_some() || in_phase >= RECOVER_WITHIN => {
+                self.next(Phase::CorruptFrame, now);
+                self.inject(Fault::CorruptFrame, now)
+            }
+            Phase::CorruptFrame if self.corrupt_ms.is_some() || in_phase >= RECOVER_WITHIN => {
                 let id = self
                     .monitors
                     .get(1)
@@ -1291,6 +1300,7 @@ impl Selftest {
                 self.fault_recovered_ms = after_fault;
             }
             Phase::SurfaceLost if self.surface_ms.is_none() => self.surface_ms = after_fault,
+            Phase::CorruptFrame if self.corrupt_ms.is_none() => self.corrupt_ms = after_fault,
             _ => {}
         }
     }
@@ -1483,6 +1493,7 @@ impl Selftest {
         r.set_ms("decoder_recovered_ms", self.recovered_ms);
         r.set_ms("decoder_error_recovered_ms", self.fault_recovered_ms);
         r.set_ms("surface_recreated_ms", self.surface_ms);
+        r.set_ms("corrupt_frame_recovered_ms", self.corrupt_ms);
         r.set_ms("stream_restart_ms", self.restart_ms);
         r.set_ms("stream_unfreeze_ms", self.unfreeze_ms);
         r.set("keyframe_asks_ignored", self.asks_ignored);

@@ -972,11 +972,14 @@ headset-error-keyboard-window = The keyboard window cannot be shown now: it is t
 ## A monitor's picture, under its name in the menu
 headset-video-trouble = No picture, recovering…
 # $codec (String): the video's codec, H.264 or H.265
-headset-video-no-decoder = This headset has no { $codec } decoder
+headset-video-no-decoder = this headset has no { $codec } decoder
 # $codec (String): H.264 or H.265; $size (String): the picture's size, 7680 × 2160
-headset-video-bad-size = This headset does not decode { $codec } at { $size }
-headset-video-no-surface = The headset could not show this picture
-headset-video-stopped = The video decoder stopped
+headset-video-bad-size = this headset does not decode { $codec } at { $size }
+headset-video-no-surface = the headset could not show this picture
+headset-video-stopped = the video decoder stopped
+headset-video-undecodable = the headset could not decode this picture
+# $reason (String): why, one of the lines above
+headset-video-not-shown = Not shown: { $reason }
 # $name (String): the monitor, as the menu names it ("Monitor 2"); $reason (String): why, one of the lines above
 headset-video-failed = { $name } is not shown: { $reason }
 # $typed (String): what was typed

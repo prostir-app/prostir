@@ -43,6 +43,16 @@ pub const NEW_SURFACE_AFTER: u32 = 3;
 /// A failure with no picture since for this long: the menu says the monitor is
 /// recovering.
 pub const TROUBLE_AFTER: Duration = Duration::from_secs(2);
+/// A stream that gave no picture in its generation and fails for this long cannot be
+/// decoded: it fails for good, with its reason (tried again when the PC starts it
+/// anew).
+pub const GIVE_UP_WITHOUT_PICTURE: Duration = Duration::from_secs(30);
+
+/// Whether a stream failing since `since` gives up at `now`: only one that never gave
+/// a picture in its generation (`pictured`), after [`GIVE_UP_WITHOUT_PICTURE`].
+pub fn gives_up(pictured: bool, since: Instant, now: Instant) -> bool {
+    !pictured && now.saturating_duration_since(since) >= GIVE_UP_WITHOUT_PICTURE
+}
 
 /// The pause before the codec is made again after `failures` passing failures in a
 /// row (1 for the first).
@@ -83,6 +93,8 @@ pub enum Why {
     NoSurface,
     /// The decoder thread ended without a word (it panicked).
     Stopped,
+    /// No picture came out of it in [`GIVE_UP_WITHOUT_PICTURE`] of failing.
+    Undecodable,
 }
 
 /// What became of a stream's video, as the shell saw it.
@@ -216,6 +228,11 @@ impl Videos {
         self.streams.get(&id).map_or(Health::Fine, |k| k.health)
     }
 
+    /// Why display `id`'s stream cannot be shown (`None`: it can, or has no stream).
+    pub fn failure(&self, id: DisplayKey) -> Option<Failed> {
+        self.failed().find(|f| f.id == id)
+    }
+
     /// The streams that cannot be shown, by display.
     pub fn failed(&self) -> impl Iterator<Item = Failed> + '_ {
         self.streams.iter().filter_map(|(id, k)| match k.health {
@@ -253,7 +270,16 @@ pub fn why_text(f: &Failed, texts: &Texts) -> String {
         ),
         Why::NoSurface => texts.t("headset-video-no-surface").to_owned(),
         Why::Stopped => texts.t("headset-video-stopped").to_owned(),
+        Why::Undecodable => texts.t("headset-video-undecodable").to_owned(),
     }
+}
+
+/// What the menu and the room say of the stream `f`: not shown, and why.
+pub fn shown_text(f: &Failed, texts: &Texts) -> String {
+    texts.f(
+        "headset-video-not-shown",
+        &[("reason", why_text(f, texts).into())],
+    )
 }
 
 #[cfg(test)]
@@ -281,6 +307,15 @@ mod tests {
         assert_eq!(retry_pause(u32::MAX), Duration::from_secs(5));
         let surfaces: Vec<u32> = (0..10).filter(|n| new_surface_due(*n)).collect();
         assert_eq!(surfaces, [3, 6, 9]);
+    }
+
+    /// Only a stream that never gave a picture gives up, after 30 s of failing.
+    #[test]
+    fn gives_up_only_without_a_picture() {
+        let t0 = Instant::now();
+        assert!(!gives_up(false, t0, t0 + Duration::from_secs(29)));
+        assert!(gives_up(false, t0, t0 + Duration::from_secs(30)));
+        assert!(!gives_up(true, t0, t0 + Duration::from_secs(3600)));
     }
 
     /// Trouble shows only after 2 s without a picture since a failure, once; the next
@@ -345,7 +380,13 @@ mod tests {
     fn every_reason_said() {
         for lang in ["en", "uk"] {
             let texts = crate::lang::builtin(lang);
-            for why in [Why::NoDecoder, Why::BadSize, Why::NoSurface, Why::Stopped] {
+            for why in [
+                Why::NoDecoder,
+                Why::BadSize,
+                Why::NoSurface,
+                Why::Stopped,
+                Why::Undecodable,
+            ] {
                 let f = Failed {
                     id: k(1),
                     codec: Codec::H265,

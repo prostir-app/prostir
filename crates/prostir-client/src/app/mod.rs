@@ -1095,8 +1095,8 @@ impl Model {
     }
 
     /// What became of a stream's video (of its generation streaming now only). A
-    /// lasting failure takes the monitor out of the room (its place is kept for the
-    /// next generation) and is said once; the menu shows it with its reason.
+    /// lasting failure is said once; the monitor keeps its place, and the menu and the
+    /// room show it with its reason.
     fn video(&mut self, e: &VideoEvent) {
         if self.videos.happened(e).is_none() {
             return;
@@ -1105,8 +1105,9 @@ impl Model {
         let Happened::Failed(_) = e.what else {
             return;
         };
-        self.world.stream_ended(e.id);
-        let Some(failed) = self.videos.failed().find(|f| f.id == e.id) else {
+        // It stays where it stands, in the room and in the rows the PC hears: the PC's
+        // desktop does not move for it, and the shell shows why in its place.
+        let Some(failed) = self.videos.failure(e.id) else {
             return;
         };
         let reason = video::why_text(&failed, self.texts());
