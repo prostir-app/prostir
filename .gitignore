@@ -4,3 +4,6 @@
 /dist
 .claude/worktrees/
 __pycache__/
+
+# Private working notes, kept out of git
+/plans/
