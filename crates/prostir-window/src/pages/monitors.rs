@@ -20,11 +20,11 @@ pub(super) fn monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State, _revision: 
     header(ui, v, Page::Monitors);
     let online = s.connected().is_some();
     let hint = if v.ui.arc_view {
-        "mon-hint-arc"
+        "window-mon-hint-arc"
     } else {
-        "mon-hint-flat"
+        "window-mon-hint-flat"
     };
-    let views = [tk.t("mon-flat"), tk.t("mon-arc")];
+    let views = [tk.t("window-mon-flat"), tk.t("window-mon-arc")];
     let views: Vec<&str> = views.iter().map(String::as_str).collect();
     if let Some(i) = w::segmented(ui, tk, &views, v.ui.arc_view as usize, true) {
         v.ui.arc_view = i == 1;
@@ -37,7 +37,7 @@ pub(super) fn monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State, _revision: 
     let height = (ui.ctx().content_rect().height() * 0.36).clamp(200.0, 420.0);
     if tiles.is_empty() {
         w::card(ui, tk, |ui| {
-            text(ui, tk.t("mon-empty"), tk.body(), p.text_muted);
+            text(ui, tk.t("window-mon-empty"), tk.body(), p.text_muted);
         });
     } else {
         let events = if v.ui.arc_view {
@@ -69,7 +69,7 @@ pub(super) fn monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State, _revision: 
         let gap = tk.th.shape.padding;
         let left = (total - gap) * 0.55;
         ui.allocate_ui_with_layout(vec2(left, 0.0), Layout::top_down(Align::Min), |ui| {
-            w::section_title(ui, tk, &tk.t("mon-selected"));
+            w::section_title(ui, tk, &tk.t("window-mon-selected"));
             w::card(ui, tk, |ui| selected_monitor(ui, v, s));
         });
         ui.add_space(gap - tk.th.shape.spacing);
@@ -77,14 +77,14 @@ pub(super) fn monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State, _revision: 
             vec2(ui.available_width(), 0.0),
             Layout::top_down(Align::Min),
             |ui| {
-                w::section_title(ui, tk, &tk.t("mon-add"));
+                w::section_title(ui, tk, &tk.t("window-mon-add"));
                 w::card(ui, tk, |ui| {
                     let note = if full {
-                        tk.f("mon-add-full", &[("max", virtual_count.into())])
+                        tk.f("window-mon-add-full", &[("max", virtual_count.into())])
                     } else if !online {
-                        tk.t("mon-add-offline")
+                        tk.t("window-mon-add-offline")
                     } else {
-                        tk.t("mon-add-desc")
+                        tk.t("window-mon-add-desc")
                     };
                     text(ui, note, tk.small(), p.text_muted);
                     ui.add_space(tk.th.shape.spacing * 1.5);
@@ -95,8 +95,10 @@ pub(super) fn monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State, _revision: 
                     };
                     ui.horizontal_wrapped(|ui| {
                         for [wd, ht] in sizes {
-                            let label =
-                                tk.f("mon-size", &[("w", (*wd).into()), ("h", (*ht).into())]);
+                            let label = tk.f(
+                                "window-mon-size",
+                                &[("w", (*wd).into()), ("h", (*ht).into())],
+                            );
                             if w::button(ui, tk, &label, Kind::Secondary, !full).clicked() {
                                 v.send(Request::AddMonitor {
                                     w: *wd,
@@ -134,12 +136,21 @@ fn being_placed(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
         ui.allocate_ui_with_layout(line, Layout::left_to_right(Align::Center), |ui| {
             text(
                 ui,
-                tk.f("mon-placing", &[("name", (&d.name).into())]),
+                tk.f("window-mon-placing", &[("name", (&d.name).into())]),
                 tk.small(),
                 p.text_muted,
             );
-            let named = tk.f("mon-remove-named", &[("name", (&d.name).into())]);
-            if w::button_named(ui, tk, &tk.t("mon-remove"), &named, Kind::Quiet, true).clicked() {
+            let named = tk.f("window-mon-remove-named", &[("name", (&d.name).into())]);
+            if w::button_named(
+                ui,
+                tk,
+                &tk.t("window-mon-remove"),
+                &named,
+                Kind::Quiet,
+                true,
+            )
+            .clicked()
+            {
                 v.out
                     .push(Action::Send(Request::RemoveMonitor { id: d.id }));
             }
@@ -151,7 +162,7 @@ fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
     let Some(d) = v.ui.selected.and_then(|id| s.display(id)) else {
-        text(ui, tk.t("mon-none"), tk.body(), p.text_muted);
+        text(ui, tk.t("window-mon-none"), tk.body(), p.text_muted);
         return;
     };
     let mut name = display_name(tk, d);
@@ -169,7 +180,7 @@ fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
             ui,
             tk,
             p.danger,
-            &tk.f("mon-failed", &[("reason", (&f.text).into())]),
+            &tk.f("window-mon-failed", &[("reason", (&f.text).into())]),
         );
     }
     w::divider(ui, tk);
@@ -184,7 +195,7 @@ fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
         .iter()
         .position(|sc| *sc == d.mode.scale)
         .unwrap_or(usize::MAX);
-    w::row(ui, tk, &tk.t("mon-scale"), None, |ui| {
+    w::row(ui, tk, &tk.t("window-mon-scale"), None, |ui| {
         let can =
             !v.ui.unsupported.contains("set_scale") && !matches!(d.kind, DisplayKind::Physical);
         if let Some(i) = w::segmented(ui, tk, &labels, current, can) {
@@ -196,9 +207,9 @@ fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     });
     w::divider(ui, tk);
     if d.kind == DisplayKind::Physical {
-        let opts = [tk.t("mon-shown"), tk.t("mon-hidden")];
+        let opts = [tk.t("window-mon-shown"), tk.t("window-mon-hidden")];
         let opts: Vec<&str> = opts.iter().map(String::as_str).collect();
-        w::row(ui, tk, &tk.t("mon-in-headset"), None, |ui| {
+        w::row(ui, tk, &tk.t("window-mon-in-headset"), None, |ui| {
             if let Some(i) = w::segmented(ui, tk, &opts, (!d.shown) as usize, true) {
                 v.out.push(Action::Send(Request::ShowPhysical {
                     id: d.id,
@@ -209,8 +220,8 @@ fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
         w::divider(ui, tk);
     }
     let main = s.primary == Some(d.id);
-    let label = tk.t("mon-main");
-    w::row(ui, tk, &label, Some(&tk.t("mon-main-desc")), |ui| {
+    let label = tk.t("window-mon-main");
+    w::row(ui, tk, &label, Some(&tk.t("window-mon-main-desc")), |ui| {
         // The main one cannot be switched off: another monitor is made main instead.
         if w::switch(ui, tk, &label, main, !main) == Some(true) {
             v.out.push(Action::Send(Request::SetPrimary { id: d.id }));
@@ -220,11 +231,11 @@ fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
         ui.add_space(tk.th.shape.padding * 0.75);
         ui.horizontal(|ui| {
             if d.state == DisplayState::Failed
-                && w::button(ui, tk, &tk.t("ov-retry"), Kind::Primary, true).clicked()
+                && w::button(ui, tk, &tk.t("window-ov-retry"), Kind::Primary, true).clicked()
             {
                 v.out.push(Action::Send(Request::RetryMonitor { id: d.id }));
             }
-            if w::button(ui, tk, &tk.t("mon-remove"), Kind::Danger, true).clicked() {
+            if w::button(ui, tk, &tk.t("window-mon-remove"), Kind::Danger, true).clicked() {
                 v.out
                     .push(Action::Send(Request::RemoveMonitor { id: d.id }));
             }
@@ -259,7 +270,7 @@ fn profiles_card(ui: &mut Ui, v: &mut View<'_, '_>, h: &Headset, session: &Sessi
     let tk = v.tk;
     let p = tk.p;
     ui.add_space(tk.th.shape.section_gap);
-    w::section_title(ui, tk, &tk.f("hs-profiles", &[("name", (&h.name).into())]));
+    w::section_title(ui, tk, &tk.f("window-hs-profiles", &[("name", (&h.name).into())]));
     let can = !v.ui.unsupported.contains("rename_profile");
     let n = session.profiles.len();
     // The one in use: by its number where it has no name, else the first of its name.
@@ -295,14 +306,14 @@ fn profiles_card(ui: &mut Ui, v: &mut View<'_, '_>, h: &Headset, session: &Sessi
         for (i, name) in session.profiles.iter().enumerate() {
             let ident = ident(i, name);
             let shown = if name.is_empty() {
-                tk.f("hs-profile-n", &[("n", (i + 1).into())])
+                tk.f("window-hs-profile-n", &[("n", (i + 1).into())])
             } else {
                 name.clone()
             };
             let active = active_row == Some(i);
             let editing = edit_row == Some(i);
             if editing {
-                let label = tk.f("hs-profile-name", &[("name", shown.as_str().into())]);
+                let label = tk.f("window-hs-profile-name", &[("name", shown.as_str().into())]);
                 ui.horizontal(|ui| {
                     let enter = if let Some((_, _, typed)) = v.ui.rename.as_mut() {
                         let resp = ui.add(
@@ -327,7 +338,7 @@ fn profiles_card(ui: &mut Ui, v: &mut View<'_, '_>, h: &Headset, session: &Sessi
                     let save = w::button(
                         ui,
                         tk,
-                        &tk.t("hs-profile-save"),
+                        &tk.t("window-hs-profile-save"),
                         Kind::Primary,
                         !typed_number,
                     );
@@ -338,24 +349,24 @@ fn profiles_card(ui: &mut Ui, v: &mut View<'_, '_>, h: &Headset, session: &Sessi
                             name: profile_name_to_send(&typed),
                         });
                     }
-                    if w::button(ui, tk, &tk.t("hs-cancel"), Kind::Quiet, true).clicked() {
+                    if w::button(ui, tk, &tk.t("window-hs-cancel"), Kind::Quiet, true).clicked() {
                         v.ui.rename = None;
                     }
                 });
                 if v.ui.rename.as_ref().is_some_and(|r| is_number(&r.2)) {
-                    text(ui, tk.t("hs-profile-number"), tk.small(), p.text_muted);
+                    text(ui, tk.t("window-hs-profile-number"), tk.small(), p.text_muted);
                 }
             } else {
-                let desc = active.then(|| tk.t("hs-profile-in-use"));
+                let desc = active.then(|| tk.t("window-hs-profile-in-use"));
                 w::row(ui, tk, &shown, desc.as_deref(), |ui| {
                     let named = tk.f(
-                        "hs-profile-rename-named",
+                        "window-hs-profile-rename-named",
                         &[("name", shown.as_str().into())],
                     );
                     if w::button_named(
                         ui,
                         tk,
-                        &tk.t("hs-profile-rename"),
+                        &tk.t("window-hs-profile-rename"),
                         &named,
                         Kind::Secondary,
                         can,
@@ -371,6 +382,6 @@ fn profiles_card(ui: &mut Ui, v: &mut View<'_, '_>, h: &Headset, session: &Sessi
             }
         }
         ui.add_space(tk.th.shape.spacing);
-        text(ui, tk.t("hs-profiles-note"), tk.small(), p.text_muted);
+        text(ui, tk.t("window-hs-profiles-note"), tk.small(), p.text_muted);
     });
 }

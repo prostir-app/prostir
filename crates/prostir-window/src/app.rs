@@ -21,10 +21,7 @@ use crate::theme::{Palette, PaletteName, Scheme, Theme, ThemeFile};
 use crate::widgets::{self as w, Kind, Tk, cr, text};
 
 /// The settings window's translations, built in.
-pub const LANGUAGES: &[(&str, &str)] = &[
-    ("en", include_str!("../lang/en.ftl")),
-    ("uk", include_str!("../lang/uk.ftl")),
-];
+pub const LANGUAGES: &[(&str, &str)] = prostir_lang::BUILTIN;
 
 /// The folder name under `prostir/lang/` for this window's translations.
 pub const LANG_DOMAIN: &str = "settings";
@@ -259,8 +256,8 @@ impl App {
             return;
         }
         let (summary, body) = (
-            self.strings.t("close-note-title"),
-            self.strings.t("close-note"),
+            self.strings.t("window-close-note-title"),
+            self.strings.t("window-close-note"),
         );
         if (note.notify)(&summary, &body) {
             if let Some(dir) = note.shown.parent() {
@@ -397,7 +394,7 @@ impl App {
         let s = &self.strings;
         match e {
             ClientError::Refused { message, code } => s.f(
-                "notice-failed",
+                "window-notice-failed",
                 &[(
                     "why",
                     if message.is_empty() {
@@ -408,11 +405,11 @@ impl App {
                     .into(),
                 )],
             ),
-            ClientError::TimedOut => s.t("notice-timeout"),
+            ClientError::TimedOut => s.t("window-notice-timeout"),
             ClientError::NotRunning | ClientError::NoBus(_) | ClientError::TooOld => {
-                s.t("notice-not-running")
+                s.t("window-notice-not-running")
             }
-            ClientError::Broken(why) => s.f("notice-broken", &[("why", why.into())]),
+            ClientError::Broken(why) => s.f("window-notice-broken", &[("why", why.into())]),
         }
     }
 
@@ -524,7 +521,7 @@ impl App {
                 if let Err(e) = made {
                     self.ui.notice = Some(
                         self.strings
-                            .f("notice-failed", &[("why", e.to_string().into())]),
+                            .f("window-notice-failed", &[("why", e.to_string().into())]),
                     );
                 }
             }
@@ -829,35 +826,38 @@ fn apply_style(ctx: &Context, p: &Palette, th: &Theme, scheme: Scheme) {
 fn status_line(tk: &Tk<'_>, conn: &Conn) -> (egui::Color32, String) {
     let p = tk.p;
     match conn {
-        Conn::Loading => (p.text_muted, tk.t("side-loading")),
+        Conn::Loading => (p.text_muted, tk.t("window-side-loading")),
         Conn::Absent {
             why: ClientError::TooOld,
             ..
-        } => (p.warning, tk.t("side-old")),
-        Conn::Absent { why, .. } if pages::silent(why) => (p.warning, tk.t("side-silent")),
-        Conn::Absent { .. } => (p.warning, tk.t("side-not-running")),
+        } => (p.warning, tk.t("window-side-old")),
+        Conn::Absent { why, .. } if pages::silent(why) => (p.warning, tk.t("window-side-silent")),
+        Conn::Absent { .. } => (p.warning, tk.t("window-side-not-running")),
         Conn::Live { snap, .. } => {
             let s = &snap.state;
             if let Some((h, session)) = s.connected() {
                 if s.displays.iter().any(|d| d.state == DisplayState::Failed) {
-                    (p.danger, tk.t("side-failed"))
+                    (p.danger, tk.t("window-side-failed"))
                 } else if !session.worn {
                     (
                         p.text_muted,
-                        tk.f("side-taken-off", &[("name", (&h.name).into())]),
+                        tk.f("window-side-taken-off", &[("name", (&h.name).into())]),
                     )
                 } else {
-                    (p.ok, tk.f("side-connected", &[("name", (&h.name).into())]))
+                    (
+                        p.ok,
+                        tk.f("window-side-connected", &[("name", (&h.name).into())]),
+                    )
                 }
             } else if let Some(name) = &s.connecting {
                 (
                     p.accent_ink,
-                    tk.f("side-connecting", &[("name", name.into())]),
+                    tk.f("window-side-connecting", &[("name", name.into())]),
                 )
             } else if s.headsets.is_empty() {
-                (p.text_muted, tk.t("side-no-headsets"))
+                (p.text_muted, tk.t("window-side-no-headsets"))
             } else {
-                (p.text_muted, tk.t("side-waiting"))
+                (p.text_muted, tk.t("window-side-waiting"))
             }
         }
     }
@@ -885,12 +885,12 @@ fn sidebar(
     });
     ui.add_space(tk.th.shape.section_gap);
     for (page, id) in [
-        (Page::Overview, "nav-overview"),
-        (Page::Monitors, "nav-monitors"),
-        (Page::Headsets, "nav-headsets"),
-        (Page::Sound, "nav-sound"),
-        (Page::Quality, "nav-quality"),
-        (Page::Look, "nav-look"),
+        (Page::Overview, "window-nav-overview"),
+        (Page::Monitors, "window-nav-monitors"),
+        (Page::Headsets, "window-nav-headsets"),
+        (Page::Sound, "window-nav-sound"),
+        (Page::Quality, "window-nav-quality"),
+        (Page::Look, "window-nav-look"),
     ] {
         nav_item(ui, tk, st.page, page, id, out);
     }
@@ -903,12 +903,12 @@ fn sidebar(
         ui.painter()
             .rect_filled(r.shrink2(vec2(12.0, 0.0)), 0.0, p.border);
         ui.add_space(tk.th.shape.spacing);
-        nav_item(ui, tk, st.page, Page::FirstRun, "nav-first-run", out);
+        nav_item(ui, tk, st.page, Page::FirstRun, "window-nav-first-run", out);
     }
     ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
         // The whole program quits from here as from the tray, while it runs.
         if matches!(conn, Conn::Live { .. }) {
-            if w::button(ui, tk, &tk.t("quit-prostir"), Kind::Quiet, true).clicked() {
+            if w::button(ui, tk, &tk.t("window-quit-prostir"), Kind::Quiet, true).clicked() {
                 out.push(Action::QuitProstir);
             }
             ui.add_space(tk.th.shape.spacing);
@@ -972,10 +972,17 @@ fn notice(ui: &mut Ui, tk: &Tk<'_>, s: &str, out: &mut Vec<Action>) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                let close = tk.t("notice-close");
+                let close = tk.t("window-notice-close");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if w::button_named(ui, tk, &tk.t("pair-close"), &close, Kind::Quiet, true)
-                        .clicked()
+                    if w::button_named(
+                        ui,
+                        tk,
+                        &tk.t("window-pair-close"),
+                        &close,
+                        Kind::Quiet,
+                        true,
+                    )
+                    .clicked()
                     {
                         out.push(Action::Dismiss);
                     }

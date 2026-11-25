@@ -60,7 +60,9 @@ pub fn clean_name(name: &str) -> Option<String> {
 /// their files.
 fn builtin_names(n: usize) -> impl Iterator<Item = String> {
     crate::lang::BUILTIN.iter().filter_map(move |(_, ftl)| {
-        let line = ftl.lines().find_map(|l| l.strip_prefix("profile-n = "))?;
+        let line = ftl
+            .lines()
+            .find_map(|l| l.strip_prefix("headset-profile-n = "))?;
         Some(line.replace("{ $n }", &n.to_string()))
     })
 }

@@ -159,10 +159,7 @@ impl Worker {
         if behind >= BEHIND_AT_MOST {
             bail!(
                 "{behind} {}",
-                t(
-                    "кодувальників не відповідають: нових не запускаю",
-                    "encoders do not respond: no more are started"
-                )
+                t("pc-worker-run-encoders-encoders-do-not-respond-no-more")
             );
         }
         let mut source = output.source();
@@ -193,7 +190,7 @@ impl Worker {
             if hangs >= HANGS_OF_A_KIND {
                 let why = format!(
                     "{} {hangs}",
-                    t("не відповідав разів:", "did not respond, times:")
+                    t("pc-worker-run-encoders-did-not-respond-times")
                 );
                 tried.push((choice, why));
                 continue;
@@ -239,10 +236,9 @@ impl Worker {
                     retired.store(true, Ordering::Relaxed);
                     let text = format!("{e:#}");
                     if source_again || output.health() == OutputHealth::Closed {
-                        return Err(e.context(t(
-                            "джерело кадрів не працює",
-                            "the source of the frames fails",
-                        )));
+                        return Err(
+                            e.context(t("pc-worker-run-encoders-the-source-of-the-frames-fails"))
+                        );
                     }
                     source_again = true;
                     warn!("{name}: its source failed ({text}); trying it once more");
@@ -307,13 +303,7 @@ impl Worker {
                 crate::encoder::pick(cfg.codec, wanted.software)
                     .err()
                     .map_or_else(
-                        || {
-                            t(
-                                "немає кодувальника для цього виходу",
-                                "no encoder for this output",
-                            )
-                            .to_owned()
-                        },
+                        || t("pc-worker-run-encoders-no-encoder-for-this-output").to_owned(),
                         |e| e.to_string(),
                     ),
             );
@@ -389,17 +379,11 @@ impl Worker {
                     warn!("{name} keeps being resized by another program: leaving it at {w}x{h}");
                     let body = format!(
                         "{} {}. {}",
-                        t(
-                            "Інша програма раз у раз змінює розмір монітора",
-                            "Another program keeps changing the size of monitor"
-                        ),
+                        t("pc-worker-run-encoders-another-program-keeps-changing-the"),
                         number,
-                        t(
-                            "Покажіть у ній вікно програми замість монітора, а тоді зніміть і знову вдягніть шолом.",
-                            "Share an app window in it instead of the monitor, then take the headset off and put it on again."
-                        )
+                        t("pc-worker-run-encoders-share-an-app-window-in-it")
                     );
-                    dialogs::notify(t("Розмір монітора", "Monitor size"), &body);
+                    dialogs::notify(t("pc-worker-run-encoders-monitor-size"), &body);
                 }
             }
         }
@@ -552,9 +536,9 @@ pub(super) fn kept_note(used: Codec, asked: Codec) -> String {
     let name = crate::encoder::codec_label;
     format!(
         "{} {}: {} {}",
-        t("лишився", "kept"),
+        t("pc-worker-run-encoders-kept"),
         name(used),
         name(asked),
-        t("не запустився", "did not start")
+        t("pc-worker-run-encoders-did-not-start")
     )
 }

@@ -106,11 +106,11 @@ impl Place {
     fn name(self) -> Option<&'static str> {
         Some(match self {
             Place::Unknown => return None,
-            Place::Left => "place-left",
-            Place::Center => "place-middle",
-            Place::Right => "place-right",
-            Place::Above => "place-above",
-            Place::Below => "place-below",
+            Place::Left => "headset-place-left",
+            Place::Center => "headset-place-middle",
+            Place::Right => "headset-place-right",
+            Place::Above => "headset-place-above",
+            Place::Below => "headset-place-below",
         })
     }
 }
@@ -280,24 +280,24 @@ impl Failure {
     /// happened.
     pub fn text(self) -> Option<&'static str> {
         Some(match self {
-            Self::NotConnected => "failure-not-connected",
-            Self::Disconnected => "failure-disconnected",
-            Self::TimedOut => "failure-timed-out",
+            Self::NotConnected => "headset-failure-not-connected",
+            Self::Disconnected => "headset-failure-disconnected",
+            Self::TimedOut => "headset-failure-timed-out",
             Self::Pc(code) => match code.known() {
-                ErrorCode::UNSUPPORTED => "failure-unsupported",
-                ErrorCode::NOT_ALLOWED => "failure-not-allowed",
-                ErrorCode::UNKNOWN_DISPLAY => "failure-unknown-display",
-                ErrorCode::LIMIT => "failure-limit",
-                ErrorCode::BAD_SIZE => "failure-bad-size",
-                ErrorCode::LAST_DISPLAY => "failure-last-display",
-                ErrorCode::NO_WINDOW => "failure-no-window",
-                ErrorCode::DESKTOP => "failure-desktop",
-                ErrorCode::ENCODER => "failure-encoder",
-                ErrorCode::CAPTURE => "failure-capture",
-                ErrorCode::SOUND => "failure-sound",
-                ErrorCode::NOT_ON_DISPLAYS => "failure-not-on-displays",
-                ErrorCode::NO_SUCH_PROFILE => "failure-no-such-profile",
-                ErrorCode::BAD_ARGUMENT => "failure-bad-argument",
+                ErrorCode::UNSUPPORTED => "headset-failure-unsupported",
+                ErrorCode::NOT_ALLOWED => "headset-failure-not-allowed",
+                ErrorCode::UNKNOWN_DISPLAY => "headset-failure-unknown-display",
+                ErrorCode::LIMIT => "headset-failure-limit",
+                ErrorCode::BAD_SIZE => "headset-failure-bad-size",
+                ErrorCode::LAST_DISPLAY => "headset-failure-last-display",
+                ErrorCode::NO_WINDOW => "headset-failure-no-window",
+                ErrorCode::DESKTOP => "headset-failure-desktop",
+                ErrorCode::ENCODER => "headset-failure-encoder",
+                ErrorCode::CAPTURE => "headset-failure-capture",
+                ErrorCode::SOUND => "headset-failure-sound",
+                ErrorCode::NOT_ON_DISPLAYS => "headset-failure-not-on-displays",
+                ErrorCode::NO_SUCH_PROFILE => "headset-failure-no-such-profile",
+                ErrorCode::BAD_ARGUMENT => "headset-failure-bad-argument",
                 _ => return None,
             },
         })
@@ -1277,12 +1277,12 @@ impl Panel {
             color: [16, 18, 24, 235],
         }];
         let sectors = [
-            (l.t("wrist-in-front"), false, Action::Recenter),
-            (l.t("focus"), st.focus, Action::Focus(!st.focus)),
-            (l.t("cinema"), st.cinema, Action::Cinema(!st.cinema)),
-            (l.t("wrist-mouse"), false, Action::FindMouse),
-            (l.t("wrist-screenshot"), false, Action::Screenshot),
-            (l.t("line-up"), false, Action::Tidy),
+            (l.t("headset-wrist-in-front"), false, Action::Recenter),
+            (l.t("headset-focus"), st.focus, Action::Focus(!st.focus)),
+            (l.t("headset-cinema"), st.cinema, Action::Cinema(!st.cinema)),
+            (l.t("headset-wrist-mouse"), false, Action::FindMouse),
+            (l.t("headset-wrist-screenshot"), false, Action::Screenshot),
+            (l.t("headset-line-up"), false, Action::Tidy),
         ];
         let (r0, r1) = (outer * 0.4, outer - 10.0);
         let step = TAU / sectors.len() as f32;
@@ -1344,9 +1344,9 @@ impl Panel {
         // little higher, still clear of the sectors).
         if let Some((percent, charging)) = s.battery {
             let id = if charging {
-                "battery-charging"
+                "headset-battery-charging"
             } else {
-                "battery-level"
+                "headset-battery-level"
             };
             let battery = l.f(id, &[("percent", percent.into())]);
             let (x, size) = centred(self, &battery, 15.0, false, across(56.0));
@@ -1379,7 +1379,7 @@ impl Panel {
             [255, 255, 255, 255],
             &s.clock,
         ));
-        let label = l.t("menu");
+        let label = l.t("headset-menu");
         let (x, menu) = centred(self, label, menu, false, across(50.0));
         items.push(text_in(
             across(50.0),
@@ -1893,10 +1893,10 @@ impl Panel {
             &prostir_proto::app_version(env!("CARGO_PKG_VERSION")),
         ));
         let (status, light) = match &s.host {
-            _ if s.update.is_some() => (l.t("status-update-needed").to_owned(), DANGER),
-            _ if s.pairing.is_some() => (l.t("status-pairing").to_owned(), WAIT),
-            Some(h) => (l.f("status-connected", &[("pc", h.into())]), GOOD),
-            None => (l.t("status-searching").to_owned(), WAIT),
+            _ if s.update.is_some() => (l.t("headset-status-update-needed").to_owned(), DANGER),
+            _ if s.pairing.is_some() => (l.t("headset-status-pairing").to_owned(), WAIT),
+            Some(h) => (l.f("headset-status-connected", &[("pc", h.into())]), GOOD),
+            None => (l.t("headset-status-searching").to_owned(), WAIT),
         };
         let sw = self.text_width(&status, 21.0, false);
         let change_w = if s.host.is_some() { 190.0 } else { 0.0 };
@@ -1911,7 +1911,7 @@ impl Panel {
         if s.host.is_some() {
             items.push(button(
                 rect(w - 98.0 - 170.0, 32.0, 170.0, 48.0),
-                l.t("change-pc"),
+                l.t("headset-change-pc"),
                 Style::Normal,
                 Some(Action::ChangeHost),
             ));
@@ -1965,12 +1965,12 @@ impl Panel {
 
         // Tabs: everyday things, the monitors, the profiles, everything set once.
         let tabs = [
-            (Tab::Quick, l.t("tab-quick")),
-            (Tab::Monitors, l.t("tab-monitors")),
-            (Tab::Profiles, l.t("tab-profiles")),
+            (Tab::Quick, l.t("headset-tab-quick")),
+            (Tab::Monitors, l.t("headset-tab-monitors")),
+            (Tab::Profiles, l.t("headset-tab-profiles")),
             (
                 Tab::Settings(s.tab.section().unwrap_or_default()),
-                l.t("tab-settings"),
+                l.t("headset-tab-settings"),
             ),
         ];
         let tab_w = (w - 2.0 * lx - 3.0 * 10.0) / 4.0;
@@ -2030,31 +2030,48 @@ impl Panel {
             21.0,
             false,
             MUTED,
-            &l.f("pairing-with", &[("pc", (&p.host).into())]),
+            &l.f("headset-pairing-with", &[("pc", (&p.host).into())]),
         ));
         y += 40.0;
         if p.failed {
-            items.push(text(lx, y, 20.0, true, DANGER, l.t("pairing-failed")));
+            items.push(text(
+                lx,
+                y,
+                20.0,
+                true,
+                DANGER,
+                l.t("headset-pairing-failed"),
+            ));
             y += 34.0;
         }
         if let Some(code) = &p.code {
-            items.push(text(lx, y, 20.0, false, TEXT, l.t("pairing-type-on-pc")));
+            items.push(text(
+                lx,
+                y,
+                20.0,
+                false,
+                TEXT,
+                l.t("headset-pairing-type-on-pc"),
+            ));
             y += 30.0;
             items.push(Item::Box(rect(lx, y, lw, 130.0), [255, 255, 255, 16]));
             let cw = self.text_width(code, 84.0, true);
             items.push(text(lx + (lw - cw) / 2.0, y + 98.0, 84.0, true, TEXT, code));
             y += 150.0;
-            items.push(text(lx, y, 18.0, false, MUTED, l.t("pairing-once")));
+            items.push(text(lx, y, 18.0, false, MUTED, l.t("headset-pairing-once")));
             y += 30.0;
             items.push(button(
                 rect(lx, y, lw, 50.0),
-                l.t("pairing-other-way-type-here"),
+                l.t("headset-pairing-other-way-type-here"),
                 Style::Normal,
                 Some(Action::PairOtherWay),
             ));
             return y + 62.0;
         }
-        for line in [l.t("pairing-type-pc-code"), l.t("pairing-where-pc-code")] {
+        for line in [
+            l.t("headset-pairing-type-pc-code"),
+            l.t("headset-pairing-where-pc-code"),
+        ] {
             items.push(text(lx, y, 20.0, false, TEXT, line));
             y += 30.0;
         }
@@ -2074,8 +2091,8 @@ impl Panel {
         ));
         y += 76.0;
         let ready = p.typed.len() == 6;
-        let erase = l.t("key-delete");
-        let done = l.t("key-done");
+        let erase = l.t("headset-key-delete");
+        let done = l.t("headset-key-done");
         let keys = [
             "1", "2", "3", "4", "5", "6", "7", "8", "9", erase, "0", done,
         ];
@@ -2098,7 +2115,7 @@ impl Panel {
         y += 4.0 * (kh + 8.0) + 4.0;
         items.push(button(
             rect(lx, y, lw, 50.0),
-            l.t("pairing-other-way-type-on-pc"),
+            l.t("headset-pairing-other-way-type-on-pc"),
             Style::Normal,
             Some(Action::PairOtherWay),
         ));
@@ -2138,7 +2155,7 @@ impl Panel {
                 "9",
                 ".",
                 "0",
-                l.t("key-delete"),
+                l.t("headset-key-delete"),
             ];
             let (kw, kh) = ((lw - 20.0) / 3.0, 50.0);
             for (i, k) in keys.iter().enumerate() {
@@ -2159,7 +2176,7 @@ impl Panel {
             let ready = !typed.is_empty();
             items.push(button(
                 rect(lx, y, half, 50.0),
-                l.t("connect"),
+                l.t("headset-connect"),
                 if ready {
                     Style::Selected
                 } else {
@@ -2169,7 +2186,7 @@ impl Panel {
             ));
             items.push(button(
                 rect(lx + half + 10.0, y, half, 50.0),
-                l.t("cancel"),
+                l.t("headset-cancel"),
                 Style::Normal,
                 Some(Action::CancelKeypad),
             ));
@@ -2182,19 +2199,22 @@ impl Panel {
                 21.0,
                 true,
                 MUTED,
-                l.t("connect-searching"),
+                l.t("headset-connect-searching"),
             ));
             y += 48.0;
             if let Some(hint) = s.hint {
                 let (title, body) = match hint {
-                    crate::session::Hint::NewPc => ("connect-new-title", "connect-new-pair"),
-                    crate::session::Hint::Silent => {
-                        ("connect-silent-title", "connect-silent-check")
+                    crate::session::Hint::NewPc => {
+                        ("headset-connect-new-title", "headset-connect-new-pair")
                     }
+                    crate::session::Hint::Silent => (
+                        "headset-connect-silent-title",
+                        "headset-connect-silent-check",
+                    ),
                 };
                 items.push(text(lx, y + 16.0, 21.0, true, TEXT, l.t(title)));
                 y += 32.0;
-                for body in [body, "connect-or-type"] {
+                for body in [body, "headset-connect-or-type"] {
                     for line in self.wrapped(l.t(body), 19.0, false, lw) {
                         items.push(text(lx, y + 16.0, 19.0, false, MUTED, &line));
                         y += 27.0;
@@ -2203,7 +2223,14 @@ impl Panel {
                 }
             }
         } else {
-            items.push(text(lx, y + 14.0, 21.0, false, MUTED, l.t("connect-found")));
+            items.push(text(
+                lx,
+                y + 14.0,
+                21.0,
+                false,
+                MUTED,
+                l.t("headset-connect-found"),
+            ));
             y += 30.0;
             for (i, (name, addr)) in s.found.iter().enumerate().take(5) {
                 let label = format!("{name}   {addr}");
@@ -2220,8 +2247,8 @@ impl Panel {
                 let name: String = name.chars().take(30).collect();
                 for line in [
                     name,
-                    l.t("connect-blocked").to_owned(),
-                    l.t("connect-allow-port").to_owned(),
+                    l.t("headset-connect-blocked").to_owned(),
+                    l.t("headset-connect-allow-port").to_owned(),
                 ] {
                     items.push(text(lx, y + 16.0, 18.0, false, DANGER, &line));
                     y += 28.0;
@@ -2231,14 +2258,14 @@ impl Panel {
         }
         items.push(button(
             rect(lx, y + 6.0, 280.0, 48.0),
-            l.t("connect-type-ip"),
+            l.t("headset-connect-type-ip"),
             Style::Normal,
             Some(Action::ShowKeypad),
         ));
         y += 66.0;
         // A cable needs developer mode and adb: not something a store install has.
         if s.found.is_empty() && s.hint.is_some() && !cfg!(feature = "store") {
-            for line in self.wrapped(l.t("connect-or-usb"), 19.0, false, lw) {
+            for line in self.wrapped(l.t("headset-connect-or-usb"), 19.0, false, lw) {
                 items.push(text(lx, y + 16.0, 19.0, false, MUTED, &line));
                 y += 27.0;
             }
@@ -2878,7 +2905,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
                 22.0,
                 true,
                 TEXT,
-                &l.f("monitor-n", &[("n", (&m.label).into())]),
+                &l.f("headset-monitor-n", &[("n", (&m.label).into())]),
             ),
         );
         if let Item::Text { shorten, .. } = &mut title {
@@ -2907,7 +2934,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         if !scales.is_empty() {
             let (y0, bw) = (y + 66.0, 92.0);
             let n = scales.len().min(3);
-            let label = l.t("scale");
+            let label = l.t("headset-scale");
             items.push(text_in(
                 lw - n as f32 * (bw + 8.0) - 10.0,
                 text(lx, y0 + 25.0, 18.0, false, MUTED, label),
@@ -2923,7 +2950,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
                 let action = Action::SetScale(m.id, scale);
                 let mut b = button(
                     r,
-                    &l.f("percent", &[("value", scale.into())]),
+                    &l.f("headset-percent", &[("value", scale.into())]),
                     if on { Style::Selected } else { Style::Normal },
                     (!on).then_some(action),
                 );
@@ -2944,7 +2971,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
                     remove.right() - primary.left(),
                     remove.height(),
                 ),
-                l.t("monitor-remove-confirm"),
+                l.t("headset-monitor-remove-confirm"),
                 Style::Armed,
                 Some(Action::Remove(m.id)),
             ));
@@ -2952,14 +2979,14 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             if s.primary == Some(m.id) {
                 items.push(button(
                     primary,
-                    l.t("monitor-primary"),
+                    l.t("headset-monitor-primary"),
                     Style::Selected,
                     None,
                 ));
             } else {
                 items.push(button(
                     primary,
-                    l.t("monitor-make-primary"),
+                    l.t("headset-monitor-make-primary"),
                     Style::Normal,
                     Some(Action::MakePrimary(m.id)),
                 ));
@@ -2987,7 +3014,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             22.0,
             true,
             TEXT,
-            &l.f("window-n", &[("n", (i + 1).into())]),
+            &l.f("headset-window-n", &[("n", (i + 1).into())]),
         ));
         items.push(text(
             lx + 20.0,
@@ -3008,7 +3035,7 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
     y = pc_displays(s, items, lx, lw, y + 34.0);
     items.push(button(
         rect(lx, y, lw, 52.0),
-        l.t("monitors-line-up"),
+        l.t("headset-monitors-line-up"),
         Style::Normal,
         Some(Action::Tidy),
     ));
@@ -3047,7 +3074,7 @@ fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -
     let title_room = if pages > 1 { w - PAGER_W - 10.0 } else { w };
     items.push(text_in(
         title_room,
-        text(x, y, 21.0, true, SECTION, l.t("pc-displays")),
+        text(x, y, 21.0, true, SECTION, l.t("headset-pc-displays")),
     ));
     if pages > 1 {
         pager(
@@ -3076,9 +3103,9 @@ fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -
         }
         items.push(name);
         let note = if !d.connected {
-            Some(l.t("pc-display-not-connected"))
+            Some(l.t("headset-pc-display-not-connected"))
         } else if full && !d.shown {
-            Some(l.t("pc-display-limit"))
+            Some(l.t("headset-pc-display-limit"))
         } else {
             None
         };
@@ -3097,8 +3124,8 @@ fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -
         }
         let can_show = !full || d.shown;
         let switch = [
-            (l.t("pc-display-shown"), true, can_show),
-            (l.t("pc-display-hidden"), false, true),
+            (l.t("headset-pc-display-shown"), true, can_show),
+            (l.t("headset-pc-display-hidden"), false, true),
         ];
         for (i, (label, on, enabled)) in switch.into_iter().enumerate().filter(|_| d.connected) {
             let r = rect(
@@ -3153,7 +3180,7 @@ fn pager(
         Some(to(page + 1)),
     ));
     let label = l.f(
-        "page-of",
+        "headset-page-of",
         &[("page", (page + 1).into()), ("pages", pages.into())],
     );
     items.push(text_in(
@@ -3172,10 +3199,10 @@ fn pager(
 /// A row with a title, a muted note and one button on the right.
 fn hints(l: &Texts, items: &mut Vec<Item>, lx: f32, mut y: f32) {
     for line in [
-        l.t("hint-finger"),
-        l.t("hint-hand"),
-        l.t("hint-controller"),
-        l.t("hint-stick"),
+        l.t("headset-hint-finger"),
+        l.t("headset-hint-hand"),
+        l.t("headset-hint-controller"),
+        l.t("headset-hint-stick"),
     ] {
         items.push(text(lx, y, 19.0, false, MUTED, line));
         y += 30.0;
@@ -3225,7 +3252,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
     let shown = scales.len().min(3);
     let choices_w = shown as f32 * (sw + sgap);
     if shown > 0 {
-        let label = l.t("scale");
+        let label = l.t("headset-scale");
         let label_w = 120.0;
         items.push(text_in(
             label_w,
@@ -3242,7 +3269,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             let action = Action::AddScale(scale);
             let mut b = button(
                 r,
-                &l.f("percent", &[("value", scale.into())]),
+                &l.f("headset-percent", &[("value", scale.into())]),
                 if on { Style::Selected } else { Style::Normal },
                 (!on).then_some(action),
             );
@@ -3260,7 +3287,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
     };
     items.push(text_in(
         title_room,
-        text(rx, y, 21.0, false, MUTED, l.t("add-monitor")),
+        text(rx, y, 21.0, false, MUTED, l.t("headset-add-monitor")),
     ));
     y += 18.0;
     // The sizes the PC offers (it says them when the headset connects), six at most.
@@ -3309,7 +3336,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             18.0,
             false,
             MUTED,
-            &l.f("monitors-at-most", &[("count", max.into())]),
+            &l.f("headset-monitors-at-most", &[("count", max.into())]),
         ));
         y += 10.0;
     }
@@ -3321,22 +3348,22 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         rx,
         rw,
         &mut y,
-        l.t("layout"),
+        l.t("headset-layout"),
         vec![
             (
-                l.t("layout-around"),
+                l.t("headset-layout-around"),
                 Action::Preset(Preset::Arc),
                 st.preset == Preset::Arc,
                 true,
             ),
             (
-                l.t("layout-wall"),
+                l.t("headset-layout-wall"),
                 Action::Preset(Preset::Wall),
                 st.preset == Preset::Wall,
                 true,
             ),
             (
-                l.t("layout-lying"),
+                l.t("headset-layout-lying"),
                 Action::Preset(Preset::Overhead),
                 st.preset == Preset::Overhead,
                 true,
@@ -3360,22 +3387,22 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         rx,
         rw,
         &mut y,
-        l.t("curve"),
+        l.t("headset-curve"),
         vec![
             (
-                l.t("curve-flat"),
+                l.t("headset-curve-flat"),
                 Action::Curve(Curve::Flat),
                 st.curve == Curve::Flat,
                 true,
             ),
             (
-                l.t("curve-gentle"),
+                l.t("headset-curve-gentle"),
                 Action::Curve(Curve::Gentle),
                 st.curve == Curve::Gentle,
                 s.curve_available,
             ),
             (
-                l.t("curve-strong"),
+                l.t("headset-curve-strong"),
                 Action::Curve(Curve::Strong),
                 st.curve == Curve::Strong,
                 s.curve_available,
@@ -3390,10 +3417,10 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         rx,
         half,
         &mut y,
-        l.t("follow-head"),
+        l.t("headset-follow-head"),
         vec![
-            (l.t("no"), Action::Follow(false), !st.follow, true),
-            (l.t("yes"), Action::Follow(true), st.follow, true),
+            (l.t("headset-no"), Action::Follow(false), !st.follow, true),
+            (l.t("headset-yes"), Action::Follow(true), st.follow, true),
         ],
     );
     segmented(
@@ -3401,10 +3428,10 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         rx + half + 16.0,
         half,
         &mut y2,
-        l.t("magnet"),
+        l.t("headset-magnet"),
         vec![
-            (l.t("no"), Action::Magnet(false), !st.magnet, true),
-            (l.t("yes"), Action::Magnet(true), st.magnet, true),
+            (l.t("headset-no"), Action::Magnet(false), !st.magnet, true),
+            (l.t("headset-yes"), Action::Magnet(true), st.magnet, true),
         ],
     );
     y = y.max(y2);
@@ -3413,10 +3440,20 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         rx,
         rw,
         &mut y,
-        l.t("drag"),
+        l.t("headset-drag"),
         vec![
-            (l.t("drag-one"), Action::MoveAll(false), !st.move_all, true),
-            (l.t("drag-all"), Action::MoveAll(true), st.move_all, true),
+            (
+                l.t("headset-drag-one"),
+                Action::MoveAll(false),
+                !st.move_all,
+                true,
+            ),
+            (
+                l.t("headset-drag-all"),
+                Action::MoveAll(true),
+                st.move_all,
+                true,
+            ),
         ],
     );
     // The cinema screen can be picked before switching to cinema.
@@ -3435,7 +3472,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
                 if short {
                     m.label.clone()
                 } else {
-                    l.f("monitor-n", &[("n", (&m.label).into())])
+                    l.f("headset-monitor-n", &[("n", (&m.label).into())])
                 }
             })
             .collect();
@@ -3445,7 +3482,7 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             rx,
             rw,
             &mut y,
-            l.t("cinema-screen"),
+            l.t("headset-cinema-screen"),
             s.monitors
                 .iter()
                 .zip(&labels)
@@ -3484,13 +3521,13 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         lx,
         lw,
         &mut y,
-        l.t("background"),
+        l.t("headset-background"),
         vec![
-            (l.t("background-black"), a1, s1, true),
-            (l.t("background-room"), a2, s2, s.room_available),
-            (l.t("background-dimmed"), a4, s4, s.room_available),
+            (l.t("headset-background-black"), a1, s1, true),
+            (l.t("headset-background-room"), a2, s2, s.room_available),
+            (l.t("headset-background-dimmed"), a4, s4, s.room_available),
             (
-                l.t("background-own"),
+                l.t("headset-background-own"),
                 a3,
                 s3,
                 s.panorama_available && s.custom_available,
@@ -3500,7 +3537,7 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
     // Where an own photo comes from, while there is none yet.
     if s.panorama_available && !s.custom_available {
         for (k, line) in [
-            l.t("background-own-where"),
+            l.t("headset-background-own-where"),
             "Android/data/dev.prostir.client/files/background.jpg",
         ]
         .into_iter()
@@ -3518,10 +3555,10 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         y += 68.0;
     }
     let skies = [
-        (l.t("sky-night"), Sky::Night),
-        (l.t("sky-sunset"), Sky::Sunset),
-        (l.t("sky-space"), Sky::Space),
-        (l.t("sky-aurora"), Sky::Aurora),
+        (l.t("headset-sky-night"), Sky::Night),
+        (l.t("headset-sky-sunset"), Sky::Sunset),
+        (l.t("headset-sky-space"), Sky::Space),
+        (l.t("headset-sky-aurora"), Sky::Aurora),
     ];
     segmented(
         items,
@@ -3545,30 +3582,35 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         rx,
         rw,
         &mut y,
-        l.t("focus"),
+        l.t("headset-focus"),
         vec![
-            (l.t("off"), Action::Focus(false), !st.focus, true),
-            (l.t("focus-dim-others"), Action::Focus(true), st.focus, true),
+            (l.t("headset-off"), Action::Focus(false), !st.focus, true),
+            (
+                l.t("headset-focus-dim-others"),
+                Action::Focus(true),
+                st.focus,
+                true,
+            ),
         ],
     );
     y -= 12.0;
-    items.push(text(rx, y, 19.0, false, MUTED, l.t("focus-note")));
+    items.push(text(rx, y, 19.0, false, MUTED, l.t("headset-focus-note")));
     y += 48.0;
     segmented(
         items,
         rx,
         rw,
         &mut y,
-        l.t("keyboard-window"),
+        l.t("headset-keyboard-window"),
         vec![
             (
-                l.t("off"),
+                l.t("headset-off"),
                 Action::KeyboardWindow(false),
                 !st.keyboard_window,
                 s.keyboard_available,
             ),
             (
-                l.t("show"),
+                l.t("headset-show"),
                 Action::KeyboardWindow(true),
                 st.keyboard_window,
                 s.keyboard_available,
@@ -3576,7 +3618,14 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         ],
     );
     y -= 12.0;
-    items.push(text(rx, y, 19.0, false, MUTED, l.t("keyboard-window-note")));
+    items.push(text(
+        rx,
+        y,
+        19.0,
+        false,
+        MUTED,
+        l.t("headset-keyboard-window-note"),
+    ));
     y += 48.0;
     let every = st.rest_every;
     segmented(
@@ -3584,24 +3633,24 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         rx,
         rw,
         &mut y,
-        l.t("rest"),
+        l.t("headset-rest"),
         [
-            (0, l.t("off")),
-            (20, l.t("rest-every-20")),
-            (60, l.t("rest-hourly")),
+            (0, l.t("headset-off")),
+            (20, l.t("headset-rest-every-20")),
+            (60, l.t("headset-rest-hourly")),
         ]
         .into_iter()
         .map(|(m, label)| (label, Action::RestEvery(m), every == m, true))
         .collect(),
     );
     let levels = [100u8, 80, 60, 40];
-    let labels = levels.map(|p| l.f("percent", &[("value", p.into())]));
+    let labels = levels.map(|p| l.f("headset-percent", &[("value", p.into())]));
     segmented(
         items,
         rx,
         rw,
         &mut y,
-        l.t("brightness"),
+        l.t("headset-brightness"),
         levels
             .iter()
             .zip(&labels)
@@ -3622,17 +3671,17 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
 fn build_pair_offer(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32, host: &str, why: OfferWhy) {
     let mut y = 180.0;
     let title = match why {
-        OfferWhy::New => l.t("offer-new"),
-        OfferWhy::WrongCodes => l.t("offer-wrong-codes"),
-        OfferWhy::Forgotten => l.t("offer-forgotten"),
-        OfferWhy::PcRefused { .. } => l.t("offer-pc-refused"),
+        OfferWhy::New => l.t("headset-offer-new"),
+        OfferWhy::WrongCodes => l.t("headset-offer-wrong-codes"),
+        OfferWhy::Forgotten => l.t("headset-offer-forgotten"),
+        OfferWhy::PcRefused { .. } => l.t("headset-offer-pc-refused"),
     };
     items.push(text(x, y, 34.0, true, TEXT, title));
     y += 60.0;
     let host: String = host.chars().take(40).collect();
     items.push(text(x, y, 24.0, false, TEXT, &host));
     y += 44.0;
-    for line in [l.t("offer-own-pc"), l.t("offer-code")] {
+    for line in [l.t("headset-offer-own-pc"), l.t("headset-offer-code")] {
         items.push(text(x, y, 20.0, false, MUTED, line));
         y += 32.0;
     }
@@ -3640,9 +3689,9 @@ fn build_pair_offer(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32, host: &str
     // Refused by the PC: the other side may show the code.
     if let OfferWhy::PcRefused { pc_shows } = why {
         let other = if pc_shows {
-            l.t("pairing-other-way-type-on-pc")
+            l.t("headset-pairing-other-way-type-on-pc")
         } else {
-            l.t("pairing-other-way-type-here")
+            l.t("headset-pairing-other-way-type-here")
         };
         items.push(button(
             rect(x, y, w, 56.0),
@@ -3654,9 +3703,9 @@ fn build_pair_offer(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32, host: &str
     }
     let half = (w - 12.0) / 2.0;
     let pair = match why {
-        OfferWhy::New => l.t("offer-pair"),
-        OfferWhy::WrongCodes | OfferWhy::PcRefused { .. } => l.t("offer-try-again"),
-        OfferWhy::Forgotten => l.t("offer-pair-again"),
+        OfferWhy::New => l.t("headset-offer-pair"),
+        OfferWhy::WrongCodes | OfferWhy::PcRefused { .. } => l.t("headset-offer-try-again"),
+        OfferWhy::Forgotten => l.t("headset-offer-pair-again"),
     };
     items.push(button(
         rect(x, y, half, 56.0),
@@ -3666,7 +3715,7 @@ fn build_pair_offer(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32, host: &str
     ));
     items.push(button(
         rect(x + half + 12.0, y, half, 56.0),
-        l.t("offer-not-now"),
+        l.t("headset-offer-not-now"),
         Style::Normal,
         Some(Action::PairAnswer(false)),
     ));
@@ -3686,14 +3735,14 @@ fn build_update(
     let ours = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
     let mut y = 180.0;
     let title = if pc_newer {
-        l.t("update-headset")
+        l.t("headset-update-headset")
     } else {
-        l.t("update-pc")
+        l.t("headset-update-pc")
     };
     items.push(text(x, y, 34.0, true, TEXT, title));
     y += 60.0;
     let versions = l.f(
-        "update-versions",
+        "headset-update-versions",
         &[("pc", pc_app.into()), ("headset", ours.into())],
     );
     items.push(text(x, y, 22.0, false, MUTED, &versions));
@@ -3704,14 +3753,14 @@ fn build_update(
         22.0,
         false,
         MUTED,
-        l.t("update-versions-differ"),
+        l.t("headset-update-versions-differ"),
     ));
     y += 50.0;
     items.push(Item::Box(rect(x, y, w, 130.0), [255, 255, 255, 12]));
     let (how, where_) = if pc_newer {
         (l.t(headset.how), headset.place)
     } else {
-        (l.t("update-pc-from"), SITE)
+        (l.t("headset-update-pc-from"), SITE)
     };
     items.push(text(x + 28.0, y + 50.0, 22.0, false, TEXT, how));
     items.push(text(x + 28.0, y + 100.0, 32.0, true, ACCENT, where_));
@@ -3722,7 +3771,7 @@ fn build_update(
         19.0,
         false,
         MUTED,
-        l.t("update-connects-by-itself"),
+        l.t("headset-update-connects-by-itself"),
     ));
 }
 
@@ -3732,7 +3781,14 @@ pub const SITE: &str = "prostir.ishawyha.dev";
 
 /// Before any PC is found: what Prostir needs and where to get the PC part.
 fn build_welcome(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
-    items.push(text(x, y + 6.0, 26.0, true, TEXT, l.t("welcome-title")));
+    items.push(text(
+        x,
+        y + 6.0,
+        26.0,
+        true,
+        TEXT,
+        l.t("headset-welcome-title"),
+    ));
     y += 36.0;
     items.push(text(
         x,
@@ -3740,19 +3796,23 @@ fn build_welcome(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         19.0,
         false,
         MUTED,
-        &l.f("welcome-pc-app", &[("site", SITE.into())]),
+        &l.f("headset-welcome-pc-app", &[("site", SITE.into())]),
     ));
     y += 30.0;
     let steps: [(&str, &str, bool); 3] = [
-        (l.t("welcome-install"), SITE, true),
-        (l.t("welcome-start"), l.t("welcome-start-note"), false),
+        (l.t("headset-welcome-install"), SITE, true),
+        (
+            l.t("headset-welcome-start"),
+            l.t("headset-welcome-start-note"),
+            false,
+        ),
         // USB needs developer mode and adb: not something a store install has.
         (
-            l.t("welcome-finds"),
+            l.t("headset-welcome-finds"),
             l.t(if cfg!(feature = "store") {
-                "welcome-finds-wifi"
+                "headset-welcome-finds-wifi"
             } else {
-                "welcome-finds-wifi-usb"
+                "headset-welcome-finds-wifi-usb"
             }),
             false,
         ),
@@ -3791,14 +3851,14 @@ fn build_welcome(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
 /// happens when the headset comes off.
 fn build_intro(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32) {
     let mut y = 160.0;
-    items.push(text(x, y, 28.0, true, TEXT, l.t("intro-title")));
+    items.push(text(x, y, 28.0, true, TEXT, l.t("headset-intro-title")));
     y += 34.0;
     let tips = [
-        ("intro-menu", "intro-menu-text"),
-        ("intro-move", "intro-move-text"),
-        ("intro-line-up", "intro-line-up-text"),
-        ("intro-finger", "intro-finger-text"),
-        ("intro-off", "intro-off-text"),
+        ("headset-intro-menu", "headset-intro-menu-text"),
+        ("headset-intro-move", "headset-intro-move-text"),
+        ("headset-intro-line-up", "headset-intro-line-up-text"),
+        ("headset-intro-finger", "headset-intro-finger-text"),
+        ("headset-intro-off", "headset-intro-off-text"),
     ];
     for (title, tip) in tips {
         y += 28.0;
@@ -3810,7 +3870,7 @@ fn build_intro(l: &Texts, items: &mut Vec<Item>, x: f32, w: f32) {
     y += 36.0;
     items.push(button(
         rect(x, y, 280.0, 56.0),
-        l.t("intro-done"),
+        l.t("headset-intro-done"),
         Style::Selected,
         Some(Action::IntroDone),
     ));
@@ -3853,7 +3913,14 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     let l = &s.texts;
     let st = s.settings;
     let connected = s.host.is_some();
-    items.push(text(x, y + 14.0, 21.0, true, SECTION, l.t("profiles")));
+    items.push(text(
+        x,
+        y + 14.0,
+        21.0,
+        true,
+        SECTION,
+        l.t("headset-profiles"),
+    ));
     y += 32.0;
     // The first three, the one in use among them (in place of the third where it is
     // further down the list), and the way to all of them.
@@ -3882,7 +3949,7 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         items.push(b);
     }
     if s.profiles.is_empty() {
-        let none = l.t("profiles-none-short");
+        let none = l.t("headset-profiles-none-short");
         items.push(text_in(
             3.0 * (cw + 12.0) - 12.0,
             text(x, y + 44.0, 19.0, false, MUTED, none),
@@ -3890,13 +3957,17 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     }
     items.push(button(
         rect(x + 3.0 * (cw + 12.0), y, cw, 72.0),
-        l.t("profiles-all"),
+        l.t("headset-profiles-all"),
         Style::Normal,
         Some(Action::Tab(Tab::Profiles)),
     ));
     y += 72.0 + 40.0;
     let on_off = |on: bool| {
-        if on { l.t("on") } else { l.t("off") }
+        if on {
+            l.t("headset-on")
+        } else {
+            l.t("headset-off")
+        }
     };
     let tw = (w - 2.0 * 12.0) / 3.0;
     let th = 140.0;
@@ -3906,72 +3977,72 @@ fn build_quick(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         .is_none_or(|l| s.windows.len() >= usize::from(l.windows_max));
     let tiles: [(&str, String, bool, Option<Action>); 9] = [
         (
-            l.t("quick-in-front"),
-            l.t("quick-in-front-state").to_owned(),
+            l.t("headset-quick-in-front"),
+            l.t("headset-quick-in-front-state").to_owned(),
             false,
             Some(Action::Recenter),
         ),
         (
-            l.t("focus"),
+            l.t("headset-focus"),
             on_off(st.focus).to_owned(),
             st.focus,
             Some(Action::Focus(!st.focus)),
         ),
         (
-            l.t("cinema"),
+            l.t("headset-cinema"),
             on_off(st.cinema).to_owned(),
             st.cinema,
             Some(Action::Cinema(!st.cinema)),
         ),
         (
-            l.t("keyboard-window"),
+            l.t("headset-keyboard-window"),
             on_off(st.keyboard_window).to_owned(),
             st.keyboard_window,
             s.keyboard_available
                 .then_some(Action::KeyboardWindow(!st.keyboard_window)),
         ),
         (
-            l.t("pc-sound"),
+            l.t("headset-pc-sound"),
             if s.audio_wanted {
-                l.t("sound-in-headset")
+                l.t("headset-sound-in-headset")
             } else {
-                l.t("sound-on-pc")
+                l.t("headset-sound-on-pc")
             }
             .to_owned(),
             s.audio_wanted,
             connected.then_some(Action::SetAudio(!s.audio_wanted)),
         ),
         (
-            l.t("microphone"),
+            l.t("headset-microphone"),
             if s.mic_wanted {
-                l.t("quick-mic-headset")
+                l.t("headset-quick-mic-headset")
             } else {
-                l.t("quick-mic-pc")
+                l.t("headset-quick-mic-pc")
             }
             .to_owned(),
             s.mic_wanted,
             connected.then_some(Action::SetMic(!s.mic_wanted)),
         ),
         (
-            l.t("quick-detach"),
+            l.t("headset-quick-detach"),
             if full {
-                l.t("quick-detach-full")
+                l.t("headset-quick-detach-full")
             } else {
-                l.t("quick-detach-state")
+                l.t("headset-quick-detach-state")
             }
             .to_owned(),
             false,
             (connected && !full).then_some(Action::DetachWindow),
         ),
         (
-            l.t("quick-window-here"),
-            l.t("quick-window-here-state").to_owned(),
+            l.t("headset-quick-window-here"),
+            l.t("headset-quick-window-here-state").to_owned(),
             false,
             connected.then_some(Action::WindowHere),
         ),
         (
-            l.t("quick-screenshot"),
-            l.t("quick-screenshot-state").to_owned(),
+            l.t("headset-quick-screenshot"),
+            l.t("headset-quick-screenshot-state").to_owned(),
             false,
             connected.then_some(Action::Screenshot),
         ),
@@ -4005,7 +4076,7 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>
     let pager_room = if pages > 1 { PAGER_W + 20.0 } else { 0.0 };
     items.push(text_in(
         w - 330.0 - pager_room,
-        text(x, y + 30.0, 21.0, true, SECTION, l.t("profiles")),
+        text(x, y + 30.0, 21.0, true, SECTION, l.t("headset-profiles")),
     ));
     if pages > 1 {
         pager(
@@ -4019,7 +4090,7 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>
     let new = Action::NewProfile;
     let mut b = button(
         rect(x + w - 300.0, y, 300.0, 48.0),
-        l.t("profile-new"),
+        l.t("headset-profile-new"),
         if can_save && !full {
             Style::Normal
         } else {
@@ -4033,7 +4104,7 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>
     items.push(b);
     y += 70.0;
     if s.profiles.is_empty() {
-        let none = l.t("profiles-none");
+        let none = l.t("headset-profiles-none");
         for (k, line) in wrap(none, 19.0, w).iter().enumerate() {
             items.push(text(
                 x,
@@ -4085,7 +4156,7 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>
         if s.confirm_delete == Some(i) {
             items.push(button(
                 tools,
-                l.t("profile-delete-confirm"),
+                l.t("headset-profile-delete-confirm"),
                 Style::Armed,
                 Some(Action::DeleteProfile(i)),
             ));
@@ -4096,9 +4167,9 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>
         let mut b = button(
             rect(tools.left(), ry, save_w, 52.0),
             if armed {
-                l.t("profile-replace")
+                l.t("headset-profile-replace")
             } else {
-                l.t("profile-save-here")
+                l.t("headset-profile-save-here")
             },
             match (can_save, armed) {
                 (false, _) => Style::Disabled,
@@ -4130,13 +4201,13 @@ fn build_profiles(s: &UiState, items: &mut Vec<Item>, mut y: f32, wrap: Wrap<'_>
             false,
             MUTED,
             &l.f(
-                "profiles-at-most",
+                "headset-profiles-at-most",
                 &[("count", crate::profiles::MAX_PROFILES.into())],
             ),
         ));
         y += 34.0;
     }
-    for (k, line) in wrap(l.t("profiles-rename-hint"), 17.0, w)
+    for (k, line) in wrap(l.t("headset-profiles-rename-hint"), 17.0, w)
         .iter()
         .enumerate()
     {
@@ -4161,13 +4232,13 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
     let l = &s.texts;
     let (nx, nw) = (44.0, 230.0);
     let sections = [
-        (Section::Look, l.t("section-look")),
-        (Section::Controls, l.t("section-controls")),
-        (Section::Sound, l.t("section-sound")),
-        (Section::Language, l.t("section-language")),
-        (Section::Pc, l.t("section-pc")),
-        (Section::Paired, l.t("section-paired")),
-        (Section::Help, l.t("section-help")),
+        (Section::Look, l.t("headset-section-look")),
+        (Section::Controls, l.t("headset-section-controls")),
+        (Section::Sound, l.t("headset-section-sound")),
+        (Section::Language, l.t("headset-section-language")),
+        (Section::Pc, l.t("headset-section-pc")),
+        (Section::Paired, l.t("headset-section-paired")),
+        (Section::Help, l.t("headset-section-help")),
     ];
     for (i, (sec, label)) in sections.into_iter().enumerate() {
         let r = rect(nx, top + i as f32 * 60.0, nw, 52.0);
@@ -4223,10 +4294,10 @@ fn settings_page(
                 cx,
                 w,
                 &mut y,
-                l.t("language-title"),
+                l.t("headset-language-title"),
                 vec![
-                    choice(l.t("language-like-pc"), Language::LikePc),
-                    choice(l.t("language-like-system"), Language::LikeSystem),
+                    choice(l.t("headset-language-like-pc"), Language::LikePc),
+                    choice(l.t("headset-language-like-system"), Language::LikeSystem),
                 ],
             );
             // Every language there is a file for, by the name it calls itself, three
@@ -4248,7 +4319,7 @@ fn settings_page(
                 .collect();
             if let Some(next) = more {
                 options.push((
-                    l.t("language-more"),
+                    l.t("headset-language-more"),
                     Action::LanguagePage(next),
                     false,
                     true,
@@ -4270,7 +4341,7 @@ fn settings_page(
                 cx,
                 w,
                 &mut y,
-                l.t("time"),
+                l.t("headset-time"),
                 vec![
                     (
                         clocks[0].as_str(),
@@ -4290,7 +4361,7 @@ fn settings_page(
             let styles = [DateStyle::Ukrainian, DateStyle::English, DateStyle::Numbers];
             let dates = styles.map(|style| l.date(style, &example));
             let mut options = vec![(
-                l.t("date-like-menu"),
+                l.t("headset-date-like-menu"),
                 Action::DateStyle(DateStyle::LikeMenu),
                 st.date_style == DateStyle::LikeMenu,
                 true,
@@ -4303,7 +4374,7 @@ fn settings_page(
                     true,
                 )
             }));
-            segmented(items, cx, w, &mut y, l.t("date"), options);
+            segmented(items, cx, w, &mut y, l.t("headset-date"), options);
         }
         Section::Pc => {
             let w = cw.min(700.0);
@@ -4317,10 +4388,10 @@ fn settings_page(
                 cx,
                 half,
                 &mut y,
-                l.t("pc-notifications"),
+                l.t("headset-pc-notifications"),
                 vec![
-                    (l.t("off"), Action::Notifications(false), !on, true),
-                    (l.t("on"), Action::Notifications(true), on, true),
+                    (l.t("headset-off"), Action::Notifications(false), !on, true),
+                    (l.t("headset-on"), Action::Notifications(true), on, true),
                 ],
             );
             let on = s.settings.no_limits;
@@ -4329,14 +4400,17 @@ fn settings_page(
                 cx + half + 16.0,
                 half,
                 &mut y2,
-                l.t("no-limits"),
+                l.t("headset-no-limits"),
                 vec![
-                    (l.t("off"), Action::NoLimits(false), !on, true),
-                    (l.t("on"), Action::NoLimits(true), on, true),
+                    (l.t("headset-off"), Action::NoLimits(false), !on, true),
+                    (l.t("headset-on"), Action::NoLimits(true), on, true),
                 ],
             );
             // What it costs, under its own switch.
-            for (k, line) in wrap(l.t("no-limits-note"), 17.0, half).iter().enumerate() {
+            for (k, line) in wrap(l.t("headset-no-limits-note"), 17.0, half)
+                .iter()
+                .enumerate()
+            {
                 items.push(text(
                     cx + half + 16.0,
                     y2 - 18.0 + k as f32 * 23.0,
@@ -4353,7 +4427,7 @@ fn settings_page(
             hints(l, items, cx, ctop + 10.0);
             items.push(button(
                 rect(cx, ctop + 170.0, 300.0, 50.0),
-                l.t("help-show-tips"),
+                l.t("headset-help-show-tips"),
                 Style::Normal,
                 Some(Action::ShowTips),
             ));
@@ -4381,22 +4455,22 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
             lx,
             lw,
             &mut y,
-            l.t("hands"),
+            l.t("headset-hands"),
             vec![
                 (
-                    l.t("hide"),
+                    l.t("headset-hide"),
                     Action::Hands(HandMode::Hidden),
                     st.hands == HandMode::Hidden,
                     true,
                 ),
                 (
-                    l.t("show"),
+                    l.t("headset-show"),
                     Action::Hands(HandMode::Visible),
                     st.hands == HandMode::Visible,
                     true,
                 ),
                 (
-                    l.t("hands-use"),
+                    l.t("headset-hands-use"),
                     Action::Hands(HandMode::Control),
                     st.hands == HandMode::Control,
                     true,
@@ -4406,8 +4480,8 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
     }
     let on_off = |on: bool, act: fn(bool) -> Action, enabled: bool| {
         vec![
-            (l.t("off"), act(false), !on, enabled),
-            (l.t("on"), act(true), on, enabled),
+            (l.t("headset-off"), act(false), !on, enabled),
+            (l.t("headset-on"), act(true), on, enabled),
         ]
     };
     segmented(
@@ -4415,7 +4489,7 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         lx,
         lw,
         &mut y,
-        l.t("gaze-mouse"),
+        l.t("headset-gaze-mouse"),
         on_off(st.gaze_mouse, Action::GazeMouse, s.can_move_mouse),
     );
     items.push(text(
@@ -4425,9 +4499,9 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         false,
         MUTED,
         if s.can_move_mouse || s.host.is_none() {
-            l.t("gaze-mouse-note")
+            l.t("headset-gaze-mouse-note")
         } else {
-            l.t("gaze-mouse-unavailable")
+            l.t("headset-gaze-mouse-unavailable")
         },
     ));
     y += 22.0;
@@ -4436,16 +4510,16 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         lx,
         lw,
         &mut y,
-        l.t("menu-size"),
+        l.t("headset-menu-size"),
         vec![
             (
-                l.t("menu-size-normal"),
+                l.t("headset-menu-size-normal"),
                 Action::LargeMenu(false),
                 !st.large_menu,
                 true,
             ),
             (
-                l.t("menu-size-large"),
+                l.t("headset-menu-size-large"),
                 Action::LargeMenu(true),
                 st.large_menu,
                 true,
@@ -4459,16 +4533,16 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
             lx,
             lw,
             &mut y,
-            l.t("palm-menu"),
+            l.t("headset-palm-menu"),
             vec![
                 (
-                    l.t("palm-menu-left"),
+                    l.t("headset-palm-menu-left"),
                     Action::LeftHanded(false),
                     !st.left_handed,
                     true,
                 ),
                 (
-                    l.t("palm-menu-right"),
+                    l.t("headset-palm-menu-right"),
                     Action::LeftHanded(true),
                     st.left_handed,
                     true,
@@ -4478,14 +4552,14 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
     }
     // The rates the runtime offers, by the rule; none to choose from: hidden.
     if let Some((usual, saver)) = s.display_rates {
-        let usual_text = l.f("display-rate-normal", &[("hz", usual.into())]);
-        let saver_text = l.f("display-rate-saver", &[("hz", saver.into())]);
+        let usual_text = l.f("headset-display-rate-normal", &[("hz", usual.into())]);
+        let saver_text = l.f("headset-display-rate-saver", &[("hz", saver.into())]);
         segmented(
             items,
             lx,
             lw,
             &mut y,
-            l.t("display-rate"),
+            l.t("headset-display-rate"),
             vec![
                 (
                     usual_text.as_str(),
@@ -4505,8 +4579,8 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         // changed it); else why the slower rate loses nothing.
         let chosen = if st.battery_saver { saver } else { usual };
         let note = match s.display_rate_now {
-            Some(now) if now != chosen => l.f("display-rate-now", &[("hz", now.into())]),
-            _ => l.f("display-rate-note", &[("hz", saver.into())]),
+            Some(now) if now != chosen => l.f("headset-display-rate-now", &[("hz", now.into())]),
+            _ => l.f("headset-display-rate-note", &[("hz", saver.into())]),
         };
         items.push(text(lx, y - 18.0, 18.0, false, MUTED, &note));
         y += 22.0;
@@ -4516,11 +4590,16 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
         lx,
         lw,
         &mut y,
-        l.t("menu-button"),
+        l.t("headset-menu-button"),
         vec![
-            (l.t("show"), Action::MenuButton(true), st.menu_button, true),
             (
-                l.t("hide"),
+                l.t("headset-show"),
+                Action::MenuButton(true),
+                st.menu_button,
+                true,
+            ),
+            (
+                l.t("headset-hide"),
                 Action::MenuButton(false),
                 !st.menu_button,
                 true,
@@ -4532,10 +4611,17 @@ fn build_controls(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32
 /// The PCs this headset is paired with, each with "Forget" (pressed twice).
 fn paired_pcs(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     let l = &s.texts;
-    items.push(text(x, y, 21.0, true, SECTION, l.t("paired-pcs")));
+    items.push(text(x, y, 21.0, true, SECTION, l.t("headset-paired-pcs")));
     y += 14.0;
     if s.paired.is_empty() {
-        items.push(text(x, y + 26.0, 19.0, false, MUTED, l.t("paired-none")));
+        items.push(text(
+            x,
+            y + 26.0,
+            19.0,
+            false,
+            MUTED,
+            l.t("headset-paired-none"),
+        ));
         return;
     }
     // Eight fit; with more, seven and how many others.
@@ -4556,9 +4642,9 @@ fn paired_pcs(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
         items.push(button(
             rect(x + w - 200.0, y + 6.0, 192.0, 44.0),
             if armed {
-                l.t("paired-forget-confirm")
+                l.t("headset-paired-forget-confirm")
             } else {
-                l.t("paired-forget")
+                l.t("headset-paired-forget")
             },
             if armed { Style::Armed } else { Style::Normal },
             Some(Action::ForgetPc(i)),
@@ -4572,7 +4658,10 @@ fn paired_pcs(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
             18.0,
             false,
             MUTED,
-            &l.f("paired-more", &[("count", (s.paired.len() - shown).into())]),
+            &l.f(
+                "headset-paired-more",
+                &[("count", (s.paired.len() - shown).into())],
+            ),
         ));
     }
 }
@@ -4587,7 +4676,7 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
             21.0,
             false,
             MUTED,
-            l.t("pc-not-connected"),
+            l.t("headset-pc-not-connected"),
         ));
         return y + 70.0;
     };
@@ -4601,11 +4690,11 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
         x,
         w,
         &mut y,
-        l.t("pc-quality"),
+        l.t("headset-pc-quality"),
         [
-            (15, l.t("pc-quality-economy")),
-            (30, l.t("pc-quality-normal")),
-            (50, l.t("pc-quality-high")),
+            (15, l.t("headset-pc-quality-economy")),
+            (30, l.t("headset-pc-quality-normal")),
+            (50, l.t("headset-pc-quality-high")),
         ]
         .into_iter()
         .map(|(q, label)| {
@@ -4623,10 +4712,10 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
         x,
         w,
         &mut y,
-        l.t("pc-encoding-on"),
+        l.t("headset-pc-encoding-on"),
         vec![
             (
-                l.t("pc-gpu"),
+                l.t("headset-pc-gpu"),
                 set(EncodingChange {
                     software: Some(false),
                     ..none
@@ -4635,7 +4724,7 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
                 any_gpu,
             ),
             (
-                l.t("pc-cpu"),
+                l.t("headset-pc-cpu"),
                 set(EncodingChange {
                     software: Some(true),
                     codec: Some(Codec::H264),
@@ -4651,7 +4740,7 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
         x,
         w,
         &mut y,
-        l.t("pc-codec"),
+        l.t("headset-pc-codec"),
         vec![
             (
                 "HEVC",
@@ -4673,17 +4762,24 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
             ),
         ],
     );
-    items.push(text(x, y - 18.0, 18.0, false, MUTED, l.t("pc-codec-note")));
+    items.push(text(
+        x,
+        y - 18.0,
+        18.0,
+        false,
+        MUTED,
+        l.t("headset-pc-codec-note"),
+    ));
     y += 22.0;
     segmented(
         items,
         x,
         w,
         &mut y,
-        l.t("pc-sharp"),
+        l.t("headset-pc-sharp"),
         vec![
             (
-                l.t("off"),
+                l.t("headset-off"),
                 set(EncodingChange {
                     sharp: Some(false),
                     ..none
@@ -4692,7 +4788,7 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
                 gpu,
             ),
             (
-                l.t("on"),
+                l.t("headset-on"),
                 set(EncodingChange {
                     sharp: Some(true),
                     ..none
@@ -4715,16 +4811,16 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
         lx,
         lw,
         &mut y,
-        l.t("sound-plays"),
+        l.t("headset-sound-plays"),
         vec![
             (
-                l.t("sound-in-headset"),
+                l.t("headset-sound-in-headset"),
                 Action::SetAudio(true),
                 s.audio_wanted,
                 true,
             ),
             (
-                l.t("sound-on-pc"),
+                l.t("headset-sound-on-pc"),
                 Action::SetAudio(false),
                 !s.audio_wanted,
                 true,
@@ -4736,16 +4832,16 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
         lx,
         lw,
         &mut y,
-        l.t("sound-apps-hear"),
+        l.t("headset-sound-apps-hear"),
         vec![
             (
-                l.t("sound-mic-headset"),
+                l.t("headset-sound-mic-headset"),
                 Action::SetMic(true),
                 s.mic_wanted,
                 true,
             ),
             (
-                l.t("sound-mic-pc"),
+                l.t("headset-sound-mic-pc"),
                 Action::SetMic(false),
                 !s.mic_wanted,
                 true,
@@ -4754,13 +4850,16 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
     );
     y -= 24.0;
     if s.mic_denied {
-        for line in [l.t("sound-mic-denied-1"), l.t("sound-mic-denied-2")] {
+        for line in [
+            l.t("headset-sound-mic-denied-1"),
+            l.t("headset-sound-mic-denied-2"),
+        ] {
             items.push(text(lx, y, 19.0, false, DANGER, line));
             y += 30.0;
         }
         items.push(button(
             rect(lx, y - 8.0, 260.0, 48.0),
-            l.t("sound-ask-again"),
+            l.t("headset-sound-ask-again"),
             Style::Normal,
             Some(Action::AskMic),
         ));
@@ -4772,16 +4871,16 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
         lx,
         lw,
         &mut y,
-        l.t("sound-from-screen"),
+        l.t("headset-sound-from-screen"),
         vec![
             (
-                l.t("off"),
+                l.t("headset-off"),
                 Action::SoundFromScreen(false),
                 !s.settings.sound_from_screen,
                 true,
             ),
             (
-                l.t("on"),
+                l.t("headset-on"),
                 Action::SoundFromScreen(true),
                 s.settings.sound_from_screen,
                 true,
@@ -4794,14 +4893,14 @@ fn build_sound(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32)
         18.0,
         false,
         MUTED,
-        l.t("sound-from-screen-note"),
+        l.t("headset-sound-from-screen-note"),
     ));
     y += 30.0;
     for line in [
-        l.t("sound-about-1"),
-        l.t("sound-about-2"),
-        l.t("sound-about-3"),
-        l.t("sound-about-4"),
+        l.t("headset-sound-about-1"),
+        l.t("headset-sound-about-2"),
+        l.t("headset-sound-about-3"),
+        l.t("headset-sound-about-4"),
     ] {
         items.push(text(lx, y, 19.0, false, MUTED, line));
         y += 30.0;
@@ -5352,7 +5451,10 @@ mod tests {
         let rows = physical_rows(&s);
         assert_eq!(rows[0].1, Some(Action::ShowPhysical(k(100), true)));
         s.physical.clear();
-        assert!(!says(&s, crate::lang::builtin("uk").t("pc-displays")));
+        assert!(!says(
+            &s,
+            crate::lang::builtin("uk").t("headset-pc-displays")
+        ));
     }
 
     /// More displays of the PC than fit above "Line up": a page at a time, the pages
@@ -5751,7 +5853,7 @@ mod tests {
                 }
                 st.confirm_delete = Some(1);
                 st.active_profile = Some(1);
-                st.error = Some(lang.f("monitors-at-most", &[("count", 6.into())]));
+                st.error = Some(lang.f("headset-monitors-at-most", &[("count", 6.into())]));
                 states.push(st.clone());
                 // Twenty languages, every page of them.
                 if tab == Tab::Settings(Section::Language) {
@@ -5845,7 +5947,11 @@ mod tests {
             .iter()
             .filter(|st| st.error.is_none())
             .flat_map(|st| {
-                ["error-cameras-lost", "error-keyboard-window"].map(|id| UiState {
+                [
+                    "headset-error-cameras-lost",
+                    "headset-error-keyboard-window",
+                ]
+                .map(|id| UiState {
                     error: Some(st.texts.t(id).to_owned()),
                     ..st.clone()
                 })
@@ -5962,7 +6068,7 @@ mod tests {
             width: 2560,
             height: 1440,
         };
-        st.note = Some(Note::done(Some(add), texts.t("note-monitor-added")));
+        st.note = Some(Note::done(Some(add), texts.t("headset-note-monitor-added")));
         let mut p = Panel::new();
         p.set_state(&st);
         let b = button_at(&p, add);
@@ -6012,7 +6118,7 @@ mod tests {
         st.audio_wanted = false;
         st.note = Some(Note::done(
             Some(Action::SetAudio(false)),
-            texts.t("note-sound-pc"),
+            texts.t("headset-note-sound-pc"),
         ));
         let mut p = Panel::new();
         p.set_state(&st);
@@ -6039,7 +6145,10 @@ mod tests {
         assert_eq!(p.press(), Some(remove));
         st.monitors.retain(|m| m.id != k(102));
         st.selected = None;
-        st.note = Some(Note::done(Some(remove), texts.t("note-monitor-removed")));
+        st.note = Some(Note::done(
+            Some(remove),
+            texts.t("headset-note-monitor-removed"),
+        ));
         p.set_state(&st);
         // In the column where it was, over nothing that is there now.
         let (r, ..) = note_of(&p).expect("a note");
@@ -6071,7 +6180,7 @@ mod tests {
             st.note = Some(if waiting {
                 Note::waiting(on, &texts)
             } else {
-                Note::failed(on, texts.t("failure-not-on-displays"))
+                Note::failed(on, texts.t("headset-failure-not-on-displays"))
             });
             let mut p = Panel::new();
             p.set_state(&st);
@@ -6115,7 +6224,7 @@ mod tests {
                 st.tab = tab;
                 st.selected = Some(k(103));
                 pages.push(st.clone());
-                st.error = Some(lang.t("error-not-connected").to_owned());
+                st.error = Some(lang.t("headset-error-not-connected").to_owned());
                 pages.push(st);
             }
             let mut offline = sample_state();
@@ -6125,9 +6234,9 @@ mod tests {
             pages.push(offline);
             let failed = Note {
                 detail: Some("At most 6 monitors of 5120×1440 on this PC".into()),
-                ..Note::failed(None, lang.t("failure-bad-size"))
+                ..Note::failed(None, lang.t("headset-failure-bad-size"))
             };
-            let done = Note::done(None, lang.t("note-mic-ask"));
+            let done = Note::done(None, lang.t("headset-note-mic-ask"));
             let mut p = Panel::new();
             for page in pages {
                 // On the bottom line, above the error line when there is one (or where

@@ -284,11 +284,8 @@ pub fn first_start() {
         info!("starting with the session: on (the first start; the tray turns it off)");
     } else if places.hyprland {
         crate::platform::dialogs::notify(
-            t("Запуск разом із Hyprland", "Starting with Hyprland"),
-            t(
-                "Щоб Prostir чекав на шолом після входу, додайте в конфіг Hyprland рядок: exec-once = prostir serve",
-                "For Prostir to wait for the headset after login, add this line to the Hyprland config: exec-once = prostir serve",
-            ),
+            t("pc-autostart-starting-with-hyprland"),
+            t("pc-autostart-for-prostir-to-wait-for-the"),
         );
     }
 }
