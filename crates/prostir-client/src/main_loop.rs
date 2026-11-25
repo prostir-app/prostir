@@ -597,8 +597,15 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         fb_passthrough: exts.fb_passthrough,
         htc_passthrough: exts.htc_passthrough,
     });
+    // A frame without the cameras' room blended in: opaque where the runtime offers it.
+    let plain = match crate::caps::plain_blend(&blend_modes) {
+        crate::caps::BlendMode::Opaque => xr::EnvironmentBlendMode::OPAQUE,
+        crate::caps::BlendMode::Additive => xr::EnvironmentBlendMode::ADDITIVE,
+        crate::caps::BlendMode::AlphaBlend => xr::EnvironmentBlendMode::ALPHA_BLEND,
+    };
     let room = Room::make(
         &room_ways,
+        plain,
         &session,
         settings.background.is_room(),
         settings.background.room_opacity(),
@@ -954,7 +961,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     let flags = e.flags();
                     if flags.contains(xr::PassthroughStateChangedFlagsFB::NON_RECOVERABLE_ERROR) {
                         error!("the cameras failed for good");
-                        shell.room = Room::None;
+                        shell.room.lost();
                         shell.handle(now, Event::Platform(PlatformEvent::CamerasLost));
                     } else if flags.contains(xr::PassthroughStateChangedFlagsFB::RECOVERABLE_ERROR)
                     {

@@ -83,12 +83,12 @@ pub struct RoomFound<'a> {
 }
 
 /// The ways to show the room this runtime offers, to try in this order (the first that
-/// can be made counts; none: no room). The blend modes first: a display that lets the
-/// room through (`ADDITIVE` preferred, or without `OPAQUE`) is glasses; one that blends
-/// with the cameras (`ALPHA_BLEND`) shows the room so. Only then a maker's layer,
-/// `XR_FB_passthrough`, then `XR_HTC_passthrough`. Never a blend mode and a layer
-/// together: a runtime with `ALPHA_BLEND` and `XR_FB_passthrough` both gets
-/// `ALPHA_BLEND` only (the two were seen to fight over the background).
+/// can be made is the only one used; none: no room). A display that lets the room
+/// through (`ADDITIVE` preferred, or without `OPAQUE`) is glasses, and nothing else is
+/// tried. Otherwise the maker's own way first, as native as the headset has it: the
+/// cameras' layer of `XR_FB_passthrough`, then of `XR_HTC_passthrough`, and the frame
+/// blended with the cameras (`ALPHA_BLEND`) last. Only one is ever used, so a layer and
+/// the blend never fight over the background.
 pub fn room_ways(found: &RoomFound<'_>) -> Vec<RoomWay> {
     let modes = found.blend_modes;
     let has = |m| modes.contains(&m);
@@ -97,9 +97,6 @@ pub fn room_ways(found: &RoomFound<'_>) -> Vec<RoomWay> {
     {
         return vec![RoomWay::Glasses];
     }
-    if has(BlendMode::AlphaBlend) {
-        return vec![RoomWay::Blend];
-    }
     let mut ways = Vec::new();
     if found.fb_passthrough {
         ways.push(RoomWay::FbPassthrough);
@@ -107,7 +104,20 @@ pub fn room_ways(found: &RoomFound<'_>) -> Vec<RoomWay> {
     if found.htc_passthrough {
         ways.push(RoomWay::HtcPassthrough);
     }
+    if has(BlendMode::AlphaBlend) {
+        ways.push(RoomWay::Blend);
+    }
     ways
+}
+
+/// The blend mode of a frame while the cameras' room is not blended in: opaque where the
+/// runtime offers it (or says nothing), else the first it offers.
+pub fn plain_blend(modes: &[BlendMode]) -> BlendMode {
+    if modes.is_empty() || modes.contains(&BlendMode::Opaque) {
+        BlendMode::Opaque
+    } else {
+        modes[0]
+    }
 }
 
 /// What this headset can do (see the module).
@@ -682,8 +692,15 @@ mod tests {
         assert_eq!(ways(&[Opaque], true, false), [RoomWay::FbPassthrough]);
         // The same without the extension (`caps=minimal`): no room.
         assert_eq!(ways(&[Opaque], false, false), []);
-        // Blended and the layer both: one only, the blend.
-        assert_eq!(ways(&[Opaque, AlphaBlend], true, false), [RoomWay::Blend]);
+        // Blended and the layer both: the layer first, the blend if it cannot be made.
+        assert_eq!(
+            ways(&[Opaque, AlphaBlend], true, false),
+            [RoomWay::FbPassthrough, RoomWay::Blend]
+        );
+        assert_eq!(
+            ways(&[AlphaBlend, Opaque], false, true),
+            [RoomWay::HtcPassthrough, RoomWay::Blend]
+        );
         // Blended only.
         assert_eq!(ways(&[Opaque, AlphaBlend], false, false), [RoomWay::Blend]);
         assert_eq!(ways(&[AlphaBlend, Opaque], false, false), [RoomWay::Blend]);
@@ -708,6 +725,12 @@ mod tests {
         );
         // A runtime that says nothing.
         assert_eq!(ways(&[], false, false), []);
+        // The frame without the room: opaque where offered, else the first offered.
+        assert_eq!(plain_blend(&[Opaque, AlphaBlend]), Opaque);
+        assert_eq!(plain_blend(&[AlphaBlend, Opaque]), Opaque);
+        assert_eq!(plain_blend(&[AlphaBlend]), AlphaBlend);
+        assert_eq!(plain_blend(&[Additive]), Additive);
+        assert_eq!(plain_blend(&[]), Opaque);
     }
 
     #[test]

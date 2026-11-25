@@ -92,7 +92,6 @@ mod found {
         c.color_scale = on.khr_composition_layer_color_scale_bias;
         c.room = room;
         c.image_flip = on.fb_composition_layer_image_layout;
-        c.image_flip = on.fb_composition_layer_image_layout;
         c.hands = hands;
         c.hand_aim = on.ext_hand_interaction;
         c.menu_gesture = hands && on.fb_hand_tracking_aim;
