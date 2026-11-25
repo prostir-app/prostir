@@ -318,12 +318,12 @@ fn only_the_main_headset_changes_the_limits() {
 #[test]
 fn no_more_streams_than_the_headset_decodes() {
     let dir = TestDir::new("streams-max");
-    dir.save_monitors(crate::TWO_MONITORS);
+    dir.save_monitors(TWO_MONITORS);
     let mut keys = dir.pair();
     let pc = Pc::start(&dir, &Options::default());
-    let mut state = prostir_testkit::FakeHeadset::state();
+    let mut state = FakeHeadset::state();
     state.caps.as_mut().unwrap().streams_max = 3;
-    let mut headset = prostir_testkit::FakeHeadset::connect_saying(pc.addr, &mut keys, &state)
+    let mut headset = FakeHeadset::connect_saying(pc.addr, &mut keys, &state)
         .unwrap_or_else(|e| panic!("connecting: {e}"));
     headset
         .wait(START, "every monitor showing", View::all_monitors_show)
@@ -355,7 +355,7 @@ fn no_more_streams_than_the_headset_decodes() {
 fn a_guest_is_not_asked_for_the_volume() {
     use prostir_proto::state::caps;
     let dir = TestDir::new("guest-volume");
-    dir.save_monitors(crate::TWO_MONITORS);
+    dir.save_monitors(TWO_MONITORS);
     let mut keys = dir.pair();
     let key = prostir_proto::secure::to_hex(&keys.identity.public);
     dir.save_settings(&format!("access {key} guest input\n"));
