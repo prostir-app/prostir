@@ -201,6 +201,15 @@ impl ksni::Tray for Tray {
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let (selected, qualities) = qualities(self.bitrate);
+        // The quality of large monitors over USB, while it is not chosen.
+        let usb_large = self.status.usb_large.map(|mbit| {
+            StandardItem {
+                label: crate::i18n::count("pc-tray-quality-usb-large", mbit as usize),
+                enabled: false,
+                ..Default::default()
+            }
+            .into()
+        });
         let mut items: Vec<MenuItem<Self>> = Vec::new();
         if let Some(code) = &self.pairing_code {
             items.push(
@@ -322,7 +331,7 @@ impl ksni::Tray for Tray {
             MenuItem::Separator,
             SubMenu {
                 label: t("pc-tray-video-quality").into(),
-                submenu: vec![
+                submenu: std::iter::once(
                     RadioGroup {
                         selected,
                         // The item of a quality of its own changes nothing.
@@ -340,7 +349,9 @@ impl ksni::Tray for Tray {
                             .collect(),
                     }
                     .into(),
-                ],
+                )
+                .chain(usb_large)
+                .collect(),
                 ..Default::default()
             }
             .into(),

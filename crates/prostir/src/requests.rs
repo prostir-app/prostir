@@ -297,7 +297,12 @@ fn carry_out(
             if let Some((w, h)) = displays.too_big_for(would, asker.caps) {
                 bail!(UserError::BadSize { w, h, scale: 100 });
             }
-            store.set_encoding(bitrate, sharp.unwrap_or(now.sharp), codec, software);
+            store.set_encoding(
+                bitrate,
+                sharp.unwrap_or_else(|| now.clear_text()),
+                codec,
+                software,
+            );
             // Quality and clearer text apply even when the codec cannot change.
             displays.apply(&store.wanted());
             let result = displays.encode_for(codec, software, &headsets);

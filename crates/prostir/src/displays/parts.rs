@@ -26,7 +26,7 @@ impl Displays {
                 bitrate: u16::try_from(wanted.bitrate).unwrap_or(u16::MAX),
                 codec: Some(wanted.codec).filter(|c| decodes(*c)),
                 software: wanted.software,
-                sharp: wanted.sharp,
+                sharp: wanted.clear_text(),
             },
             using: Some((codec, !software)).filter(|(c, _)| decodes(*c)),
             choices: self

@@ -9,7 +9,7 @@ RUN dnf -y install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-rele
     mesa-dri-drivers mesa-libEGL mesa-libgbm libglvnd-egl \
     libwayland-client libwayland-cursor libwayland-egl libxkbcommon wayland-utils \
     gcc gcc-c++ make pkgconf-pkg-config clang \
-    gstreamer1-devel gstreamer1-plugins-base-devel glib2-devel mesa-libgbm-devel libdrm-devel \
+    gstreamer1-devel gstreamer1-plugins-base-devel pipewire-devel clang-devel glib2-devel mesa-libgbm-devel libdrm-devel \
     wayland-devel libxkbcommon-devel dbus-devel \
     procps-ng iproute util-linux findutils which file curl \
  && dnf clean all

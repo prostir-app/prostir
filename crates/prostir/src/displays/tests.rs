@@ -43,6 +43,27 @@ fn the_codec_is_one_every_headset_decodes() {
     assert_eq!(Displays::codec_for(Codec::H264, &[both, h264]), Codec::H264);
 }
 
+/// Over USB, while the quality is not chosen, large monitors stream at 60 Mbit/s;
+/// a quality chosen holds for every monitor, and over Wi-Fi nothing changes.
+#[test]
+fn large_monitors_over_usb_while_the_quality_is_not_chosen() {
+    let default = Settings::default();
+    assert_eq!(Displays::large_kbps_for(true, &default), Some(60_000));
+    assert_eq!(Displays::large_kbps_for(false, &default), None);
+    let chosen = Settings {
+        bitrate: 30,
+        bitrate_chosen: true,
+        ..Settings::default()
+    };
+    assert_eq!(Displays::large_kbps_for(true, &chosen), None);
+    let more = Settings {
+        bitrate: 80,
+        bitrate_chosen: false,
+        ..Settings::default()
+    };
+    assert_eq!(Displays::large_kbps_for(true, &more), None, "not less");
+}
+
 /// The rows go bottom first only when every headset with a session asks for it.
 #[test]
 fn rows_bottom_first_only_for_all() {

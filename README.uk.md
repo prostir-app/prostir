@@ -362,6 +362,16 @@ sudo firewall-cmd --add-port=47830/tcp --add-port=47831/udp --permanent \
 
 ### Із сирців
 
+Для збирання програми ПК потрібні Rust (див. `rust-toolchain.toml`), pkg-config,
+компілятор C і файли для розробки GStreamer (з `-base`), GBM і PipeWire та libclang
+(прив'язки до PipeWire робляться з його заголовків):
+
+| Дистрибутив | Пакети для збирання |
+|---|---|
+| Debian, Ubuntu | `pkg-config clang libclang-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgbm-dev libpipewire-0.3-dev` |
+| Fedora | `pkgconf-pkg-config clang clang-devel gstreamer1-devel gstreamer1-plugins-base-devel mesa-libgbm-devel pipewire-devel` |
+| Arch | `base-devel clang gstreamer gst-plugins-base-libs mesa pipewire` |
+
 ```sh
 # ПК
 cargo build --release -p prostir
