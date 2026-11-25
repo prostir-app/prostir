@@ -1,8 +1,12 @@
 //! What the app asks the system. The `system` thread asks now and then, away from the
-//! frame (a call into Java takes its time): for now the battery, once a minute and
-//! every 15 s while the palm menu shows, read afresh when it appears. It also reads the
-//! language files when the menu's language changes (see [`crate::lang`]). What does not
-//! change (the headset's model, its language) is asked once at the start.
+//! frame (a call into Java takes its time): the battery, once a minute and every 15 s
+//! while the palm menu shows, read afresh when it appears; the media volume as often as
+//! the app asks (every 250 ms in a session, every second without one, not while the
+//! headset is not worn), soon after a volume button and right after the app set it. It
+//! also sets the volume as the app asks (see [`crate::platform::media_volume`]), and
+//! reads the language files when the menu's language changes (see [`crate::lang`]).
+//! What does not change (the headset's model, its language) is asked once at the
+//! start.
 
 #![expect(
     clippy::disallowed_methods,
@@ -16,12 +20,15 @@ use std::time::{Duration, Instant};
 use log::warn;
 
 use crate::lang::{Known, Lang, Loader, Texts};
+use crate::platform::media_volume::MediaVolume;
 
 /// How often the battery is read, and while the palm menu shows it.
 const BATTERY_EVERY: Duration = Duration::from_secs(60);
 const BATTERY_EVERY_ON_PALM: Duration = Duration::from_secs(15);
 /// How long the app waits for the thread when it closes.
 const STOP_WITHIN: Duration = Duration::from_millis(300);
+/// After a volume button, the system has changed the volume by then.
+const AFTER_BUTTON: Duration = Duration::from_millis(50);
 
 /// What the thread found.
 pub enum SystemEvent {
@@ -32,6 +39,9 @@ pub enum SystemEvent {
     Texts(Texts),
     /// The languages there are files for, listed again.
     Languages(Vec<Known>),
+    /// The media volume, in percent of its steps, and whether it is muted: read after
+    /// the `done`th set; said when it changed, and after each set.
+    Volume { level: u8, muted: bool, done: u32 },
 }
 
 enum SystemCmd {
@@ -41,6 +51,14 @@ enum SystemCmd {
     Language(Lang),
     /// List the language files again.
     Languages,
+    /// Follow the volume, of `steps` above silence, read this often (`None`: only
+    /// after a set or a button). Without code of its own in Java the app hears of no
+    /// change of the system's (its menu, its buttons): it looks.
+    WatchVolume { steps: u8, every: Option<Duration> },
+    /// Set the volume: the `n`th set.
+    SetVolume { level: u8, muted: bool, n: u32 },
+    /// A volume button was pressed.
+    VolumeButton,
 }
 
 /// The running thread, for one start of the app: it stops when this is dropped.
@@ -89,6 +107,24 @@ impl System {
         self.send(SystemCmd::Languages);
     }
 
+    /// Follow the media volume, of `steps` above silence, read `every` so often
+    /// (`None`: only after a set or a button); [`SystemEvent::Volume`] says what it is
+    /// now, and each change.
+    pub fn watch_volume(&self, steps: u8, every: Option<Duration>) {
+        self.send(SystemCmd::WatchVolume { steps, every });
+    }
+
+    /// Put the media volume at `level` percent, muted or not: the `n`th set (its
+    /// reading after says so).
+    pub fn set_volume(&self, level: u8, muted: bool, n: u32) {
+        self.send(SystemCmd::SetVolume { level, muted, n });
+    }
+
+    /// A volume button was pressed (the system changes the volume): read it soon.
+    pub fn volume_button(&self) {
+        self.send(SystemCmd::VolumeButton);
+    }
+
     fn send(&self, cmd: SystemCmd) {
         let sent = self.cmds.as_ref().is_some_and(|c| c.send(cmd).is_ok());
         if !sent && !self.gone.replace(true) {
@@ -112,21 +148,108 @@ impl Drop for System {
     }
 }
 
+/// The media volume as the thread follows it.
+#[derive(Default)]
+struct Volume {
+    media: super::AndroidMedia,
+    /// In percent of its steps, once the app said them.
+    follow: Option<MediaVolume>,
+    /// How often it is read (`None`: only after a set or a button).
+    every: Option<Duration>,
+    /// When it is read next.
+    at: Option<Instant>,
+    /// What it was last read as.
+    last: Option<(u8, bool)>,
+    /// The last set done, and whether its reading is still to be said.
+    done: u32,
+    set: bool,
+}
+
+impl Volume {
+    /// When it is to be read next, while it is followed.
+    fn due(&self) -> Option<Instant> {
+        self.follow.as_ref().and(self.at)
+    }
+
+    /// Followed with `steps`, read `every` so often from now (at once).
+    fn watch(&mut self, steps: u8, every: Option<Duration>) {
+        if self.follow.as_ref().is_none_or(|f| f.steps() != steps) {
+            self.follow = Some(MediaVolume::new(steps));
+        }
+        self.every = every;
+        self.at = every.map(|_| Instant::now());
+    }
+
+    /// Sets it as asked, the `n`th set; read right after.
+    fn set(&mut self, level: u8, muted: bool, n: u32) {
+        self.done = n;
+        if let Some(follow) = &mut self.follow {
+            let now = follow.set(&mut self.media, level, muted);
+            if now != Some((level, muted)) {
+                warn!("volume: set to {level} (muted: {muted}), the system has {now:?}");
+            }
+            self.set = true;
+            self.at = Some(Instant::now());
+        }
+    }
+
+    /// A button changed it: read it soon.
+    fn button(&mut self) {
+        let soon = Instant::now() + AFTER_BUTTON;
+        self.at = Some(self.at.map_or(soon, |at| at.min(soon)));
+    }
+
+    /// Reads it if it is time: what to say, when it changed or was just set.
+    fn read(&mut self, now: Instant) -> Option<SystemEvent> {
+        let follow = self.follow.as_mut()?;
+        if self.at.is_none_or(|at| now < at) {
+            return None;
+        }
+        self.at = self.every.map(|every| now + every);
+        let read = follow.read(&mut self.media)?;
+        if !self.set && self.last == Some(read) {
+            return None;
+        }
+        self.set = false;
+        self.last = Some(read);
+        Some(SystemEvent::Volume {
+            level: read.0,
+            muted: read.1,
+            done: self.done,
+        })
+    }
+}
+
 fn run(cmds: &Receiver<SystemCmd>, events: &Sender<SystemEvent>, mut loader: Loader) {
     let mut palm = false;
     let mut read_at = Instant::now();
+    let mut volume = Volume::default();
     loop {
         let every = if palm {
             BATTERY_EVERY_ON_PALM
         } else {
             BATTERY_EVERY
         };
-        let wait = (read_at + every).saturating_duration_since(Instant::now());
+        let battery_at = read_at + every;
+        let until = volume.due().map_or(battery_at, |at| at.min(battery_at));
+        let wait = until.saturating_duration_since(Instant::now());
         let read = match cmds.recv_timeout(wait) {
             Ok(SystemCmd::PalmMenu(shown)) => {
                 let appeared = shown && !palm;
                 palm = shown;
                 appeared
+            }
+            Ok(SystemCmd::WatchVolume { steps, every }) => {
+                volume.watch(steps, every);
+                false
+            }
+            Ok(SystemCmd::SetVolume { level, muted, n }) => {
+                volume.set(level, muted, n);
+                false
+            }
+            Ok(SystemCmd::VolumeButton) => {
+                volume.button();
+                false
             }
             Ok(SystemCmd::Language(lang)) => {
                 if events.send(SystemEvent::Texts(loader.load(lang))).is_err() {
@@ -142,14 +265,20 @@ fn run(cmds: &Receiver<SystemCmd>, events: &Sender<SystemEvent>, mut loader: Loa
                 }
                 false
             }
-            Err(RecvTimeoutError::Timeout) => true,
+            Err(RecvTimeoutError::Timeout) => false,
             Err(RecvTimeoutError::Disconnected) => return,
         };
-        if read {
-            read_at = Instant::now();
+        let now = Instant::now();
+        if read || now >= battery_at {
+            read_at = now;
             if events.send(SystemEvent::Battery(super::battery())).is_err() {
                 return;
             }
+        }
+        if let Some(said) = volume.read(now)
+            && events.send(said).is_err()
+        {
+            return;
         }
     }
 }

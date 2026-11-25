@@ -20,6 +20,7 @@ mod hands;
 mod session;
 #[cfg(test)]
 mod tests;
+mod volume;
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -91,6 +92,8 @@ pub struct Start {
     /// The headset's own system language.
     pub system_lang: Option<Lang>,
     pub battery: Option<(u8, bool)>,
+    /// The system's volume now, percent and muted (`None`: it could not be read).
+    pub volume: Option<(u8, bool)>,
     /// What the headset can do (its model among it), as the shell found it.
     pub caps: Caps,
     /// The display rate now, as the runtime says (`None`: it does not).
@@ -161,6 +164,10 @@ pub enum PlatformEvent {
     Mic { permission: u8, denied: bool },
     /// The battery was read.
     Battery(Option<(u8, bool)>),
+    /// The system's volume was read (now and then while a session is open, and right
+    /// after each set): `level` percent, muted or not, after the `done`th
+    /// [`SoundCmd::SetVolume`].
+    Volume { level: u8, muted: bool, done: u32 },
     /// The system moved the room's origin to where the person is now (its "recenter"):
     /// what stands in the room moves with it, as it always did.
     SpaceMoved,
@@ -228,6 +235,10 @@ pub enum SoundCmd {
     /// Where the sound comes from, as an angle to the right of where the user looks
     /// (`None`: from straight ahead).
     Place(Option<f32>),
+    /// Put the system's volume at `level` percent (muted or not), without the system's
+    /// own display of it; the `n`th set (its reading says so, see
+    /// [`PlatformEvent::Volume`]).
+    SetVolume { level: u8, muted: bool, n: u32 },
 }
 
 /// For the microphone.
@@ -258,6 +269,9 @@ pub enum SystemCmd {
     /// The menu opened: the person may have put a language file or a background
     /// picture on the headset meanwhile.
     LookForFiles,
+    /// Follow the system's volume, of `steps` above silence, read this often (`None`:
+    /// only after a set or a volume button), and at once when this starts.
+    WatchVolume { steps: u8, every: Option<Duration> },
 }
 
 /// A short message shown on its own, below the line of sight.
@@ -424,6 +438,8 @@ pub struct Model {
     profiles_changed: bool,
     /// The palm menu showed when last looked at.
     palm_shown: bool,
+    /// The volume shared with the PC (`None`: the app cannot set the system's).
+    volume: Option<volume::SharedVolume>,
 
     // The frame.
     /// Head position and gaze.
@@ -482,6 +498,10 @@ pub struct Model {
     not_owned: Option<NotOwned>,
     /// The monitors that do not fit in the compositor's layers.
     hidden: Hidden,
+    /// The monitor the head looked at in the last frame, while the numbers of "For
+    /// development" are shown (see [`Model::metrics_place`]); not in the menu.
+    #[cfg(feature = "preview")]
+    looked_monitor: Option<DisplayKey>,
 }
 
 impl Model {
@@ -496,14 +516,28 @@ impl Model {
             lang,
             system_lang,
             battery,
-            caps,
+            volume,
+            mut caps,
             refresh_hz,
             custom_panorama,
             update_from,
             mic_permission,
             only,
         } = start;
-        let world = World::new(desk, keyboard, caps.cylinder, &settings);
+        // A volume that could not be read is not shared: the PC is not told of it.
+        let volume = match (
+            caps.volume_steps
+                .filter(|_| caps.offers(Offer::SharedVolume)),
+            volume,
+        ) {
+            (Some(steps), Some(now)) => Some(volume::SharedVolume::new(steps, now)),
+            _ => {
+                caps.volume_steps = None;
+                None
+            }
+        };
+        let ppd = crate::clarity::pixels_per_degree(&caps.model);
+        let world = World::new(desk, keyboard, caps.cylinder, ppd, &settings);
         let mut m = Self {
             now,
             rev: 0,
@@ -549,6 +583,7 @@ impl Model {
             mic_told: mic_permission,
             profiles_changed: false,
             palm_shown: false,
+            volume,
             head: (Vec3::ZERO, -Vec3::Z),
             head_right: Vec3::X,
             view_eye: None,
@@ -574,6 +609,8 @@ impl Model {
             first_failure: None,
             not_owned: None,
             hidden: Hidden::default(),
+            #[cfg(feature = "preview")]
+            looked_monitor: None,
         };
         // The language's file had lines that could not be read: said once, in front.
         if let Some(warning) = m.texts().warning() {
@@ -702,6 +739,59 @@ impl Model {
         self.menu.toast.as_ref()
     }
 
+    /// The numbers of "For development" are shown next to the monitor looked at: in
+    /// the preview build, while chosen.
+    pub fn metrics_shown(&self) -> bool {
+        cfg!(feature = "preview") && self.world.dev().metrics
+    }
+
+    /// The monitor whose numbers of "For development" are shown (see
+    /// [`Model::metrics_place`]).
+    #[cfg(feature = "preview")]
+    pub fn metrics_for(&self) -> Option<DisplayKey> {
+        self.looked_monitor
+            .filter(|_| self.metrics_shown())
+            .filter(|id| self.world.shown(*id).is_some())
+    }
+
+    /// Where the numbers of "For development" stand: just under the monitor looked at,
+    /// turned as it is, as large to the eye at any distance; where something stands
+    /// there (a row under it, the PC's own display), just over it; where something
+    /// stands there too, beside it on its right, its bottom edge level with the
+    /// monitor's. `None` while not shown. Nothing is allocated.
+    #[cfg(feature = "preview")]
+    pub fn metrics_place(&self) -> Option<crate::layers::Quad> {
+        let id = self.metrics_for()?;
+        let p = *self.world.shown(id)?;
+        let (half_w, half_h) = (p.width / 2.0, self.world.height_of(id) / 2.0);
+        let d = p.position.distance(self.head.0).max(0.3);
+        let width = 0.3 * d;
+        let (w, h) = crate::layers::METRICS_PX;
+        let height = width * h as f32 / w as f32;
+        let gap = 0.01 * d;
+        // In the monitor's own plane: x right, y up, from its middle.
+        let below = Vec2::new(0.0, -(half_h + gap + height / 2.0));
+        let above = Vec2::new(0.0, half_h + gap + height / 2.0);
+        let beside = Vec2::new(half_w + gap + width / 2.0, -half_h + height / 2.0);
+        let at = [below, above, beside]
+            .into_iter()
+            .find(|c| !self.world.stands_at(&p, *c, Vec2::new(width, height), id))
+            .unwrap_or(below);
+        let (right, up, out) = (
+            p.rotation * Vec3::X,
+            p.rotation * Vec3::Y,
+            p.rotation * Vec3::Z,
+        );
+        Some(crate::layers::Quad {
+            at: Placement {
+                position: p.position + right * at.x + up * at.y + out * 0.005,
+                rotation: p.rotation,
+                width,
+            },
+            height,
+        })
+    }
+
     /// "Where is the mouse": on which monitor, where across its image, how far the
     /// rings went (0 to 1).
     pub fn finder(&self) -> Option<(DisplayKey, Vec2, f32)> {
@@ -762,8 +852,13 @@ impl Model {
         for file in self.saves.take() {
             self.effects.push(Effect::Save(file));
         }
+        self.watch_volume();
+        let volume = self.volume_changed();
         if self.profiles_changed {
             self.tell_profiles();
+        } else if volume {
+            let state = self.headset_state();
+            self.session.set_headset(state);
         }
     }
 
@@ -940,6 +1035,10 @@ impl Model {
         self.place_sound();
         self.remind_rest(input.dt);
         let looked = self.looked(input.focused);
+        #[cfg(feature = "preview")]
+        {
+            self.looked_monitor = looked.map(|(k, _)| k);
+        }
         self.tell_gaze(looked);
         if input.focused {
             self.follow_gaze(looked);
@@ -1082,6 +1181,7 @@ impl Model {
                 }
             }
             PlatformEvent::Battery(battery) => self.battery_read(battery),
+            PlatformEvent::Volume { level, muted, done } => self.volume_read(level, muted, done),
             PlatformEvent::SpaceMoved => {
                 // In the room's terms nothing moved: the arrangement went with the
                 // origin. The menu's map is drawn from the eyes again.
@@ -1535,10 +1635,13 @@ impl Model {
     pub fn headset_state(&self) -> HeadsetState {
         HeadsetState {
             profiles: Some(self.profiles_part()),
+            // With its count of the headset's own changes.
+            volume: self.volume.as_ref().map(volume::SharedVolume::now),
             ..headset_state(
                 &self.settings,
                 self.presence.worn(),
                 self.headset.battery,
+                self.volume.as_ref().map(|v| (v.now().level, v.now().muted)),
                 self.headset.mic_permission,
                 &self.headset.caps,
             )
@@ -1816,6 +1919,8 @@ fn tab_code(tab: Tab) -> u8 {
         Tab::Settings(Section::Controls) => 7,
         Tab::Profiles => 8,
         Tab::Settings(Section::Paired) => 9,
+        #[cfg(feature = "preview")]
+        Tab::Settings(Section::Dev) => 10,
     }
 }
 
@@ -1831,6 +1936,9 @@ fn tab_from_code(code: u8) -> Tab {
         7 => Tab::Settings(Section::Controls),
         8 => Tab::Profiles,
         9 => Tab::Settings(Section::Paired),
+        // "For development" only where the build has it.
+        #[cfg(feature = "preview")]
+        10 => Tab::Settings(Section::Dev),
         _ => Tab::Quick,
     }
 }
@@ -1849,23 +1957,30 @@ fn prefs_of(s: &Settings) -> Prefs {
 }
 
 /// What the headset says about itself when it opens a session: what it can do, its
-/// settings, whether it is worn, its battery, the microphone's switch and `permission`;
-/// what it can do as `caps` says.
+/// settings, whether it is worn, its battery, its volume (percent and muted: shared
+/// where `caps` offers it and it could be read), the microphone's switch and
+/// `permission`; what it can do as `caps` says.
 pub fn headset_state(
     settings: &Settings,
     worn: bool,
     battery: Option<(u8, bool)>,
+    volume: Option<(u8, bool)>,
     permission: u8,
     caps: &Caps,
 ) -> HeadsetState {
     let mic = mic_state(settings, permission);
+    let mut told = caps.headset_caps();
+    let volume = volume.filter(|_| caps.offers(Offer::SharedVolume));
+    if volume.is_none() {
+        told.features.retain(|f| *f != caps::headset::VOLUME);
+    }
     HeadsetState {
-        caps: Some(caps.headset_caps()),
+        caps: Some(told),
         prefs: Some(prefs_of(settings)),
         presence: Some(Presence { worn }),
         battery: battery.map(|(percent, charging)| Battery { percent, charging }),
-        // The headset's own volume follows the PC's slider from 0.2.0 step 7.11.
-        volume: None,
+        volume: volume
+            .map(|(level, muted)| prostir_proto::volume::HeadsetVolume::new(level, muted).now()),
         up: std::iter::once((mic.kind, mic)).collect(),
         // The model adds them (see `Model::headset_state`).
         profiles: None,

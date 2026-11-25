@@ -21,7 +21,9 @@ use std::sync::Mutex;
 
 use fluent_bundle::concurrent::FluentBundle;
 use fluent_bundle::{FluentArgs, FluentResource, FluentValue};
-use fluent_syntax::ast::Entry;
+use fluent_syntax::ast::{
+    CallArguments, Entry, Expression, InlineExpression, Pattern, PatternElement,
+};
 use unic_langid::LanguageIdentifier;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -29,9 +31,32 @@ use unicode_segmentation::UnicodeSegmentation;
 /// one per language, English (complete, behind every other one) and Ukrainian. The PC
 /// app, the settings window and the headset app share them; each uses the messages
 /// whose ids start with its own name (`pc-`, `window-`, `headset-`).
+#[cfg(not(feature = "preview"))]
 pub const BUILTIN: &[(&str, &str)] = &[
     ("en", include_str!("../../../lang/en.ftl")),
     ("uk", include_str!("../../../lang/uk.ftl")),
+];
+
+/// [`BUILTIN`] in the headset's preview build: with the texts of its "For development"
+/// part (`lang/dev/<code>.ftl`, one per language as well).
+#[cfg(feature = "preview")]
+pub const BUILTIN: &[(&str, &str)] = &[
+    (
+        "en",
+        concat!(
+            include_str!("../../../lang/en.ftl"),
+            "\n",
+            include_str!("../../../lang/dev/en.ftl")
+        ),
+    ),
+    (
+        "uk",
+        concat!(
+            include_str!("../../../lang/uk.ftl"),
+            "\n",
+            include_str!("../../../lang/dev/uk.ftl")
+        ),
+    ),
 ];
 
 /// The language every other one falls back to; always built in.
@@ -313,6 +338,21 @@ impl Strings {
         id.to_owned()
     }
 
+    /// What Fluent reports when `id` is rendered with no arguments, in the language that
+    /// has it (the primary one, else English); empty for a text that is whole without
+    /// them. For a check that the texts shown without arguments are sound.
+    pub fn errors_without_args(&self, id: &str) -> Vec<String> {
+        for bundle in self.primary.iter().chain(std::iter::once(&self.fallback)) {
+            let Some(pattern) = bundle.get_message(id).and_then(|m| m.value()) else {
+                continue;
+            };
+            let mut errors = Vec::new();
+            bundle.format_pattern(pattern, None, &mut errors);
+            return errors.iter().map(ToString::to_string).collect();
+        }
+        vec![format!("{id}: no such message")]
+    }
+
     /// The text of `id` in this language only, without falling back.
     fn own(&self, id: &str) -> Option<String> {
         format(self.primary.as_ref().unwrap_or(&self.fallback), id, None)
@@ -441,6 +481,61 @@ pub fn check(reference: &str, file: &str) -> Report {
             .filter(|k| !ref_ids.contains_key(*k))
             .cloned()
             .collect(),
+    }
+}
+
+/// The ids of the messages of an `.ftl` text that need no arguments: no `{ $name }` in
+/// the text, in its attributes or in any variant of a selector. Those can be rendered
+/// once, up front; the others only with their values.
+pub fn plain_ids(text: &str) -> Vec<String> {
+    let resource = match FluentResource::try_new(text.to_owned()) {
+        Ok(r) => r,
+        Err((r, _)) => r,
+    };
+    resource
+        .entries()
+        .filter_map(|e| match e {
+            Entry::Message(m) => {
+                let patterns = m.value.iter().chain(m.attributes.iter().map(|a| &a.value));
+                let plain = patterns.into_iter().all(|p| !pattern_has_variable(p));
+                plain.then(|| m.id.name.to_owned())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn pattern_has_variable(pattern: &Pattern<&str>) -> bool {
+    pattern.elements.iter().any(|e| match e {
+        PatternElement::TextElement { .. } => false,
+        PatternElement::Placeable { expression } => expression_has_variable(expression),
+    })
+}
+
+fn expression_has_variable(expression: &Expression<&str>) -> bool {
+    match expression {
+        Expression::Inline(i) => inline_has_variable(i),
+        Expression::Select { selector, variants } => {
+            inline_has_variable(selector) || variants.iter().any(|v| pattern_has_variable(&v.value))
+        }
+    }
+}
+
+fn inline_has_variable(inline: &InlineExpression<&str>) -> bool {
+    let in_arguments = |a: &CallArguments<&str>| {
+        a.positional.iter().any(inline_has_variable)
+            || a.named.iter().any(|n| inline_has_variable(&n.value))
+    };
+    match inline {
+        InlineExpression::VariableReference { .. } => true,
+        InlineExpression::Placeable { expression } => expression_has_variable(expression),
+        InlineExpression::FunctionReference { arguments, .. } => in_arguments(arguments),
+        InlineExpression::TermReference { arguments, .. } => {
+            arguments.as_ref().is_some_and(in_arguments)
+        }
+        InlineExpression::StringLiteral { .. }
+        | InlineExpression::NumberLiteral { .. }
+        | InlineExpression::MessageReference { .. } => false,
     }
 }
 
@@ -711,6 +806,16 @@ mod tests {
         // A folder that only starts with the same letters is someone else's.
         let other = PathBuf::from(format!("{}x/y", home.display()));
         assert_eq!(short_path(&other), other.display().to_string());
+    }
+
+    #[test]
+    fn plain_ids_leave_out_texts_with_placeholders() {
+        let ids = plain_ids(
+            "a = Fixed\nb = { $n } things\nc = Fixed\n    .tip = With { $x }\n\
+             d = { $n ->\n    [one] One\n   *[other] { $n } more\n}\n\
+             e = { NUMBER(1) } of them\nf = { NUMBER($n) } of them\n",
+        );
+        assert_eq!(ids, ["a", "e"]);
     }
 
     #[test]

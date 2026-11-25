@@ -99,6 +99,8 @@ const KEYS: &[&str] = &[
     "streams_max",
     "layers_max",
     "volume_steps",
+    "volume_set",
+    "volume_mute",
     "refresh_rates",
     "refresh_hz",
     "period_ms",
@@ -805,6 +807,20 @@ impl Selftest {
             Some(steps) => r.set("volume_steps", steps),
             None => r.set("volume_steps", "none"),
         }
+        // Whether the system takes the app's setting of its volume (one step off and
+        // back) and of its mute (muted, then unmuted): what one volume with the PC
+        // needs, first checked on each new headset.
+        let steps = caps
+            .volume_steps
+            .or_else(|| crate::platform::android::volume().and_then(|(s, _)| u8::try_from(s).ok()));
+        let probe = steps.and_then(crate::platform::android::volume_probe);
+        let said = |taken: Option<bool>| match taken {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unknown",
+        };
+        r.set("volume_set", said(probe.map(|p| p.set)));
+        r.set("volume_mute", said(probe.map(|p| p.mute)));
         self.perf_levels = caps.perf_levels;
     }
 

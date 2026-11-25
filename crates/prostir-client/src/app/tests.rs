@@ -137,6 +137,7 @@ impl Sim {
             lang: LangState::new(crate::lang::builtin("en"), Vec::new()),
             system_lang: None,
             battery: Some((80, false)),
+            volume: Some((40, false)),
             caps,
             refresh_hz: Some(90.0),
             custom_panorama: false,
@@ -2060,6 +2061,268 @@ fn the_gaze_going_from_one_pc_to_another_tells_both() {
     assert_eq!(gazes_to(&fx, PC_B), [Some(DisplayId(7))]);
 }
 
+/// What the headset told the PC of its volume among `fx`.
+fn volumes(fx: &[Effect]) -> Vec<state::Volume> {
+    sent(fx)
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Volume { part } => Some(*part),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What the system was asked to set its volume to among `fx`.
+fn volume_sets(fx: &[Effect]) -> Vec<(u8, bool, u32)> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Sound(SoundCmd::SetVolume { level, muted, n }) => Some((*level, *muted, *n)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn volume_ask(level: u8, seen: u32, ask: u32) -> NetEvent {
+    NetEvent::VolumeAsk {
+        pc: PC,
+        asked: state::VolumeAsk {
+            level,
+            muted: false,
+            seen,
+            ask,
+        },
+    }
+}
+
+fn volume_read(level: u8, done: u32) -> Event {
+    Event::Platform(PlatformEvent::Volume {
+        level,
+        muted: false,
+        done,
+    })
+}
+
+fn heard(level: u8, seq: u32, ask: u32) -> state::Volume {
+    state::Volume {
+        level,
+        muted: false,
+        seq,
+        ask,
+    }
+}
+
+/// One volume with the PC on a headset whose system volume goes in 15 steps: `Open`
+/// names it and carries the level; the PC's request goes to the next step the way it
+/// moved, set at once and answered at once; the system's reading of it says nothing
+/// more, nor one from before the newest set; a reading that differs is a change of the
+/// headset's own; a request that did not see it is not taken; the next `Open` carries
+/// the level; the system's volume is followed only while the session is open.
+#[test]
+fn one_volume_with_the_pc() {
+    let mut sim = Sim::of(Caps {
+        volume_steps: Some(15),
+        ..test_caps()
+    });
+    let open = sim.m.headset_state();
+    assert!(open.caps.unwrap().has(caps::headset::VOLUME));
+    assert_eq!(open.volume, Some(heard(40, 0, 0)));
+    sim.connect(&[1]);
+    let read_every = |sim: &Sim| {
+        sim.m
+            .volume
+            .as_ref()
+            .and_then(volume::SharedVolume::watched)
+    };
+    assert_eq!(read_every(&sim), Some(volume::READ_IN_SESSION));
+
+    // Up by 1 %: the step above, at once.
+    sim.net(volume_ask(41, 0, 1));
+    let fx = sim.take();
+    assert_eq!(volume_sets(&fx), [(47, false, 1)]);
+    assert_eq!(volumes(&fx), [heard(47, 0, 1)]);
+    sim.handle(volume_read(47, 1));
+    assert!(sim.take().is_empty(), "the set read back");
+
+    // Later, down: the step below. A reading from before that set is old.
+    sim.after(Duration::from_millis(300));
+    sim.net(volume_ask(30, 0, 2));
+    let fx = sim.take();
+    assert_eq!(volume_sets(&fx), [(27, false, 2)]);
+    assert_eq!(volumes(&fx), [heard(27, 0, 2)]);
+    sim.handle(volume_read(47, 1));
+    sim.handle(volume_read(27, 2));
+    assert!(
+        volumes(&sim.take()).is_empty(),
+        "old, then the set read back"
+    );
+
+    // The same level again: nothing to set.
+    sim.after(Duration::from_millis(300));
+    sim.net(volume_ask(27, 0, 3));
+    let fx = sim.take();
+    assert!(volume_sets(&fx).is_empty());
+    assert_eq!(volumes(&fx), [heard(27, 0, 3)]);
+
+    // The buttons: a change of the headset's own, told as such.
+    sim.handle(volume_read(60, 2));
+    assert_eq!(volumes(&sim.take()), [heard(60, 1, 0)]);
+    // A request that had not seen it stands back; the answer says the level.
+    sim.net(volume_ask(20, 0, 4));
+    let fx = sim.take();
+    assert!(volume_sets(&fx).is_empty());
+    assert_eq!(volumes(&fx), [heard(60, 1, 4)]);
+
+    // The system took a set otherwise (a limit of its own): its level stands.
+    sim.after(Duration::from_millis(300));
+    sim.net(volume_ask(80, 1, 5));
+    let fx = sim.take();
+    assert_eq!(volume_sets(&fx), [(80, false, 3)]);
+    assert_eq!(volumes(&fx), [heard(80, 1, 5)]);
+    sim.handle(volume_read(73, 3));
+    assert_eq!(volumes(&sim.take()), [heard(73, 2, 0)]);
+
+    // The next `Open` says it, once, at the end of the pass.
+    sim.m.end_pass();
+    let told: Vec<_> = sim
+        .take()
+        .into_iter()
+        .filter_map(|e| match e {
+            Effect::Net(NetCmd::SetHeadset(state)) => state.volume,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(told, [heard(73, 2, 0)]);
+    sim.m.end_pass();
+    assert!(sim.take().is_empty(), "told once");
+
+    // The session ends: read less often, so the next `Open` says it as it is.
+    sim.net(NetEvent::Ended {
+        step: StepId(1),
+        pc: Some(PC),
+        why: Disconnect::Closed,
+        ended: Ended::default(),
+        lasted: Duration::from_secs(60),
+    });
+    sim.m.end_pass();
+    let watch = SystemCmd::WatchVolume {
+        steps: 15,
+        every: Some(volume::READ_WITHOUT_SESSION),
+    };
+    assert!(sim.take().contains(&Effect::System(watch)));
+    // Taken off: not read at all until it is worn again.
+    sim.handle(Event::Platform(PlatformEvent::Paused(true)));
+    sim.after(Duration::from_secs(10));
+    sim.m.end_pass();
+    let watch = SystemCmd::WatchVolume {
+        steps: 15,
+        every: None,
+    };
+    assert!(sim.take().contains(&Effect::System(watch)), "not worn");
+    assert_eq!(read_every(&sim), None);
+}
+
+/// The PC mutes and unmutes, and asks for silence, on a headset whose system keeps
+/// Android's rules (muted it says step 0, step 0 mutes): what the system then says is
+/// what the headset answered, never a change of the headset's own, so the PC keeps its
+/// level while muted, and an unmute stays.
+#[test]
+fn mute_and_silence_on_androids_rules() {
+    use crate::platform::media_volume::{AndroidRules, MediaVolume};
+    let mut sim = Sim::of(Caps {
+        volume_steps: Some(15),
+        ..test_caps()
+    });
+    sim.connect(&[1]);
+    let mut media = AndroidRules {
+        max: 15,
+        index: 6,
+        muted: false,
+    };
+    let mut system = MediaVolume::new(15);
+    assert_eq!(system.read(&mut media), Some((40, false)));
+    let asked = [
+        ((40, true), (40, true)),
+        ((40, false), (40, false)),
+        ((0, false), (0, false)),
+        ((41, false), (47, false)),
+        ((47, true), (47, true)),
+        ((47, false), (47, false)),
+    ];
+    for (ask, ((level, muted), answered)) in (1..).zip(asked) {
+        sim.after(Duration::from_millis(300));
+        sim.net(NetEvent::VolumeAsk {
+            pc: PC,
+            asked: state::VolumeAsk {
+                level,
+                muted,
+                seen: 0,
+                ask,
+            },
+        });
+        let fx = sim.take();
+        let case = format!("asked {level}, muted {muted}");
+        let answer = volumes(&fx);
+        assert_eq!(
+            answer
+                .iter()
+                .map(|v| (v.level, v.muted))
+                .collect::<Vec<_>>(),
+            [answered],
+            "{case}"
+        );
+        for (l, m, n) in volume_sets(&fx) {
+            // As the system thread says it: right after the set, and at the next read.
+            let (l, m) = system.set(&mut media, l, m).unwrap();
+            sim.handle(Event::Platform(PlatformEvent::Volume {
+                level: l,
+                muted: m,
+                done: n,
+            }));
+            let (l, m) = system.read(&mut media).unwrap();
+            sim.handle(Event::Platform(PlatformEvent::Volume {
+                level: l,
+                muted: m,
+                done: n,
+            }));
+        }
+        let told = volumes(&sim.take());
+        assert!(told.is_empty(), "a change of its own ({case}): {told:?}");
+    }
+    assert_eq!((media.index, media.muted), (7, false), "the unmute stays");
+}
+
+/// A headset whose system volume the app cannot set: `Open` neither names the shared
+/// volume nor carries a level, and the PC's request (were it to come) does nothing.
+#[test]
+fn a_fixed_volume_is_not_shared() {
+    let mut sim = Sim::of(test_caps());
+    let open = sim.m.headset_state();
+    assert!(!open.caps.unwrap().has(caps::headset::VOLUME));
+    assert_eq!(open.volume, None);
+    sim.connect(&[1]);
+    sim.net(volume_ask(41, 0, 1));
+    assert!(sim.take().is_empty());
+    // One the app could set but could not read at the start: neither.
+    let steps = Caps {
+        volume_steps: Some(15),
+        ..test_caps()
+    };
+    let open = headset_state(&Settings::default(), true, None, None, 0, &steps);
+    assert!(!open.caps.unwrap().has(caps::headset::VOLUME));
+    assert_eq!(open.volume, None);
+    let open = headset_state(&Settings::default(), true, None, Some((7, true)), 0, &steps);
+    assert!(open.caps.unwrap().has(caps::headset::VOLUME));
+    assert_eq!(
+        open.volume,
+        Some(state::Volume {
+            level: 7,
+            muted: true,
+            seq: 0,
+            ask: 0
+        })
+    );
+}
+
 /// What the shell has for the plan of the frame's layers: a picture for every monitor,
 /// every picture drawn, nothing wrong with any.
 struct AllReady;
@@ -2088,6 +2351,11 @@ impl crate::layers::Ready for AllReady {
     }
     fn attach(&self) -> bool {
         true
+    }
+    // The numbers of "For development" (the preview build) are not counted here.
+    #[cfg(feature = "preview")]
+    fn metrics(&self) -> bool {
+        false
     }
     fn hands(&self) -> bool {
         true
@@ -2294,4 +2562,58 @@ fn the_layers_go_back_to_front() {
     for id in order {
         assert_eq!(planned(&plan, id), sim.m.world().shown(id).copied());
     }
+}
+
+/// On a headset of 25 pixels a degree (in the table) the monitors are made 1:1 and
+/// their layers only sharpened. "For
+/// development" (shown in the preview build only) lays them out again at another size
+/// at once, its filters change the layers' with the next frame, and "Reset" puts the
+/// monitors back; the menu hears of each (its change moves).
+#[cfg(feature = "preview")]
+#[test]
+fn for_development_changes_the_sizes_and_the_filters() {
+    use crate::clarity::{Filter, MonitorSize, Quality};
+    let mut sim = Sim::of(Caps {
+        model: crate::platform::pixels::MODELS[0].0.into(),
+        ..test_caps()
+    });
+    sim.connect(&[1, 2]);
+    assert!(crate::view::build(&sim.m).dev.is_some());
+    let world = sim.m.world();
+    assert_eq!(world.pixels_per_degree(), Some(25.0));
+    let scale = world.shown_scale(k(1)).expect("known");
+    assert!((scale - 1.0).abs() < 0.02, "{scale}");
+    let only_sharpened = Quality {
+        super_sampling: false,
+        sharpening: true,
+    };
+    assert_eq!(world.layer_quality(k(1)), only_sharpened);
+    let before = *world.placement(k(1)).expect("placed");
+    let rev = sim.m.rev();
+    sim.menu(Action::DevSize(MonitorSize::Standard));
+    assert!(sim.m.rev() > rev);
+    sim.frames(20 * MS);
+    let world = sim.m.world();
+    assert_eq!(world.dev().size, MonitorSize::Standard);
+    let standard = *world.placement(k(1)).expect("placed");
+    assert!(standard.width < before.width * 0.9);
+    assert_eq!(world.layer_quality(k(1)), Quality::BOTH, "shown smaller");
+    sim.menu(Action::DevSuperSampling(Filter::Off));
+    sim.menu(Action::DevSharpening(Filter::Off));
+    sim.frames(20 * MS);
+    assert_eq!(
+        sim.m.world().layer_quality(k(1)),
+        Quality {
+            super_sampling: false,
+            sharpening: false
+        }
+    );
+    sim.menu(Action::DevSizeReset);
+    sim.frames(20 * MS);
+    let world = sim.m.world();
+    assert_eq!(world.dev().size, MonitorSize::OneToOne);
+    assert_eq!(*world.placement(k(1)).expect("placed"), before);
+    sim.menu(Action::DevMetrics(false));
+    assert!(!sim.m.world().dev().metrics);
+    assert_eq!(sim.m.metrics_place(), None);
 }

@@ -392,9 +392,28 @@ impl Screencast {
         )?;
         let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
         let qh = queue.handle();
-        let screencast: ZkdeScreencastUnstableV1 = globals
-            .bind(&qh, 2..=4, ())
-            .context("KWin does not expose zkde_screencast_unstable_v1 to this program")?;
+        // KWin leaves the interface out of the registry of a program it does not
+        // allow (see `access.rs`): told apart from a version it does not know.
+        let listed = globals.contents().with_list(|list| {
+            list.iter()
+                .any(|g| g.interface == ZkdeScreencastUnstableV1::interface().name)
+        });
+        if !listed {
+            // Interfaces only KWin has tell it from another compositor that names itself
+            // KDE.
+            let kwin = globals.contents().with_list(|list| {
+                list.iter().any(|g| {
+                    matches!(
+                        g.interface.as_str(),
+                        "kde_output_device_v2" | "org_kde_kwin_server_decoration_manager"
+                    )
+                })
+            });
+            return Err(anyhow::Error::new(super::access::NotExposed { kwin }));
+        }
+        let screencast: ZkdeScreencastUnstableV1 = globals.bind(&qh, 2..=4, ()).context(
+            "KWin offers zkde_screencast_unstable_v1 in a version this program does not speak",
+        )?;
         let shared = Arc::new(Shared::default());
         // Each output's logical size, where KWin offers it (without it nothing knows
         // a scale given in the display settings).

@@ -158,8 +158,9 @@ pub struct Caps {
     pub streams_max: u8,
     /// The system's volume steps above silence; `None`: the app cannot set it.
     pub volume_steps: Option<u8>,
-    /// The headset as the system names it: shown on the PC and logged, never decided
-    /// by.
+    /// The headset as the system names it: shown on the PC and logged, and looked up
+    /// only for its display's pixels per degree (`platform::pixels`); what it can do is
+    /// never decided by it.
     pub model: String,
 }
 
@@ -369,6 +370,10 @@ impl Caps {
         // over: the PC turns the picture over instead.
         if !self.image_flip {
             features.push(caps::headset::ROWS_UP);
+        }
+        // The system lets the app set its volume: one volume with the PC.
+        if self.offers(Offer::SharedVolume) {
+            features.push(caps::headset::VOLUME);
         }
         HeadsetCaps {
             features,
@@ -611,6 +616,13 @@ mod tests {
         assert_eq!(told.model, "Test");
         // The head's ray is always there.
         assert!(told.has(caps::headset::GAZE));
+        assert!(
+            told.has(caps::headset::VOLUME),
+            "the volume is the system's"
+        );
+        let fixed = Caps::without_extensions("Test".into(), vec![DECODERS_UNSAID[0]], 4, None);
+        assert!(!fixed.headset_caps().has(caps::headset::VOLUME));
+        assert!(fixed.headset_caps().has(caps::headset::GAZE));
     }
 
     /// The rate by the rule: the highest up to 90 as usual, the lowest from 72 to save

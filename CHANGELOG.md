@@ -36,6 +36,13 @@
 
 ### Monitors and the desktop
 
+- KDE Plasma 6.0 to 6.7: KWin hides its screencast interface from a program that no
+  application shortcut names, so Prostir found no way to add monitors. The shortcut
+  now lists the interface and names the program by its real path in every package
+  (the Nix package adds a hidden entry for the unwrapped program). When KWin still
+  refuses, the settings window, the tray and the headset say what to do (install from
+  the package, update to Plasma 6.8, or for a build from the source folder run
+  `scripts/install-kde-shortcut.sh`) instead of failing without a reason.
 - Monitors in the headset no longer overlap, however many there are. When a row would
   reach behind your back (past 210 degrees), the circle grows a little; past 1.5 m the
   monitors make a second row above the main one, then a third. Three 2560×1440
@@ -126,6 +133,17 @@
   with the one it had. A desktop that does not respond for 15 s is said in the
   headset, in the tray and by `prostir ctl status`; after 2 min Prostir quits with an
   error instead of hanging, so that whatever started it can start it again.
+- Sharper text: on a Quest 3, Quest 3S, Quest 2 or Quest Pro a new layout makes each
+  monitor as large as the headset's own pixels, one pixel of the desktop on one of the
+  headset's (a 1920×1080 monitor was shown 30 % smaller than that). The monitors stay
+  at the same distance and get larger. Where a layout does not fit around you that
+  way, or a row over the main one would be out of view, all of them get the largest
+  size that fits. A monitor added later is as large, for its pixels, as the one beside
+  it. What you placed or resized yourself stays as it is. On other headsets the size
+  is as before.
+- Each monitor's picture is smoothed by the headset only while it is shown smaller than
+  the headset's pixels, and sharpened always; before, it was smoothed always, which
+  blurs a picture shown at full size.
 
 ### Settings
 

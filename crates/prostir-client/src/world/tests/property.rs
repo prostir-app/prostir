@@ -8,7 +8,8 @@
 //! the PC's own displays shown as one group. With monitors far wider than the circle
 //! (5120x1440) among them, every such monitor added is also in view, and after "Line
 //! up" no monitor is alone in a row out of view; after a preset nothing is out of view,
-//! and after "Line up" then neither.
+//! and after "Line up" then neither. The same on a headset whose model is known, its
+//! monitors made "1:1" (`clarity`).
 
 use super::*;
 
@@ -94,7 +95,12 @@ impl Trial {
 
     /// Laid out with `sizes`, monitors added and refitted later getting one of `later`.
     fn of(sizes: &[(u32, u32)], later: &'static [(u32, u32)]) -> Self {
-        let mut sim = Sim::new(None);
+        Self::of_on(sizes, later, None)
+    }
+
+    /// [`Trial::of`] on a headset of `ppd` pixels per degree.
+    fn of_on(sizes: &[(u32, u32)], later: &'static [(u32, u32)], ppd: Option<f32>) -> Self {
+        let mut sim = Sim::on(None, ppd);
         sim.connect(PC);
         let list: Vec<Display> = sizes
             .iter()
@@ -383,16 +389,23 @@ fn holds_through(steps: &[Step], cases: usize) {
 
 /// [`holds_through`] with monitors of `sizes`.
 fn holds_through_with(sizes: &'static [(u32, u32)], steps: &[Step], cases: usize) {
+    holds_through_on(None, sizes, steps, cases);
+}
+
+/// [`holds_through_with`] on a headset of `ppd` pixels per degree.
+fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Step], cases: usize) {
     let mut rng = Lcg(42);
     let mut failures = Vec::new();
     for case in 0..cases {
         let n = 2 + rng.below(3);
         let first: Vec<(u32, u32)> = (0..n).map(|_| sizes[rng.below(sizes.len())]).collect();
-        let mut desk = Trial::of(&first, sizes);
+        let mut desk = Trial::of_on(&first, sizes, ppd);
         let mut done = vec!["laid out".to_owned()];
         let at_first = desk.cutting();
         if !at_first.is_empty() {
-            failures.push(format!("case {case} {first:?}: laid out: cut {at_first:?}"));
+            failures.push(format!(
+                "{ppd:?} case {case} {first:?}: laid out: cut {at_first:?}"
+            ));
             continue;
         }
         for _ in 0..6 {
@@ -411,8 +424,14 @@ fn holds_through_with(sizes: &'static [(u32, u32)], steps: &[Step], cases: usize
             let (cutting, unglued) = (desk.cutting(), desk.unglued());
             if !cutting.is_empty() || !unglued.is_empty() {
                 failures.push(format!(
-                    "case {case} {first:?}: {done:?}: cut {cutting:?}, glued apart {unglued:?}"
+                    "{ppd:?} case {case} {first:?}: {done:?}: cut {cutting:?}, glued apart \
+                     {unglued:?}"
                 ));
+                if std::env::var_os("PROSTIR_CUT_DEBUG").is_some() {
+                    for (n, p) in &desk.sim.world.placements {
+                        eprintln!("{n} {p:?} h {}", desk.height(n.id.0, p));
+                    }
+                }
                 break;
             }
         }
@@ -452,6 +471,36 @@ fn each_arrangement_step_cuts_into_nothing() {
         Step::PcDisplays,
     ] {
         holds_through(&[step], 300);
+    }
+}
+
+/// [`each_arrangement_step_cuts_into_nothing`] and with wide monitors, on a headset of
+/// 25 pixels a degree: the monitors made 1:1 or as large as fits, new ones beside them
+/// at their own size.
+#[test]
+fn each_step_at_one_to_one_cuts_into_nothing() {
+    for step in [
+        Step::Drop,
+        Step::Add,
+        Step::AddTwice,
+        Step::Swap,
+        Step::Refit,
+        Step::LineUp,
+        Step::PcDisplays,
+    ] {
+        holds_through_on(Some(25.0), &SIZES, &[step], 150);
+        holds_through_on(Some(25.0), &WIDE, &[step], 100);
+    }
+}
+
+/// The magnet on many more desks, of the standard size and made 1:1 on headsets of 25
+/// and 20 pixels a degree: never a monitor stuck over another nearly in its plane (two
+/// hinged on one edge to the same side), nor through one.
+#[test]
+fn the_magnet_cuts_into_nothing_on_many_desks() {
+    for ppd in [None, Some(25.0), Some(20.0)] {
+        holds_through_on(ppd, &SIZES, &[Step::Drop], 1500);
+        holds_through_on(ppd, &WIDE, &[Step::Drop], 600);
     }
 }
 
@@ -569,20 +618,35 @@ const COMMON: [(u32, u32); 7] = [
 /// after "Line up" then, and nothing cuts.
 #[test]
 fn presets_and_line_up_leave_nothing_out_of_view() {
+    presets_and_line_up_on(None);
+}
+
+/// [`presets_and_line_up_leave_nothing_out_of_view`] on headsets of 25 and 20 pixels a
+/// degree, the
+/// monitors made 1:1 or as large as fits.
+#[test]
+fn presets_at_one_to_one_and_line_up_leave_nothing_out_of_view() {
+    presets_and_line_up_on(Some(25.0));
+    presets_and_line_up_on(Some(20.0));
+}
+
+/// The desks of [`presets_and_line_up_leave_nothing_out_of_view`] on a headset of `ppd`
+/// pixels per degree.
+fn presets_and_line_up_on(ppd: Option<f32>) {
     let mut rng = Lcg(11);
     let mut failures = Vec::new();
     for preset in [Preset::Arc, Preset::Overhead, Preset::Wall] {
         for case in 0..150 {
             let n = 1 + rng.below(4);
             let first: Vec<(u32, u32)> = (0..n).map(|_| COMMON[rng.below(COMMON.len())]).collect();
-            let mut desk = Trial::of(&first, &COMMON);
+            let mut desk = Trial::of_on(&first, &COMMON, ppd);
             let mut check = |desk: &mut Trial, what: &str| {
                 desk.sim.after(1000);
                 let (cutting, unseen) = (desk.cutting(), desk.out_of_view(false));
                 if !cutting.is_empty() || !unseen.is_empty() {
                     failures.push(format!(
-                        "{preset:?} case {case} {first:?}: {what}: cut {cutting:?}, out of view \
-                         {unseen:?}"
+                        "{ppd:?} {preset:?} case {case} {first:?}: {what}: cut {cutting:?}, out \
+                         of view {unseen:?}"
                     ));
                 }
             };
@@ -608,13 +672,27 @@ fn presets_and_line_up_leave_nothing_out_of_view() {
 /// nothing cuts.
 #[test]
 fn an_add_lifts_nothing_out_of_view() {
+    an_add_on(None);
+}
+
+/// [`an_add_lifts_nothing_out_of_view`] on a headset of 25 pixels a degree, the
+/// monitors made 1:1 or as large
+/// as fits, the new one at its own 1:1 size beside them.
+#[test]
+fn an_add_at_one_to_one_lifts_nothing_out_of_view() {
+    an_add_on(Some(25.0));
+}
+
+/// The desks of [`an_add_lifts_nothing_out_of_view`] on a headset of `ppd` pixels per
+/// degree.
+fn an_add_on(ppd: Option<f32>) {
     let mut rng = Lcg(17);
     let mut failures = Vec::new();
     for preset in [Preset::Arc, Preset::Overhead, Preset::Wall] {
         for case in 0..60 {
             let n = 5 + rng.below(3);
             let first: Vec<(u32, u32)> = (0..n).map(|_| COMMON[rng.below(COMMON.len())]).collect();
-            let mut desk = Trial::of(&first, &COMMON);
+            let mut desk = Trial::of_on(&first, &COMMON, ppd);
             let sim = &mut desk.sim;
             sim.s.preset = preset;
             sim.world.preset_chosen(&sim.s, sim.now);

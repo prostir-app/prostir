@@ -22,10 +22,11 @@ mod stick;
 mod tests;
 
 pub use arrange::{
-    Physical, ahead, alone_out_of_view, arrange, carried, clear_along_up, covers_any, cut_any,
-    edge_to, facing_yaw, frame, further, glued_pairs, in_view, kept_to, left_of, level_towards,
-    lifted, line_up, line_up_keeping, make_room, meeting_pairs, place_in_view, place_new,
-    place_waiting, preset_radius, refit, seam_gaps, spread, tilt,
+    Circle, Physical, ahead, alone_out_of_view, arrange, arrange_sized, carried, clear_along_up,
+    covers_any, cut_any, edge_to, facing_yaw, frame, further, glued_pairs, in_view, kept_to,
+    largest_scale, left_of, level_towards, lifted, line_up, line_up_keeping, make_room,
+    meeting_pairs, place_in_view, place_new, place_waiting, preset_radius, preset_radius_sized,
+    refit, seam_gaps, spread, tilt,
 };
 pub use cinema::{cinema, cinema_choice};
 pub use desktop::{Desktop, DesktopMemo};
@@ -45,4 +46,5 @@ pub use prostir_layout::circle::{OVERHEAD_PITCH, RADIUS, VIEW_RADIUS};
 pub trait Key: Copy + Ord + std::hash::Hash {}
 
 impl<K: Copy + Ord + std::hash::Hash> Key for K {}
+pub use prostir_layout::size::{Size, Sizes, shown_scale};
 pub use prostir_layout::space::{METRES_PER_PIXEL, Placement, facing};

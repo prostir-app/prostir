@@ -11,6 +11,7 @@ use std::ptr;
 use log::{info, warn};
 use openxr as xr;
 
+use crate::clarity::Quality;
 use crate::platform::openxr::Gfx;
 
 /// Turns on in `on` each of these extensions that `available` has.
@@ -54,14 +55,22 @@ pub fn set_display_rate(session: &xr::Session<Gfx>, hz: f32) {
     }
 }
 
-/// Supersampling and sharpening for a layer (`XR_FB_composition_layer_settings`):
-/// the desktop's text is denser than the display, and plain sampling shimmers.
-pub fn sharper() -> xr::sys::CompositionLayerSettingsFB {
+/// Supersampling and sharpening for a layer (`XR_FB_composition_layer_settings`), as
+/// `quality` says (see `clarity::quality`): a desktop shown smaller than the display's
+/// pixels shimmers with plain sampling; one shown about as large is only sharpened.
+pub fn sharper(quality: Quality) -> xr::sys::CompositionLayerSettingsFB {
+    type Flags = xr::sys::CompositionLayerSettingsFlagsFB;
+    let mut layer_flags = Flags::EMPTY;
+    if quality.super_sampling {
+        layer_flags |= Flags::QUALITY_SUPER_SAMPLING;
+    }
+    if quality.sharpening {
+        layer_flags |= Flags::QUALITY_SHARPENING;
+    }
     xr::sys::CompositionLayerSettingsFB {
         ty: xr::sys::CompositionLayerSettingsFB::TYPE,
         next: ptr::null(),
-        layer_flags: xr::sys::CompositionLayerSettingsFlagsFB::QUALITY_SUPER_SAMPLING
-            | xr::sys::CompositionLayerSettingsFlagsFB::QUALITY_SHARPENING,
+        layer_flags,
     }
 }
 

@@ -135,6 +135,12 @@ impl Shell<'_> {
                 }
             }
             Effect::Sound(SoundCmd::Place(angle)) => self.gains.place(angle),
+            Effect::Sound(SoundCmd::SetVolume { level, muted, n }) => {
+                self.system.set_volume(level, muted, n);
+            }
+            Effect::System(SystemCmd::WatchVolume { steps, every }) => {
+                self.system.watch_volume(steps, every);
+            }
             Effect::Mic(MicCmd::Allowed(on)) => self.mic.set_allowed(on),
             Effect::Mic(MicCmd::AskAgain) => self.mic.ask_again(),
             Effect::Mic(MicCmd::RefreshPermission) => self.mic.refresh_permission(),
@@ -193,6 +199,10 @@ impl Shell<'_> {
                 }
                 SystemEvent::Languages(known) => {
                     self.handle(now, Event::Platform(PlatformEvent::Languages(known)));
+                }
+                SystemEvent::Volume { level, muted, done } => {
+                    let read = PlatformEvent::Volume { level, muted, done };
+                    self.handle(now, Event::Platform(read));
                 }
             }
         }

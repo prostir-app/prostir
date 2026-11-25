@@ -39,6 +39,8 @@ if [[ "${PROSTIR_STORE:-}" == 1 ]]; then
     # Without the selftest (and its fake PC) the default feature brings.
     cargo_flags+=(--no-default-features --features store)
 fi
+# PROSTIR_PREVIEW=1 (see below): the menu's "For development" part too.
+[[ "${PROSTIR_PREVIEW:-}" == 1 ]] && cargo_flags+=(--features preview)
 [[ "$PROFILE" == release ]] && cargo_flags+=(--release)
 (cd "$ROOT" && cargo build "${cargo_flags[@]}")
 # Where cargo builds: its own CARGO_TARGET_DIR when set (relative to the root, where

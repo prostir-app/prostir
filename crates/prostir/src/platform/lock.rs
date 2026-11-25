@@ -150,6 +150,16 @@ mod tests {
             .arg("10")
             .spawn()
             .unwrap();
+        // Until its exec the child is a copy of this test and has its name.
+        let comm = format!("/proc/{}/comm", other.id());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::fs::read_to_string(&comm).is_ok_and(|c| c.trim() != "sleep") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never became sleep"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         std::fs::write(&path, format!("watcher {}", other.id())).unwrap();
         let found = holder(&path, "watcher");
         let _ = other.kill();

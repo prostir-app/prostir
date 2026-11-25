@@ -460,8 +460,9 @@ pub fn plan<K: Copy + Ord, V: View<K>>(
                 );
             }
         }
-        // Every piece left was held from above (it was cut for that): none is left.
-        debug_assert!(waiting.is_empty());
+        // A piece cut to be held from above is, but one the row above no longer spans
+        // as seen (a monitor let go beside it, a row turned) is not: it goes on in the
+        // main row on its own, held by nothing.
         for k in waiting {
             put(
                 &cut[main_row],

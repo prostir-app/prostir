@@ -250,8 +250,14 @@ impl Brain {
         };
         let others = self.sessions.len().saturating_sub(1);
         let pairing = self.door.pairing_open();
-        self.control
-            .show(self.displays.as_ref(), &self.store, &lead, others, pairing);
+        self.control.show(
+            self.displays.as_ref(),
+            &self.store,
+            &lead,
+            others,
+            pairing,
+            self.desk_unusable.is_some(),
+        );
     }
 
     /// The session commands for the headset go to: the main one, else the first.

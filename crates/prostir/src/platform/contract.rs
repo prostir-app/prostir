@@ -377,6 +377,20 @@ pub enum Memory {
     D3D11 { adapter: AdapterId },
 }
 
+/// Connecting to a desktop failed for a reason the person can fix, and this says what
+/// to do, already in their language: the text goes to the headset, the settings window
+/// and the tray as it is, instead of a failure to be worded again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unusable(pub String);
+
+impl std::fmt::Display for Unusable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unusable {}
+
 /// A graphics card, as the system tells them apart (on Windows its LUID, which
 /// changes between boots, so it is never saved).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

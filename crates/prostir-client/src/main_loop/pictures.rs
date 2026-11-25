@@ -14,8 +14,12 @@ use crate::background;
 use crate::ids::DisplayKey;
 use crate::interaction::{Hands, Menu, Menus};
 use crate::lang::Texts;
+#[cfg(feature = "preview")]
+use crate::layers::METRICS_PX;
 use crate::layers::TOAST_PX;
 use crate::platform::openxr::ImageLayer;
+#[cfg(feature = "preview")]
+use crate::platform::video::SurfaceVideo;
 use crate::settings::Background;
 use crate::ui::{self, Action, Panel};
 use crate::view::View;
@@ -127,6 +131,12 @@ pub struct Pictures {
     button_hovered: bool,
     pub panels: Panels,
     pub wrist_layer: ImageLayer,
+    /// The numbers of "For development" next to the monitor looked at (the preview
+    /// build only), and what they say (`None`: not drawn yet).
+    #[cfg(feature = "preview")]
+    pub metrics_layer: ImageLayer,
+    #[cfg(feature = "preview")]
+    pub metrics: crate::metrics::Label,
     /// The panorama shown and the background it was made for.
     pub pano_layer: Option<(Background, ImageLayer)>,
     pano_job: Option<(Background, JoinHandle<Panorama>)>,
@@ -148,6 +158,8 @@ impl Pictures {
         let mut cursor_layer = ImageLayer::new(session, format, CURSOR_PX, CURSOR_PX, true)?;
         let toast_layer = ImageLayer::new(session, format, TOAST_PX.0, TOAST_PX.1, false)?;
         let attach_layer = ImageLayer::new(session, format, ATTACH_PX.0, ATTACH_PX.1, false)?;
+        #[cfg(feature = "preview")]
+        let metrics_layer = ImageLayer::new(session, format, METRICS_PX.0, METRICS_PX.1, false)?;
         cursor_layer.upload(gl, &ui::cursor_image(CURSOR_PX))?;
         button_layer.upload(gl, &ui::menu_button_image(BUTTON_PX, false))?;
         let panels = Panels {
@@ -172,6 +184,10 @@ impl Pictures {
             button_hovered: false,
             panels,
             wrist_layer,
+            #[cfg(feature = "preview")]
+            metrics_layer,
+            #[cfg(feature = "preview")]
+            metrics: crate::metrics::Label::new(),
             pano_layer: None,
             pano_job: None,
             pano_failed: None,
@@ -365,6 +381,26 @@ impl Pictures {
             }
         }
         Ok(menu_drawn)
+    }
+
+    /// The numbers of "For development" for the monitor looked at (see
+    /// `metrics::Label`): drawn and uploaded again only when what they say changes.
+    #[cfg(feature = "preview")]
+    pub fn metrics(
+        &mut self,
+        gl: &glow::Context,
+        model: &Model,
+        video: &SurfaceVideo,
+        now: Instant,
+    ) -> Result<()> {
+        let received = |id| video.received(id);
+        if let Some(picture) = self
+            .metrics
+            .update(&mut self.panels.main, model, received, now)
+        {
+            self.metrics_layer.upload(gl, picture)?;
+        }
+        Ok(())
     }
 
     /// The black layer over a room blended with the frame and dimmed, letting part of

@@ -126,6 +126,18 @@ struct Loop {
     gazes: u64,
     /// The frame's layers.
     plan: Plan,
+    /// The numbers of "For development" (the preview build): their label and the
+    /// menu's panel they are drawn by, the bytes the stream counts, how many times the
+    /// label was drawn again.
+    #[cfg(feature = "preview")]
+    label: prostir::metrics::Label,
+    #[cfg(feature = "preview")]
+    panel: prostir::ui::Panel,
+    #[cfg(feature = "preview")]
+    bytes: u64,
+    #[cfg(feature = "preview")]
+    redrawn: u64,
+    frames: u64,
 }
 
 /// What the shell has for the layers: every picture drawn.
@@ -154,6 +166,10 @@ impl Ready for Drawn {
         true
     }
     fn attach(&self) -> bool {
+        true
+    }
+    #[cfg(feature = "preview")]
+    fn metrics(&self) -> bool {
         true
     }
     fn hands(&self) -> bool {
@@ -227,6 +243,18 @@ impl Loop {
         if let Some(hidden) = self.plan.news() {
             self.handle(Event::Platform(PlatformEvent::LayersHidden(hidden)));
         }
+        // The numbers by the monitor looked at: a stream of a different rate each
+        // second, and a keyframe now and then.
+        self.frames += 1;
+        #[cfg(feature = "preview")]
+        {
+            self.bytes += 40_000 + (self.frames / 91 % 17) * 9_000;
+            let (bytes, key) = (self.bytes, 380_000 + (self.frames / 400) as u32 * 70_000);
+            let drawn =
+                self.label
+                    .update(&mut self.panel, &self.m, |_| Some((bytes, Some(key))), now);
+            self.redrawn += u64::from(drawn.is_some());
+        }
     }
 
     /// `frames` frames with the right hand as `right` says for each, after 30 to
@@ -270,6 +298,7 @@ fn connected(layers_max: u8) -> Loop {
         ),
         system_lang: None,
         battery: Some((80, false)),
+        volume: Some((40, false)),
         caps: Caps {
             equirect: true,
             cylinder: true,
@@ -301,6 +330,15 @@ fn connected(layers_max: u8) -> Loop {
         forward: -Vec3::Z,
         gazes: 0,
         plan: Plan::new(),
+        #[cfg(feature = "preview")]
+        label: prostir::metrics::Label::new(),
+        #[cfg(feature = "preview")]
+        panel: prostir::ui::Panel::new(),
+        #[cfg(feature = "preview")]
+        bytes: 0,
+        #[cfg(feature = "preview")]
+        redrawn: 0,
+        frames: 0,
     };
     l.now += Duration::from_millis(1);
     l.m.tick(l.now, &FrameInput::hidden(None));
@@ -453,6 +491,38 @@ fn telling_the_gaze_takes_no_memory() {
     assert!(l.gazes - gazes > 6, "told {}", l.gazes - gazes);
 }
 
+/// The preview build's numbers by the monitor looked at, in a session as it runs: the
+/// stream's rate changes each second and the label says it, the label's picture is
+/// drawn again each time (10 s in all, as the log counts), with no memory taken. In
+/// the frames before, the label was made and every digit drawn once.
+#[cfg(feature = "preview")]
+#[test]
+fn the_numbers_by_the_monitor_take_no_memory() {
+    let mut l = connected(16);
+    assert!(l.m.metrics_for().is_some(), "a monitor looked at");
+    assert!(l.label.ready(), "drawn");
+    assert!(l.label.text().contains("Mbit/s"), "{}", l.label.text());
+    let redrawn = l.redrawn;
+    assert_eq!(l.measure(900, |_| HandState::default()), (0, 0), "10 s");
+    assert!(
+        l.redrawn - redrawn >= 8,
+        "drawn {} times",
+        l.redrawn - redrawn
+    );
+    // The menu open over it, and a ray on a monitor: the same.
+    l.handle(Event::Menu(Action::OpenMenu, By::Elsewhere));
+    let target =
+        l.m.world()
+            .shown(DisplayKey::new(PC, DisplayId(1)))
+            .expect("drawn")
+            .position;
+    let on_monitor = HandState {
+        ray: ray_at(target),
+        ..HandState::default()
+    };
+    assert_eq!(l.measure(300, |_| on_monitor), (0, 0), "the menu open");
+}
+
 /// On a compositor that takes fewer layers than the frame wants, the plan leaves the
 /// farthest monitor out every frame, still without memory, and the person is told
 /// before that (not in the frames counted).
@@ -530,9 +600,21 @@ fn pointing_about_the_menu_takes_no_memory() {
 #[test]
 fn the_allocator_counts() {
     let start = allocations();
-    let l = connected(16);
+    #[cfg_attr(not(feature = "preview"), expect(unused_mut))]
+    let mut l = connected(16);
     let made = allocations();
     assert!(made > start);
     let _ = prostir::view::build(&l.m);
     assert!(allocations() > made);
+    // What the label took each second before it was kept: its words by Fluent, its
+    // picture on a pixmap made anew.
+    #[cfg(feature = "preview")]
+    {
+        let before = allocations();
+        let text =
+            l.m.texts()
+                .f("headset-dev-metrics-rate", &[("rate", "31.5".into())]);
+        let _ = l.panel.toast_image(&text, 1024, 88);
+        assert!(allocations() - before > 5, "{}", allocations() - before);
+    }
 }

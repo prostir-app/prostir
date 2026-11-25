@@ -20,6 +20,8 @@ use prostir_proto::state::Gen;
 
 use self::decoder::{DecoderJob, End, Status, Stopped, Stream};
 use crate::frames::Frames;
+#[cfg(feature = "preview")]
+use crate::frames::Received;
 use crate::ids::DisplayKey;
 use crate::net::Feedback;
 use crate::platform::openxr::{self as xrutil, Gfx};
@@ -38,6 +40,9 @@ struct Monitor {
     watch: Watch,
     /// `None` once it failed for good (nothing is shown, nothing tried again).
     swapchain: Option<xr::Swapchain<Gfx>>,
+    /// What came of its stream (the numbers of "For development").
+    #[cfg(feature = "preview")]
+    received: Arc<Received>,
 }
 
 impl Drop for Monitor {
@@ -104,6 +109,8 @@ impl SurfaceVideo {
             said,
         } = spec;
         self.monitors.remove(&id);
+        #[cfg(feature = "preview")]
+        let received = frames.received();
         let stop = Arc::new(AtomicBool::new(false));
         let status = Arc::new(Status::new());
         let mut monitor = Monitor {
@@ -115,6 +122,8 @@ impl SurfaceVideo {
             status: status.clone(),
             watch: Watch::default(),
             swapchain: None,
+            #[cfg(feature = "preview")]
+            received,
         };
         match xrutil::create_surface_swapchain(session, vm, width, height) {
             Ok((swapchain, window)) => {
@@ -152,6 +161,13 @@ impl SurfaceVideo {
     /// surface goes.
     pub fn end(&mut self, id: DisplayKey) {
         self.monitors.remove(&id);
+    }
+
+    /// The bytes of every frame of display `id`'s stream so far, and of its last
+    /// keyframe (see `frames::Received`).
+    #[cfg(feature = "preview")]
+    pub fn received(&self, id: DisplayKey) -> Option<(u64, Option<u32>)> {
+        self.monitors.get(&id).map(|m| m.received.get())
     }
 
     /// What a layer of display `id` shows (`None`: nothing to show).
