@@ -189,3 +189,151 @@
 - Monado: пишу я, власник розбирається і ставить `Signed-off-by`, в MR зазначаємо допомогу
   ШІ. Коли з'явиться `prostir-vr`.
 - driftwm і xdg-desktop-portal: тексти й код пишу я, публікує власник.
+
+## river, Wayfire, labwc
+
+Дата перевірки: 2026-11-25. Читали код і документацію (клони, GitHub, Codeberg, Repology).
+Нічого ніде не публікували і не тестували на живій сесії. Усе про поведінку без позначки
+«перевірити руками» взято з коду.
+
+Головне коротко:
+
+- Wayfire вже вміє створювати й видаляти віртуальні виходи через свій IPC (від 0.9.0), з розміром.
+  Потрібен лише драйвер у Prostir. Зміни в апстрімі не потрібні.
+- labwc вміє створювати й видаляти (дії `VirtualOutputAdd` і `VirtualOutputRemove`, від 0.7.0),
+  але лише з клавіатурної прив'язки: IPC немає і не буде. Обхід: прив'язка в `rc.xml` і
+  віртуальна клавіатура. Розмір і частоту задають потім через wlr-output-management.
+- river (нова гілка і 0.3.x) не вміє. У класичному river мейнтейнер сказав, що прийме патч
+  `riverctl`, але ШІ там заборонено повністю.
+- ШІ заборонено в river і labwc. У Wayfire письмової політики немає, лише відкритий RFC
+  від стороннього користувача.
+
+### Таблиця
+
+| Що | labwc | Wayfire | river (нова, від 0.4.0) | river 0.3.x (river-classic) |
+|---|---|---|---|---|
+| Остання версія | 0.20.3 (2026-10-30), wlroots 0.20 | 0.11.0 (2026-07-27), в master 0.12.0-dev | 0.5.2 (2026-11-10), main 0.6.0-dev | 0.3.18 (2026-11-10) |
+| Віртуальний вихід під час роботи | Так: `VirtualOutputAdd output_name=...` і `VirtualOutputRemove output_name=...`, від 0.7.0 (2023-12-22) | Так: метод IPC `wayfire/create-headless-output` і `wayfire/destroy-headless-output`, від 0.9.0 (2024-08-24) | Ні. Лише на старті через `WLR_BACKENDS=...,headless WLR_HEADLESS_OUTPUTS=N` | Ні. Те саме, що в новій гілці |
+| Розмір і частота | Створюється 1920x1080 при 60 Гц. Далі `wlr-randr --custom-mode WxH@Hz` (wlr-output-management) | Розмір задають у запиті (`width`, `height`), частоти в запиті немає, 60 Гц. Далі wlr-output-management чи `[output:ім'я] mode` в `wayfire.ini` | Із середовища: 1280x720. Далі wlr-output-management | Те саме |
+| Чим викликати ззовні | Нічим прямим. Лише прив'язка клавіш, мишки чи меню. Обхід: прив'язка на рідкісну клавішу, яку натискає Prostir через `zwp_virtual_keyboard_v1` (перевірити руками) | Unix-сокет `$WAYFIRE_SOCKET` (за замовчуванням `$XDG_RUNTIME_DIR/wayfire-<дисплей>-.socket`), JSON: 4 байти довжини, потім `{"method": "...", "data": {...}}` | Немає | Немає (`riverctl` лише для вікон і налаштувань) |
+| Обмеження доступу | Немає окремих. Дія працює з будь-якої прив'язки. Ім'я виходу мусить бути унікальним. Без імені `VirtualOutputRemove` прибирає останній доданий | Лише права файлової системи на сокет (каталог `$XDG_RUNTIME_DIR`, доступ має той самий користувач). Прибрати можна лише виходи, створені через IPC. Плагіни `ipc` і `ipc-rules` НЕ входять у типовий список, їх додає користувач | Для клієнтів у пісочниці (security-context) захоплення і віртуальний ввід заблоковані | Те саме |
+| ext-image-copy-capture-v1 і ext-image-capture-source-v1 | Від 0.9.0 (2025-07-11): вихід і вікно | Від 0.11.0 (2026-07-27): вихід. Вікна вимкнули в 0.11.0 («do not advertise foreign-toplevel-capture») | Від 0.4.0 (2026-03-15): вихід і вікно | Ні |
+| wlr-screencopy-v1 | Так, давно | Так, давно | Так | Так |
+| xdg-desktop-portal-wlr | Працює, є свій `portals.conf` у комплекті. Потрібен xdpw 0.8.0 (2025-10-21) або новіший для ext-image-copy, раніше через wlr-screencopy. Портал показує віртуальний вихід як звичайний монітор | Працює, `wayfire-portals.conf` у репозиторії (`default=wlr;*`) | Працює як з будь-яким wlroots | Працює (через wlr-screencopy) |
+| Віртуальна миша і клавіатура | `zwlr_virtual_pointer_v1` і `zwp_virtual_keyboard_v1`: так (від 0.6.0, 2022-11). Прив'язки спрацьовують і від віртуальної клавіатури, за символом клавіші, не за кодом | Обидва: так, у `core.cpp` | Обидва: так, плюс свій `river_virtual_keyboard_manager_v1` | Обидва: так |
+| Правила внесків | PR на GitHub, для великих змін спершу issue чи IRC, «scope document» ([labwc-scope](https://github.com/labwc/labwc-scope)): IPC свідомо поза межами. Стиль ядра Linux, перевірка `./scripts/check`. | PR на GitHub, спершу issue для нових речей, uncrustify, чат Matrix `#wayfire:matrix.org`. [CONTRIBUTING](https://github.com/WayfireWM/wayfire/blob/master/CONTRIBUTING.md) | PR на Codeberg, спершу IRC `#river`, коміти з префіксом, `zig fmt`. [CONTRIBUTING](https://codeberg.org/river/river/src/branch/main/CONTRIBUTING.md) | Як у river |
+| Політика ШІ | Заборонено | Письмової немає | Заборонено повністю | Явного тексту не знайшли, вважати як у river |
+| Активність | Коміти й злиття щодня (кілька мейнтейнерів: johanmalm, Consolatis, інші), близько 2900 зірок | Основний автор Ilia Bozhinov (ammen99), 26 комітів від 2026-09-01, близько 3100 зірок | Isaac Freund комітить щотижня, близько 1330 зірок | Ізаак теж, версія 0.3.18 від 2026-11-10, 64 зірки |
+
+### Версії в дистрибутивах
+
+Джерело: [Repology](https://repology.org/), станом на 2026-11-25.
+
+| Дистрибутив | labwc | Wayfire | river |
+|---|---|---|---|
+| Arch | 0.20.3 | 0.11.0 | river 0.5.2, river-classic 0.3.18 |
+| Debian 13 | 0.8.3 | 0.9.0 | немає |
+| Ubuntu 26.04 | 0.9.3 | 0.10.0 | немає |
+| Fedora 43 | 0.9.6 | 0.10.1 | river і river-classic 0.3.14 |
+| Raspberry Pi OS (stable, на Debian 13) | 0.8.3 | 0.9.0 | немає |
+
+Що це дає:
+
+- labwc: віртуальні виходи є скрізь (від 0.7.0). Але ext-image-copy-capture немає в
+  Debian 13 і Raspberry Pi OS (0.8.3 менше за 0.9.0). Там лише wlr-screencopy.
+- Wayfire: створення виходу через IPC є скрізь (від 0.9.0). ext-image-copy-capture лише
+  в Arch (0.11.0), в інших wlr-screencopy.
+- river: у Debian, Ubuntu і Raspberry Pi OS пакета немає. В Arch 0.5.2 має захоплення, але
+  не має віртуальних виходів. У Fedora лише 0.3.x.
+- Raspberry Pi OS: типовий робочий стіл це labwc, тож він найважливіший для цього
+  дистрибутива.
+
+### Політика ШІ дослівно
+
+- labwc: «We do not accept contributions containing AI-generated content. Contributors may be
+  asked to explain the provenance of a contribution.» Діє і на issue, обговорення та описи PR.
+  Допускає ШІ для дослідження API, статичного аналізу й налагодження, якщо результат не
+  потрапляє у внесок. Переклад теж без генеративного ШІ.
+  [CONTRIBUTING, розділ про ШІ](https://github.com/labwc/labwc/blob/master/CONTRIBUTING.md#use-of-ai-generated-content).
+- river: «Use of generative AI/LLMs is strictly forbidden for all contributions to river.»
+  і «This includes bug reports and comments on the issue tracker.»
+  [CONTRIBUTING](https://codeberg.org/river/river/src/branch/main/CONTRIBUTING.md).
+- Wayfire: у CONTRIBUTING і README про ШІ нічого немає, шаблони issue теж. Є відкритий
+  [RFC #3252](https://github.com/WayfireWM/wayfire/issues/3252) (2026-11-22, від користувача,
+  не від мейнтейнера): «These wouldn't ban AI tools outright but they would set a high bar»
+  (розкриття, автор розуміє кожен рядок, опис своїми словами, докази перевірки). Мейнтейнери
+  ще не відповіли. Поки правил немає, робити так, ніби вони вже діють: власник пише опис
+  сам і перевіряє на реальній сесії.
+
+### Вердикти
+
+**labwc: працює зараз із загальним бекендом wlroots, з одним кроком налаштування.**
+
+- Prostir додає (або просить користувача додати) у `rc.xml` прив'язки на рідкісні клавіші,
+  наприклад `XF86Launch5` для `VirtualOutputAdd output_name="Prostir-1"` і `XF86Launch6`
+  для `VirtualOutputRemove output_name="Prostir-1"`. Prostir натискає їх через
+  `zwp_virtual_keyboard_v1`. Потім ставить розмір і частоту через wlr-output-management
+  (як у прикладі з [labwc-actions(5)](https://github.com/labwc/labwc/blob/master/docs/labwc-actions.5.scd))
+  і знімає екран через ext-image-copy-capture або wlr-screencopy.
+- Слабкі місця: потрібна правка конфігу користувача; ім'я виходу задане в конфігу, тож
+  кілька віртуальних моніторів означає кілька пар прив'язок; прив'язки від віртуальної
+  клавіатури шукаються лише за символом клавіші, не за кодом; усе це прочитано в коді,
+  але на живому labwc не пробували. Також не перевірено, куди в розкладці стає новий вихід
+  і чи тримає headless частоту, що не 60 Гц (у коді wlroots `backend/headless/output.c`
+  частота береться з режиму, тож має тримати).
+- Окремої зміни в апстрімі не просимо. Якщо хочемо краще: атрибути `width`, `height`,
+  `refresh` у `VirtualOutputAdd` (мала зміна в `src/action.c` і `src/output-virtual.c`).
+  Це можливо лише так: власник пише сам, без ШІ, спершу issue. IPC мейнтейнери не приймуть:
+  це прямо в [scope](https://github.com/labwc/labwc-scope) і в README.
+
+**Wayfire: працює зараз, потрібен лише драйвер Wayfire в Prostir.**
+
+- Запит: `{"method": "wayfire/create-headless-output", "data": {"width": 2560, "height": 1440}}`.
+  Відповідь містить опис виходу з іменем (`HEADLESS-N`). Видалення:
+  `wayfire/destroy-headless-output` з `output` або `output-id`. Код:
+  [ipc-utility-methods.hpp](https://github.com/WayfireWM/wayfire/blob/master/plugins/ipc-rules/ipc-utility-methods.hpp).
+- Частота: у запиті її немає. Після створення Prostir просить режим `WxH@Hz` через
+  wlr-output-management (Wayfire його підтримує, для не-DRM виходів довільні режими дозволені,
+  `is_mode_supported` у `output-layout.cpp`). Перевірити руками.
+- Умова: користувач додає `ipc` і `ipc-rules` у `plugins` в `wayfire.ini`. Prostir має
+  показати це в підказці налаштування.
+- Захоплення: до 0.11.0 лише wlr-screencopy, тож для Debian 13, Ubuntu 26.04, Fedora 43 і
+  Raspberry Pi OS це шлях через screencopy.
+- Це не «загальний wlroots»: IPC свій, лише для Wayfire. Але зміни в апстрімі не потрібні.
+  Бажана мала зміна: необов'язковий `refresh` у `create-headless-output`. Можна окремим PR,
+  спершу відкрити issue за шаблоном feature request. ШІ не заборонено, але RFC #3252 вказує
+  на настрій: код і опис пише власник, ШІ лише допомагає читати код.
+
+**river (нова гілка): неможливо без великої зміни в апстрімі.**
+
+- Немає ні методу, ні протоколу для створення виходу. `river-window-management-v1` лише
+  повідомляє про виходи (`river_output_v1`), не створює їх. Обхід: запустити river з
+  `WLR_BACKENDS=drm,libinput,headless WLR_HEADLESS_OUTPUTS=2`. Тоді є пул виходів на старті
+  сесії, розмір далі через wlr-output-management. Видалити чи додати під час роботи не
+  можна. Для Prostir це не рішення, лише запасний шлях для ентузіастів.
+- Щоб це було можливо, треба нове розширення протоколу чи команда, тобто дизайн Ізаака.
+  Відкритий [issue #878](https://codeberg.org/river/river/issues/878) «Support for creating
+  virtual (headless) outputs» (2023, ще відкритий).
+- ШІ заборонено повністю, навіть для issue і коментарів. Лише власник, лише вручну.
+
+**river 0.3.x (river-classic): потрібна мала зміна в апстрімі.**
+
+- У [issue #878](https://codeberg.org/river/river/issues/878) мейнтейнер (ifreund) написав:
+  «I'd be happy to merge a patch adding a riverctl command to do this.» Це 2023 рік, за
+  старою гілкою. Тобто команда `riverctl` для створення й видалення headless-виходу
+  (з розміром) прийнятна для нього. Роботи небагато в Zig.
+- Але: класична гілка тепер у [river-classic](https://codeberg.org/river/river-classic), там
+  активність помірна, ext-image-copy-capture немає (лише wlr-screencopy), а в Debian,
+  Ubuntu і Raspberry Pi OS пакета немає. Користувачів для Prostir мало.
+- Рекомендація: не вкладатися. Якщо власник захоче, то пише сам і без ШІ.
+
+### Підсумок для плану
+
+| Композитор | Вердикт | Бекенд у Prostir | Що робити |
+|---|---|---|---|
+| Wayfire | Працює зараз (потрібен свій драйвер IPC) | IPC `wayfire/create-headless-output` плюс wlr-output-management плюс захоплення | Додати драйвер. Не чекати апстріму. |
+| labwc | Працює зараз з кроком налаштування (прив'язка плюс віртуальна клавіатура) | wlr-virtual-keyboard плюс wlr-output-management плюс захоплення | Спершу перевірити руками на labwc 0.20.3 і 0.9.x. Це шлях для Raspberry Pi OS. |
+| river (нова) | Неможливо зараз | Лише пул виходів на старті | Не підтримувати. Звернутися до issue #878 лише власнику. |
+| river 0.3.x | Потрібна мала зміна в апстрімі | Немає | Не підтримувати. |
+
+Перед внеском знову перевірити CONTRIBUTING і політику ШІ: вони змінюються.
