@@ -27,7 +27,7 @@ jobs:
           fi
       - uses: ./.github/actions/system-libraries
         with:
-          packages: libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config
+          packages: libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libpipewire-0.3-dev libclang-dev pkg-config
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
         with:
           toolchain: 1.100.0

@@ -387,9 +387,11 @@ pub struct Encoder {
     sink: gst_app::AppSink,
     stop: Arc<AtomicBool>,
     paused: Arc<Pause>,
-    /// The source sends nothing after a pause until the screen changes (PipeWire from
-    /// KWin): it is started over on resuming. A capture pushing its own frames
-    /// (`appsrc`) repeats the last one by itself.
+    /// The source sends nothing after a pause until the screen changes (a source
+    /// inside the pipeline, as `pipewiresrc` was for KWin's streams): it is started
+    /// over on resuming. A capture pushing its own frames (`appsrc`) hears of the
+    /// resume through its [`Pause`] and sends a picture by itself (KWin's feed starts
+    /// its stream over).
     restart_on_resume: bool,
     /// It takes frames straight from GPU buffers (dmabuf), so a capture hands it those.
     takes_dmabuf: bool,
@@ -1193,6 +1195,15 @@ impl Encoder {
         } else {
             gst::State::Playing
         };
+        if !paused && self.paused.is_on() && !self.restart_on_resume {
+            // Frames a capture pushed just before the pause wait in the queues: let go,
+            // so the headset coming back sees no old picture before the capture's new
+            // one (which the keyframe asked for below comes with).
+            if let Some(src) = self.pipeline.by_name("src") {
+                src.send_event(gst::event::FlushStart::new());
+                src.send_event(gst::event::FlushStop::new(false));
+            }
+        }
         self.paused.set(paused);
         if !paused {
             self.resumed.store(true, Ordering::Relaxed);
@@ -1225,7 +1236,8 @@ impl Encoder {
     }
 }
 
-/// Whether an encoder is paused, which a capture feeding it sleeps on.
+/// Whether an encoder is paused, which a capture feeding it sleeps on, or hears of
+/// through [`Pause::tell`] when it waits in a loop of its own.
 #[derive(Debug, Default)]
 pub struct Pause {
     on: Mutex<bool>,
@@ -1233,6 +1245,22 @@ pub struct Pause {
     /// A keyframe was asked of a still screen: a capture sends its last picture again
     /// at once, instead of at its next keepalive.
     again: AtomicBool,
+    /// It was resumed, also when it was not paused (the stream is to start over): a
+    /// source that sends a picture only when the screen changes starts over, so the
+    /// desktop sends the picture it has now.
+    fresh: AtomicBool,
+    /// Called after each change, on the thread that made it.
+    told: Told,
+}
+
+/// What a capture asked to be called with when its encoder's pause changes.
+#[derive(Default)]
+struct Told(Mutex<Option<Box<dyn Fn() + Send>>>);
+
+impl std::fmt::Debug for Told {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Told")
+    }
 }
 
 impl Pause {
@@ -1245,13 +1273,49 @@ impl Pause {
         self.again.swap(false, Ordering::Relaxed)
     }
 
+    /// Whether the encoder was resumed since this was last asked: a capture whose
+    /// desktop sends a picture only when the screen changes starts its stream over.
+    #[cfg_attr(
+        feature = "fake-desktop",
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
+    pub fn take_fresh(&self) -> bool {
+        self.fresh.swap(false, Ordering::Relaxed)
+    }
+
     pub fn is_on(&self) -> bool {
         *self.on.lock().unwrap()
     }
 
-    fn set(&self, on: bool) {
+    /// The capture is to send its last picture again at once.
+    pub fn picture_again(&self) {
+        self.again.store(true, Ordering::Relaxed);
+        self.poke();
+    }
+
+    pub(crate) fn set(&self, on: bool) {
+        if !on {
+            self.fresh.store(true, Ordering::Relaxed);
+        }
         *self.on.lock().unwrap() = on;
         self.changed.notify_all();
+        self.poke();
+    }
+
+    /// `then` is called after each change of the pause and each picture asked again
+    /// (none: no longer), on the thread that made it; it is to return at once.
+    #[cfg_attr(
+        feature = "fake-desktop",
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
+    pub fn tell(&self, then: Option<Box<dyn Fn() + Send>>) {
+        *self.told.0.lock().unwrap() = then;
+    }
+
+    fn poke(&self) {
+        if let Some(then) = &*self.told.0.lock().unwrap() {
+            then();
+        }
     }
 
     /// Wakes whoever waits (a capture that is to stop).
@@ -1294,7 +1358,7 @@ impl Keyframer {
     /// The source is to send its picture again at once (a keyframe asked of a still
     /// screen comes with the next frame): a capture pushing its own frames does so.
     pub fn picture_again(&self) {
-        self.pause.again.store(true, Ordering::Relaxed);
+        self.pause.picture_again();
     }
 }
 
@@ -1316,9 +1380,9 @@ impl Drop for Encoder {
                 "prostir-stop",
             )));
         }
-        // A PipeWire source whose stream failed waits up to 30 s for a format that
-        // never comes before it stops (gst-plugin-pipewire 1.6, `wait_negotiated`):
-        // stopped on a thread of its own, holding nobody up; the graphics devices go
+        // A source whose stream failed may take long to stop (`pipewiresrc` of
+        // gst-plugin-pipewire 1.6 waited up to 30 s for a format that never came,
+        // `wait_negotiated`): stopped on a thread of its own, holding nobody up; the graphics devices go
         // to it once it runs, and after the pipeline stopped.
         let stopper = self.gate.failed.load(Ordering::Relaxed).then(|| {
             let pipeline = self.pipeline.clone();
@@ -1580,6 +1644,89 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(*told.lock().unwrap(), 0, "not told as the encoder's");
+    }
+
+    /// Resuming lets go of what waited from before the pause (see
+    /// `Encoder::set_paused`) and keeps the keyframe asked for: the first frame the
+    /// capture pushes then comes out, a keyframe, and nothing from before it.
+    #[test]
+    fn resuming_lets_old_frames_go_and_the_next_is_a_keyframe() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        use super::{Backend, Encoder, EncoderConfig, EncoderEvent, GpuDevices, Input};
+        gst::init().unwrap();
+        if gst::ElementFactory::find("x264enc").is_none() {
+            eprintln!("skipped: no x264enc");
+            return;
+        }
+        let input = Input {
+            source: "appsrc name=src is-live=true format=time do-timestamp=true \
+                     max-buffers=2 leaky-type=downstream \
+                     caps=video/x-raw,format=I420,width=64,height=64,framerate=30/1"
+                .into(),
+            label: "test".into(),
+            frame_rate: None,
+            live: true,
+        };
+        let cfg = EncoderConfig {
+            codec: prostir_proto::Codec::H264,
+            bitrate_kbps: 1000,
+            large_kbps: None,
+            backend: Backend::X264,
+            sharp: Some(false),
+            rows_up: false,
+        };
+        let frames = Arc::new(Mutex::new(0));
+        let keyframes = Arc::new(Mutex::new(Vec::new()));
+        let (kept, keys) = (frames.clone(), keyframes.clone());
+        let encoder = Encoder::start(&input, &cfg, None, &GpuDevices::default(), move |e| {
+            if let EncoderEvent::Frame { keyframe, .. } = e {
+                *kept.lock().unwrap() += 1;
+                keys.lock().unwrap().push(keyframe);
+            }
+            false
+        })
+        .unwrap();
+        let src = encoder
+            .pipeline
+            .by_name("src")
+            .unwrap()
+            .downcast::<gstreamer_app::AppSrc>()
+            .unwrap();
+        let push = || {
+            let _ = src.push_buffer(gst::Buffer::from_mut_slice(vec![128u8; 64 * 64 * 3 / 2]));
+        };
+        let came = |n: usize| {
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            while *frames.lock().unwrap() < n && std::time::Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            *frames.lock().unwrap()
+        };
+        push();
+        assert_eq!(came(1), 1);
+        push();
+        assert_eq!(came(2), 2);
+        encoder.set_paused(true);
+        push();
+        push();
+        std::thread::sleep(Duration::from_millis(300));
+        let before = *frames.lock().unwrap();
+        encoder.set_paused(false);
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            *frames.lock().unwrap(),
+            before,
+            "the old frames were let go"
+        );
+        push();
+        assert_eq!(came(before + 1), before + 1, "a new frame goes through");
+        assert_eq!(
+            keyframes.lock().unwrap()[before..],
+            [true],
+            "a keyframe after resuming"
+        );
     }
 
     /// The slower preset as chosen for every picture; not chosen, for pictures smaller

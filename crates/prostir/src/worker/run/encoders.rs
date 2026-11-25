@@ -240,6 +240,16 @@ impl Worker {
                 retired.store(true, Ordering::Relaxed);
                 Err(e.into())
             });
+            // Frames the platform pushes itself start coming now: a stream of them that
+            // cannot start fails as the source, as one inside the encoder does.
+            let started = match started {
+                Ok(encoder) => match output.attach(&encoder) {
+                    Ok(()) => Ok(encoder),
+                    Err(e) if e.downcast_ref::<SourceFailed>().is_some() => Err(e),
+                    Err(e) => return Err(e),
+                },
+                Err(e) => Err(e),
+            };
             let mut encoder = match started {
                 Ok(encoder) => encoder,
                 Err(e) if e.downcast_ref::<SourceFailed>().is_some() => {
@@ -290,7 +300,6 @@ impl Worker {
                     continue;
                 }
             };
-            output.attach(&encoder)?;
             let note = crate::encoder::note(&choice, wanted, &ranked.skipped, &tried);
             match &note {
                 Some(note) => warn!("{name}: encoding with {note}"),

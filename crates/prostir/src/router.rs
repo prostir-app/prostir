@@ -1102,10 +1102,10 @@ impl Router {
 
     /// A keyframe was asked of stream `id`, whose screen is still: on a still screen
     /// the source sends nothing until its keepalive (750 ms on KDE, 2 s on Hyprland),
-    /// so it is asked for a
-    /// picture now. A capture pushing its own frames sends its last one again
-    /// (`keyframer`); a source that sends its picture when it starts (PipeWire on KDE)
-    /// is started over by the control loop.
+    /// so it is asked for a picture now. A capture pushing its own frames (KWin's
+    /// stream through the feed, Hyprland's capture) sends its last one again
+    /// (`keyframer`); one that sends its picture only when it starts is started over
+    /// by the control loop.
     fn picture_now(&self, id: ScreenId, keyframer: Option<&crate::encoder::Keyframer>) {
         if let Some(k) = keyframer {
             k.picture_again();
@@ -1201,8 +1201,8 @@ impl Router {
     /// After a big frame (see [`big_frame`]) the picture on the screen is coarse, and
     /// would stay so until then: the keyframe is asked for `early` instead, which
     /// sharpens it (once a pause: then it is settled), and the source is asked for its
-    /// picture at once where it can be (a capture that pushes its own frames; KWin's
-    /// stream sends it again within its keepalive). Small frames (typing, scrolling)
+    /// picture at once (a capture that pushes its own frames, KWin's stream through
+    /// the feed among them). Small frames (typing, scrolling)
     /// wait `after` as before.
     /// Returns how many it asked for.
     pub fn still_keyframes(&self, after: Duration, early: Duration) -> usize {

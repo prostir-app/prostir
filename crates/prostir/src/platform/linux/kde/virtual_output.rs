@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use super::feed::Feed;
 use super::kscreen;
-use crate::encoder::Input;
+use crate::encoder::{Input, Pause};
 use crate::platform::linux::is_panel;
 use crate::platform::{OutputKey, PhysicalDisplay, VirtualSpec, needs_scale, scale_of};
 use log::{info, warn};
@@ -40,17 +41,34 @@ use wayland_protocols_plasma::screencast::v1::client::{
 
 /// Pointer mode from the protocol: render the cursor into the stream.
 const POINTER_EMBEDDED: u32 = 2;
+/// Pointer mode from the protocol: the cursor only in each buffer's metadata
+/// (`SPA_META_Cursor`), and buffers with the cursor alone when only it moved.
+const POINTER_METADATA: u32 = 4;
 
-/// How often the last frame of a still screen is sent again, in ms. The session
+/// The cursor apart from the picture (step 2 of the cursor layer): off until the
+/// headset draws it. The feed reads the metadata either way (see `feed/meta.rs`).
+const CURSOR_APART: bool = false;
+
+/// The pointer mode KWin's streams are made with.
+const fn pointer_mode(apart: bool) -> u32 {
+    if apart {
+        POINTER_METADATA
+    } else {
+        POINTER_EMBEDDED
+    }
+}
+
+/// How often the last frame of a still screen is sent again, in ms, by the feed (as
+/// `pipewiresrc`'s `keepalive-time` did before it, at the same cadence). The session
 /// needs none of it (pings keep it), and with the frame rate and liveness told (see
 /// [`input_for`]) no encoder holds a frame back waiting for the next; it is what
-/// pushes out the keyframe a still screen gets, which after a big change sharpens the
-/// picture: asked for 0.65 s after the change (`displays::STILL_EARLY`), it comes with
-/// the repeat at 0.75 s. Nothing else here can make KWin's stream send its picture
-/// again without starting it over, and a repeat comes only this long after the frame
-/// before (at 0.5 s the keyframe came with the second one, at 1 s). Each costs an
-/// encoding on the PC (a frame of 0 to 3 KB, the picture unchanged) and a decoding and
-/// a wake-up of the radio in the headset: 1.3 a second for each still monitor.
+/// pushes out the keyframe a still screen gets. After a big change that keyframe
+/// sharpens the picture: asked for 0.65 s after the change (`displays::STILL_EARLY`)
+/// with the picture again, the feed sends it at once (through `pipewiresrc` it came
+/// with the repeat at 0.75 s, the earliest a repeat came after the frame before; at
+/// 0.5 s it came with the second one, at 1 s). Each repeat costs an encoding on the PC
+/// (a frame of 0 to 3 KB, the picture unchanged) and a decoding and a wake-up of the
+/// radio in the headset: 1.3 a second for each still monitor.
 const KEEPALIVE_MS: u32 = 750;
 
 /// The refresh rate in mHz of an output whose rate KWin did not say.
@@ -71,31 +89,35 @@ fn frame_rate(mhz: u32) -> gstreamer::Fraction {
     )
 }
 
-/// The encoder's input for KWin's PipeWire node `node` of an output at `refresh` mHz.
+/// The encoder's input for KWin's PipeWire node `node` of an output at `refresh` mHz:
+/// an `appsrc` the feed pushes KWin's frames into ([`super::feed`]).
 ///
 /// KWin's stream says no frame rate (`0/1`, frames come when the screen changes),
 /// and an encoder without one budgets badly, so it is told the output's refresh rate
 /// ([`crate::encoder::tell_frame_rate`]); frames still come only when something
-/// changes. Nothing may stand between `pipewiresrc` and the encoder that hides which
-/// formats the encoder takes (as `capssetter` does): `pipewiresrc` then offers
-/// PipeWire no format and is linked to nothing ("target not found").
+/// changes. Nothing may stand between the `appsrc` and the encoder that hides which
+/// formats the encoder takes (as `capssetter` does): the feed asks the encoder's
+/// elements through it, as `pipewiresrc` did, and would offer PipeWire no format
+/// (`pipewiresrc` was then linked to nothing, "target not found").
 ///
-/// It is live, which `pipewiresrc` says only once its stream is up, after VA-API
-/// asked and chose to keep frames back (each picture of a still screen then waited
-/// for the keepalive 2 s later): the encoder is told so ([`crate::encoder::tell_live`]).
+/// It is live from the start. `pipewiresrc` said so only once its stream was up,
+/// after VA-API asked and chose to keep frames back (each picture of a still screen
+/// then waited for the keepalive 2 s later), so the encoder is still told so
+/// ([`crate::encoder::tell_live`]).
 ///
 /// Only that node: when it is gone, WirePlumber would otherwise link the stream to
 /// the default video source, a webcam (seen here with a node that was not there:
-/// linked to one, it failed only on its format). With `node.dont-fallback` it says
-/// "defined target not found" at once.
+/// linked to one, it failed only on its format). The feed asks with
+/// `node.dont-fallback`, so it says "defined target not found" at once.
 fn input_for(node: u32, refresh: u32) -> Input {
     Input {
-        // On a still screen KWin sends nothing; PipeWire's source repeats the last
-        // frame every 750 ms (see `KEEPALIVE_MS`).
-        source: format!(
-            "pipewiresrc path={node} do-timestamp=true keepalive-time={KEEPALIVE_MS} \
-             always-copy=false stream-properties=\"props,node.dont-fallback=true\""
-        ),
+        // Caps are set by the feed once KWin chose a format; on a still screen KWin
+        // sends nothing and the feed sends the last frame again every 750 ms (see
+        // `KEEPALIVE_MS`). One frame waits in it at most, a newer one taking its
+        // place: the encoder lagging holds few of KWin's buffers.
+        source: "appsrc name=src is-live=true format=time do-timestamp=true \
+                 max-buffers=1 leaky-type=downstream"
+            .to_owned(),
         label: format!("node {node}"),
         frame_rate: Some(frame_rate(refresh)),
         live: true,
@@ -537,9 +559,9 @@ impl Screencast {
             .lock()
             .unwrap()
             .insert(number, StreamState::default());
-        let stream = self
-            .screencast
-            .stream_output(&output, POINTER_EMBEDDED, &self.qh, number);
+        let stream =
+            self.screencast
+                .stream_output(&output, pointer_mode(CURSOR_APART), &self.qh, number);
         // Normally ~10 ms; never hold up the headset's requests for long.
         let mirror = self.wait_for_node(
             number,
@@ -628,7 +650,7 @@ impl Screencast {
                 w,
                 h,
                 1.0,
-                POINTER_EMBEDDED,
+                pointer_mode(CURSOR_APART),
                 &self.qh,
                 number,
             )
@@ -638,7 +660,7 @@ impl Screencast {
                 w,
                 h,
                 1.0,
-                POINTER_EMBEDDED,
+                pointer_mode(CURSOR_APART),
                 &self.qh,
                 number,
             )
@@ -739,6 +761,18 @@ impl VirtualOutput {
     /// refresh rate (see [`input_for`]).
     pub fn input(&self) -> Input {
         input_for(self.node, self.refresh)
+    }
+
+    /// Starts feeding KWin's stream into the encoder's `appsrc` (see [`input_for`]),
+    /// as the encoder's `pause` says; fails as the source when the stream cannot start.
+    pub fn feed(&self, appsrc: gstreamer_app::AppSrc, pause: Arc<Pause>) -> Result<Feed> {
+        Feed::start(
+            self.node,
+            &format!("node {}", self.node),
+            appsrc,
+            pause,
+            Duration::from_millis(KEEPALIVE_MS.into()),
+        )
     }
 
     /// Makes this the primary output, so the Plasma panel and new windows go there.
@@ -848,19 +882,14 @@ mod tests {
         assert_eq!(out.refresh, Some(60_000));
     }
 
-    /// `pipewiresrc` offers PipeWire the formats the elements after it take, as they
-    /// answer its caps query; told "any" (by `capssetter` after it, as once), it
-    /// offers no format, WirePlumber links it to nothing ("target not found") and
-    /// its start hangs. Skipped without gst-plugin-pipewire; nothing connects to
-    /// PipeWire (the pipeline is never started).
+    /// The feed offers PipeWire the formats the elements after the `appsrc` take, as
+    /// they answer its caps query (as `pipewiresrc` did); told "any" (by `capssetter`
+    /// after it, as once), it would offer no format, and `pipewiresrc` was then linked
+    /// to nothing ("target not found"). Nothing connects to PipeWire.
     #[test]
     fn pipewire_is_offered_the_formats_the_encoder_takes() {
         use gstreamer::prelude::*;
         gstreamer::init().unwrap();
-        if gstreamer::ElementFactory::find("pipewiresrc").is_none() {
-            eprintln!("skipped: no pipewiresrc (gst-plugin-pipewire)");
-            return;
-        }
         let input = input_for(42, 60_000);
         let pipeline = gstreamer::parse::launch(&format!(
             "{} ! queue ! video/x-raw,format=I420 ! fakesink",
@@ -869,12 +898,7 @@ mod tests {
         .unwrap()
         .downcast::<gstreamer::Bin>()
         .unwrap();
-        let source = pipeline
-            .iterate_sources()
-            .into_iter()
-            .filter_map(Result::ok)
-            .find(|e| e.factory().is_some_and(|f| f.name() == "pipewiresrc"))
-            .expect("a pipewiresrc");
+        let source = pipeline.by_name("src").expect("the feed's appsrc");
         let offered = source.static_pad("src").unwrap().peer_query_caps(None);
         assert!(
             !offered.is_any(),
@@ -971,7 +995,18 @@ mod tests {
             },
         )
         .unwrap();
-        let why = failure.recv_timeout(time).ok();
+        let feed = Feed::start(
+            node,
+            "test",
+            encoder.appsrc().unwrap(),
+            encoder.paused(),
+            Duration::from_millis(KEEPALIVE_MS.into()),
+        );
+        let why = match &feed {
+            Ok(_) => failure.recv_timeout(time).ok(),
+            Err(e) => Some(format!("{e:#}")),
+        };
+        drop(feed);
         drop(encoder);
         let frames = frames.lock().unwrap().clone();
         (frames, why)
@@ -1000,9 +1035,9 @@ mod tests {
 
     /// A still screen, a new picture every 2 s from a PipeWire node made here: VA-API
     /// gives each out at once, not when the next comes in 2 s later, and no frame is
-    /// made twice. It keeps frames back for a source that is not live, and
-    /// `pipewiresrc` says it is only once its stream is up, after VA-API asked: told
-    /// it is (see [`crate::encoder::tell_live`]). The time is from the frame entering
+    /// made twice. It keeps frames back for a source that is not live (`pipewiresrc`
+    /// said it was only once its stream was up, after VA-API asked), so it is told
+    /// (see [`crate::encoder::tell_live`]). The time is from the frame entering
     /// the converter to leaving the parser; without it, 4 s (it kept two). Run by hand:
     /// `cargo test -p prostir -- --ignored a_still_screens_picture --nocapture`; needs
     /// PipeWire, WirePlumber, `pw-cli`, gst-plugin-pipewire and VA-API.
@@ -1036,11 +1071,12 @@ mod tests {
         assert!(again <= new.len() * between, "{again} repeats");
     }
 
-    /// KWin's node gone: the encoder's start says its source failed at once (not after
-    /// the 10 s limit), links to no other source, and is dropped at once, though
-    /// `pipewiresrc` takes 30 s to stop. Run by hand:
+    /// KWin's node gone: the feed's start says its source failed at once (not after
+    /// the 10 s limit), links to no other source, and the encoder is not told it
+    /// failed (which would end the session); both are dropped at once (`pipewiresrc`
+    /// took 30 s to stop). Run by hand:
     /// `cargo test -p prostir -- --ignored a_gone_node`; needs PipeWire, WirePlumber
-    /// and gst-plugin-pipewire.
+    /// and x264.
     #[test]
     #[ignore = "by hand: asks PipeWire for a node that is not there"]
     fn a_gone_node_fails_at_once() {
@@ -1059,7 +1095,7 @@ mod tests {
         let told = Arc::new(Mutex::new(Vec::new()));
         let kept = told.clone();
         let started = Instant::now();
-        let result = Encoder::start(
+        let encoder = Encoder::start(
             &input_for(4_000_000, 60_000),
             &cfg,
             None,
@@ -1070,7 +1106,10 @@ mod tests {
                 }
                 false
             },
-        );
+        )
+        .unwrap();
+        let output = VirtualOutputStub(4_000_000);
+        let result = output.feed(&encoder);
         let took = started.elapsed();
         let Err(e) = result else {
             panic!("started on a node that is not there")
@@ -1079,9 +1118,142 @@ mod tests {
         let failed = e.downcast_ref::<SourceFailed>().expect("the source failed");
         assert!(failed.0.contains("target not found"), "{failed}");
         assert!(took < Duration::from_secs(3), "{took:?}");
-        // Its stop is left to a thread of its own.
+        drop(encoder);
         assert!(started.elapsed() < Duration::from_secs(4));
         assert!(told.lock().unwrap().is_empty(), "not told as the encoder's");
+    }
+
+    /// A node to feed from, as [`VirtualOutput::feed`] does with its own.
+    struct VirtualOutputStub(u32);
+
+    impl VirtualOutputStub {
+        fn feed(&self, encoder: &crate::encoder::Encoder) -> Result<Feed> {
+            Feed::start(
+                self.0,
+                &format!("node {}", self.0),
+                encoder.appsrc().unwrap(),
+                encoder.paused(),
+                Duration::from_millis(KEEPALIVE_MS.into()),
+            )
+        }
+    }
+
+    /// How long frames take from a PipeWire node to the encoder's converter, through
+    /// `pipewiresrc` (as before) and through the feed, with VA-API encoding after it.
+    /// The node draws the time it sends each frame into it (`timecode`), read back as
+    /// the frame enters the converter. Prints both; run by hand, on a quiet PC:
+    /// `cargo test -p prostir -- --ignored the_feeds_latency --nocapture`; needs
+    /// PipeWire, WirePlumber, `pw-cli`, gst-plugin-pipewire and VA-API.
+    #[test]
+    #[ignore = "by hand: makes a PipeWire video node of its own; needs VA-API"]
+    fn the_feeds_latency_against_pipewiresrc() {
+        use gstreamer::prelude::*;
+        use gstreamer_video::prelude::*;
+        gstreamer::init().unwrap();
+        let ms_now = || {
+            let mut t = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: a timespec to fill, valid through the call.
+            unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut t) };
+            (t.tv_sec as u64 * 1000 + t.tv_nsec as u64 / 1_000_000) as u32
+        };
+        let (provider, node) = test_node(
+            "video/x-raw,format=NV12,width=1920,height=1080,framerate=60/1 ! identity name=stamp drop-allocation=true",
+        );
+        let stamp = provider
+            .downcast_ref::<gstreamer::Bin>()
+            .unwrap()
+            .by_name("stamp")
+            .unwrap();
+        stamp.static_pad("src").unwrap().add_probe(
+            gstreamer::PadProbeType::BUFFER,
+            move |_, info| {
+                if let Some(b) = info.buffer_mut()
+                    && let Ok(mut map) = b.make_mut().map_writable()
+                {
+                    prostir_proto::timecode::draw(&mut map, 1920, 1920, 1080, ms_now());
+                }
+                gstreamer::PadProbeReturn::Ok
+            },
+        );
+        let run = |source: &str, feed: bool| -> Vec<u32> {
+            let pipeline = gstreamer::parse::launch(&format!(
+                "{source} ! queue max-size-buffers=2 leaky=downstream ! vapostproc name=enc_in \
+                 ! video/x-raw(memory:VAMemory),format=NV12 ! vah265enc rate-control=cbr \
+                 bitrate=20000 target-usage=6 ! h265parse ! fakesink sync=false"
+            ))
+            .unwrap()
+            .downcast::<gstreamer::Pipeline>()
+            .unwrap();
+            let delays = Arc::new(Mutex::new(Vec::new()));
+            let kept = delays.clone();
+            let pad = pipeline
+                .by_name("enc_in")
+                .unwrap()
+                .static_pad("sink")
+                .unwrap();
+            pad.add_probe(gstreamer::PadProbeType::BUFFER, move |pad, info| {
+                let now = ms_now();
+                if let (Some(b), Some(caps)) = (info.buffer(), pad.current_caps())
+                    && let Ok(video) = gstreamer_video::VideoInfo::from_caps(&caps)
+                    && let Ok(frame) =
+                        gstreamer_video::VideoFrameRef::from_buffer_ref_readable(b, &video)
+                    && let Ok(luma) = frame.plane_data(0)
+                    && let Some(sent) = prostir_proto::timecode::read(
+                        luma,
+                        frame.plane_stride()[0] as usize,
+                        1920,
+                        1080,
+                    )
+                {
+                    kept.lock().unwrap().push(now.wrapping_sub(sent));
+                }
+                gstreamer::PadProbeReturn::Ok
+            });
+            pipeline.set_state(gstreamer::State::Playing).unwrap();
+            let pause = Arc::new(Pause::default());
+            let feed = feed.then(|| {
+                let appsrc = pipeline
+                    .by_name("src")
+                    .unwrap()
+                    .downcast::<gstreamer_app::AppSrc>()
+                    .unwrap();
+                Feed::start(node, "latency", appsrc, pause, Duration::from_millis(750)).unwrap()
+            });
+            std::thread::sleep(Duration::from_secs(6));
+            drop(feed);
+            pipeline.set_state(gstreamer::State::Null).unwrap();
+            let mut d = delays.lock().unwrap().split_off(0);
+            // The first second settles.
+            d.drain(..d.len().min(60));
+            d.sort_unstable();
+            d
+        };
+        let report = |name: &str, d: &[u32]| {
+            let avg = d.iter().map(|v| f64::from(*v)).sum::<f64>() / d.len().max(1) as f64;
+            let at = |p: usize| d.get(d.len() * p / 100).copied().unwrap_or(0);
+            eprintln!(
+                "{name}: {} frames, node to converter avg {avg:.1} ms, p50 {} p95 {} max {}",
+                d.len(),
+                at(50),
+                at(95),
+                d.last().copied().unwrap_or(0)
+            );
+        };
+        let before = run(
+            &format!(
+                "pipewiresrc path={node} do-timestamp=true keepalive-time={KEEPALIVE_MS} \
+                 always-copy=false stream-properties=\"props,node.dont-fallback=true\""
+            ),
+            false,
+        );
+        let after = run(&input_for(node, 60_000).source, true);
+        provider.set_state(gstreamer::State::Null).unwrap();
+        report("pipewiresrc", &before);
+        report("feed", &after);
+        assert!(after.len() > 100, "{} frames", after.len());
     }
 
     /// The thread reading KWin's events sleeps while nothing is said (no wake-ups),
