@@ -445,74 +445,13 @@ pub fn seen_local(p: &Placement, px: PixelSize, around: f64) -> Seen<()> {
 }
 
 /// Whether one monitor covers another as seen from the eye at the origin of their
-/// coordinates (the frame's), by more than `slack` of the smaller one's seen area.
-///
-/// Exact for flat faces: both are projected through the eye onto the plane facing the
-/// direction between them (a flat face stays a four-sided figure there), and the two
-/// figures are clipped against each other. A curved monitor lies behind its flat chord,
-/// so for it this errs on the side of covering. Two monitors too far apart around the
-/// eye to be projected together (a corner 85° or more from the direction between them)
-/// fall back to [`overlaps`] of their angular rectangles. Allocates nothing.
+/// coordinates (the frame's): the one seen over or behind the other by more than
+/// `slack` of either's face (see [`seen_over`]). Exact for flat faces wherever they are
+/// around the eye, however wide and near; a curved monitor lies behind its flat chord,
+/// so for it this errs on the side of covering. Allocates nothing.
 pub fn covers(a: &[Vec3; 4], b: &[Vec3; 4], slack: f64) -> bool {
-    use glam::DVec2;
-    let dir = |c: &[Vec3; 4]| {
-        c.iter()
-            .map(|p| p.as_dvec3().normalize_or_zero())
-            .sum::<DVec3>()
-            .normalize_or_zero()
-    };
-    let d = (dir(a) + dir(b)).normalize_or(DVec3::NEG_Z);
-    let all = a.iter().chain(b.iter());
-    if all
-        .clone()
-        .any(|p| p.as_dvec3().normalize_or_zero().dot(d) < 85f64.to_radians().cos())
-    {
-        // Each around its own middle, then the second moved by whole turns to lie
-        // around the first: two seen nearly opposite each other have no direction
-        // between them worth the name (their sum points up or down), and around such
-        // a one a monitor's corners would fall on both sides of the cut.
-        let rect = |c: &[Vec3; 4]| {
-            let middle = azimuth(dir(c));
-            let mut az = c.map(|p| unwrap(azimuth(p.as_dvec3()), middle));
-            let mut el = c.map(|p| elevation(p.as_dvec3()));
-            az.sort_by(f64::total_cmp);
-            el.sort_by(f64::total_cmp);
-            Seen {
-                id: (),
-                left: (az[0] + az[1]) / 2.0,
-                right: (az[2] + az[3]) / 2.0,
-                bottom: (el[0] + el[1]) / 2.0,
-                top: (el[2] + el[3]) / 2.0,
-            }
-        };
-        let (ra, rb) = (rect(a), rect(b));
-        let shift = unwrap(rb.center_x(), ra.center_x()) - rb.center_x();
-        let rb = Seen {
-            left: rb.left + shift,
-            right: rb.right + shift,
-            ..rb
-        };
-        return overlaps(&ra, &rb, slack);
-    }
-    let u = d.cross(DVec3::Y).normalize_or(DVec3::X);
-    let v = u.cross(d);
-    let flat = |c: &[Vec3; 4]| -> Poly {
-        let mut poly = Poly::default();
-        for p in c {
-            let p = p.as_dvec3();
-            let q = p / p.dot(d);
-            poly.push(DVec2::new(q.dot(u), q.dot(v)));
-        }
-        // Counter-clockwise.
-        if area(poly.corners()) < 0.0 {
-            poly.corners_mut().reverse();
-        }
-        poly
-    };
-    let (pa, pb) = (flat(a), flat(b));
-    let smaller = area(pa.corners()).abs().min(area(pb.corners()).abs());
-    let shared = clip(&pa, pb.corners());
-    smaller > 0.0 && area(shared.corners()).abs() > slack * smaller
+    let (a, b) = (a.map(|p| p.as_dvec3()), b.map(|p| p.as_dvec3()));
+    seen_quads(&a, &b, DVec3::ZERO).0 > slack || seen_quads(&b, &a, DVec3::ZERO).0 > slack
 }
 
 /// How much of monitor `a` (`ah` high) monitor `b` (`bh` high) is seen over or behind
@@ -537,20 +476,50 @@ pub fn hidden_by(a: &Placement, ah: f32, b: &Placement, bh: f32, eye: Vec3) -> f
 
 /// [`seen_over`], and whether `b` is in front of `a` there.
 fn seen_against(a: &Placement, ah: f32, b: &Placement, bh: f32, eye: Vec3) -> (f64, bool) {
+    let corners = |p: &Placement, h: f32| p.corners(h).map(|c| c.as_dvec3());
+    seen_quads(&corners(a, ah), &corners(b, bh), eye.as_dvec3())
+}
+
+/// How much of the flat four-sided face `a` (its corners in order round it) the face
+/// `b` is seen over or behind from `eye`, as a share of `a`, and whether `b` is in front
+/// there: `b` cut to what lies on `a`'s side of the eye, projected through the eye onto
+/// `a`'s plane, clipped to `a`.
+fn seen_quads(a: &[DVec3; 4], b: &[DVec3; 4], eye: DVec3) -> (f64, bool) {
     use glam::DVec2;
-    let turn = a.rotation.as_dquat().inverse();
-    let local = |p: Vec3| -> DVec3 { turn * (p.as_dvec3() - a.position.as_dvec3()) };
-    let e = local(eye);
-    let (w, h) = (f64::from(a.width), f64::from(ah));
-    if e.z.abs() < 1e-9 || w <= 0.0 || h <= 0.0 {
+    // `a`'s own frame: the middle, along its first edge, across it, and out of it.
+    let middle = a.iter().sum::<DVec3>() / 4.0;
+    let along = (a[1] - a[0]).normalize_or_zero();
+    let out = (a[1] - a[0]).cross(a[3] - a[0]).normalize_or_zero();
+    if along == DVec3::ZERO || out == DVec3::ZERO {
         return (0.0, false);
+    }
+    let across = out.cross(along);
+    let local = |p: DVec3| {
+        let d = p - middle;
+        DVec3::new(d.dot(along), d.dot(across), d.dot(out))
+    };
+    let e = local(eye);
+    if e.z.abs() < 1e-9 {
+        return (0.0, false);
+    }
+    let mut face = Poly::default();
+    for c in a {
+        let l = local(*c);
+        face.push(DVec2::new(l.x, l.y));
+    }
+    let whole = area(face.corners());
+    if whole.abs() < 1e-12 {
+        return (0.0, false);
+    }
+    if whole < 0.0 {
+        face.corners_mut().reverse();
     }
     // How far towards `a`'s plane from the eye, as a share of the eye's distance from
     // it: a point of `b` with none (level with the eye or behind it) is not seen
     // against `a`.
     let towards = |q: DVec3| (e.z - q.z) / e.z;
     const NEAR: f64 = 1e-6;
-    let corners = b.corners(bh).map(local);
+    let corners = b.map(local);
     let project = |r: DVec3| {
         let at = e + (r - e) / towards(r);
         DVec2::new(at.x, at.y)
@@ -569,12 +538,8 @@ fn seen_against(a: &Placement, ah: f32, b: &Placement, bh: f32, eye: Vec3) -> (f
     if onto.n < 3 {
         return (0.0, false);
     }
-    let mut face = Poly::default();
-    for (x, y) in [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)] {
-        face.push(DVec2::new(x * w, y * h));
-    }
     let shared = clip(&onto, face.corners());
-    let share = area(shared.corners()).abs() / (w * h);
+    let share = area(shared.corners()).abs() / whole.abs();
     if shared.n == 0 {
         return (share, false);
     }
@@ -582,10 +547,10 @@ fn seen_against(a: &Placement, ah: f32, b: &Placement, bh: f32, eye: Vec3) -> (f
     // line of sight to it meets `b`'s plane: before it, `b` is in front.
     let mid = shared.corners().iter().copied().sum::<DVec2>() / shared.n as f64;
     let at = DVec3::new(mid.x, mid.y, 0.0);
-    let (on_b, b_normal) = (local(b.position), turn * b.normal().as_dvec3());
-    let along = (at - e).dot(b_normal);
-    let front = along.abs() > 1e-12 && {
-        let t = (on_b - e).dot(b_normal) / along;
+    let b_out = (corners[1] - corners[0]).cross(corners[3] - corners[0]);
+    let toward = (at - e).dot(b_out);
+    let front = toward.abs() > 1e-15 && {
+        let t = (corners[0] - e).dot(b_out) / toward;
         t > 0.0 && t < 1.0
     };
     (share, front)

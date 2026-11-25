@@ -612,6 +612,17 @@ fn a_new_monitor_never_goes_through_another() {
     assert_eq!(trial.cutting(), []);
 }
 
+/// Two 3840x2160 and a 5120x1440 arriving one by one: the wide one is seen behind
+/// neither. Before, near the eye their corners were too far round it to be projected
+/// together, and the angular rectangles of their corners missed the middles of their
+/// edges, seen further out: each hid 12 % of it.
+#[test]
+fn a_wide_monitor_arriving_near_the_eye_hides_nothing() {
+    let trial = Trial::of(&[(3840, 2160), (3840, 2160), (5120, 1440)], &WIDE);
+    assert_eq!(trial.cutting(), []);
+    assert_eq!(trial.hiding(), []);
+}
+
 /// Each step on its own, from desks laid out as their pictures come.
 #[test]
 fn each_arrangement_step_cuts_into_nothing() {
