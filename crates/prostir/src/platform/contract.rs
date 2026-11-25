@@ -902,9 +902,8 @@ mod windows_shape {
             },
             CursorEvent::Hidden,
         ];
-        let from = sink.clone();
         let sent = events.clone();
-        std::thread::spawn(move || sent.into_iter().for_each(|e| from.send(e)))
+        std::thread::spawn(move || sent.into_iter().for_each(|e| sink.send(e)))
             .join()
             .unwrap();
         assert_eq!(*heard.lock().unwrap(), events);
