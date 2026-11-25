@@ -69,9 +69,8 @@ impl MediaVolume {
         if muted {
             media.mute(true)?;
         }
-        if index > 0 {
-            self.heard = Some(level_of(index, self.steps));
-        }
+        // What the app set is the level, silence too: muted at 0, it is said at 0.
+        self.heard = Some(level_of(index, self.steps));
         self.silence = index == 0 && !muted;
         self.read(media)
     }
@@ -181,7 +180,8 @@ mod tests {
     }
 
     /// Silence asked for, unmuted: Android mutes step 0, and that is the silence asked
-    /// for (no change of the headset's own); a level after it unmutes.
+    /// for (no change of the headset's own); a level after it unmutes. The PC at 0,
+    /// then muted and unmuted, stays at silence, never the level before it.
     #[test]
     fn silence_is_not_muted() {
         let mut media = at_step(6);
@@ -191,8 +191,15 @@ mod tests {
         assert_eq!(v.read(&mut media), Some((0, false)), "and stays silence");
         assert_eq!(v.set(&mut media, 47, false), Some((47, false)));
         assert_eq!((media.index, media.muted), (7, false));
-        // Muted at silence: the level heard before it.
-        assert_eq!(v.set(&mut media, 0, true), Some((47, true)));
+        assert_eq!(v.set(&mut media, 0, false), Some((0, false)));
+        assert_eq!(v.set(&mut media, 0, true), Some((0, true)), "muted at 0");
+        assert_eq!(v.read(&mut media), Some((0, true)));
+        assert_eq!(
+            v.set(&mut media, 0, false),
+            Some((0, false)),
+            "unmuted at 0"
+        );
+        assert_eq!(v.read(&mut media), Some((0, false)));
     }
 
     /// Muted by the system (its menu), the level heard last stands; a volume muted

@@ -126,8 +126,9 @@ pub struct Device {
     /// Writes asked for (by the control loop), and done (by the writer, under `one`).
     asked: AtomicU64,
     done: AtomicU64,
-    /// The last reading, and the last level asked to be written.
-    last: Mutex<Option<(u8, bool)>>,
+    /// The last reading, with the writes done when it was taken, and the last level
+    /// asked to be written.
+    last: Mutex<Option<(u8, bool, u64)>>,
     wanted: Mutex<Option<(u8, bool)>>,
     /// To the writer's thread, once there is one.
     writer: Mutex<Option<mpsc::Sender<Write>>>,
@@ -189,7 +190,8 @@ impl Device {
         let level = parse_volume(&pactl(&["get-sink-volume", &self.sink])?)?;
         let muted = parse_mute(&pactl(&["get-sink-mute", &self.sink])?)?;
         let level = level.min(100) as u8;
-        *self.last.lock().unwrap() = Some((level, muted));
+        let done = self.done.load(Ordering::SeqCst);
+        *self.last.lock().unwrap() = Some((level, muted, done));
         Some(Reading {
             level,
             muted,
@@ -254,11 +256,19 @@ impl SinkVolume {
         self.0.set(level, muted);
     }
 
-    /// Where the device was when last read; before any reading, where the PC last
-    /// asked to put it (so a new main headset is asked for the PC's level meanwhile).
+    /// Where the device was when last read; where the PC last asked to put it when
+    /// it asked after that reading, or before any (so a new main headset is asked for
+    /// the PC's level meanwhile, and a reading of a device made before, which this one
+    /// replaced, is not taken over a newer write).
     pub fn level(&self) -> Option<(u8, bool)> {
         let last = *self.0.last.lock().unwrap();
-        last.or_else(|| *self.0.wanted.lock().unwrap())
+        let wanted = *self.0.wanted.lock().unwrap();
+        match last {
+            Some((level, muted, done)) if done >= self.0.asked.load(Ordering::SeqCst) => {
+                Some((level, muted))
+            }
+            _ => wanted.or_else(|| last.map(|(level, muted, _)| (level, muted))),
+        }
     }
 
     /// Whether a reading of the device taken after `writes` writes were done is old:
@@ -343,6 +353,28 @@ impl SoundSystem for Pactl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The device's level: before any reading, the write asked; then the reading,
+    /// unless a write was asked after it (a device made anew, or a write on its way),
+    /// whose level is newer.
+    #[test]
+    fn the_level_is_the_newest_known() {
+        let device = Device::new("prostir-test-sink");
+        let sink = SinkVolume(device.clone());
+        assert_eq!(sink.level(), None);
+        device.asked.store(1, Ordering::SeqCst);
+        *device.wanted.lock().unwrap() = Some((40, false));
+        assert_eq!(sink.level(), Some((40, false)), "no reading yet");
+        *device.last.lock().unwrap() = Some((55, true, 1));
+        assert_eq!(sink.level(), Some((55, true)), "read after the write");
+        device.asked.store(2, Ordering::SeqCst);
+        *device.wanted.lock().unwrap() = Some((30, false));
+        assert_eq!(
+            sink.level(),
+            Some((30, false)),
+            "a write asked after the reading"
+        );
+    }
 
     /// What `pactl` says (with `LC_ALL=C`) about the headset's device.
     #[test]
