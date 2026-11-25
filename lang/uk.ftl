@@ -253,6 +253,7 @@ pc-displays-sound-the-microphone-is-not-ready-yet = Мікрофон ще не �
 pc-encoder-choice-already-has = уже відкрито
 pc-encoder-choice-sessions-open-the-most-it-opens = сеансів, більше не відкривається
 pc-encoder-choice-did-not-start = не запустився
+pc-encoder-cannot-turn-over = ця відеокарта не може перевернути картинку для шолома
 pc-encoder-choice-encoding-on-the-cpu = кодування процесором
 pc-encoder-choice-frames-go-through-the-cpu = кадри йдуть через процесор
 

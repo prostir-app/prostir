@@ -9,9 +9,9 @@
 //! that does not open goes on to the next one for that output only: `Displays` hears
 //! of it as [`EncoderEvent::Unopened`] and learns the encoder's session limit from it.
 
-use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -33,6 +33,7 @@ pub use gpu::GpuDevices;
 pub use probe::file_identity;
 pub use probe::{Next, catalog, probe_timeout, settle, start_probing};
 
+use crate::i18n::t;
 use crate::platform::AdapterId;
 
 impl Backend {
@@ -100,6 +101,42 @@ pub(crate) fn tune(pipeline: &gst::Pipeline, cfg: &EncoderConfig) {
         set_enum(&enc, "preset", "low-latency-hq");
     }
     set_number(&enc, "rc-lookahead", 0);
+}
+
+/// Whether VA-API's converter turns the picture over on this PC's graphics card: it has
+/// the property only where its driver may, and keeps the direction only where the
+/// driver can (asked once, of the converter opened on its card).
+fn va_turns_over() -> bool {
+    static TURNS: OnceLock<bool> = OnceLock::new();
+    *TURNS.get_or_init(|| {
+        let Ok(vpp) = gst::ElementFactory::make("vapostproc").build() else {
+            return false;
+        };
+        if vpp.set_state(gst::State::Ready).is_err() {
+            return false;
+        }
+        let set = set_enum(&vpp, "video-direction", "vert");
+        let kept = set
+            && gst::glib::EnumValue::from_value(&vpp.property_value("video-direction"))
+                .is_some_and(|(_, v)| v.nick() == "vert");
+        let _ = vpp.set_state(gst::State::Null);
+        info!("VA-API turns the picture over: {kept}");
+        kept
+    })
+}
+
+/// Whether CUDA's converter is there and turns the picture over (asked once).
+fn cuda_turns_over() -> bool {
+    static TURNS: OnceLock<bool> = OnceLock::new();
+    *TURNS.get_or_init(|| {
+        let _ = gst::init();
+        let turns = gst::ElementFactory::find("cudaupload").is_some()
+            && gst::ElementFactory::make("cudaconvertscale")
+                .build()
+                .is_ok_and(|e| e.find_property("video-direction").is_some());
+        info!("CUDA turns the picture over: {turns}");
+        turns
+    })
 }
 
 /// Sets enum property `name` of `element` to its value `nick`, when it has both;
@@ -187,6 +224,19 @@ impl EncoderConfig {
             " ! videoflip video-direction=vert"
         } else {
             ""
+        }
+    }
+
+    /// What NVENC takes, turned over where the rows go bottom first: on the GPU where
+    /// CUDA's converter can (`cudaconvertscale`), else in NV12 on the CPU (a pass over
+    /// a byte and a half a pixel, not four).
+    fn nvenc_in(&self) -> String {
+        if !self.rows_up {
+            NVENC_IN.to_owned()
+        } else if cuda_turns_over() {
+            format!("{NVENC_IN} ! cudaupload ! cudaconvertscale video-direction=vert")
+        } else {
+            "video/x-raw,format=NV12 ! videoflip video-direction=vert".to_owned()
         }
     }
 
@@ -398,9 +448,9 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         ),
         (Codec::H264, Backend::Nvenc) => (
             format!(
-                "videoconvert name=enc_in n-threads=0 ! {NVENC_IN}{} ! nvh264enc name=enc rc-mode=cbr \
+                "videoconvert name=enc_in n-threads=0 ! {} ! nvh264enc name=enc rc-mode=cbr \
                  bitrate={} gop-size=-1 bframes=0 zerolatency=true",
-                cfg.flip(),
+                cfg.nvenc_in(),
                 cfg.bitrate_kbps
             ),
             "h264parse config-interval=-1",
@@ -408,9 +458,9 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         ),
         (Codec::H265, Backend::Nvenc) => (
             format!(
-                "videoconvert name=enc_in n-threads=0 ! {NVENC_IN}{} ! nvh265enc name=enc rc-mode=cbr \
+                "videoconvert name=enc_in n-threads=0 ! {} ! nvh265enc name=enc rc-mode=cbr \
                  bitrate={} gop-size=-1 bframes=0 zerolatency=true",
-                cfg.flip(),
+                cfg.nvenc_in(),
                 cfg.bitrate_kbps
             ),
             "h265parse config-interval=-1",
@@ -608,6 +658,11 @@ impl Encoder {
         gpu: &GpuDevices,
         on_event: impl Fn(EncoderEvent) -> bool + Send + Sync + 'static,
     ) -> Result<Self> {
+        // A card whose converter cannot turn the picture over: the next way is tried
+        // (and the note says why this one was not).
+        if cfg.rows_up && cfg.backend == Backend::Va && !va_turns_over() {
+            bail!("{}", t("pc-encoder-cannot-turn-over"));
+        }
         let desc = pipeline_description(input, cfg)?;
         let node = input.label.clone();
         debug!("pipeline: {desc}");
@@ -1397,22 +1452,21 @@ mod tests {
             rows_up,
         };
         use prostir_proto::Codec::{H264, H265};
+        gst::init().unwrap();
+        // NVENC: on the GPU where CUDA can, else in NV12 (never a pass over BGRx).
+        let nvenc = if super::cuda_turns_over() {
+            "cudaconvertscale video-direction=vert ! nv"
+        } else {
+            "format=NV12 ! videoflip video-direction=vert ! nv"
+        };
         for (backend, codec, flip) in [
             (
                 Backend::X264,
                 H264,
                 "format=I420 ! videoflip video-direction=vert ! x264enc",
             ),
-            (
-                Backend::Nvenc,
-                H264,
-                "NV12 } ! videoflip video-direction=vert ! nvh264enc",
-            ),
-            (
-                Backend::Nvenc,
-                H265,
-                "NV12 } ! videoflip video-direction=vert ! nvh265enc",
-            ),
+            (Backend::Nvenc, H264, nvenc),
+            (Backend::Nvenc, H265, nvenc),
             (
                 Backend::Va,
                 H264,
@@ -1429,7 +1483,9 @@ mod tests {
             let plain = encoding(&input, &cfg(backend, codec, false)).unwrap();
             assert!(!plain.contains("video-direction"), "{plain}");
         }
-        gst::init().unwrap();
+        // Whether this PC's VA-API card keeps the direction: asked without failing,
+        // whatever the answer (no card, no driver: no).
+        eprintln!("VA-API turns over here: {}", super::va_turns_over());
         if gst::ElementFactory::find("x264enc").is_none() {
             eprintln!("skipped: no x264enc");
             return;

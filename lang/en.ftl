@@ -262,6 +262,7 @@ pc-displays-sound-the-microphone-is-not-ready-yet = The microphone is not ready 
 pc-encoder-choice-already-has = already has
 pc-encoder-choice-sessions-open-the-most-it-opens = sessions open, the most it opens
 pc-encoder-choice-did-not-start = did not start
+pc-encoder-cannot-turn-over = this graphics card cannot turn the picture over for the headset
 pc-encoder-choice-encoding-on-the-cpu = encoding on the CPU
 pc-encoder-choice-frames-go-through-the-cpu = frames go through the CPU
 
