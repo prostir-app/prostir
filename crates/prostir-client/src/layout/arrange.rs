@@ -30,10 +30,20 @@ fn pixel_sizes<K: Key>(monitors: &[(K, u32, u32)]) -> Vec<(K, prostir_layout::sp
         .collect()
 }
 
-/// How far from the head `preset` puts `monitors` (a wall's distance): the circle
-/// grows when they do not fit around the user (see `prostir_layout::circle`).
-pub fn preset_radius<K: Key>(preset: Preset, monitors: &[(K, u32, u32)]) -> f32 {
-    circle::radius_of(shape(preset), &pixel_sizes(monitors), &Limits::default())
+/// How far from the head `preset` puts `monitors` (a wall's distance), `primary` in
+/// the main row: the circle grows when they do not fit around the user (see
+/// `prostir_layout::circle`).
+pub fn preset_radius<K: Key>(
+    preset: Preset,
+    monitors: &[(K, u32, u32)],
+    primary: Option<K>,
+) -> f32 {
+    circle::radius_of(
+        shape(preset),
+        &pixel_sizes(monitors),
+        primary,
+        &Limits::default(),
+    )
 }
 
 /// A display of the PC itself shown: its stream's size in pixels, and where it is on
@@ -290,6 +300,100 @@ pub fn place_new<K: Key>(
     )
 }
 
+/// [`place_new`], but where that place is out of view (see
+/// `prostir_layout::space::in_view`: a monitor too wide for any row, over the head),
+/// in the main row instead, at the seam nearest the gaze (see
+/// `prostir_layout::place::into_row`): then `true`, and the neighbours it covers there
+/// are to be pushed aside along the row (see [`make_room`]). `any`: any monitor goes
+/// into the row so, else only one too wide for the row's circle (a new one: one that
+/// fits has its place over the row, as before). With no room in the row (it would go
+/// all the way around), a monitor too wide for the circle goes over or under a row on a
+/// wider circle (see [`FAR_ONE`]) where that is in view.
+#[allow(clippy::too_many_arguments)]
+pub fn place_in_view<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    size: (u32, u32),
+    center: (Vec3, f32),
+    tilt: f32,
+    gaze: Vec3,
+    previous: &[Vec<K>],
+    radius: f32,
+    any: bool,
+) -> (Placement, bool) {
+    let at = place_new(
+        placements, monitors, size, center, tilt, gaze, previous, radius,
+    );
+    if in_view(&at, (center, tilt)) {
+        return (at, false);
+    }
+    let frame = frame(center, tilt);
+    let all = placed(placements, monitors);
+    let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
+    let px = prostir_layout::space::PixelSize::new(size.0, size.1);
+    if let Some(p) = place::into_row(&all, &frame, gaze, px, Some(&rows), any) {
+        return (p, true);
+    }
+    // No room in the row: over or under one, further away, so seen lower.
+    let limits = Limits {
+        radius,
+        ..Limits::default()
+    };
+    let far = place::place_within(&all, &frame, gaze, px, Some(&rows), &limits, FAR_ONE);
+    (
+        if in_view(&far, (center, tilt)) {
+            far
+        } else {
+            at
+        },
+        false,
+    )
+}
+
+/// The most a monitor too wide for every row's circle takes around the user, over or
+/// under a row, where the row has no room for it (90°): further away than where it takes
+/// `circle::MAX_ONE`, and so seen nearer eye level.
+const FAR_ONE: f32 = std::f32::consts::FRAC_PI_2;
+
+/// The monitors among `monitors` (placed in `placements`) that are alone in a row whose
+/// middle is out of view from `center` tilted up by `tilt` (see
+/// `prostir_layout::space::in_view`), in the order of `monitors`. `previous`: the rows
+/// the PC has.
+pub fn alone_out_of_view<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    (center, tilt): ((Vec3, f32), f32),
+    previous: &[Vec<K>],
+) -> Vec<K> {
+    let all = placed(placements, monitors);
+    let frame = frame(center, tilt);
+    let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
+    monitors
+        .iter()
+        .map(|m| m.0)
+        .filter(|k| {
+            rows.iter().any(|r| r.as_slice() == [*k])
+                && placements
+                    .get(k)
+                    .is_some_and(|p| !in_view(p, (center, tilt)))
+        })
+        .collect()
+}
+
+/// Whether the middle of `p` is in view from `center` tilted up by `tilt` (see
+/// `prostir_layout::space::in_view`).
+pub fn in_view(p: &Placement, (center, tilt): ((Vec3, f32), f32)) -> bool {
+    prostir_layout::space::in_view(&frame(center, tilt).unplace(*p))
+}
+
+/// The direction at eye level from `center` (tilted up by `tilt`) towards where `p`
+/// is seen around the user: where to look for a monitor's new place near its old one.
+pub fn level_towards(p: &Placement, (center, tilt): ((Vec3, f32), f32)) -> Vec3 {
+    let frame = frame(center, tilt);
+    let az = azimuth(frame.to_local(p.position).as_dvec3()) as f32;
+    frame.turn * Vec3::new(az.sin(), 0.0, -az.cos())
+}
+
 /// Seen overlaps smaller than this share of the smaller monitor are a shared edge (as
 /// for a new monitor, see `prostir_layout::place`).
 const SLACK: f64 = 0.01;
@@ -402,6 +506,10 @@ pub fn make_room<K: Key>(
             vec![k]
         }
     };
+    // Which side of a monitor another is on, as they stood before any was pushed: a
+    // long push (a wide monitor put into the row) may carry a monitor past the middle
+    // of the next one.
+    let before = placements.clone();
     let mut moved = piece(id);
     let mut work = vec![(id, 1.0f32), (id, -1.0)];
     // Each push goes further out along the row: a bound only against a float gone wrong.
@@ -433,8 +541,13 @@ pub fn make_room<K: Key>(
             } else {
                 it.right - me.left
             };
+            let stood = |k: K, now: Monitor<K>| Monitor {
+                placement: before.get(&k).copied().unwrap_or(now.placement),
+                ..now
+            };
+            let was = see(&frame, &[stood(m, mine), stood(o, other)]);
             if it.vertical_overlap(me) < 0.5
-                || (it.center_x() > me.center_x()) != (side > 0.0)
+                || (was[1].center_x() > was[0].center_x()) != (side > 0.0)
                 || it.horizontal_overlap(me) <= 0.0
                 || reach <= SEAM
             {
