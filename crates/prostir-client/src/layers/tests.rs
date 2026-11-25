@@ -96,6 +96,7 @@ fn names(p: &Plan) -> Vec<String> {
             Layer::Palm(_) => "palm".into(),
             Layer::Hands => "hands".into(),
             Layer::Cursor(_) => "dot".into(),
+            Layer::PcCursor { .. } => "pointer".into(),
         })
         .collect()
 }
@@ -260,4 +261,47 @@ fn each_frame_is_planned_anew() {
     assert_eq!(p.layers().len(), 7);
     assert_eq!(p.news(), Some(0), "every monitor shows again");
     assert_eq!(p.news(), None);
+}
+
+/// The frame of [`fill`] (plain) with a PC's pointer right over monitor `on`.
+fn with_pointer(on: u32) -> Plan {
+    let mut p = Plan::new();
+    p.push(Layer::Background, Rank::Room(1));
+    for n in 1..=4 {
+        p.push(monitor(n), Rank::Monitor(nearness(5.0 - n as f32)));
+        if n == on {
+            let pointer = Layer::PcCursor {
+                pc: PcId([7; 8]),
+                shape: 1,
+                quad: quad(),
+            };
+            p.push(pointer, Rank::DOT);
+        }
+    }
+    p.push(Layer::MenuButton(quad()), Rank::Own(1));
+    p.push(Layer::Hands, Rank::Own(4));
+    p
+}
+
+/// A PC's pointer stays over its monitor, uncounted as a dot; over a monitor left out
+/// it goes too, and its place goes to the next monitor: it takes no place over nothing.
+#[test]
+fn a_pointer_goes_with_its_monitor() {
+    let mut p = with_pointer(4);
+    p.budget(16);
+    assert_eq!(
+        names(&p),
+        ["bg", "m1", "m2", "m3", "m4", "pointer", "button", "hands"]
+    );
+    let mut p = with_pointer(4);
+    p.budget(6);
+    assert_eq!(names(&p), ["bg", "m3", "m4", "pointer", "button", "hands"]);
+    assert_eq!(p.hidden(), 1, "counted as if there were no pointer");
+    // Over the farthest, which does not fit: as without it.
+    let mut p = with_pointer(1);
+    p.budget(6);
+    let mut plain = plain();
+    plain.budget(6);
+    assert_eq!(names(&p), names(&plain));
+    assert_eq!(names(&p), ["bg", "m2", "m3", "m4", "button", "hands"]);
 }

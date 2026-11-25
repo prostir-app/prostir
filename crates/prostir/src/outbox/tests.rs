@@ -400,3 +400,82 @@ fn a_message_over_its_limits_ends_the_session() {
     assert!(!o.control(too_long));
     assert!(!o.video(d(0), true, frame(0, true, 1)));
 }
+
+fn cursor_at(u: u16, shape: u32) -> HostMsg {
+    HostMsg::CursorAt {
+        display: Some(d(1)),
+        u,
+        v: 0,
+        shape,
+    }
+}
+
+fn cursor_shape(shape: u32) -> HostMsg {
+    HostMsg::CursorShape {
+        shape,
+        w: 2,
+        h: 2,
+        hot_x: 0,
+        hot_y: 0,
+        rgba: vec![255; 16],
+    }
+}
+
+/// Only the newest place of the pointer waits; it goes after the control messages
+/// queued before it (the look it names among them), and before sound and video.
+#[test]
+fn the_pointer_keeps_only_the_newest_after_its_look() {
+    let o = Outbox::default();
+    assert!(o.video(d(0), true, frame(0, true, 10)));
+    o.audio(HostMsg::Audio { pcm: vec![1] });
+    o.cursor(cursor_at(1, 7));
+    assert!(o.control(cursor_shape(8)));
+    o.cursor(cursor_at(2, 8));
+    o.cursor(cursor_at(3, 8));
+    let sent = o.sent();
+    assert_eq!(sent.len(), 4, "{sent:?}");
+    assert_eq!(sent[0], cursor_shape(8));
+    assert_eq!(sent[1], cursor_at(3, 8));
+    assert!(matches!(sent[2], HostMsg::Audio { .. }));
+    assert!(matches!(sent[3], HostMsg::Frame { .. }));
+}
+
+/// A place queued while a big control message goes out waits for it, whole: it never
+/// starts in the control lane while another message is half way there.
+#[test]
+fn the_pointer_waits_for_a_control_message_half_sent() {
+    let o = Outbox::default();
+    let big = HostMsg::CursorShape {
+        shape: 4,
+        w: 256,
+        h: 256,
+        hot_x: 0,
+        hot_y: 0,
+        rgba: vec![1; 256 * 256 * 4],
+    };
+    assert!(o.control(big.clone()));
+    assert!(o.control(cursor_shape(5)));
+    let (mut lanes, mut out) = (Lanes::default(), Capture::default());
+    send(&o, &mut lanes, &mut out, 1);
+    o.cursor(cursor_at(9, 5));
+    send(&o, &mut lanes, &mut out, 100);
+    assert!(out.records.len() > 3, "the big look in several packets");
+    let sent = out.messages();
+    assert_eq!(sent, [big, cursor_shape(5), cursor_at(9, 5)]);
+    assert!(out.lanes().iter().all(|l| *l == lane::CONTROL));
+}
+
+/// A goodbye drops the pointer's place, as it drops sound and video.
+#[test]
+fn a_goodbye_drops_the_pointer() {
+    let o = Outbox::default();
+    o.cursor(cursor_at(1, 1));
+    o.say_goodbye(PcGoodbye::Quit);
+    o.cursor(cursor_at(2, 1));
+    assert_eq!(
+        o.sent(),
+        [HostMsg::Goodbye {
+            reason: PcGoodbye::Quit.code()
+        }]
+    );
+}

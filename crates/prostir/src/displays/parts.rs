@@ -77,6 +77,11 @@ impl Displays {
         self.facts.as_ref().is_some_and(|f| f.caps.moves_pointer)
     }
 
+    /// Whether the desktop tells the mouse pointer apart from the pictures.
+    pub fn tells_cursor(&self) -> bool {
+        self.facts.as_ref().is_some_and(|f| f.cursor)
+    }
+
     /// The desktop's name, for the headset.
     pub fn desktop_name(&self) -> &'static str {
         self.facts.as_ref().map_or("", |f| f.caps.name)

@@ -1,7 +1,9 @@
 //! The small pictures drawn on the CPU and shown as layers: the menus, the menu's
 //! button, the pointer dot, the toast, "Attach", the placeholder of a monitor being
 //! added, what is wrong with a monitor's picture, the black layer over a dimmed room
-//! and the panorama. Each is drawn and uploaded only when what it shows changed.
+//! and the panorama. Each is drawn and uploaded only when what it shows changed. The
+//! looks of the PCs' mouse pointers come as they are, each made into a picture of its
+//! own once, kept while its PC's pointer may show it again.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,7 +13,7 @@ use std::time::{Duration, Instant};
 use super::Gpu;
 use crate::app::Model;
 use crate::background;
-use crate::ids::DisplayKey;
+use crate::ids::{DisplayKey, PcId};
 use crate::interaction::{Hands, Menu, Menus};
 use crate::lang::Texts;
 #[cfg(feature = "preview")]
@@ -126,6 +128,9 @@ pub struct Pictures {
     /// What is wrong with each monitor's picture, in words, for what it is now and the
     /// language it was drawn in.
     pub trouble_layers: HashMap<DisplayKey, (crate::video::Health, Texts, ImageLayer)>,
+    /// A picture for each look of a PC's mouse pointer shown so far, while the model
+    /// keeps the look (see `cursors`).
+    pub pc_cursors: Vec<(PcId, u32, ImageLayer)>,
     /// The toast drawn last (see `Toast::n`).
     toast_drawn: u64,
     button_hovered: bool,
@@ -180,6 +185,7 @@ impl Pictures {
             dim_layer: None,
             placeholder: None,
             trouble_layers: HashMap::new(),
+            pc_cursors: Vec::new(),
             toast_drawn: 0,
             button_hovered: false,
             panels,
@@ -355,6 +361,28 @@ impl Pictures {
             )?;
             self.trouble_layers
                 .insert(id, (health, model.texts().clone(), layer));
+        }
+        // The PCs' pointers: a look shown the first time is made into a picture once;
+        // one the model let go goes.
+        let cursors = model.cursors();
+        self.pc_cursors
+            .retain(|(pc, shape, _)| cursors.has(*pc, *shape));
+        for &(id, _, _) in world.monitors() {
+            let Some(shown) = cursors.on(id, model.now()) else {
+                continue;
+            };
+            if self
+                .pc_cursors
+                .iter()
+                .any(|(pc, shape, _)| *pc == id.pc && *shape == shown.shape)
+            {
+                continue;
+            }
+            let look = shown.look;
+            let mut layer =
+                ImageLayer::new(session, format, u32::from(look.w), u32::from(look.h), true)?;
+            layer.upload(gl, &look.rgba)?;
+            self.pc_cursors.push((id.pc, shown.shape, layer));
         }
         // Only what changed is uploaded: pointing at another button changes its part.
         if world.wrist().is_some() && self.panels.palm.render_if_dirty().is_some() {

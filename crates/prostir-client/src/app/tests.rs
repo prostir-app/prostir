@@ -2360,6 +2360,164 @@ impl crate::layers::Ready for AllReady {
     fn hands(&self) -> bool {
         true
     }
+    fn pc_cursor(&self, _: PcId, _: u32) -> bool {
+        true
+    }
+}
+
+/// The PC's mouse pointer (PC feature 16): a look and where it is make a layer right
+/// over its monitor, the size it has in the picture, its point where the PC says; the
+/// menu hears none of it. Hidden, off the displays, or in a look that never came, none
+/// is drawn; its looks go with the session.
+#[test]
+fn the_pcs_pointer_is_drawn_over_its_monitor() {
+    use crate::layers::{Layer, Plan};
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::Close);
+    sim.frames(Duration::from_millis(100));
+    let rev = sim.m.rev();
+    let look = crate::cursors::Look {
+        w: 32,
+        h: 32,
+        hot_x: 0,
+        hot_y: 0,
+        rgba: vec![255; 32 * 32 * 4],
+    };
+    sim.net(NetEvent::CursorShape {
+        pc: PC,
+        shape: 7,
+        look,
+    });
+    let at = |sim: &mut Sim, display: Option<u32>, u: u16, v: u16, shape: u32| {
+        sim.net(NetEvent::CursorAt {
+            pc: PC,
+            display: display.map(DisplayId),
+            u,
+            v,
+            shape,
+        });
+    };
+    at(&mut sim, Some(2), 0, 0, 7);
+    assert_eq!(sim.m.rev(), rev, "the menu shows nothing of the pointer");
+    let mut plan = Plan::new();
+    crate::layers::plan(&sim.m, &Hands::new(), &AllReady, &mut plan);
+    let layers = plan.layers();
+    let i = layers
+        .iter()
+        .position(|l| matches!(l, Layer::PcCursor { .. }))
+        .expect("the pointer is drawn");
+    let (Layer::Monitor(m), Layer::PcCursor { pc, shape, quad }) = (layers[i - 1], layers[i])
+    else {
+        panic!("right after its monitor: {layers:?}");
+    };
+    assert_eq!((m.id, pc, shape), (k(2), PC, 7));
+    // 32 of the picture's 2560 pixels wide, square.
+    let p = m.quad.at;
+    let width = layout::image_width(&p, m.curve);
+    assert!(
+        (quad.at.width - width * 32.0 / 2560.0).abs() < 1e-5,
+        "{quad:?}"
+    );
+    assert!((quad.height - quad.at.width).abs() < 1e-6);
+    // Its top left corner (the pixel it points with) at the picture's top left.
+    let corner = quad.at.position
+        + quad.at.rotation * Vec3::new(-quad.at.width / 2.0, quad.height / 2.0, 0.0);
+    let (top_left, _) = layout::image_frame(&p, m.quad.height, m.curve, Vec2::ZERO);
+    assert!(corner.distance(top_left) < 0.001, "{corner} {top_left}");
+    let pointers = |sim: &Sim, plan: &mut Plan| {
+        crate::layers::plan(&sim.m, &Hands::new(), &AllReady, plan);
+        plan.layers()
+            .iter()
+            .filter(|l| matches!(l, Layer::PcCursor { .. }))
+            .count()
+    };
+    at(&mut sim, Some(2), 100, 100, 0);
+    assert_eq!(pointers(&sim, &mut plan), 0, "hidden");
+    at(&mut sim, None, 0, 0, 7);
+    assert_eq!(pointers(&sim, &mut plan), 0, "on none of the displays");
+    at(&mut sim, Some(1), 30_000, 30_000, 8);
+    assert_eq!(pointers(&sim, &mut plan), 0, "a look that never came");
+    at(&mut sim, Some(1), 30_000, 30_000, 7);
+    assert_eq!(pointers(&sim, &mut plan), 1);
+    assert_eq!(sim.m.rev(), rev);
+    // The session ends: its pointer goes with it.
+    sim.net(NetEvent::Ended {
+        step: StepId(1),
+        pc: Some(PC),
+        why: Disconnect::Silence,
+        ended: Ended::default(),
+        lasted: Duration::from_secs(5),
+    });
+    assert!(!sim.m.cursors().has(PC, 7));
+}
+
+/// A PC's pointer goes with its monitor when the compositor's layers are too few for
+/// every monitor: never drawn over nothing, and taking no place then.
+#[test]
+fn a_pointer_goes_with_its_monitor_out_of_the_layers() {
+    use crate::layers::{Layer, Plan};
+    let mut caps = test_caps();
+    caps.layers_max = 5;
+    let mut sim = Sim::of(caps);
+    sim.connect(&[1, 2, 3]);
+    sim.menu(Action::Close);
+    sim.frames(Duration::from_millis(100));
+    sim.net(NetEvent::CursorShape {
+        pc: PC,
+        shape: 7,
+        look: crate::cursors::Look {
+            w: 2,
+            h: 2,
+            hot_x: 0,
+            hot_y: 0,
+            rgba: vec![255; 16],
+        },
+    });
+    let mut plan = Plan::new();
+    let monitors = |plan: &Plan| -> Vec<DisplayKey> {
+        plan.layers()
+            .iter()
+            .filter_map(|l| match l {
+                Layer::Monitor(m) => Some(m.id),
+                _ => None,
+            })
+            .collect()
+    };
+    let at = |sim: &mut Sim, n: u32, shape: u32| {
+        sim.net(NetEvent::CursorAt {
+            pc: PC,
+            display: Some(DisplayId(n)),
+            u: 1000,
+            v: 1000,
+            shape,
+        });
+    };
+    at(&mut sim, 1, 0);
+    crate::layers::plan(&sim.m, &Hands::new(), &AllReady, &mut plan);
+    let without = monitors(&plan);
+    assert!(without.len() < 3, "a monitor left out: {without:?}");
+    let mut drawn = 0;
+    for n in [1, 2, 3] {
+        at(&mut sim, n, 7);
+        crate::layers::plan(&sim.m, &Hands::new(), &AllReady, &mut plan);
+        let layers = plan.layers();
+        match layers
+            .iter()
+            .position(|l| matches!(l, Layer::PcCursor { .. }))
+        {
+            Some(i) => {
+                assert!(
+                    matches!(layers[i - 1], Layer::Monitor(m) if m.id == k(n)),
+                    "over its monitor: {layers:?}"
+                );
+                drawn += 1;
+            }
+            // Its monitor left out: as if it were not there.
+            None => assert_eq!(monitors(&plan), without, "the pointer on {n}"),
+        }
+    }
+    assert!(drawn < 3, "not drawn over a monitor left out");
 }
 
 /// Where monitor `id` is drawn in `plan`.

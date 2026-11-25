@@ -104,6 +104,8 @@ struct Facts {
     scales: Vec<((u32, u32), Scales)>,
     window_list: Option<std::sync::Weak<dyn WindowList>>,
     has_windows: bool,
+    /// It tells the mouse pointer apart from the pictures.
+    cursor: bool,
 }
 
 /// What came of something the worker did, that the control loop acts on.
@@ -347,6 +349,7 @@ impl Displays {
             scales: c.scales,
             window_list: c.window_list,
             has_windows: c.has_windows,
+            cursor: c.cursor,
         });
         self.sync_physical(&c.physical, new_id);
         self.push();
@@ -471,6 +474,9 @@ impl Displays {
                 primary,
             },
             wake_physical: self.physical().any(Screen::is_shown_physical),
+            // Every headset with a session draws the pointer itself (the router
+            // knows them at once; a session opening is attached before this).
+            cursor_apart: self.tells_cursor() && self.router.cursor_apart(),
         }
     }
 

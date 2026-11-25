@@ -241,6 +241,55 @@ fn curved_hit_matches_flat_at_centre_and_edges() {
     );
 }
 
+/// The point at `uv` of a monitor's image, flat or curved, turned and anywhere, is
+/// where a ray finds that `uv` again (`image_uv` of it), and the surface there faces
+/// the way the hit says.
+#[test]
+fn a_point_of_the_image_is_found_back_at_its_uv() {
+    let places = [
+        Placement {
+            position: Vec3::new(0.0, 0.0, -1.0),
+            rotation: Quat::IDENTITY,
+            width: 1.2,
+        },
+        Placement {
+            position: Vec3::new(0.8, 0.3, -1.4),
+            rotation: Quat::from_rotation_y(-0.5) * Quat::from_rotation_x(0.2),
+            width: 0.9,
+        },
+    ];
+    for p in &places {
+        for curve in [None, Some(1.5), Some(0.8)] {
+            for uv in [
+                Vec2::new(0.5, 0.5),
+                Vec2::new(0.02, 0.03),
+                Vec2::new(0.97, 0.6),
+                Vec2::new(0.3, 0.99),
+            ] {
+                let (point, turn) = image_frame(p, 0.7, curve, uv);
+                let eye = point + turn * Vec3::Z * 0.6;
+                let ray = Ray {
+                    origin: eye,
+                    dir: (point - eye).normalize(),
+                };
+                let hit = hit_surface(ray, p, 0.7, curve).expect("found");
+                assert!((hit.point - point).length() < 1e-4, "{curve:?} {uv}");
+                let back = image_uv(p, 0.7, curve, hit.local);
+                assert!((back - uv).length() < 1e-4, "{curve:?} {uv}: {back}");
+                assert!(hit.normal.dot(turn * Vec3::Z) > 0.9999, "{curve:?} {uv}");
+                // Up the monitor, square to it.
+                let up = turn * Vec3::Y;
+                assert!(up.dot(p.rotation * Vec3::Y) > 0.9999);
+            }
+        }
+        assert!((image_width(p, None) - p.width).abs() < 1e-6);
+        assert!(
+            image_width(p, Some(1.5)) > p.width,
+            "the arc is longer than its chord"
+        );
+    }
+}
+
 #[test]
 fn order_follows_given_sequence_and_directions() {
     // Portrait in the middle: order [0, 2, 1].

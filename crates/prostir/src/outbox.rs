@@ -1,5 +1,5 @@
 //! What goes to the headset, packet by packet, most important first: control messages,
-//! then sound, then video, the streams taking turns a packet each. A big keyframe goes
+//! then where the mouse pointer is (only the newest), then sound, then video, the streams taking turns a packet each. A big keyframe goes
 //! out in packets of [`FRAGMENT`] bytes, so sound and the answers of the menu wait at
 //! most one packet behind it, not the whole frame.
 //!
@@ -10,7 +10,8 @@
 //!
 //! Who does what:
 //! - The encoders, the sound capture and the session loop queue messages here
-//!   ([`Outbox::control`], [`Outbox::audio`], [`Outbox::video`]), never waiting.
+//!   ([`Outbox::control`], [`Outbox::cursor`], [`Outbox::audio`], [`Outbox::video`]),
+//!   never waiting.
 //! - The one writer thread takes the next packet to send with [`Outbox::next`]. A
 //!   message it started moves out of the queues into its [`Lanes`], so its packets are
 //!   cut and encrypted without holding the queues' lock. A message started is always
@@ -146,6 +147,9 @@ pub struct OutboxStats {
 struct State {
     control: VecDeque<Encoded>,
     control_bytes: usize,
+    /// Where the pointer is, the newest only (`CursorAt`): sent once no control
+    /// message waits, so never before a look queued ahead of it.
+    cursor: Option<Encoded>,
     /// Sound slices with when each was queued.
     audio: VecDeque<(Instant, Encoded)>,
     streams: BTreeMap<DisplayId, StreamQueue>,
@@ -308,6 +312,26 @@ impl Outbox {
         true
     }
 
+    /// Queues where the mouse pointer is (`CursorAt`), in place of one still waiting:
+    /// only the newest is worth sending. It goes once every control message queued
+    /// before it went (a `CursorShape` it names among them), in one packet.
+    pub fn cursor(&self, msg: HostMsg) {
+        let mut s = self.lock();
+        if s.closed || s.leaving {
+            return;
+        }
+        let Some(msg) = encode(msg) else {
+            self.close_locked(&mut s);
+            return;
+        };
+        s.queued += msg.len();
+        if let Some(old) = s.cursor.replace(msg) {
+            s.garbage.push(old);
+        }
+        self.ready.notify_one();
+        unlock(s);
+    }
+
     /// Queues a slice of sound; the oldest goes when too many wait.
     pub fn audio(&self, msg: HostMsg) {
         let mut s = self.lock();
@@ -416,6 +440,7 @@ impl Outbox {
             return;
         }
         s.audio.clear();
+        s.cursor = None;
         s.streams.clear();
         s.stream_lanes.clear();
         s.video_bytes = 0;
@@ -443,6 +468,7 @@ impl Outbox {
     fn close_locked(&self, s: &mut State) {
         s.closed = true;
         s.control.clear();
+        s.cursor = None;
         s.audio.clear();
         s.streams.clear();
         s.stream_lanes.clear();
@@ -524,10 +550,15 @@ impl State {
     }
 
     /// The next lane to send in, taking a message into `lanes` when its lane is free:
-    /// control, then sound, then the streams in turn.
+    /// control, then the pointer, then sound, then the streams in turn.
     fn pick(&mut self, lanes: &mut Lanes) -> Option<Pick> {
         if let Some(pick) = self.pick_control(lanes) {
             return Some(pick);
+        }
+        // The control lane is free and nothing waits for it: the pointer, whole.
+        if let Some(msg) = self.cursor.take() {
+            lanes.control = Some(Outgoing::new(lane::CONTROL, msg));
+            return Some(Pick::Control);
         }
         if lanes.sound.is_none()
             && let Some((queued, msg)) = self.audio.pop_front()

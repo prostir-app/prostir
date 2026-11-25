@@ -28,6 +28,11 @@
 //!   next three of any encoder;
 //! - `fail-source Fake-3 2`: the next two starts of that output's picture source fail
 //!   (it may not be made yet), as when KWin's PipeWire node of an output is gone;
+//! - `cursor-shape 32 32 4 2 200`: the mouse pointer looks so (32x32 pixels, pointing
+//!   at 4,2, every pixel of grey 200, opaque); `cursor-move Fake-1 100 50`: it is at
+//!   that pixel of the output's picture; `cursor-hide`: it is hidden (until the next
+//!   look). Only with `PROSTIR_FAKE_CURSOR=1`, where the desktop tells the pointer
+//!   apart from the pictures; said to the core only while it asks for that;
 //! - `hang make 20`, `hang place 20`, `hang encoder-stop 20`, `hang sound-start 20`:
 //!   the next monitor made, layout placed, encoder stopped or sound to the headset
 //!   started takes that many seconds, as a desktop, a driver or a sound system that
@@ -51,9 +56,10 @@ use log::{info, warn};
 use super::screen::{self, Picture, Screen};
 use crate::encoder::{Encoder, Input};
 use crate::platform::{
-    AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Geometry, GpuDevices, Memory,
-    Origin, Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales,
-    VirtualSpec, Windows, needs_scale, scale_of,
+    AddModel, Cursor, CursorEvent, CursorImage, CursorSink, CursorSource, DeskPlan, Desktop,
+    DesktopCaps, FrameSource, Geometry, GpuDevices, Memory, Origin, Output, OutputHealth,
+    OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec, Windows, needs_scale,
+    scale_of,
 };
 
 /// A display of the fake PC itself, and whether it is plugged in.
@@ -72,6 +78,80 @@ static SCALES: Mutex<BTreeMap<String, f64>> = Mutex::new(BTreeMap::new());
 
 /// The desktop's layout, for the commands of other programs.
 static LAYOUT: Mutex<Option<Layout>> = Mutex::new(None);
+
+/// The mouse pointer of the fake desktop, as the test's commands make it: how it looks
+/// and where it is, and the core's sink while it asks for it apart from the pictures.
+#[derive(Default)]
+struct FakePointer {
+    image: Option<CursorImage>,
+    hidden: bool,
+    at: Option<(OutputKey, i32, i32)>,
+    sink: Option<CursorSink>,
+}
+
+impl FakePointer {
+    /// What the core is told of it as it is now.
+    fn now(&self) -> Vec<CursorEvent> {
+        let look = match (&self.image, self.hidden) {
+            (Some(image), false) => CursorEvent::Shape(image.clone()),
+            _ => CursorEvent::Hidden,
+        };
+        let at = self
+            .at
+            .clone()
+            .map(|(output, x, y)| CursorEvent::Moved { output, x, y });
+        std::iter::once(look).chain(at).collect()
+    }
+}
+
+static POINTER: Mutex<Option<FakePointer>> = Mutex::new(None);
+
+/// Tells the core `event` (while it asks for the pointer apart), after keeping it.
+fn pointer_event(event: CursorEvent) -> Result<()> {
+    let mut pointer = POINTER.lock().unwrap();
+    let p = pointer
+        .as_mut()
+        .context("the fake desktop tells no pointer (PROSTIR_FAKE_CURSOR)")?;
+    match &event {
+        CursorEvent::Shape(image) => {
+            p.image = Some(image.clone());
+            p.hidden = false;
+        }
+        CursorEvent::Moved { output, x, y } => p.at = Some((output.clone(), *x, *y)),
+        CursorEvent::Hidden => p.hidden = true,
+    }
+    if let Some(sink) = &p.sink {
+        sink.send(event);
+    }
+    Ok(())
+}
+
+/// The fake desktop's side of the pointer apart from the pictures. Its pictures never
+/// have a pointer drawn in, so leaving it out changes nothing in them.
+struct FakeCursor;
+
+impl CursorSource for FakeCursor {
+    fn set_apart(&mut self, sink: Option<CursorSink>) {
+        let mut pointer = POINTER.lock().unwrap();
+        let Some(p) = pointer.as_mut() else {
+            return;
+        };
+        info!(
+            "fake desktop: the pointer {}",
+            if sink.is_some() {
+                "apart from the pictures"
+            } else {
+                "in the pictures"
+            }
+        );
+        if let Some(sink) = &sink {
+            for event in p.now() {
+                sink.send(event);
+            }
+        }
+        p.sink = sink;
+    }
+}
 
 /// The next scale the platform layer sets is not set (`refuse-scale`), as when
 /// `kscreen-doctor` fails.
@@ -147,6 +227,8 @@ pub struct FakeDesktop {
     slow: Duration,
     /// Monitors (by number, from 1) that cannot be made.
     broken: Vec<u32>,
+    /// The pointer told apart from the pictures (`PROSTIR_FAKE_CURSOR=1`).
+    cursor: Option<FakeCursor>,
 }
 
 impl FakeDesktop {
@@ -184,6 +266,8 @@ impl FakeDesktop {
             physical.len()
         );
         *PHYSICAL.lock().unwrap() = physical;
+        let cursor = std::env::var_os("PROSTIR_FAKE_CURSOR").is_some_and(|v| v == "1");
+        *POINTER.lock().unwrap() = cursor.then(FakePointer::default);
         let layout = Layout::default();
         *LAYOUT.lock().unwrap() = Some(layout.clone());
         static WATCHED: Once = Once::new();
@@ -208,6 +292,7 @@ impl FakeDesktop {
             picture,
             slow: Duration::from_millis(slow),
             broken,
+            cursor: cursor.then_some(FakeCursor),
         })
     }
 }
@@ -356,6 +441,13 @@ impl Desktop for FakeDesktop {
 
     fn pointer(&mut self) -> Option<&mut dyn Pointer> {
         None
+    }
+
+    fn cursor(&mut self) -> Option<&mut dyn CursorSource> {
+        match &mut self.cursor {
+            Some(c) => Some(c),
+            None => None,
+        }
     }
 }
 
@@ -576,6 +668,31 @@ fn command(line: &str) -> Result<()> {
             return Ok(());
         }
         _ => {}
+    }
+    if let ["cursor-shape", w, h, hot_x, hot_y, grey] = words[..] {
+        let (w, h): (u16, u16) = (w.parse()?, h.parse()?);
+        let grey: u8 = grey.parse()?;
+        let image = CursorImage {
+            w,
+            h,
+            hot_x: hot_x.parse()?,
+            hot_y: hot_y.parse()?,
+            rgba: [grey, grey, grey, 255].repeat(usize::from(w) * usize::from(h)),
+        };
+        info!("fake desktop: the pointer looks {image:?}");
+        return pointer_event(CursorEvent::Shape(image));
+    }
+    if let ["cursor-move", name, x, y] = words[..] {
+        info!("fake desktop: the pointer at {x},{y} of {name}");
+        return pointer_event(CursorEvent::Moved {
+            output: OutputKey::new(name),
+            x: x.parse()?,
+            y: y.parse()?,
+        });
+    }
+    if let ["cursor-hide"] = words[..] {
+        info!("fake desktop: the pointer hidden");
+        return pointer_event(CursorEvent::Hidden);
     }
     if let ["close", name] = words[..] {
         Screen::find(name)

@@ -105,6 +105,9 @@ pub struct Wanted {
     pub layout: Layout,
     /// A display of the PC is to be shown: switch one on where none is.
     pub wake_physical: bool,
+    /// The mouse pointer is left out of the pictures and told to the router apart
+    /// (where the desktop can), since every headset with a session draws it.
+    pub cursor_apart: bool,
 }
 
 /// The number of a job whose answer someone waits for.
@@ -205,6 +208,8 @@ pub struct Connected {
     pub choices: Vec<(Codec, bool)>,
     /// The PC's own displays, connected and on now.
     pub physical: Vec<PhysicalDisplay>,
+    /// It tells the mouse pointer apart from the pictures (see `CursorSource`).
+    pub cursor: bool,
 }
 
 /// What came of a job.

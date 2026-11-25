@@ -314,6 +314,26 @@ pub(crate) fn host_samples() -> Vec<HostMsg> {
         HostMsg::Ping { seq: 7 },
         HostMsg::Pong { seq: u32::MAX },
         HostMsg::Goodbye { reason: 3 },
+        HostMsg::CursorShape {
+            shape: 0x9e37_79b9,
+            w: 2,
+            h: 3,
+            hot_x: 1,
+            hot_y: 2,
+            rgba: (0..24).collect(),
+        },
+        HostMsg::CursorAt {
+            display: Some(DisplayId(3)),
+            u: 0,
+            v: 65535,
+            shape: 0x9e37_79b9,
+        },
+        HostMsg::CursorAt {
+            display: None,
+            u: 0,
+            v: 0,
+            shape: 0,
+        },
     ];
     samples.extend(pc_state().parts());
     samples
@@ -1052,6 +1072,58 @@ fn values_breaking_the_rules_are_refused() {
     caps.decoders[0].max_h = 0;
     let msg = ClientMsg::HeadsetCaps { part: caps };
     assert!(read_client(&client_bytes(&msg)).is_err());
+}
+
+/// A look of the pointer must be numbered, of a size within 256 pixels each way, with
+/// its point on the picture and four bytes for each pixel: anything else ends the
+/// session like a message that does not parse. The largest one goes through.
+#[test]
+fn a_pointer_look_is_checked() {
+    let shape = |shape, w: u16, h: u16, hot: (u16, u16), bytes: usize| HostMsg::CursorShape {
+        shape,
+        w,
+        h,
+        hot_x: hot.0,
+        hot_y: hot.1,
+        rgba: vec![0xff; bytes],
+    };
+    let largest = shape(7, 256, 256, (255, 255), 256 * 256 * 4);
+    assert_eq!(read_host(&host_bytes(&largest)).unwrap(), largest);
+    for bad in [
+        shape(0, 32, 32, (0, 0), 32 * 32 * 4),
+        shape(7, 0, 32, (0, 0), 0),
+        shape(7, 257, 1, (0, 0), 257 * 4),
+        shape(7, 32, 32, (32, 0), 32 * 32 * 4),
+        shape(7, 32, 32, (0, 32), 32 * 32 * 4),
+        shape(7, 32, 32, (0, 0), 32 * 32 * 4 - 1),
+    ] {
+        assert!(
+            matches!(
+                wire_error(&read_host(&host_bytes(&bad)).unwrap_err()),
+                Some(WireError::Invalid(_))
+            ),
+            "{bad:?}"
+        );
+    }
+    // An older headset skips both, and reads on.
+    let at = HostMsg::CursorAt {
+        display: Some(DisplayId(1)),
+        u: 1,
+        v: 2,
+        shape: 7,
+    };
+    for (tag, msg) in [(42, &largest), (43, &at)] {
+        assert_eq!(msg.wire_tag(), tag);
+        assert!(!RETIRED_HOST_TAGS.contains(&tag));
+    }
+    let focus = HostMsg::Focus {
+        part: Focus { display: None },
+    };
+    let mut payload = Vec::new();
+    at.put_fields(&mut payload).unwrap();
+    let mut buf = framed(250, &payload);
+    focus.write(&mut buf).unwrap();
+    assert_eq!(host_read(&mut buf.as_slice()).unwrap(), focus);
 }
 
 /// The largest snapshot (32 displays with the longest texts) is far below a frame:

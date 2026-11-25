@@ -10,7 +10,9 @@
 //!    panorama);
 //! 2. the window onto the keyboard;
 //! 3. the monitors on cylinders, then the flat ones, far to near (as
-//!    `World::draw_list` has them, the one in a hand last), of every PC together;
+//!    `World::draw_list` has them, the one in a hand last), of every PC together,
+//!    each PC's mouse pointer right after its monitor (so a nearer monitor covers it
+//!    as it covers that monitor);
 //! 4. what is wrong with a monitor's picture: over it while it recovers, in its place
 //!    while it cannot be shown;
 //! 5. the placeholder of a monitor being added, the numbers next to the monitor looked
@@ -30,17 +32,19 @@
 //! 3. the placeholder, "Attach", the toast: a small sign goes before the room;
 //! 4. the window onto the keyboard, then the background;
 //! 5. last, and with the compositor's least ([`crate::caps::LAYERS_AT_LEAST`]) never:
-//!    the person's own, the pointer dots, the menu's button, the palm menu, the menu,
-//!    the hands and rays.
+//!    the person's own, the pointer dots and the PCs' mouse pointers, the menu's
+//!    button, the palm menu, the menu, the hands and rays. A PC's pointer goes with
+//!    its monitor all the same.
 //!
 //! The streams the PC is told the headset takes leave [`crate::caps::RESERVED_LAYERS`]
-//! for the background, the menu, its button, the hands, the dots of the two rays and
-//! the toast, so pointing or a message never pushes a monitor out; only what comes on
-//! top of those (the palm menu, "Attach", the keyboard's window, a dot under a
-//! fingertip...) can. The model hears how many monitors are hidden when that changes
-//! (see [`Plan::news`]) and says so once. That number is counted as if there were no
-//! toast and no dots: the toast saying so never hides one more monitor and so says
-//! more, and a dot that comes and goes with the hand says nothing.
+//! for the background, the menu, its button, the hands, the dots of the two rays, the
+//! toast and one PC's mouse pointer, so pointing, a message or the pointer never
+//! pushes a monitor out; only what comes on top of those (the palm menu, "Attach", the
+//! keyboard's window, a dot under a fingertip, a second PC's pointer...) can. The
+//! model hears how many monitors are hidden when that changes (see [`Plan::news`]) and
+//! says so once. That number is counted as if there were no toast, no dots and no
+//! pointers: the toast saying so never hides one more monitor and so says more, and a
+//! dot or a pointer that comes and goes says nothing.
 //!
 //! Nothing is allocated once the plan's lists are long enough: it is kept from frame
 //! to frame and filled again.
@@ -50,13 +54,14 @@
 #[cfg(test)]
 mod tests;
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 use crate::app::{Model, TOAST_WIDTH};
 use crate::clarity::Quality;
-use crate::ids::{DisplayKey, Target};
+use crate::cursors::Shown;
+use crate::ids::{DisplayKey, PcId, Target};
 use crate::interaction::Hands;
-use crate::layout::{Placement, facing};
+use crate::layout::{Placement, facing, image_frame, image_width};
 use crate::world::{
     ATTACH_WIDTH, BUTTON_SIZE, WRIST_MENU_WIDTH, attach_height, panel_height, panel_width,
     wrist_menu_height,
@@ -122,6 +127,13 @@ pub enum Layer {
     Hands,
     /// A pointer dot: where a ray meets something, or under a fingertip near the menu.
     Cursor(Quad),
+    /// PC `pc`'s mouse pointer in its look `shape`, over its monitor (the layer
+    /// before it).
+    PcCursor {
+        pc: PcId,
+        shape: u32,
+        quad: Quad,
+    },
 }
 
 /// What the shell has a picture for this frame.
@@ -147,6 +159,8 @@ pub trait Ready {
     fn metrics(&self) -> bool;
     /// The hands and rays drawn this frame.
     fn hands(&self) -> bool;
+    /// The picture of look `shape` of PC `pc`'s mouse pointer.
+    fn pc_cursor(&self, pc: PcId, shape: u32) -> bool;
 }
 
 /// What a layer is worth when not all fit: the higher one stays (see the module).
@@ -243,6 +257,12 @@ impl Plan {
         self.ranks.push((rank, at));
     }
 
+    /// Whether layer `i` is a PC's pointer whose monitor (the layer before it) does
+    /// not stay.
+    fn lone_pointer(&self, i: usize) -> bool {
+        matches!(self.layers[i], Layer::PcCursor { .. }) && (i == 0 || !self.stays[i - 1])
+    }
+
     /// No more than `max` layers: the ones ranked lowest go (see the module), the
     /// rest keep their order.
     fn budget(&mut self, max: usize) {
@@ -256,6 +276,29 @@ impl Plan {
         self.stays.resize(self.layers.len(), false);
         for &(_, at) in &self.ranks[..max] {
             self.stays[usize::from(at)] = true;
+        }
+        // A PC's pointer goes with its monitor (the layer before it); its place goes
+        // to the next layer that fits, so a pointer over a monitor left out takes no place.
+        let mut next = max;
+        loop {
+            let mut freed = 0;
+            for i in 1..self.layers.len() {
+                if self.stays[i] && self.lone_pointer(i) {
+                    self.stays[i] = false;
+                    freed += 1;
+                }
+            }
+            if freed == 0 {
+                break;
+            }
+            while freed > 0 && next < self.ranks.len() {
+                let at = usize::from(self.ranks[next].1);
+                next += 1;
+                if !self.lone_pointer(at) {
+                    self.stays[at] = true;
+                    freed -= 1;
+                }
+            }
         }
         // The monitors that would not fit without the toast and the dots.
         self.hidden = self
@@ -320,6 +363,18 @@ pub fn plan(model: &Model, hands: &Hands, ready: &impl Ready, plan: &mut Plan) {
                 }),
                 Rank::Monitor(nearness(distance)),
             );
+            // Its PC's pointer, if it is on it, right over it.
+            if let Some(shown) = model.cursors().on(id, model.now())
+                && ready.pc_cursor(id.pc, shown.shape)
+            {
+                let quad = pointer_quad(p, quad.height, on, (w, h), &shown);
+                let layer = Layer::PcCursor {
+                    pc: id.pc,
+                    shape: shown.shape,
+                    quad,
+                };
+                plan.push(layer, Rank::DOT);
+            }
         }
     }
     for &(distance, id) in world.draw_list() {
@@ -428,6 +483,40 @@ pub fn plan(model: &Model, hands: &Hands, ready: &impl Ready, plan: &mut Plan) {
         plan.push(Layer::Cursor(dot(point, normal, 0.002, size)), Rank::DOT);
     }
     plan.budget(usize::from(model.headset().caps.layers_max));
+}
+
+/// Where a PC's pointer `shown` is drawn over its monitor, which stands at `p`,
+/// `height` high, on a cylinder of `curve` (none: flat), its picture `picture` pixels:
+/// the pixel of the look it points with over the pixel of the picture the PC says,
+/// in the plane touching the monitor there, as large as it is in the picture.
+pub fn pointer_quad(
+    p: &Placement,
+    height: f32,
+    curve: Option<f32>,
+    (w, h): (u32, u32),
+    shown: &Shown<'_>,
+) -> Quad {
+    // The middle of the pixel the PC points at: `MouseTo` and `CursorAt` say pixels
+    // from the first (0) to the last (1).
+    let to_middle = |f: f32, n: u32| (f * (n.max(1) - 1) as f32 + 0.5) / n.max(1) as f32;
+    let uv = Vec2::new(to_middle(shown.uv.x, w), to_middle(shown.uv.y, h));
+    let (point, rotation) = image_frame(p, height, curve, uv);
+    // Metres a pixel of the picture takes.
+    let pixel = image_width(p, curve) / w.max(1) as f32;
+    let look = shown.look;
+    let (lw, lh) = (f32::from(look.w), f32::from(look.h));
+    // From the middle of the pixel it points with to the middle of the look, right and
+    // up.
+    let right = (lw / 2.0 - (f32::from(look.hot_x) + 0.5)) * pixel;
+    let up = ((f32::from(look.hot_y) + 0.5) - lh / 2.0) * pixel;
+    Quad {
+        at: Placement {
+            position: point + rotation * Vec3::new(right, up, 0.0),
+            rotation,
+            width: lw * pixel,
+        },
+        height: lh * pixel,
+    }
 }
 
 /// A round dot `size` across, `lift` out of a surface at `point` that faces `normal`.

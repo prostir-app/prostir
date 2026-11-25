@@ -58,6 +58,7 @@ impl Worker {
                 slot.encoder = Some(encoder);
                 slot.started_for = Some(used);
                 slot.rows_up = wanted.encoding.rows_up;
+                slot.cursor_apart = self.cursor_apart;
                 slot.kept = (used != asked).then(|| (asked, Instant::now() + KEPT_FOR));
                 slot.failed = None;
                 self.layout_due = true;
@@ -208,6 +209,7 @@ impl Worker {
             self.shared
                 .router
                 .add_stream(id, choice.codec, name.to_owned());
+            self.shared.router.set_stream_key(id, output.key().clone());
             let router = self.shared.router.clone();
             let (input, gpu) = (source.input.clone(), self.gpu.clone());
             // Left behind after its time, a late encoder sends nothing; nor does one

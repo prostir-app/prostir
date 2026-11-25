@@ -772,7 +772,8 @@ the table says. A new value later comes with a capability and a fallback of its 
 | 11 | the microphone as an up stream | | |
 | 12 | the camera | | |
 | 13 | poses | | |
-| 14 | takes `Gaze` (for which display gets the most bits, from step 10) | | |
+| 14 | takes `Gaze` (for which display gets the most bits, from step 10) | 10 | draws the PC's mouse pointer itself |
+| 16 | tells the mouse pointer apart from the pictures | | |
 
 | Enum | Value | Needs | Without it |
 |---|---|---|---|
@@ -787,6 +788,7 @@ the table says. A new value later comes with a capability and a fallback of its 
 | `Outcome` | all | the request's kind | |
 | `VolumeAsk` | | host 5 and headset 2, and only to the main headset | the PC's volume and the headset's are separate |
 | `Command` | | headset 1 | no commands |
+| `CursorShape`, `CursorAt` | | host 16, and headset 10 named by every headset with a session | the pointer is in the pictures, as in every older build (see [The mouse pointer](#the-mouse-pointer)) |
 
 Soft values need no capability: `role`, `permission` and `os` read an unknown value as
 a guest, not known and another OS; unknown bits of `perms` and unknown `features` are
@@ -987,6 +989,8 @@ are marked as such (their bytes never change). "Part" marks a part of the state 
 | 25 | `Ping` | `seq:u32` | Every second in the session; answer with `Pong` at once. |
 | 26 | `Pong` | `seq:u32` | The answer to the headset's `Ping`. |
 | 27 | `Goodbye` | `reason:u8` | The host ends the session on purpose (see [End of session](#end-of-session)). |
+| 42 | `CursorShape` | `shape:u32, w:u16, h:u16, hot_x:u16, hot_y:u16, rgba:bytes*` | A look of the mouse pointer, numbered `shape` (not 0): `w`x`h` pixels (1 to 256 each way) of 8-bit RGBA in sRGB, not premultiplied, top row first; `hot_x`, `hot_y` (on the picture) is where it points. See [The mouse pointer](#the-mouse-pointer). |
+| 43 | `CursorAt` | `display:opt<DisplayId>, u:u16, v:u16, shape:u32` | Where the pointer points: `u`, `v` across the picture of `display` (0 to 65535 from the top left, as in `MouseTo`), looking as `shape`; none: on no display streamed to this headset; `shape` 0: hidden. |
 
 ### Headset → host
 
@@ -1236,12 +1240,16 @@ in either order.
 The host picks every packet it sends (implementation-defined, `crates/prostir/src/outbox.rs`),
 in strict priority:
 
-1. control messages (everything except `Audio`, `Frame`, `StreamStart` and
-   `StreamEnd`), in order, in lane `0`; never dropped, but over 4 MiB of them waiting
-   means the headset reads nothing, and the session ends;
-2. sound (`Audio`), in lane `1`, at most 8 slices waiting; the oldest is dropped when a
+1. control messages (everything except `Audio`, `Frame`, `StreamStart`, `StreamEnd`
+   and `CursorAt`), in order, in lane `0`; never dropped, but over 4 MiB of them
+   waiting means the headset reads nothing, and the session ends;
+2. `CursorAt`, once no control message waits, in lane `0` in one packet: only the
+   newest waits, a newer one takes its place (so after a slow moment the pointer jumps
+   to where it is, never replaying where it was), and a `CursorShape` queued before it
+   always arrives first;
+3. sound (`Audio`), in lane `1`, at most 8 slices waiting; the oldest is dropped when a
    newer one arrives;
-3. video, each stream in a lane of its own, the streams taking turns a packet each.
+4. video, each stream in a lane of its own, the streams taking turns a packet each.
 
 A message it started is always finished; one of a higher class goes between its
 packets. So sound waits behind at most one packet (16 KiB) of a big keyframe, and one
@@ -1271,6 +1279,39 @@ kernel (`TCP_NOTSENT_LOWAT` 32 KiB) for the same reason.
 
 These values are implementation-defined; the rule a client can rely on is that
 **after a gap in a stream, the next frame it gets for that stream is a keyframe**.
+
+### The mouse pointer
+
+A host that can tell the mouse pointer apart from the pictures (its desktop says how
+it looks and where it is) names feature 16. The picture of a display is one for every
+headset, so the host leaves the pointer out of it only while **every** headset with a
+session names feature 10; otherwise the pointer is drawn into the pictures as in every
+older build, and no `CursorShape` or `CursorAt` goes to anyone. A headset without 10
+coming in the middle of a session brings the pointer back into the pictures: the
+others get `CursorAt` with `display` none and `shape` 0 first. Desktops that choose
+this when a stream is made start their streams over (a new generation) to switch.
+
+While the pointer is apart, the host sends:
+
+- `CursorShape` for a look the headset does not have: before the first `CursorAt`
+  naming it, and again once the headset may have let it go. The headset keeps the 64
+  looks that came last for each host (the one that came first goes, whatever was
+  used); the host counts the same, so the headset can trust that a look named in
+  `CursorAt` came. A look named but not known is drawn as nothing. The same picture
+  keeps its number for the session (current host: a hash of it), so an animated
+  pointer sends its pictures once, then only numbers.
+- `CursorAt` when the pointer moves, changes its look, hides or shows (at most as
+  often as the display's frames, 60 to 120 times a second): `u`, `v` across the
+  display's picture as streamed, the point of the look's `hot_x`, `hot_y` there.
+  `display` none when it is on no display streamed to this headset (a display of
+  the PC not shown, another output); `shape` 0 when the PC hides it (a video full
+  screen, a game, touch). Right after `Snapshot` (or once the pointer goes apart) the
+  host sends the look and place it has now.
+
+The headset draws the look over the display at that point, the size it has in the
+picture (`w` pixels of the picture's width), and hides it with the display. It can
+draw the pointer where its own `MouseTo` sent it until `CursorAt` catches up
+(implementation-defined; the current client: 200 ms after its last `MouseTo`).
 
 ### Sound
 

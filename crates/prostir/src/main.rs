@@ -5,6 +5,7 @@ mod brain;
 mod cli;
 mod control;
 mod ctl;
+mod cursor;
 mod deskside;
 mod displays;
 mod door;

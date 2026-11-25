@@ -12,5 +12,6 @@ pub mod nal;
 pub mod pc;
 
 pub use headset::{
-    Arrival, ConnectError, FIRST_VOLUME, FakeHeadset, Keys, Stream, VOLUME_STEPS, View, stepped,
+    Arrival, ConnectError, CursorAt, FIRST_VOLUME, FakeHeadset, Keys, Stream, VOLUME_STEPS, View,
+    stepped,
 };

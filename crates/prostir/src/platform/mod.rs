@@ -5,13 +5,13 @@
 //! signal to quit) goes to the control loop as events (`crate::events`).
 //!
 //! The desktop is a contract (`contract.rs`): the traits [`Desktop`], [`Output`],
-//! [`Windows`] and [`Pointer`], and the data that says what differs ([`DesktopCaps`],
-//! [`FrameSource`], [`OutputHealth`], [`OutputKey`]). It has an implementation per
-//! desktop, picked once when a session starts ([`connect`]), and the core holds it as
-//! a `Box<dyn Desktop>`. Everything else of the platform has one implementation per
-//! build: each operating system has a module of its own (`linux/`, picked with `cfg`)
-//! whose public items are re-exported here, so the core writes `platform::tray::spawn`
-//! and never names the OS.
+//! [`Windows`], [`Pointer`] and [`CursorSource`], and the data that says what differs
+//! ([`DesktopCaps`], [`FrameSource`], [`OutputHealth`], [`OutputKey`]). It has an
+//! implementation per desktop, picked once when a session starts ([`connect`]), and
+//! the core holds it as a `Box<dyn Desktop>`. Everything else of the platform has one
+//! implementation per build: each operating system has a module of its own (`linux/`,
+//! picked with `cfg`) whose public items are re-exported here, so the core writes
+//! `platform::tray::spawn` and never names the OS.
 //!
 //! # A new operating system (Windows)
 //!

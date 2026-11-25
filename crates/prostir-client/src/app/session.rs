@@ -89,6 +89,15 @@ impl Model {
             NetEvent::Command { pc, req, asked } => self.take_command(pc, req, &asked),
             NetEvent::VolumeAsk { pc, asked } => self.volume_asked(pc, &asked),
             NetEvent::Notice(_, text) => self.show_toast(text),
+            // The pointer is drawn, never shown in the menu: no `rev` for it.
+            NetEvent::CursorShape { pc, shape, look } => self.cursors.take_look(pc, shape, look),
+            NetEvent::CursorAt {
+                pc,
+                display,
+                u,
+                v,
+                shape,
+            } => self.cursors.take_at(pc, display, u, v, shape),
             NetEvent::Reply { pc, req, outcome } => {
                 match (self.answered(pc, req, &outcome), outcome) {
                     // Only the switch it asked for: another one asked since goes on.
@@ -167,6 +176,7 @@ impl Model {
                 self.menu.physical_asked.retain(|(k, _)| k.pc != pc);
                 self.sessions.remove(&pc);
                 self.videos.pc_ended(pc);
+                self.cursors.forget(pc);
                 // Its streams went with it, also one whose end the network never said.
                 self.effects.extend(
                     self.world

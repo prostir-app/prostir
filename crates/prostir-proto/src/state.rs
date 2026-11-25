@@ -212,6 +212,9 @@ pub mod caps {
         pub const POSES: Feature = Feature(13);
         /// Uses the gaze for which display gets the most bits.
         pub const GAZE: Feature = Feature(14);
+        /// Tells the mouse pointer apart from the pictures (`CursorShape`,
+        /// `CursorAt`), where every headset with a session draws it itself.
+        pub const CURSOR: Feature = Feature(16);
     }
 
     /// What the headset can do.
@@ -234,6 +237,8 @@ pub mod caps {
         /// Its compositor shows a stream's rows bottom first: the PC sends them so, and
         /// the picture shows the right way up.
         pub const ROWS_UP: Feature = Feature(9);
+        /// Draws the PC's mouse pointer itself, from `CursorShape` and `CursorAt`.
+        pub const CURSOR: Feature = Feature(10);
     }
 }
 

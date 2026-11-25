@@ -18,7 +18,7 @@ use super::start::{Stage, Xr};
 use super::{Gpu, Kept};
 use crate::app::{Event, PlatformEvent};
 use crate::clarity::Quality;
-use crate::ids::DisplayKey;
+use crate::ids::{DisplayKey, PcId};
 use crate::layers::{self, Layer, Plan, Quad};
 use crate::layout::Cylinder;
 use crate::platform::meta::{self, passthrough};
@@ -121,6 +121,13 @@ impl layers::Ready for Have<'_> {
     fn hands(&self) -> bool {
         self.hands
     }
+
+    fn pc_cursor(&self, pc: PcId, shape: u32) -> bool {
+        self.pictures
+            .pc_cursors
+            .iter()
+            .any(|(p, s, _)| *p == pc && *s == shape)
+    }
 }
 
 /// The picture of a planned flat layer (not a monitor's).
@@ -136,6 +143,14 @@ fn picture_of<'p>(pictures: &'p Pictures, layer: &Layer) -> Option<(&'p ImageLay
         Layer::Attach(quad) => (&pictures.attach_layer, quad),
         Layer::Palm(quad) => (&pictures.wrist_layer, quad),
         Layer::Cursor(quad) => (&pictures.cursor_layer, quad),
+        Layer::PcCursor { pc, shape, quad } => (
+            &pictures
+                .pc_cursors
+                .iter()
+                .find(|(p, s, _)| *p == pc && *s == shape)?
+                .2,
+            quad,
+        ),
         Layer::Background | Layer::KeyboardWindow | Layer::Monitor(_) | Layer::Hands => {
             return None;
         }
