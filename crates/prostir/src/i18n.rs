@@ -1,7 +1,15 @@
 //! Interface language of the PC side, from the desktop's locale: Ukrainian for `uk*`,
-//! English otherwise. Strings are written as `inline_t("український", "English")` pairs.
+//! English otherwise. The texts are the `pc-` messages of `lang/<code>.ftl` at the root
+//! of the repository (one file per language, shared with the settings window and the
+//! headset app), built in and named by id: `t("pc-ctl-done")`.
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
+
+use prostir_lang::{Arg, Strings};
+
+/// What the ids of the PC app's messages start with in the shared language files.
+const PREFIX: &str = "pc-";
 
 fn ukrainian() -> bool {
     static UK: OnceLock<bool> = OnceLock::new();
@@ -14,25 +22,53 @@ fn ukrainian() -> bool {
     })
 }
 
+/// `uk` or `en`, sent to the headset.
+pub fn code() -> &'static str {
+    if ukrainian() { "uk" } else { "en" }
+}
+
+/// A text written in the code as a pair, until it moves into `lang/`.
 pub fn inline_t<'a>(uk: &'a str, en: &'a str) -> &'a str {
     if ukrainian() { uk } else { en }
 }
 
-/// `uk` or `en`, sent to the headset.
-pub fn code() -> &'static str {
-    inline_t("uk", "en")
+fn strings() -> &'static Strings {
+    static STRINGS: OnceLock<Strings> = OnceLock::new();
+    STRINGS.get_or_init(|| built_in(code()))
+}
+
+/// The text of message `id` that has no placeholders, in the PC's language. Every such
+/// message is formatted once, at the first call, so a call is a lookup that allocates
+/// nothing; an id no file has shows as itself.
+pub fn t(id: &'static str) -> &'static str {
+    static TEXTS: OnceLock<HashMap<String, &'static str>> = OnceLock::new();
+    let texts = TEXTS.get_or_init(|| {
+        let (english, _) = prostir_lang::messages(prostir_lang::BUILTIN[0].1);
+        english
+            .into_keys()
+            .filter(|id| id.starts_with(PREFIX))
+            .map(|id| {
+                // Kept for the life of the program, as the texts in the code were.
+                let text: &'static str = Box::leak(strings().t(&id).into_boxed_str());
+                (id, text)
+            })
+            .collect()
+    });
+    texts.get(id).copied().unwrap_or(id)
+}
+
+/// The text of message `id` with its placeholders (`{ $name }`) filled in.
+pub fn f(id: &str, args: &[(&str, Arg)]) -> String {
+    strings().f(id, args)
 }
 
 /// Text `id` of `lang/*.ftl` with the count `n`, in the PC's language: its words in
 /// the plural form `n` needs ("2 екрани", "5 екранів").
 pub fn count(id: &str, n: usize) -> String {
-    static STRINGS: OnceLock<prostir_lang::Strings> = OnceLock::new();
-    STRINGS
-        .get_or_init(|| counted_in(code()))
-        .f(id, &[("n", n.into())])
+    f(id, &[("n", n.into())])
 }
 
-fn counted_in(code: &str) -> prostir_lang::Strings {
+fn built_in(code: &str) -> Strings {
     prostir_lang::Catalog::with_dirs(prostir_lang::BUILTIN, Vec::new()).load(code)
 }
 
@@ -47,7 +83,7 @@ mod tests {
             let report = prostir_lang::check(prostir_lang::BUILTIN[0].1, text);
             assert!(report.is_clean(), "{code}: {report:?}");
         }
-        let uk = counted_in("uk");
+        let uk = built_in("uk");
         let at_most = |n: usize| uk.f("pc-limit-physical", &[("n", n.into())]);
         assert_eq!(at_most(1), "Щонайбільше 1 екран ПК");
         assert_eq!(at_most(2), "Щонайбільше 2 екрани ПК");
@@ -55,7 +91,7 @@ mod tests {
         assert_eq!(at_most(21), "Щонайбільше 21 екран ПК");
         let streams = uk.f("pc-limit-streams", &[("n", 12.into())]);
         assert_eq!(streams, "Щонайбільше 12 екранів разом");
-        let en = counted_in("en");
+        let en = built_in("en");
         assert_eq!(
             en.f("pc-limit-monitors", &[("n", 1.into())]),
             "At most 1 monitor"
@@ -64,5 +100,15 @@ mod tests {
             en.f("pc-limit-windows", &[("n", 3.into())]),
             "At most 3 windows"
         );
+    }
+
+    /// A text is the one of the PC's language, and an id nobody wrote shows as itself.
+    #[test]
+    fn a_text_is_looked_up_by_its_id() {
+        let own = strings().t("pc-quality-custom");
+        assert_eq!(own, f("pc-quality-custom", &[]));
+        assert_eq!(t("pc-quality-custom"), own);
+        assert_eq!(t("no-such-text"), "no-such-text");
+        assert!(count("pc-quality-custom", 40).contains("40"));
     }
 }

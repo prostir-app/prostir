@@ -38,6 +38,76 @@ pc-limit-streams = At most { $n } { $n ->
    *[other] displays
 } in all
 
+## src/ctl.rs
+
+pc-ctl-waiting-for-the-headset-asleep = Waiting for the headset (asleep)
+pc-ctl-not-running-port = Not running: port
+pc-ctl-is-taken-by-another-program = is taken by another program
+pc-ctl-not-running = Not running
+pc-ctl-no-session-bus = No session bus
+pc-ctl-prostir-is-not-running = Prostir is not running
+pc-ctl-no-answer-in-time = No answer in time
+pc-ctl-whole-desktop = { " (whole desktop)" }
+pc-ctl-saved = Saved:
+pc-ctl-added-id = Added, id
+pc-ctl-pairing-is-open-for = Pairing is open for
+pc-ctl-s = s
+pc-ctl-done = Done
+pc-ctl-yes = yes
+pc-ctl-no = no
+pc-ctl-not-asked-yet = not asked yet
+pc-ctl-unknown = unknown
+pc-ctl-not-available = not available
+pc-ctl-on = on
+pc-ctl-off = off
+pc-ctl-taken-off = , taken off
+pc-ctl-connected = Connected:
+pc-ctl-monitors = monitors
+pc-ctl-waiting-for-the-headset-monitors = Waiting for the headset, monitors kept
+pc-ctl-waiting-for-a-headset = Waiting for a headset
+pc-ctl-power-saving-is-on-for-this = Power saving is on for this PC's Wi-Fi
+pc-ctl-it-can-hold-the-picture-back = it can hold the picture back by tens of ms. A cable helps, or `nmcli connection modify <connection> 802-11-wireless.powersave 2`
+pc-ctl-monitor = monitor
+pc-ctl-pc-display = PC display
+pc-ctl-window = window
+pc-ctl-starting = starting
+pc-ctl-running = running
+pc-ctl-failed = failed
+pc-ctl-not-connected = not connected
+pc-ctl-kept-for-the-headset = kept for the headset
+pc-ctl-shown = , shown
+pc-ctl-hidden = , hidden
+pc-ctl-primary = , primary
+pc-ctl-frames-s = frames/s
+pc-ctl-repeated = repeated
+pc-ctl-mbit-s = Mbit/s
+pc-ctl-encoder = encoder
+pc-ctl-ms = ms
+pc-ctl-max = max
+pc-ctl-guest = guest
+pc-ctl-main = main
+pc-ctl-connected-2 = , connected
+pc-ctl-prostir-is-not-running-waiting = Prostir is not running, waiting
+pc-ctl-prostir-is-running = Prostir is running
+pc-ctl-headset-connected = Headset connected:
+pc-ctl-headset-disconnected = Headset disconnected:
+pc-ctl-headset-put-on = Headset put on:
+pc-ctl-headset-taken-off = Headset taken off:
+pc-ctl-prostir-did-not-come-on-the = Prostir did not come on the bus in time
+pc-ctl-prostir-ended-before-it-started = Prostir ended before it started
+
+## src/control.rs
+
+pc-control-no-headset-is-connected = No headset is connected
+
+## src/main.rs
+
+pc-main-prostir-in-the-hyprland-config = Prostir in the Hyprland config
+pc-main-change-exec-once-prostir-to-exec = Change exec-once = prostir to exec-once = prostir serve: a bare prostir now opens the settings window.
+pc-main-prostir-is-not-running = Prostir is not running
+pc-main-port = Port
+pc-main-is-taken-by-another-program = is taken by another program.
+
 ### Settings window
 
 ## Pages

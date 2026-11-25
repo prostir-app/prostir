@@ -26,7 +26,7 @@ impl Control {
                     r,
                     api::CtlReply::failed(
                         api::ApiError::NotConnected,
-                        i18n::inline_t("Шолом не підключено", "No headset is connected"),
+                        i18n::t("pc-control-no-headset-is-connected"),
                     ),
                 );
             }

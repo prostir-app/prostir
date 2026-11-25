@@ -29,6 +29,76 @@ pc-limit-streams = Щонайбільше { $n } { $n ->
    *[many] екранів
 } разом
 
+## src/ctl.rs
+
+pc-ctl-waiting-for-the-headset-asleep = Чекає на шолом (спить)
+pc-ctl-not-running-port = Не працює: порт
+pc-ctl-is-taken-by-another-program = зайнятий іншою програмою
+pc-ctl-not-running = Не працює
+pc-ctl-no-session-bus = Немає сеансової шини
+pc-ctl-prostir-is-not-running = Prostir не працює
+pc-ctl-no-answer-in-time = Немає відповіді вчасно
+pc-ctl-whole-desktop = { " (уся стільниця)" }
+pc-ctl-saved = Збережено:
+pc-ctl-added-id = Додано, номер
+pc-ctl-pairing-is-open-for = Сполучення відкрите ще
+pc-ctl-s = с
+pc-ctl-done = Зроблено
+pc-ctl-yes = так
+pc-ctl-no = ні
+pc-ctl-not-asked-yet = ще не спитано
+pc-ctl-unknown = невідомо
+pc-ctl-not-available = недоступно
+pc-ctl-on = увімкнено
+pc-ctl-off = вимкнено
+pc-ctl-taken-off = , знято
+pc-ctl-connected = Підключено
+pc-ctl-monitors = моніторів
+pc-ctl-waiting-for-the-headset-monitors = Чекає на шолом, монітори лишаються
+pc-ctl-waiting-for-a-headset = Чекає на шолом
+pc-ctl-power-saving-is-on-for-this = На Wi-Fi цього ПК увімкнено енергозбереження
+pc-ctl-it-can-hold-the-picture-back = воно може затримувати картинку на десятки мс. Допоможе кабель або `nmcli connection modify <з'єднання> 802-11-wireless.powersave 2`
+pc-ctl-monitor = монітор
+pc-ctl-pc-display = екран ПК
+pc-ctl-window = вікно
+pc-ctl-starting = запускається
+pc-ctl-running = працює
+pc-ctl-failed = не вдалося
+pc-ctl-not-connected = не під'єднано
+pc-ctl-kept-for-the-headset = чекає на шолом
+pc-ctl-shown = , показано
+pc-ctl-hidden = , приховано
+pc-ctl-primary = , головний
+pc-ctl-frames-s = кадрів/с
+pc-ctl-repeated = повторених
+pc-ctl-mbit-s = Мбіт/с
+pc-ctl-encoder = кодування
+pc-ctl-ms = мс
+pc-ctl-max = макс.
+pc-ctl-guest = гість
+pc-ctl-main = головний
+pc-ctl-connected-2 = , підключено
+pc-ctl-prostir-is-not-running-waiting = Prostir не працює, чекаю
+pc-ctl-prostir-is-running = Prostir працює
+pc-ctl-headset-connected = Шолом підключився:
+pc-ctl-headset-disconnected = Шолом відключився:
+pc-ctl-headset-put-on = Шолом вдягнули:
+pc-ctl-headset-taken-off = Шолом зняли:
+pc-ctl-prostir-did-not-come-on-the = Prostir не з'явився на шині вчасно
+pc-ctl-prostir-ended-before-it-started = Prostir завершився, не запустившись
+
+## src/control.rs
+
+pc-control-no-headset-is-connected = Шолом не підключено
+
+## src/main.rs
+
+pc-main-prostir-in-the-hyprland-config = Prostir у конфігу Hyprland
+pc-main-change-exec-once-prostir-to-exec = Замініть exec-once = prostir на exec-once = prostir serve: сам prostir тепер відкриває вікно налаштувань.
+pc-main-prostir-is-not-running = Prostir не працює
+pc-main-port = Порт
+pc-main-is-taken-by-another-program = зайнятий іншою програмою.
+
 ### Settings window
 
 ## Сторінки
