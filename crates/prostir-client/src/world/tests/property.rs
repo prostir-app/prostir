@@ -601,3 +601,139 @@ fn presets_and_line_up_leave_nothing_out_of_view() {
         failures.join("\n")
     );
 }
+
+/// Desks of five to seven monitors of common sizes (the same every run) laid out by each
+/// preset, then a monitor added: a monitor in view stays in view (one pushed aside along
+/// the row lifts nothing out of view for long: the whole goes further away), and
+/// nothing cuts.
+#[test]
+fn an_add_lifts_nothing_out_of_view() {
+    let mut rng = Lcg(17);
+    let mut failures = Vec::new();
+    for preset in [Preset::Arc, Preset::Overhead, Preset::Wall] {
+        for case in 0..60 {
+            let n = 5 + rng.below(3);
+            let first: Vec<(u32, u32)> = (0..n).map(|_| COMMON[rng.below(COMMON.len())]).collect();
+            let mut desk = Trial::of(&first, &COMMON);
+            let sim = &mut desk.sim;
+            sim.s.preset = preset;
+            sim.world.preset_chosen(&sim.s, sim.now);
+            desk.sim.after(1000);
+            let out = desk.out_of_view(false);
+            let before: Vec<u32> = desk
+                .monitors()
+                .into_iter()
+                .filter(|n| !out.contains(n))
+                .collect();
+            let added = desk.add(&mut rng, false);
+            desk.sim.after(1000);
+            let now = desk.out_of_view(false);
+            let lost: Vec<u32> = before.into_iter().filter(|n| now.contains(n)).collect();
+            let cutting = desk.cutting();
+            if !lost.is_empty() || !cutting.is_empty() {
+                failures.push(format!(
+                    "{preset:?} case {case} {first:?}, {added:?}: out of view now {lost:?}, cut \
+                     {cutting:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} desks:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Desks of four to seven monitors of common sizes (the same every run) laid out by
+/// each preset, then brought nearer (a fifth of the radius: rows over the main one come
+/// out of view) and lined up: taken further away again to bring them into view, every
+/// seam seen closed (to a few pixels) stays closed, and nothing cuts that did not.
+#[test]
+fn further_into_view_opens_no_seam() {
+    const MEETING: f32 = 1.5e-3;
+    const OPEN: f32 = 5e-4;
+    let mut rng = Lcg(23);
+    let mut failures = Vec::new();
+    let mut moved = 0;
+    for preset in [Preset::Arc, Preset::Overhead, Preset::Wall] {
+        for case in 0..200 {
+            let n = 4 + rng.below(4);
+            let first: Vec<(u32, u32)> = (0..n).map(|_| COMMON[rng.below(COMMON.len())]).collect();
+            let mut desk = Trial::of(&first, &COMMON);
+            let sim = &mut desk.sim;
+            sim.s.preset = preset;
+            sim.world.preset_chosen(&sim.s, sim.now);
+            let world = &mut sim.world;
+            let frame = layout::frame(world.center, world.tilt);
+            for p in world.placements.values_mut() {
+                *p = layout::further(*p, &frame, 0.8, preset == Preset::Wall);
+            }
+            world.radius *= 0.8;
+            let glued = world.line_up_rows();
+            let at = (world.center, world.tilt);
+            let laid = world.sizes.clone();
+            let meeting = layout::meeting_pairs(&world.placements, &laid, at, MEETING);
+            let was = layout::seam_gaps(&world.placements, &laid, at, &meeting);
+            let radius = world.radius;
+            let cut_before = desk.cutting();
+            let sim = &mut desk.sim;
+            let world = &mut sim.world;
+            world.further_into_view(&sim.s, &glued);
+            if world.radius != radius {
+                moved += 1;
+            }
+            let now = layout::seam_gaps(&world.placements, &laid, at, &meeting);
+            let opened: Vec<(u32, u32, f32)> = meeting
+                .iter()
+                .zip(was.iter().zip(&now))
+                .filter_map(|(pair, gaps)| match gaps {
+                    (Some(was), Some(now)) if now - was > OPEN => {
+                        Some((pair.0.id.0, pair.1.id.0, now - was))
+                    }
+                    (Some(_), None) => Some((pair.0.id.0, pair.1.id.0, f32::NAN)),
+                    _ => None,
+                })
+                .collect();
+            desk.sim.after(1000);
+            let cutting: Vec<(u32, u32)> = desk
+                .cutting()
+                .into_iter()
+                .filter(|c| !cut_before.contains(c))
+                .collect();
+            if !opened.is_empty() || !cutting.is_empty() {
+                failures.push(format!(
+                    "{preset:?} case {case} {first:?}: opened {opened:?}, cut {cutting:?}"
+                ));
+            }
+        }
+    }
+    assert!(moved > 20, "taken further away on {moved} desks only");
+    assert!(
+        failures.is_empty(),
+        "{} desks:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// One of the owner's desks of 2026-11-25: 3440x1440, 3440x1440, 2560x1440 and
+/// 1920x1080 on an arc, a 3840x2160 added. It goes into the row, which makes room; that
+/// lifted the row over it out of view. Now the whole goes a little further away: every
+/// monitor in view, nothing cuts.
+#[test]
+fn an_add_into_the_row_leaves_the_row_over_it_in_view() {
+    let mut desk = Trial::of(
+        &[(3440, 1440), (3440, 1440), (2560, 1440), (1920, 1080)],
+        &[(3840, 2160)],
+    );
+    let sim = &mut desk.sim;
+    sim.world.preset_chosen(&sim.s, sim.now);
+    desk.sim.after(1000);
+    assert_eq!(desk.out_of_view(false), [], "in view as laid out");
+    desk.add(&mut Lcg(1), false);
+    desk.sim.after(1000);
+    assert_eq!(desk.out_of_view(false), [], "in view with it");
+    assert_eq!(desk.cutting(), []);
+}

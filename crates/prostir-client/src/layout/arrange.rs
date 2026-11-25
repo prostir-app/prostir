@@ -616,13 +616,14 @@ pub fn cut_any<K: Key>(placements: &HashMap<K, Placement>, monitors: &[(K, u32, 
 /// How far apart each of `pairs` (one over or under the other, as [`glued_pairs`] gives
 /// them) is seen from `center` tilted up by `tilt`, in the middle of where the edges they
 /// face each other with run along each other: radians up or down, above 0 apart, below
-/// overlapping. 0 for a pair not both placed or whose edges do not run along each other.
+/// overlapping. None for a pair not both placed or whose edges do not run along each
+/// other.
 pub fn seam_gaps<K: Key>(
     placements: &HashMap<K, Placement>,
     monitors: &[(K, u32, u32)],
     (center, tilt): ((Vec3, f32), f32),
     pairs: &[(K, K)],
-) -> Vec<f32> {
+) -> Vec<Option<f32>> {
     let frame = frame(center, tilt);
     let local = |k: K| {
         let m = monitor_of(placements, monitors, k)?;
@@ -649,7 +650,7 @@ pub fn seam_gaps<K: Key>(
         .iter()
         .map(|&(p, u)| {
             let (Some((pp, ph)), Some((up, uh))) = (local(p), local(u)) else {
-                return 0.0;
+                return None;
             };
             let over = up.position.y > pp.position.y;
             let [ptl, ptr, pbr, pbl] = pp.corners(ph);
@@ -667,13 +668,42 @@ pub fn seam_gaps<K: Key>(
             let ((ul, ur), (pl, pr)) = (span(ue), span(pe));
             let (lo, hi) = (ul.max(pl), ur.min(pr));
             if hi <= lo {
-                return 0.0;
+                return None;
             }
             let mid = (lo + hi) / 2.0;
             let (at_u, at_p) = (seen_at(ue, mid), seen_at(pe, mid));
-            if over { at_u - at_p } else { at_p - at_u }
+            Some(if over { at_u - at_p } else { at_p - at_u })
         })
         .collect()
+}
+
+/// Every two of the placed ones of `monitors`, one over or under the other, seen to meet
+/// within `within` (radians up or down, apart or overlapping; see [`seam_gaps`]), in
+/// both orders: the seams that are to stay closed, whether or not "Line up" took them
+/// for glued.
+pub fn meeting_pairs<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    at: ((Vec3, f32), f32),
+    within: f32,
+) -> Vec<(K, K)> {
+    let ids: Vec<K> = placed(placements, monitors).iter().map(|m| m.id).collect();
+    let mut pairs = Vec::new();
+    for (i, &a) in ids.iter().enumerate() {
+        for &b in &ids[i + 1..] {
+            let gap = seam_gaps(placements, monitors, at, &[(a, b)]);
+            if gap
+                .first()
+                .copied()
+                .flatten()
+                .is_some_and(|g| g.abs() <= within)
+            {
+                pairs.push((a, b));
+                pairs.push((b, a));
+            }
+        }
+    }
+    pairs
 }
 
 /// `p` for a stream now `now` pixels in size instead of `was`: the same size of a
