@@ -638,6 +638,15 @@ way as an incompatible one: `Error`, then `Incompatible`; the side with the lowe
 revision is the one to update. Released builds carry no revision and do not look at
 it.
 
+Within revision 6, `Decoder.max_w` and `max_h` changed their meaning (0.2.0 B6): they
+were one box, every picture within it decoding in time; now they are the widest and the
+tallest picture apart, and how many pixels a picture may have is the budget in
+`DecoderPixels`. A host reads both: a size fits a decoder only within its sides and,
+where it has a budget, within that budget. The revision stayed 6, as no development
+build of the old meaning is in use. A headset that measured no budget for a decoder
+says sides no larger than those taken for granted for its codec (4096x4096 for H.264,
+8192x4320 for H.265), and no budget for it.
+
 A first message other than `Hello` can only come from a version 1 client (Prostir
 0.1.x), which may ask to pair before saying hello. The host answers it the same way
 (`Error` saying to update the headset, then `Incompatible`) and closes the connection,
