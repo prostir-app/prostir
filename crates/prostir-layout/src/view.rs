@@ -278,7 +278,11 @@ impl<K: Copy + PartialEq> View<K> for Room<K> {
     }
 }
 
-/// How `mb` stands on `side` of `ma` as seen (see [`View::relate`]).
+/// Two edges seen side by side over less than this angle (radians) meet at a point.
+const FACING: f64 = 1e-9;
+
+/// How `mb` stands on `side` of `ma` as seen (see [`View::relate`]). Whether they share
+/// a stretch of edge (`shared` above 0) does not depend on which is asked about first.
 fn relate_shown<K>(ma: &Shown<K>, mb: &Shown<K>, side: Side) -> Option<Relation> {
     // `b` must be on that side of `a` at all.
     let on_side = match side {
@@ -307,8 +311,19 @@ fn relate_shown<K>(ma: &Shown<K>, mb: &Shown<K>, side: Side) -> Option<Relation>
         (a0 + a1 + b0 + b1) / 4.0
     };
     let (ta, tb) = (ea.find(m, ca), eb.find(m, cb));
-    let shared = if hi > lo {
-        (ea.pixel(ea.find(hi, ca)) - ea.pixel(ea.find(lo, ca))).abs()
+    // They face each other along a stretch (more than a point where two corners meet,
+    // to the last bits of a float), the same stretch whichever of the two is asked
+    // about first; how long it is along `a`'s edge, in its pixels. Along an edge seen
+    // passing under or over the eye the angle does not run one way, and the pixels
+    // found at the two ends of the stretch can be one: then its share of the angle
+    // `a`'s edge spans is taken.
+    let shared = if hi - lo > FACING {
+        let found = (ea.pixel(ea.find(hi, ca)) - ea.pixel(ea.find(lo, ca))).abs();
+        if found > 0.0 {
+            found
+        } else {
+            (hi - lo) / (a1 - a0) * ea.pixels
+        }
     } else {
         0.0
     };
@@ -401,4 +416,65 @@ pub fn reach_pair<K: Copy>(
             into / size_across
         })
         .reduce(f64::max)
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::Quat;
+
+    use super::*;
+    use crate::desk::View;
+    use crate::space::{PixelSize, Placement, facing};
+
+    /// Whichever of two is asked about first, they share a stretch of edge or they do
+    /// not: on random rooms (the same every run), monitors all round the eye, under and
+    /// over it too, some turned well away from facing it.
+    #[test]
+    fn a_shared_edge_is_shared_both_ways() {
+        let mut seed = 7u64;
+        let mut f = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 11) as f64 / (1u64 << 53) as f64) as f32
+        };
+        let sizes = [(2560, 1440), (1920, 1080), (1440, 2560), (5120, 1440)];
+        let mut checked = 0;
+        for _ in 0..3000 {
+            let monitors: Vec<Monitor<u8>> = (0..3)
+                .map(|id| {
+                    let (az, el) = ((f() - 0.5) * 7.0, (f() - 0.5) * 3.0);
+                    let r = 0.4 + 1.6 * f();
+                    let at = Vec3::new(az.sin() * el.cos(), el.sin(), -az.cos() * el.cos()) * r;
+                    let turn = Quat::from_rotation_y((f() - 0.5) * 1.5)
+                        * Quat::from_rotation_x((f() - 0.5) * 1.5);
+                    let (w, h) = sizes[(f() * 4.0) as usize % 4];
+                    Monitor {
+                        id,
+                        px: PixelSize::new(w, h),
+                        placement: Placement {
+                            position: at,
+                            rotation: facing(at, Vec3::ZERO) * turn,
+                            width: 0.3 + 1.5 * f(),
+                        },
+                    }
+                })
+                .collect();
+            let room = Room::new(&Frame::upright(Vec3::ZERO, 0.0), &monitors);
+            for a in 0..3u8 {
+                for b in 0..3u8 {
+                    for side in [Side::Right, Side::Left, Side::Above, Side::Below] {
+                        if a == b {
+                            continue;
+                        }
+                        let one = room.relate(a, b, side).map(|r| r.shared > 0.0);
+                        let other = room.relate(b, a, side.opposite()).map(|r| r.shared > 0.0);
+                        assert_eq!(one, other, "{a} {side:?} {b}: {monitors:?}");
+                        checked += usize::from(one == Some(true));
+                    }
+                }
+            }
+        }
+        assert!(checked > 100, "only {checked} shared edges");
+    }
 }
