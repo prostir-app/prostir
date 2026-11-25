@@ -5,10 +5,10 @@
 use prostir_proto::ClientMsg;
 use prostir_proto::request::{Asked, Outcome, Primary, Request};
 use prostir_proto::state::{DisplayId, DisplayState, ErrorCode, Mode, Placed, Prefs, ReqId, Row};
-use prostir_testkit::View;
+use prostir_testkit::{FakeHeadset, View};
 
 use crate::pc::{Options, Pc, TestDir};
-use crate::{SOON, START, connect, session};
+use crate::{SOON, START, TWO_MONITORS, connect, session};
 
 /// The code a failed reply carries.
 fn failed_with(outcome: &Outcome) -> Option<ErrorCode> {
@@ -16,6 +16,42 @@ fn failed_with(outcome: &Outcome) -> Option<ErrorCode> {
         Outcome::Failed { error, .. } => Some(error.known()),
         _ => None,
     }
+}
+
+/// A headset whose H.264 decoder takes 4096 a side but keeps up at 60 frames a second
+/// only with 2560x1600 worth of pixels (its `DecoderPixels` in `Open`): the PC offers
+/// it no 4K, refuses a 4K monitor asked for (`BAD_SIZE`), and makes a 1440p one.
+#[test]
+fn the_pixel_budget_bounds_the_sizes() {
+    let dir = TestDir::new("pixel-budget");
+    dir.save_monitors(TWO_MONITORS);
+    let mut keys = dir.pair();
+    let pc = Pc::start(&dir, &Options::default());
+    let mut state = FakeHeadset::state();
+    state.caps.as_mut().unwrap().pixels = vec![prostir_proto::state::PixelBudget {
+        codec: 0,
+        max_pixels: 2560 * 1600,
+    }];
+    let mut headset = FakeHeadset::connect_saying(pc.addr, &mut keys, &state)
+        .unwrap_or_else(|e| panic!("connecting: {e}"));
+    headset
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    let limits = headset.view().pc.limits.clone().unwrap();
+    assert!(!limits.sizes.contains(&Mode::new(3840, 2160)), "{limits:?}");
+    assert!(limits.sizes.contains(&Mode::new(2560, 1440)), "{limits:?}");
+    let big = headset
+        .ask(Request::AddDisplay {
+            mode: Mode::new(3840, 2160),
+        })
+        .unwrap();
+    assert_eq!(failed_with(&big), Some(ErrorCode::BAD_SIZE), "{big:?}");
+    let fits = headset
+        .ask(Request::AddDisplay {
+            mode: Mode::new(2560, 1440),
+        })
+        .unwrap();
+    assert!(matches!(fits, Outcome::Added { .. }), "{fits:?}");
 }
 
 /// Over the limit, a size the PC does not make, the last monitor, a display that is
