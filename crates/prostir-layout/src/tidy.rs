@@ -126,12 +126,29 @@ pub fn line_up<K: Copy + Ord>(
     previous_rows: Option<&[Vec<K>]>,
     lid: Option<K>,
 ) -> BTreeMap<K, Placement> {
+    line_up_keeping(all, frame, main, previous_rows, lid, &[], None)
+}
+
+/// [`line_up`], each of `glued` (pairs as [`glued_pairs`] gives them: the one of the
+/// row nearer the main one first) kept glued as well, as if its seam were closed: for
+/// monitors carried away from where they were glued (further from the eye, so their
+/// seams open in the room though they met as seen), whose seams are to close again.
+/// The pairs it keeps glued, as [`glued_pairs`] gives them, are added to `kept`.
+pub fn line_up_keeping<K: Copy + Ord>(
+    all: &[Monitor<K>],
+    frame: &Frame,
+    main: Option<K>,
+    previous_rows: Option<&[Vec<K>]>,
+    lid: Option<K>,
+    glued: &[(K, K)],
+    kept: Option<&mut Vec<(K, K)>>,
+) -> BTreeMap<K, Placement> {
     // The rows as the eye sees them, the laptop screen among them: what is kept.
     let ids: Vec<K> = all.iter().map(|m| m.id).collect();
     let seen_rows = rows_of(&ids, &Room::new(frame, all), previous_rows);
     let monitors: Vec<Monitor<K>> = all.iter().filter(|m| Some(m.id) != lid).copied().collect();
     let screen = all.iter().find(|m| Some(m.id) == lid).copied();
-    let mut lined = line_up_rows(&monitors, frame, main, &seen_rows, screen, None);
+    let mut lined = line_up_rows(&monitors, frame, main, &seen_rows, screen, glued, kept);
     if let Some(l) = screen {
         let mut p = frame.unplace(l.placement);
         // Only a monitor lined up over it pushes it down: one that covered it as it
@@ -347,14 +364,15 @@ fn is_flat(poses: &[Pose]) -> bool {
         })
 }
 
-/// [`line_up`] of the monitors without the laptop screen; the pairs it keeps glued
-/// added to `glued_out`.
+/// [`line_up`] of the monitors without the laptop screen, the pairs of `keep` glued
+/// too (see [`line_up_keeping`]); the pairs it keeps glued added to `glued_out`.
 fn line_up_rows<K: Copy + Ord>(
     monitors: &[Monitor<K>],
     frame: &Frame,
     main: Option<K>,
     seen_rows: &[Vec<K>],
     screen: Option<Monitor<K>>,
+    keep: &[(K, K)],
     mut glued_out: Option<&mut Vec<(K, K)>>,
 ) -> BTreeMap<K, Placement> {
     let ids: Vec<K> = monitors.iter().map(|m| m.id).collect();
@@ -534,6 +552,11 @@ fn line_up_rows<K: Copy + Ord>(
         let stood = |k: K| local[&k].0;
         let lined = |k: K| out[&k];
         glued(&rows[r], &inner, &local, (turn, over, kept[r]), &mut pairs);
+        for &(p, u) in keep {
+            if inner.contains(&p) && rows[r].contains(&u) && !pairs.contains(&(p, u)) {
+                pairs.push((p, u));
+            }
+        }
         let closing = |p: K, u: K| {
             close(
                 &|s: f32| seam_gap(p, u, &lined, &local, turn, dir * s, over).map(|g| g.0),
@@ -644,7 +667,15 @@ pub fn glued_pairs<K: Copy + Ord>(
     let monitors: Vec<Monitor<K>> = all.iter().filter(|m| Some(m.id) != lid).copied().collect();
     let screen = all.iter().find(|m| Some(m.id) == lid).copied();
     let mut pairs = Vec::new();
-    line_up_rows(&monitors, frame, main, &seen_rows, screen, Some(&mut pairs));
+    line_up_rows(
+        &monitors,
+        frame,
+        main,
+        &seen_rows,
+        screen,
+        &[],
+        Some(&mut pairs),
+    );
     pairs.sort();
     pairs
 }
