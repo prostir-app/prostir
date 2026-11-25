@@ -206,10 +206,10 @@ fn no_long_dashes_in_the_texts() {
     }
 }
 
-/// Every `.rs` file of a program's `src/` that is not a test (`tests.rs`, `tests/`),
-/// with its text.
-fn code_of(dir: &str) -> Vec<(PathBuf, String)> {
-    fn walk(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
+/// Every `.rs` file of a program's `src/`, with its text; the tests (`tests.rs`,
+/// `tests/`) only if `with_tests`.
+fn code_of(dir: &str, with_tests: bool) -> Vec<(PathBuf, String)> {
+    fn walk(dir: &Path, with_tests: bool, out: &mut Vec<(PathBuf, String)>) {
         let mut entries: Vec<_> = std::fs::read_dir(dir)
             .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
             .flatten()
@@ -219,17 +219,17 @@ fn code_of(dir: &str) -> Vec<(PathBuf, String)> {
         for path in entries {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if path.is_dir() {
-                if name != "tests" {
-                    walk(&path, out);
+                if with_tests || name != "tests" {
+                    walk(&path, with_tests, out);
                 }
-            } else if name.ends_with(".rs") && name != "tests.rs" {
+            } else if name.ends_with(".rs") && (with_tests || name != "tests.rs") {
                 let text = std::fs::read_to_string(&path).expect("a source file");
                 out.push((path, text));
             }
         }
     }
     let mut out = Vec::new();
-    walk(&root().join(dir).join("src"), &mut out);
+    walk(&root().join(dir).join("src"), with_tests, &mut out);
     out
 }
 
@@ -261,31 +261,57 @@ fn named(sources: &[(PathBuf, String)], prefix: &str) -> (BTreeSet<String>, Vec<
     (ids, stems)
 }
 
+/// A message only the tests show has `-tests-` in its id (`pc-worker-run-tests-...`).
+const TESTS_ONLY: &str = "-tests-";
+
 #[test]
 fn the_code_and_the_messages_match() {
     let en = variables(&english());
     for (prefix, dir) in PROGRAMS {
-        let sources = code_of(dir);
+        let sources = code_of(dir, false);
         assert!(!sources.is_empty(), "{dir}: no code found");
-        let (ids, stems) = named(&sources, prefix);
-        let numbered = |id: &str| {
+        let (shown, stems) = named(&sources, prefix);
+        let (in_tests, test_stems) = named(&code_of(dir, true), prefix);
+        let numbered = |id: &str, stems: &[String]| {
             stems.iter().any(|stem| {
                 id.strip_prefix(stem.as_str())
                     .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
             })
         };
-        let missing: Vec<_> = ids.iter().filter(|id| !en.contains_key(*id)).collect();
+        let missing: Vec<_> = in_tests
+            .iter()
+            .filter(|id| !en.contains_key(*id) && !numbered(id, &test_stems))
+            .collect();
         assert!(
             missing.is_empty(),
             "{dir} names messages that lang/en.ftl lacks: {missing:?}"
         );
         let unused: Vec<_> = en
             .keys()
-            .filter(|id| id.starts_with(prefix) && !ids.contains(*id) && !numbered(id))
+            .filter(|id| id.starts_with(prefix) && !id.contains(TESTS_ONLY))
+            .filter(|id| !shown.contains(*id) && !numbered(id, &stems))
             .collect();
         assert!(
             unused.is_empty(),
             "lang/en.ftl has messages {dir} never shows: {unused:?}"
+        );
+        let test_only_unused: Vec<_> = en
+            .keys()
+            .filter(|id| id.starts_with(prefix) && id.contains(TESTS_ONLY))
+            .filter(|id| !in_tests.contains(*id))
+            .collect();
+        assert!(
+            test_only_unused.is_empty(),
+            "lang/en.ftl has messages for the tests of {dir} that no test names: {test_only_unused:?}"
+        );
+        let hidden: Vec<_> = in_tests
+            .iter()
+            .filter(|id| !shown.contains(*id) && !id.contains(TESTS_ONLY))
+            .filter(|id| !numbered(id, &stems))
+            .collect();
+        assert!(
+            hidden.is_empty(),
+            "only the tests of {dir} name these messages (a message only the tests show has \"{TESTS_ONLY}\" in its id): {hidden:?}"
         );
     }
 }
