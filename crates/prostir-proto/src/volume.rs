@@ -11,8 +11,11 @@
 //! The headset takes a request only when the PC had seen all of its own changes
 //! (`seen >= seq`); otherwise its own level stands and it says so. The PC writes the
 //! headset's level to its device only when no newer request is on its way and the
-//! slider has rested a moment, so a slider being dragged never jumps back; a device
-//! change equal to what the PC wrote itself is its echo and asks nothing.
+//! slider has rested a moment, so a slider being dragged never jumps back. The first
+//! change of the device after the PC wrote it, to exactly that level and soon, is the
+//! write's echo and asks nothing; so is a change to where the device already was.
+//! Every other change is the person's, a 1 % one too (the sound system reads back the
+//! percent it was given: `pactl` takes and says whole percent).
 //!
 //! The level on the wire is in percent; the headset's system counts its volume in
 //! steps of its own ([`Steps`]), which only the headset knows. A request between two
@@ -29,8 +32,10 @@ use crate::state::{Volume, VolumeAsk};
 /// While the slider moves, the PC asks at most this often, with the newest level; and
 /// it writes the headset's answer once the slider rested this long.
 pub const ASK_EVERY: Duration = Duration::from_millis(50);
-/// A level the PC wrote, give or take this, coming back from the device is its echo.
-const ECHO: u8 = 1;
+/// The level the PC wrote, coming back from the device this soon as its first change
+/// after the write, is the write's echo. Later it is taken as a move to the level the
+/// headset already has: one request more, and nothing changes.
+pub const ECHO_WITHIN: Duration = Duration::from_secs(1);
 /// Requests closer together than this are one move of the slider (the PC asks every
 /// [`ASK_EVERY`] while it moves, and writes the answer only once it rested): each goes
 /// on from where the one before asked, not from the step that one became.
@@ -184,8 +189,10 @@ pub enum Act {
 /// The PC's side, for one session.
 #[derive(Debug, Clone, Default)]
 pub struct PcVolume {
-    /// What the PC last wrote to the device, while the device has not moved since.
-    written: Option<(u8, bool)>,
+    /// Where the device was last said to be.
+    known: Option<(u8, bool)>,
+    /// What the PC wrote to the device and when, until the device's next change.
+    echo: Option<(u8, bool, Instant)>,
     /// The newest change of the headset's own that came.
     seen: u32,
     /// Requests sent, and the newest one answered.
@@ -214,13 +221,18 @@ impl PcVolume {
 
     /// The device changed (the slider, the volume keys): what to do now.
     pub fn device(&mut self, level: u8, muted: bool, now: Instant) -> Option<Act> {
-        if let Some((l, m)) = self.written
-            && m == muted
-            && l.abs_diff(level) <= ECHO
-        {
+        let level = level.min(100);
+        if self.known == Some((level, muted)) {
+            // Said again, nothing moved: the echo, if it was this level, came.
+            self.echo.take_if(|(l, m, _)| (*l, *m) == (level, muted));
             return None;
         }
-        self.written = None;
+        self.known = Some((level, muted));
+        if self.echo.take().is_some_and(|(l, m, at)| {
+            (l, m) == (level, muted) && now.saturating_duration_since(at) < ECHO_WITHIN
+        }) {
+            return None;
+        }
         self.answer = None;
         self.waiting = Some((level.min(100), muted));
         self.last_move = Some(now);
@@ -231,10 +243,10 @@ impl PcVolume {
     /// like a move of the device, whose echo of the level then asks nothing more.
     pub fn set_here(&mut self, level: u8, muted: bool, now: Instant) -> Option<Act> {
         let level = level.min(100);
-        // The device left any level written before, even one within an echo of this.
-        self.written = None;
+        // Not the echo of a level written before, even one within an echo of this.
+        self.echo = None;
         let act = self.device(level, muted, now);
-        self.written = Some((level, muted));
+        self.echo = Some((level, muted, now));
         act
     }
 
@@ -259,7 +271,8 @@ impl PcVolume {
         }
         if self.answer.is_some() && since(self.last_move) {
             let (level, muted) = self.answer.take()?;
-            self.written = Some((level, muted));
+            // A device already there does not change, and says nothing back.
+            self.echo = (self.known != Some((level, muted))).then_some((level, muted, now));
             return Some(Act::Write { level, muted });
         }
         None
@@ -308,6 +321,8 @@ mod tests {
         device_events: Vec<(u64, (u8, bool))>,
         latency: u64,
         messages: Vec<u64>,
+        /// The device says a write this long after it.
+        echo_after: u64,
     }
 
     impl World {
@@ -326,6 +341,7 @@ mod tests {
                 device_events: Vec::new(),
                 latency,
                 messages: Vec::new(),
+                echo_after: 2,
             };
             // The session opens: the headset's level comes in `Open`.
             let open = w.headset.now();
@@ -346,7 +362,8 @@ mod tests {
                 Some(Act::Write { level, muted }) => {
                     self.writes.push((self.ms, level));
                     self.device = (level, muted);
-                    self.device_events.push((self.ms + 2, (level, muted)));
+                    let at = self.ms + self.echo_after;
+                    self.device_events.push((at, (level, muted)));
                 }
                 None => {}
             }
@@ -486,36 +503,90 @@ mod tests {
         }
     }
 
-    /// The slider moved by 1 % at a time, resting between moves (the volume keys of a
-    /// desktop set to 1 %): the headset never goes the other way, and every two moves
-    /// take it a step on (the first move from a level the PC wrote is within its echo
-    /// and asks nothing), up to the top and down to silence.
+    /// The slider moved by 1 % at a time, again and again, resting between moves (the
+    /// volume keys of a desktop set to 1 %): every press asks the headset once, even
+    /// the first after a level the PC wrote, and takes it a step on, never back, up to
+    /// the top and down to silence.
     #[test]
     fn one_percent_at_a_time_is_never_stuck() {
         for steps in STEPS {
-            let mut w = World::new(5, 40, steps);
-            w.run(100);
-            for d in [1i16, -1] {
-                let end = if d > 0 { 100 } else { 0 };
-                let mut presses = 0;
-                let mut level = w.headset.now().level;
-                while level != end {
-                    let before = level;
-                    for _ in 0..2 {
+            // Pressed again after a rest, and soon (a person's fastest presses are
+            // apart by more than `ONE_MOVE`; held, the key repeats faster, a drag).
+            for rest in [300, 150] {
+                let mut w = World::new(5, 40, steps);
+                w.run(100);
+                for d in [1i16, -1] {
+                    let end = if d > 0 { 100 } else { 0 };
+                    let mut level = w.headset.now().level;
+                    let mut presses = 0;
+                    while level != end {
+                        let asks = w.answers.len();
                         let slider = (i16::from(w.device.0) + d).clamp(0, 100) as u8;
                         w.slide(slider);
-                        w.run(w.ms + 300);
+                        w.run(w.ms + rest);
                         let now = w.headset.now().level;
-                        let case = format!("{steps} steps, press {presses} at {level} by {d}");
-                        assert!(i16::from(now) * d >= i16::from(level) * d, "back ({case})");
+                        let case = format!("{steps} steps, {rest} ms, {level} by {d}");
+                        assert_eq!(w.answers.len(), asks + 1, "asked once ({case})");
+                        assert!(i16::from(now) * d > i16::from(level) * d, "stuck ({case})");
                         assert_eq!(step(now, steps), now, "on a step ({case})");
+                        assert_eq!(w.device.0, now, "the slider on the step ({case})");
                         level = now;
                         presses += 1;
+                        assert!(presses <= 100, "{case}: too many presses");
                     }
-                    assert_ne!(level, before, "stuck at {level} ({steps} steps, by {d})");
-                    assert!(presses <= 200, "{steps} steps, by {d}: too many presses");
                 }
             }
+        }
+    }
+
+    /// A write whose echo never comes on its own (the device was there already, or the
+    /// sound system read it together with the person's next press): a 1 % press right
+    /// after it is the person's, and asks.
+    #[test]
+    fn a_press_right_after_a_write_is_the_persons() {
+        let start = Instant::now();
+        let v = Volume {
+            level: 40,
+            muted: false,
+            seq: 0,
+            ask: 0,
+        };
+        let mut pc = PcVolume::default();
+        let written = pc.from_headset(&v, start);
+        assert_eq!(
+            written,
+            Some(Act::Write {
+                level: 40,
+                muted: false
+            })
+        );
+        let soon = start + Duration::from_millis(10);
+        assert!(matches!(pc.device(41, false, soon), Some(Act::Ask(_))));
+    }
+
+    /// The device says the PC's write at once, or late: that is the write's echo and
+    /// asks nothing, nor does the same level said again; a press after it is the
+    /// person's and asks.
+    #[test]
+    fn the_echo_of_a_write_asks_nothing() {
+        for echo_after in [2, 400] {
+            let case = format!("{echo_after} ms");
+            let mut w = World::new(5, 40, 15);
+            w.echo_after = echo_after;
+            w.run(1000);
+            w.buttons(53);
+            w.run(2000);
+            assert_eq!(w.writes.len(), 2, "{case}");
+            assert_eq!(w.messages.len(), 1, "the buttons' Volume only ({case})");
+            // The same level said again asks nothing either.
+            w.device_events.push((w.ms + 1, w.device));
+            w.run(w.ms + 300);
+            assert_eq!(w.messages.len(), 1, "said again ({case})");
+            let slider = w.device.0 + 1;
+            w.slide(slider);
+            w.run(w.ms + 300);
+            assert_eq!(w.messages.len(), 3, "the press asked ({case})");
+            assert!(w.headset.now().level > 53, "{case}");
         }
     }
 

@@ -832,8 +832,10 @@ requests.
 
 - **The headset changes it**: `seq + 1`, and `Volume{level, muted, seq, ask: 0}`. The
   host sets its sound device to it and remembers what it set.
-- **The PC's device moves**: if it is where the host set it itself (within 1 %), that
-  is an echo, and nothing happens. Otherwise `ask + 1`, and
+- **The PC's device moves**: its first change after the host set it, to exactly that
+  level and within a second, is the write's echo, and nothing happens; so is a change
+  to where the device already was. Every other change is the person's, a 1 % one too:
+  `ask + 1`, and
   `VolumeAsk{level, muted, seen: the last seq from the headset, ask}`; while a slider
   is dragged, at most every 50 ms, with the newest level.
 - **The headset gets `VolumeAsk`**: if `seen` is at least its own last `seq` (the host

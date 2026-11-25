@@ -112,11 +112,11 @@ fn one_volume_for_the_slider_and_the_buttons() {
     assert_eq!(written(&pc).len(), before + during.len());
 }
 
-/// The slider moved by 1 % at a time, as the desktop's volume keys set to 1 % move it,
-/// on a headset of the first headset's steps and on one of 100: each move that asks
-/// the headset (the first from a level the PC wrote is within its echo) takes it to
-/// its next step that way, so the slider never stays stuck between two steps, and the
-/// device stands on that step after.
+/// The slider moved by 1 % at a time, again and again, as the desktop's volume keys set
+/// to 1 % move it, on a headset of the first headset's steps and on one of 100: every
+/// press asks the headset once, even the first from a level the PC wrote, and takes it
+/// to its next step that way, so the slider never stays stuck between two steps, and
+/// the device stands on that step after.
 #[test]
 fn the_slider_by_one_percent_goes_step_by_step() {
     for steps in [VOLUME_STEPS, 100] {
@@ -125,14 +125,13 @@ fn the_slider_by_one_percent_goes_step_by_step() {
         headset.set_volume_steps(steps);
         wait_first_volume(&mut pc, &mut headset);
         let mut level = FIRST_VOLUME;
-        for d in [1i16, 1, -1, -1] {
+        for d in [1i16, 1, 1, -1, -1, -1] {
             let asks = headset.view().volume_asks.len();
-            let mut slider = level;
-            for _ in 0..2 {
-                slider = (i16::from(slider) + d) as u8;
-                pc.desktop(&format!("volume {slider}"));
-                pc.wait_log(SOON, &format!("fake desktop: volume moved to {slider}"));
-            }
+            let slider = (i16::from(level) + d) as u8;
+            pc.desktop(&format!("volume {slider}"));
+            headset
+                .wait(SOON, "the press asked", |v| v.volume_asks.len() > asks)
+                .unwrap();
             let at = stepped(level, slider, steps);
             assert!(
                 i16::from(at) * d > i16::from(level) * d,
