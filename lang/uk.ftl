@@ -285,9 +285,9 @@ pc-worker-run-tests-kept-h-264-hevc-did-not = лишився H.264: HEVC не з
 
 ## src/platform/linux/audio.rs
 
-pc-audio-prostir-headset = Prostir — шолом
+pc-audio-prostir-headset = Prostir: шолом
 pc-audio-prostir-internal = Prostir (службовий)
-pc-audio-prostir-headset-microphone = Prostir — мікрофон шолома
+pc-audio-prostir-headset-microphone = Prostir: мікрофон шолома
 
 ## src/platform/sound.rs
 

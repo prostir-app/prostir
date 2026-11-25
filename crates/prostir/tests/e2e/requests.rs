@@ -5,10 +5,10 @@
 use prostir_proto::ClientMsg;
 use prostir_proto::request::{Asked, Outcome, Primary, Request};
 use prostir_proto::state::{DisplayId, DisplayState, ErrorCode, Mode, Placed, Prefs, ReqId, Row};
-use prostir_testkit::View;
+use prostir_testkit::{FakeHeadset, View};
 
 use crate::pc::{Options, Pc, TestDir};
-use crate::{SOON, START, connect, session};
+use crate::{SOON, START, TWO_MONITORS, connect, session};
 
 /// The code a failed reply carries.
 fn failed_with(outcome: &Outcome) -> Option<ErrorCode> {
@@ -16,6 +16,42 @@ fn failed_with(outcome: &Outcome) -> Option<ErrorCode> {
         Outcome::Failed { error, .. } => Some(error.known()),
         _ => None,
     }
+}
+
+/// A headset whose H.264 decoder takes 4096 a side but keeps up at 60 frames a second
+/// only with 2560x1600 worth of pixels (its `DecoderPixels` in `Open`): the PC offers
+/// it no 4K, refuses a 4K monitor asked for (`BAD_SIZE`), and makes a 1440p one.
+#[test]
+fn the_pixel_budget_bounds_the_sizes() {
+    let dir = TestDir::new("pixel-budget");
+    dir.save_monitors(TWO_MONITORS);
+    let mut keys = dir.pair();
+    let pc = Pc::start(&dir, &Options::default());
+    let mut state = FakeHeadset::state();
+    state.caps.as_mut().unwrap().pixels = vec![prostir_proto::state::PixelBudget {
+        codec: 0,
+        max_pixels: 2560 * 1600,
+    }];
+    let mut headset = FakeHeadset::connect_saying(pc.addr, &mut keys, &state)
+        .unwrap_or_else(|e| panic!("connecting: {e}"));
+    headset
+        .wait(START, "every monitor showing", View::all_monitors_show)
+        .unwrap();
+    let limits = headset.view().pc.limits.clone().unwrap();
+    assert!(!limits.sizes.contains(&Mode::new(3840, 2160)), "{limits:?}");
+    assert!(limits.sizes.contains(&Mode::new(2560, 1440)), "{limits:?}");
+    let big = headset
+        .ask(Request::AddDisplay {
+            mode: Mode::new(3840, 2160),
+        })
+        .unwrap();
+    assert_eq!(failed_with(&big), Some(ErrorCode::BAD_SIZE), "{big:?}");
+    let fits = headset
+        .ask(Request::AddDisplay {
+            mode: Mode::new(2560, 1440),
+        })
+        .unwrap();
+    assert!(matches!(fits, Outcome::Added { .. }), "{fits:?}");
 }
 
 /// Over the limit, a size the PC does not make, the last monitor, a display that is
@@ -282,12 +318,12 @@ fn only_the_main_headset_changes_the_limits() {
 #[test]
 fn no_more_streams_than_the_headset_decodes() {
     let dir = TestDir::new("streams-max");
-    dir.save_monitors(crate::TWO_MONITORS);
+    dir.save_monitors(TWO_MONITORS);
     let mut keys = dir.pair();
     let pc = Pc::start(&dir, &Options::default());
-    let mut state = prostir_testkit::FakeHeadset::state();
+    let mut state = FakeHeadset::state();
     state.caps.as_mut().unwrap().streams_max = 3;
-    let mut headset = prostir_testkit::FakeHeadset::connect_saying(pc.addr, &mut keys, &state)
+    let mut headset = FakeHeadset::connect_saying(pc.addr, &mut keys, &state)
         .unwrap_or_else(|e| panic!("connecting: {e}"));
     headset
         .wait(START, "every monitor showing", View::all_monitors_show)
@@ -319,7 +355,7 @@ fn no_more_streams_than_the_headset_decodes() {
 fn a_guest_is_not_asked_for_the_volume() {
     use prostir_proto::state::caps;
     let dir = TestDir::new("guest-volume");
-    dir.save_monitors(crate::TWO_MONITORS);
+    dir.save_monitors(TWO_MONITORS);
     let mut keys = dir.pair();
     let key = prostir_proto::secure::to_hex(&keys.identity.public);
     dir.save_settings(&format!("access {key} guest input\n"));

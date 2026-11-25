@@ -1313,3 +1313,146 @@ fn two_pcs_one_over_usb() {
     sim.after(Duration::from_secs(10));
     assert!(sim.cmds().is_empty(), "two links: no more search");
 }
+
+/// "Change PC" from a session over Wi-Fi, and the USB dial reaches the PC: the cable
+/// counts as the user's choice, so once that session ends (the cable pulled) the
+/// PC's answer over Wi-Fi is dialed, with no tap in the menu.
+#[test]
+fn after_change_pc_and_usb_the_pc_is_found_on_wifi() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.missed(s);
+    let (_, _) = sim.asked(None);
+    sim.answer(Some(1), addr(7));
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
+    sim.reach(s, 1, addr(7));
+    let _ = sim.cmds();
+    sim.s.change_pc();
+    let _ = sim.cmds();
+    sim.end(s, Some(1), &Ended::default(), Duration::from_secs(9));
+    sim.after(RETRY_PAUSE);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    sim.reach(s, 1, usb());
+    let _ = sim.cmds();
+    let opened = Ended {
+        opened: true,
+        ..Ended::default()
+    };
+    sim.end(s, Some(1), &opened, Duration::from_secs(60));
+    let (dialed, _) = dials_its_answer(&mut sim, 1, addr(7), 5);
+    assert!(dialed, "the PC over Wi-Fi is dialed on its own");
+}
+
+/// A stale `adb reverse` (Prostir stopped on the PC, adbd still reversing): the USB
+/// dial opens and ends at once with no PC. The round goes on to the query and the
+/// last address instead of starting over at USB.
+#[test]
+fn a_stale_usb_reverse_leads_on_to_wifi() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    sim.s.dialed(s, usb());
+    sim.end(s, None, &Ended::default(), MS);
+    let (s, _) = sim.asked(None);
+    sim.missed(s);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::HostFile);
+    sim.missed(s);
+    let (_, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::LastOf(pc(1)));
+}
+
+/// A PC picked in the list by a cable mark gone stale (the cable pulled since): the
+/// USB dial takes that PC alone, and when nothing is at the cable the pick is dialed
+/// over Wi-Fi, where it answered.
+#[test]
+fn a_pick_by_a_stale_cable_mark_falls_back_to_wifi() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.reach(s, 1, usb());
+    let _ = sim.cmds();
+    sim.s.change_pc();
+    let _ = sim.cmds();
+    sim.end(s, Some(1), &Ended::default(), Duration::from_secs(9));
+    sim.after(RETRY_PAUSE);
+    let (s, _) = sim.step();
+    sim.s.dialed(s, usb());
+    sim.end(s, None, &let_go(1), MS);
+    let (a, _) = sim.asked(None);
+    sim.answer(Some(1), addr(9));
+    sim.missed(a);
+    assert!(sim.s.search().found[0].usb);
+    sim.s.pick_found(0, sim.now);
+    sim.after(Duration::ZERO);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    assert_eq!(takes(&cmd), Takes::Only(vec![pc(1)]));
+    sim.missed(s);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(9)), "the pick over Wi-Fi");
+    assert_eq!(takes(&cmd), Takes::Only(vec![pc(1)]));
+    sim.reach(s, 1, addr(9));
+    assert!(sim.s.connected(pc(1)));
+}
+
+/// A USB link that ends takes the cable's mark with it: the PC may be on Wi-Fi only
+/// by now, and the next USB dial says again who is at the cable.
+#[test]
+fn the_cable_mark_goes_with_the_usb_link() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.reach(s, 1, usb());
+    sim.answer(Some(1), addr(9));
+    assert!(sim.s.search().found[0].usb);
+    sim.end(s, Some(1), &Ended::default(), Duration::from_secs(9));
+    assert!(!sim.s.search().found[0].usb);
+}
+
+/// The user picked USB: the round dials it once, at its USB step, and not again as
+/// the pick.
+#[test]
+fn a_pick_of_usb_is_dialed_once_a_round() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.s.connect_to(usb(), sim.now);
+    sim.after(MS);
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    sim.missed(s);
+    let (_, cmd) = sim.step();
+    assert!(matches!(cmd, NetCmd::Ask { .. }), "not USB again: {cmd:?}");
+}
+
+/// A PC the headset does not trust at the cable's end (let go by a dial for the
+/// picked PC alone) is not marked: the mark is for a trusted PC in the list.
+#[test]
+fn an_untrusted_pc_is_not_marked_at_the_cable() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.s.connect_to(addr(7), sim.now);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.reach(s, 1, addr(7));
+    let _ = sim.cmds();
+    let opened = Ended {
+        opened: true,
+        ..Ended::default()
+    };
+    sim.end(s, Some(1), &opened, Duration::from_secs(60));
+    sim.after(Duration::ZERO);
+    let (s, cmd) = sim.step();
+    assert_eq!(takes(&cmd), Takes::Only(vec![pc(1)]));
+    sim.s.dialed(s, usb());
+    sim.end(s, None, &let_go(5), MS);
+    assert_eq!(sim.s.search().usb_pc, None);
+}

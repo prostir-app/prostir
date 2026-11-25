@@ -1579,6 +1579,9 @@ impl Panel {
             Kind::Waiting => None,
             _ => note.on.and_then(|on| self.note_anchor(on, items)),
         };
+        // What lies on the page, made once (it measures every text) and only when a
+        // place is looked for.
+        let mut taken: Option<Vec<Rect>> = None;
         let placed = anchor.and_then(|b| {
             // A tile: room enough under its title, for a text that fits across it.
             if b.height() >= 2.0 * h + 20.0 && wanted <= b.width() - 20.0 {
@@ -1586,8 +1589,8 @@ impl Panel {
                 let r = rect(b.left() + 10.0, b.bottom() - 10.0 - h, w, h);
                 return Some((r, None, false, true));
             }
-            let taken = self.taken(items);
-            self.free_by(b, wanted, h, &taken, lowest)
+            let taken = taken.insert(self.taken(items));
+            self.free_by(b, wanted, h, taken, lowest)
                 .map(|(r, tip, above)| (r, tip, above, false))
         });
         let (rect_, tip, above, inside) = match placed {
@@ -1600,7 +1603,10 @@ impl Panel {
                 let x = (pw - w) / 2.0;
                 let bottom = rect(x, lowest - h, w, h);
                 let top = rect(x, NOTE_TOP, w, h);
-                let taken = self.taken(items);
+                let taken = match taken {
+                    Some(taken) => taken,
+                    None => self.taken(items),
+                };
                 let free = |r: &Rect| !taken.iter().any(|t| overlap(r, t));
                 let r = match [bottom, top]
                     .into_iter()
@@ -3054,8 +3060,8 @@ fn scales_of(s: &UiState) -> &[u16] {
 /// The PC's own displays from `y` (those connected first), each on a row: its name,
 /// its connector smaller under it, and its switch (shown or hidden, said by the
 /// highlighted option). One not connected says so, without a switch (there is
-/// nothing to show); with as many shown as the PC allows, the others' "Shown" waits,
-/// saying why. As many rows as fit
+/// nothing to show) unless it is still shown, so it can be hidden; with as many shown
+/// as the PC allows, the others' "Shown" waits, saying why. As many rows as fit
 /// above "Line up", a page at a time, the pages turned beside the title. Where the
 /// next thing goes.
 fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f32 {
@@ -3092,7 +3098,9 @@ fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -
     let bw = 128.0;
     for d in s.physical.iter().skip(page * rows).take(rows) {
         items.push(Item::Box(rect(x, y, w, 54.0), [255, 255, 255, 8]));
-        let room = if d.connected {
+        // One shown and then disconnected keeps its switch, to be hidden.
+        let switched = d.connected || d.shown;
+        let room = if switched {
             w - 2.0 * bw - 10.0 - 32.0
         } else {
             w - 32.0
@@ -3127,7 +3135,7 @@ fn pc_displays(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -
             (l.t("headset-pc-display-shown"), true, can_show),
             (l.t("headset-pc-display-hidden"), false, true),
         ];
-        for (i, (label, on, enabled)) in switch.into_iter().enumerate().filter(|_| d.connected) {
+        for (i, (label, on, enabled)) in switch.into_iter().enumerate().filter(|_| switched) {
             let r = rect(
                 x + w - 2.0 * bw - 14.0 + i as f32 * (bw + 6.0),
                 y + 7.0,
@@ -5455,6 +5463,26 @@ mod tests {
             &s,
             crate::lang::builtin("uk").t("headset-pc-displays")
         ));
+    }
+
+    /// A display of the PC shown and then disconnected (the laptop's lid closed) keeps
+    /// its switch, so it can still be hidden; "Shown" stays as it is.
+    #[test]
+    fn a_disconnected_pc_display_left_shown_can_be_hidden() {
+        let mut s = sample_state();
+        s.tab = Tab::Monitors;
+        s.physical[0].shown = true;
+        let rows = physical_rows(&s);
+        assert_eq!(
+            rows[0],
+            (
+                "Екран ноутбука".into(),
+                None,
+                Style::Selected,
+                Some(Action::ShowPhysical(k(100), false)),
+                Style::Normal
+            )
+        );
     }
 
     /// More displays of the PC than fit above "Line up": a page at a time, the pages

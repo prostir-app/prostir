@@ -193,23 +193,10 @@ fn placeholders_are_the_same_in_every_language() {
     }
 }
 
-/// Messages that keep a long dash: the names of the sound devices, moved from the code
-/// as they were, and shown by the sound settings of the desktop.
-const LONG_DASH_KEPT: &[&str] = &[
-    "pc-audio-prostir-headset",
-    "pc-audio-prostir-headset-microphone",
-];
-
 #[test]
 fn no_long_dashes_in_the_texts() {
     for (code, text) in files() {
         for (n, line) in text.lines().enumerate() {
-            if LONG_DASH_KEPT.iter().any(|id| {
-                line.strip_prefix(id)
-                    .is_some_and(|rest| rest.starts_with(" ="))
-            }) {
-                continue;
-            }
             assert!(
                 !line.contains('\u{2014}') && !line.contains('\u{2013}'),
                 "{code}.ftl:{}: a long dash: {line}",

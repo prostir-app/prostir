@@ -327,6 +327,16 @@ fn other_protocol_is_told_to_update() {
     assert!(String::from_utf8_lossy(text).contains("Prostir"));
 }
 
+/// A headset that closes the link before its hello (a USB dial for another PC lets go
+/// of this one so) is not an error worth a warning: it is told apart.
+#[test]
+fn a_hang_up_before_the_hello_is_told_apart() {
+    let pc = TestPc::new("no-hello");
+    let (refused, ()) = connect(&pc, |h| h.link.closer.close());
+    let e = refused.unwrap_err();
+    assert!(e.is::<HungUpBeforeHello>(), "{e:#}");
+}
+
 /// A development build of another revision speaks the same protocol version but
 /// other messages: it is turned away, told by the PC's revision which side is older.
 #[test]

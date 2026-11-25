@@ -54,7 +54,8 @@
 //!   them. Windows passes inherited sockets in `PROSTIR_SOCKETS` instead of
 //!   `LISTEN_FDS`, and starts the program without `fork`.
 //! - `keep_adb_reverse`: a headset on USB reaches the PC through 127.0.0.1. A service
-//!   of the operating system started once, not part of the desktop (see `contract.rs`).
+//!   of the operating system started once, not part of the desktop (see `contract.rs`);
+//!   `drop_adb_reverse` removes what it set up, as the program quits.
 //!
 //! The network belongs to the operating system, not to the desktop: `net.rs` holds
 //! it for every desktop, the fake one too, with a part for each operating system. So

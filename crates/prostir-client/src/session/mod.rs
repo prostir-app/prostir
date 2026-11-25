@@ -107,8 +107,8 @@ pub struct FoundHost {
     /// also reachable over USB (made again only when that changes).
     pub label: String,
     pub ip: String,
-    /// The USB dial showed this PC at the cable's end: picking it in the list goes
-    /// over USB.
+    /// The USB dial showed this PC at the cable's end: picking it in the list tries
+    /// USB first.
     pub usb: bool,
 }
 
@@ -274,8 +274,8 @@ pub struct Search {
     /// The trusted PC at the cable's end, as the last USB dial showed (none: no cable,
     /// or not known).
     usb_pc: Option<PcId>,
-    /// A USB dial let its PC go (not one wanted): USB is not dialed on its own again
-    /// before this, so that PC is not knocked on every second.
+    /// A USB dial let its PC go (not one wanted): USB is not dialed again before this,
+    /// so that PC is not knocked on every second. The user's next pick ends it.
     usb_rest: Option<Instant>,
     /// The cable's mark in the list, in the language of the last answer.
     cable: String,
@@ -574,16 +574,23 @@ impl Session {
     /// The user picked the PC at `addr` (in the list, or typed): it is tried first
     /// until a session opens there, and a session with another PC ends.
     pub fn connect_to(&mut self, addr: SocketAddr, now: Instant) {
+        self.pick(addr, None, now);
+    }
+
+    /// The user picked the PC at `addr`, PC `pc` when the list knew it: a session with
+    /// any other PC ends.
+    fn pick(&mut self, addr: SocketAddr, pc: Option<PcId>, now: Instant) {
         self.search.choice = Some(addr);
-        self.search.choice_pc = None;
+        self.search.choice_pc = pc;
         self.search.preferred.clear();
         self.search.picking = false;
         self.search.left_usb.clear();
         self.search.declined = None;
+        self.search.usb_rest = None;
         let others: Vec<PcId> = self
             .links
             .iter()
-            .filter(|(_, l)| link_addr(l).is_some_and(|a| a != addr))
+            .filter(|(p, l)| Some(**p) != pc && link_addr(l).is_some_and(|a| a != addr))
             .map(|(pc, _)| *pc)
             .collect();
         for pc in others {
@@ -595,16 +602,16 @@ impl Session {
         self.round_now(now);
     }
 
-    /// The user picked the `i`-th PC of the list: over USB when the cable reaches it,
-    /// else at the address it answered from (see [`Session::connect_to`]); a dial of
-    /// the pick takes that PC alone.
+    /// The user picked the `i`-th PC of the list: at the address it answered from
+    /// (see [`Session::connect_to`]), and over USB first while the cable reaches it;
+    /// a dial of the pick takes that PC alone. A cable mark gone stale costs one USB
+    /// dial: nothing there, and the pick is dialed over the network.
     pub fn pick_found(&mut self, i: usize, now: Instant) {
         let Some(h) = self.search.found.get(i) else {
             return;
         };
-        let (addr, pc) = (if h.usb { usb_addr() } else { h.addr }, h.pc);
-        self.connect_to(addr, now);
-        self.search.choice_pc = pc;
+        let (addr, pc) = (h.addr, h.pc);
+        self.pick(addr, pc, now);
     }
 
     /// "Change PC": the PC in use is left, and nothing connects on its own over the
@@ -987,11 +994,17 @@ impl Session {
         // A pick and an agreement to pair are for one connection: once its session is
         // open, the search goes its own way again (the answers with a trusted tag, the
         // last address), so the PC is found when it moves or the cable goes; but for
-        // the PCs picked alone (see `Search::preferred`).
-        if self.search.choice == Some(addr) {
-            self.search.choice = None;
-            self.search.choice_pc = None;
-            self.search.preferred.insert(pc);
+        // the PCs picked alone (see `Search::preferred`). The pick may open over USB
+        // (its PC at the cable). While the user picks after "Change PC", a session over
+        // the cable is the user's choice too: picking is over, or the search would
+        // wait for a tap once the cable goes.
+        let s = &mut self.search;
+        if s.choice == Some(addr) || s.choice_pc == Some(pc) || s.picking {
+            s.choice = None;
+            s.choice_pc = None;
+            s.picking = false;
+            s.left_usb.clear();
+            s.preferred.insert(pc);
         }
         if is_usb(addr) {
             self.at_cable(Some(pc));
@@ -1046,7 +1059,9 @@ impl Session {
                     Some(Attempt::Dialing { step: s, addr }) if s == step && is_usb(addr)
                 );
             if via_usb {
-                self.at_cable(Some(other));
+                // A PC this headset does not trust is no mark in the list.
+                let trusted = self.paired.iter().any(|p| p.pc == other);
+                self.at_cable(trusted.then_some(other));
                 if self.search.choice.is_none() {
                     self.search.usb_rest = Some(now + LAST_EVERY);
                 }
@@ -1062,10 +1077,40 @@ impl Session {
             }
             return out;
         }
+        let refused = ended
+            .refused
+            .is_some_and(|t| now.saturating_duration_since(t) < REFUSED_WITHIN)
+            || ended.incompatible;
+        // The USB dial opened and closed with no PC behind it, before any word: an
+        // `adb reverse` left from a PC where Prostir no longer runs. Nothing is at the
+        // cable, so the round goes on with its next step as after a miss (starting
+        // over at USB would never reach the network).
+        let stale_usb = pc.is_none()
+            && !refused
+            && !ended.opened
+            && matches!(self.search.round, Round::Open { step: s, at: Plan::Usb } if s == step)
+            && matches!(
+                self.search.attempt,
+                Some(Attempt::Dialing { step: s, .. }) if s == step
+            );
+        if stale_usb {
+            self.search.attempt = None;
+            if !self
+                .links
+                .values()
+                .any(|l| link_addr(l).is_some_and(is_usb))
+            {
+                self.at_cable(None);
+            }
+            self.step_after(Some(Plan::Usb), now);
+            return out;
+        }
         if let Some(pc) = pc
             && let Some(link) = self.links.get_mut(&pc)
         {
             let was_connected = matches!(link, Link::Connected(_));
+            // The cable may be gone with it: the next USB dial says who is there.
+            let over_usb = link_addr(link).is_some_and(is_usb);
             if let Link::Connected(p) = link {
                 out.waited = p.asks.disconnected();
             }
@@ -1076,6 +1121,9 @@ impl Session {
             if out.offline {
                 self.offline_since = Some(now);
             }
+            if over_usb && self.search.usb_pc == Some(pc) {
+                self.at_cable(None);
+            }
             self.media_due();
         }
         if matches!(
@@ -1084,11 +1132,7 @@ impl Session {
         ) {
             self.search.attempt = None;
         }
-        let pause = if ended
-            .refused
-            .is_some_and(|t| now.saturating_duration_since(t) < REFUSED_WITHIN)
-            || ended.incompatible
-        {
+        let pause = if refused {
             REFUSED_PAUSE
         } else if ended.retry_at_once(lasted) {
             Duration::ZERO
@@ -1196,6 +1240,17 @@ impl Session {
         let (choice, picking) = (s.choice, s.picking);
         // The user is choosing, or chose: only their choice, and the list of answers.
         let own_way = !picking && choice.is_none();
+        // USB once its rest is over (a pick ends the rest): on its own, for a pick of
+        // USB, and for a pick on the network while the cable leads to its PC, so a
+        // mark gone stale costs one dial and the pick follows.
+        let usb_due = s.usb_rest.is_none_or(|t| now >= t)
+            && match choice {
+                None => true,
+                Some(c) if c.ip().is_loopback() => true,
+                Some(_) => s.choice_pc.is_some() && s.choice_pc == s.usb_pc,
+            };
+        // This round's USB step dialed already: a pick of USB is not dialed twice.
+        let usb_dialed = after == Some(Plan::Usb);
         let mut at = after;
         loop {
             let next = match at {
@@ -1210,18 +1265,13 @@ impl Session {
             };
             at = Some(next);
             match next {
-                // USB: not while the user picked a PC on the network; it takes only
-                // the PCs wanted (see `usb_takes`).
-                Plan::Usb
-                    if choice.is_none_or(|c| c.ip().is_loopback())
-                        && (choice.is_some() || self.search.usb_rest.is_none_or(|t| now >= t))
-                        && !self.declined_addr(usb_addr()) =>
-                {
+                // USB: it takes only the PCs wanted (see `usb_takes`).
+                Plan::Usb if usb_due && !self.declined_addr(usb_addr()) => {
                     let takes = self.usb_takes();
                     return self.dial_taking(next, Dest::Usb, takes, now);
                 }
                 Plan::Choice => {
-                    if let Some(addr) = choice {
+                    if let Some(addr) = choice.filter(|c| !(usb_dialed && is_usb(*c))) {
                         let takes = self
                             .search
                             .choice_pc

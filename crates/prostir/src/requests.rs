@@ -110,7 +110,7 @@ fn carry_out(
     let limits = asker.limits;
     Ok(Answer::Now(match request {
         Request::AddDisplay { mode } => {
-            let spec = checked(mode, limits)?;
+            let spec = checked(mode, asker, displays.codec())?;
             let max = usize::from(limits.virtual_max);
             if displays.monitor_count() >= max {
                 bail!(UserError::Limit {
@@ -151,7 +151,7 @@ fn carry_out(
             }
             let specs = modes
                 .into_iter()
-                .map(|m| checked(m, limits))
+                .map(|m| checked(m, asker, displays.codec()))
                 .collect::<Result<Vec<MonitorSpec>>>()?;
             let physical = displays.physical_ids();
             let physical_max = usize::from(limits.physical_max);
@@ -313,11 +313,15 @@ fn streams_within(streams: usize, limits: &Limits) -> Result<()> {
 }
 
 /// The monitor `mode` asks for, if the PC makes it: a size within its limits and one
-/// of its scales.
-fn checked(mode: Mode, limits: &Limits) -> Result<MonitorSpec> {
+/// of its scales, which the asker decodes in `codec` (the one the PC sends in now):
+/// within its decoder's sides and pixel budget, where it names a decoder for it.
+fn checked(mode: Mode, asker: &Asker<'_>, codec: Codec) -> Result<MonitorSpec> {
+    let limits = asker.limits;
+    let decodes = asker.caps.decoder(codec).is_none() || asker.caps.fits(codec, mode.w, mode.h);
     let fits = (limits.min.0..=limits.max.0).contains(&mode.w)
         && (limits.min.1..=limits.max.1).contains(&mode.h)
-        && limits.scales.contains(&mode.scale);
+        && limits.scales.contains(&mode.scale)
+        && decodes;
     let spec = MonitorSpec {
         width: mode.w,
         height: mode.h,
@@ -349,24 +353,31 @@ mod tests {
     use super::*;
     use prostir_proto::state::ErrorCode;
 
-    fn limits() -> Limits {
-        crate::publish::limits(
-            prostir_proto::state::Prefs::default(),
-            &HeadsetCaps::default(),
-            Codec::H264,
-        )
+    fn limits(caps: &HeadsetCaps) -> Limits {
+        crate::publish::limits(prostir_proto::state::Prefs::default(), caps, Codec::H264)
+    }
+
+    /// A headset with every right, its caps `caps` and the limits `limits`.
+    fn asker<'a>(caps: &'a HeadsetCaps, limits: &'a Limits) -> Asker<'a> {
+        Asker {
+            caps,
+            limits,
+            access: Access::MAIN,
+        }
     }
 
     /// Only sizes within the PC's limits and only its scales.
     #[test]
     fn sizes_are_checked() {
-        let l = limits();
-        assert!(checked(Mode::new(2560, 1440), &l).is_ok());
+        let caps = HeadsetCaps::default();
+        let l = limits(&caps);
+        let a = asker(&caps, &l);
+        assert!(checked(Mode::new(2560, 1440), &a, Codec::H264).is_ok());
         let larger_text = Mode {
             scale: 150,
             ..Mode::new(2560, 1440)
         };
-        assert_eq!(checked(larger_text, &l).unwrap().scale, 1.5);
+        assert_eq!(checked(larger_text, &a, Codec::H264).unwrap().scale, 1.5);
         for bad in [
             Mode::new(100, 100),
             Mode::new(9000, 1440),
@@ -375,9 +386,43 @@ mod tests {
                 ..Mode::new(1920, 1080)
             },
         ] {
-            let e = checked(bad, &l).unwrap_err();
+            let e = checked(bad, &a, Codec::H264).unwrap_err();
             assert_eq!(errors::code_of(&e), ErrorCode::BAD_SIZE, "{bad:?}");
         }
+    }
+
+    /// A size within the sides of the headset's decoder but over its pixel budget (a
+    /// 4K monitor for a decoder that keeps up with 2560x1600 at 60 frames a second) is
+    /// not made in the codec the PC sends; within the budget, either way round, it is.
+    /// A codec without a budget goes by its decoder's sides.
+    #[test]
+    fn sizes_stay_within_the_pixel_budget() {
+        let caps = HeadsetCaps {
+            decoders: vec![
+                prostir_proto::state::Decoder {
+                    codec: 0,
+                    max_w: 4096,
+                    max_h: 4096,
+                },
+                prostir_proto::state::Decoder {
+                    codec: 1,
+                    max_w: 4096,
+                    max_h: 4096,
+                },
+            ],
+            pixels: vec![prostir_proto::state::PixelBudget {
+                codec: 0,
+                max_pixels: 2560 * 1600,
+            }],
+            ..HeadsetCaps::default()
+        };
+        let l = limits(&caps);
+        let a = asker(&caps, &l);
+        let e = checked(Mode::new(3840, 2160), &a, Codec::H264).unwrap_err();
+        assert_eq!(errors::code_of(&e), ErrorCode::BAD_SIZE);
+        assert!(checked(Mode::new(2560, 1440), &a, Codec::H264).is_ok());
+        assert!(checked(Mode::new(1440, 2560), &a, Codec::H264).is_ok());
+        assert!(checked(Mode::new(3840, 2160), &a, Codec::H265).is_ok());
     }
 
     /// Each kind of request needs its right; finding the mouse needs none.

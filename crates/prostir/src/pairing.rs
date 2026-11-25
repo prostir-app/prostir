@@ -671,7 +671,7 @@ fn accept_within(
     let peer = link.peer.clone();
     // Versions first, before pairing: this exchange is the same in every version, so
     // a headset of any version learns which side to update.
-    let first = handshake::read_first(&mut *link.receiver)?;
+    let first = handshake::read_first(&mut *link.receiver).map_err(before_hello)?;
     let headset_app = match &first {
         First::Hello { app, .. } => peer_version(app),
         First::Other => String::new(),
@@ -953,6 +953,31 @@ impl std::fmt::Display for TurnedAwayAgain {
 }
 
 impl std::error::Error for TurnedAwayAgain {}
+
+/// The headset closed the link before its hello: a USB dial meant for another PC lets
+/// go of this one so, before a word (and a headset taken off may too). Nothing to warn
+/// about.
+#[derive(Debug)]
+pub struct HungUpBeforeHello;
+
+impl std::fmt::Display for HungUpBeforeHello {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the headset closed the connection before its hello")
+    }
+}
+
+impl std::error::Error for HungUpBeforeHello {}
+
+/// An error reading the hello: [`HungUpBeforeHello`] when the link just closed.
+fn before_hello(e: io::Error) -> anyhow::Error {
+    use io::ErrorKind as K;
+    match e.kind() {
+        K::UnexpectedEof | K::ConnectionReset | K::ConnectionAborted | K::BrokenPipe => {
+            HungUpBeforeHello.into()
+        }
+        _ => e.into(),
+    }
+}
 
 fn turned_away(first: bool, why: String) -> anyhow::Error {
     if first {

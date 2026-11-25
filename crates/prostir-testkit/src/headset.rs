@@ -16,7 +16,7 @@ use prostir_proto::request::{Asked, Command, Outcome, Request};
 use prostir_proto::secure::{Identity, Pairing, TrustStore, confirmation, tags_match};
 use prostir_proto::state::{
     Decoder, Display, DisplayId, DisplayState, Encoding, Gen, HeadsetCaps, HeadsetState, PcState,
-    Prefs, Presence, ReqId, UpFormat, UpKind, UpState, VolumeAsk, caps, permission,
+    PixelBudget, Prefs, Presence, ReqId, UpFormat, UpKind, UpState, VolumeAsk, caps, permission,
 };
 use prostir_proto::stats::{Gaps, Pings};
 use prostir_proto::volume::HeadsetVolume;
@@ -618,7 +618,18 @@ impl FakeHeadset {
                 streams_max: 30,
                 layers_max: 16,
                 model: "prostir-testkit".into(),
-                pixels: Vec::new(),
+                // As the Quest app says them (in `DecoderPixels`): H.264 keeps up with
+                // its whole box at 60 frames a second, H.265 with 8192x1600 worth.
+                pixels: vec![
+                    PixelBudget {
+                        codec: 0,
+                        max_pixels: 4096 * 4096,
+                    },
+                    PixelBudget {
+                        codec: 1,
+                        max_pixels: 8192 * 1600,
+                    },
+                ],
             }),
             prefs: Some(Prefs::default()),
             presence: Some(Presence { worn: true }),
