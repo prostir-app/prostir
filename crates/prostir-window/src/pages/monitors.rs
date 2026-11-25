@@ -270,7 +270,11 @@ fn profiles_card(ui: &mut Ui, v: &mut View<'_, '_>, h: &Headset, session: &Sessi
     let tk = v.tk;
     let p = tk.p;
     ui.add_space(tk.th.shape.section_gap);
-    w::section_title(ui, tk, &tk.f("window-hs-profiles", &[("name", (&h.name).into())]));
+    w::section_title(
+        ui,
+        tk,
+        &tk.f("window-hs-profiles", &[("name", (&h.name).into())]),
+    );
     let can = !v.ui.unsupported.contains("rename_profile");
     let n = session.profiles.len();
     // The one in use: by its number where it has no name, else the first of its name.
@@ -354,7 +358,12 @@ fn profiles_card(ui: &mut Ui, v: &mut View<'_, '_>, h: &Headset, session: &Sessi
                     }
                 });
                 if v.ui.rename.as_ref().is_some_and(|r| is_number(&r.2)) {
-                    text(ui, tk.t("window-hs-profile-number"), tk.small(), p.text_muted);
+                    text(
+                        ui,
+                        tk.t("window-hs-profile-number"),
+                        tk.small(),
+                        p.text_muted,
+                    );
                 }
             } else {
                 let desc = active.then(|| tk.t("window-hs-profile-in-use"));
@@ -382,6 +391,11 @@ fn profiles_card(ui: &mut Ui, v: &mut View<'_, '_>, h: &Headset, session: &Sessi
             }
         }
         ui.add_space(tk.th.shape.spacing);
-        text(ui, tk.t("window-hs-profiles-note"), tk.small(), p.text_muted);
+        text(
+            ui,
+            tk.t("window-hs-profiles-note"),
+            tk.small(),
+            p.text_muted,
+        );
     });
 }
