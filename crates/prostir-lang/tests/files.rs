@@ -220,7 +220,7 @@ fn no_long_dashes_in_the_texts() {
 }
 
 /// Every `.rs` file of a program's `src/`, with its text; the tests (`tests.rs`,
-/// `tests/`) only if `with_tests`.
+/// `tests/`) and the `examples/` only if `with_tests`.
 fn code_of(dir: &str, with_tests: bool) -> Vec<(PathBuf, String)> {
     fn walk(dir: &Path, with_tests: bool, out: &mut Vec<(PathBuf, String)>) {
         let mut entries: Vec<_> = std::fs::read_dir(dir)
@@ -243,6 +243,69 @@ fn code_of(dir: &str, with_tests: bool) -> Vec<(PathBuf, String)> {
     }
     let mut out = Vec::new();
     walk(&root().join(dir).join("src"), with_tests, &mut out);
+    let examples = root().join(dir).join("examples");
+    if with_tests && examples.is_dir() {
+        walk(&examples, with_tests, &mut out);
+    }
+    out
+}
+
+/// `text` without its comments (`//`, `/* */`), so a message named only in a comment
+/// is not counted as shown. Quoted strings and character literals are kept whole.
+fn without_comments(text: &str) -> String {
+    let c: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < c.len() {
+        match c[i] {
+            '"' => {
+                out.push('"');
+                i += 1;
+                while i < c.len() && c[i] != '"' {
+                    if c[i] == '\\' && i + 1 < c.len() {
+                        out.push(c[i]);
+                        i += 1;
+                    }
+                    out.push(c[i]);
+                    i += 1;
+                }
+                if i < c.len() {
+                    out.push('"');
+                    i += 1;
+                }
+            }
+            '\'' => {
+                // A character literal ('"', '\'', '\n'), or the start of a lifetime.
+                let len = if c.get(i + 1) == Some(&'\\') {
+                    (i + 2..c.len().min(i + 12))
+                        .find(|&j| c[j] == '\'')
+                        .map_or(1, |j| j + 1 - i)
+                } else if c.get(i + 2) == Some(&'\'') {
+                    3
+                } else {
+                    1
+                };
+                out.extend(&c[i..i + len]);
+                i += len;
+            }
+            '/' if c.get(i + 1) == Some(&'/') => {
+                while i < c.len() && c[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if c.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i < c.len() && !(c[i] == '*' && c.get(i + 1) == Some(&'/')) {
+                    i += 1;
+                }
+                i += 2;
+            }
+            ch => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
     out
 }
 
@@ -252,6 +315,7 @@ fn named(sources: &[(PathBuf, String)], prefix: &str) -> (BTreeSet<String>, Vec<
     let mut ids = BTreeSet::new();
     let mut stems = Vec::new();
     for (_, text) in sources {
+        let text = without_comments(text);
         let mut rest = text.as_str();
         while let Some(at) = rest.find(&format!("\"{prefix}")) {
             rest = &rest[at + 1..];
@@ -326,5 +390,160 @@ fn the_code_and_the_messages_match() {
             hidden.is_empty(),
             "only the tests of {dir} name these messages (a message only the tests show has \"{TESTS_ONLY}\" in its id): {hidden:?}"
         );
+    }
+}
+
+/// A call that shows a message by a literal id: `t("id")`, `.f("id", &[("key", ..)])`,
+/// `count("id", n)`.
+struct Call {
+    file: PathBuf,
+    id: String,
+    /// The placeholders the call fills in, when the code spells them out.
+    keys: Option<BTreeSet<String>>,
+}
+
+/// The string literal starting at `c[i]` (a `"`): its text and the index after it.
+fn literal_at(c: &[char], i: usize) -> Option<(String, usize)> {
+    if c.get(i) != Some(&'"') {
+        return None;
+    }
+    let mut out = String::new();
+    let mut j = i + 1;
+    while j < c.len() && c[j] != '"' {
+        if c[j] == '\\' {
+            j += 1;
+        }
+        out.extend(c.get(j));
+        j += 1;
+    }
+    (j < c.len()).then(|| (out, j + 1))
+}
+
+fn skip_space(c: &[char], mut i: usize) -> usize {
+    while c.get(i).is_some_and(|ch| ch.is_whitespace()) {
+        i += 1;
+    }
+    i
+}
+
+/// The keys of `&[("key", value), ..]` starting at `c[i]`, if that is how the arguments
+/// are written.
+fn keys_at(c: &[char], i: usize) -> Option<BTreeSet<String>> {
+    let i = skip_space(c, i);
+    if c.get(i) != Some(&'&') || c.get(skip_space(c, i + 1)) != Some(&'[') {
+        return None;
+    }
+    let mut j = skip_space(c, i + 1) + 1;
+    let mut depth = 1;
+    let mut keys = BTreeSet::new();
+    while depth > 0 {
+        match *c.get(j)? {
+            '"' => {
+                j = literal_at(c, j)?.1;
+                continue;
+            }
+            '(' if depth == 1 => {
+                let (key, _) = literal_at(c, skip_space(c, j + 1))?;
+                keys.insert(key);
+                depth += 1;
+            }
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            // An item that is not a written-out pair (`&[key]`): the keys are unknown.
+            ch if depth == 1 && ch != ',' && !ch.is_whitespace() => return None,
+            _ => {}
+        }
+        j += 1;
+    }
+    Some(keys)
+}
+
+/// Every `t("id"`, `f("id"` and `count("id"` call in `sources` (also as a method or a
+/// path), outside comments.
+fn calls(sources: &[(PathBuf, String)]) -> Vec<Call> {
+    let mut out = Vec::new();
+    for (file, text) in sources {
+        let c: Vec<char> = without_comments(text).chars().collect();
+        for name in ["t", "f", "count"] {
+            let name: Vec<char> = name.chars().collect();
+            let len = name.len();
+            for at in 0..c.len() {
+                let word_start = at == 0 || !(c[at - 1].is_alphanumeric() || c[at - 1] == '_');
+                if !word_start || c.len() < at + len + 1 || c[at..at + len] != name[..] {
+                    continue;
+                }
+                if c[at + len] != '(' {
+                    continue;
+                }
+                let Some((id, end)) = literal_at(&c, skip_space(&c, at + len + 1)) else {
+                    continue;
+                };
+                let after = skip_space(&c, end);
+                let keys = match (len, c.get(after)) {
+                    // `count(id, n)` fills in `n`.
+                    (5, Some(',')) => Some(BTreeSet::from(["n".to_owned()])),
+                    (1, Some(')')) => Some(BTreeSet::new()),
+                    (1, Some(',')) => keys_at(&c, after + 1),
+                    _ => None,
+                };
+                out.push(Call {
+                    file: file.clone(),
+                    id,
+                    keys,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Ids the code shows that are not messages of a program: a missing message shows as
+/// its own id, and a test checks that.
+const NOT_PROGRAM_IDS: &[&str] = &["no-such-message", "no-such-text"];
+
+#[test]
+fn every_message_a_program_shows_has_its_prefix() {
+    for (prefix, dir) in PROGRAMS {
+        for call in calls(&code_of(dir, true)) {
+            assert!(
+                call.id.starts_with(prefix)
+                    || call.id == prostir_lang::NAME_ID
+                    || NOT_PROGRAM_IDS.contains(&call.id.as_str()),
+                "{}: shows \"{}\", an id that does not start with \"{prefix}\"",
+                call.file.display(),
+                call.id
+            );
+        }
+    }
+}
+
+/// The calls with their placeholders spelled out must fill in exactly the ones the text
+/// has. The tests are left out, also a `mod tests` at the end of a file: they show a
+/// message without its placeholders on purpose.
+#[test]
+fn the_code_fills_in_the_placeholders_of_each_message() {
+    let en = variables(&english());
+    for (_, dir) in PROGRAMS {
+        let sources: Vec<_> = code_of(dir, false)
+            .into_iter()
+            .map(|(file, text)| {
+                let end = text
+                    .find("\n#[cfg(test)]\nmod tests {")
+                    .unwrap_or(text.len());
+                (file, text[..end].to_owned())
+            })
+            .collect();
+        for call in calls(&sources) {
+            let (Some(keys), Some(wanted)) = (&call.keys, en.get(&call.id)) else {
+                continue;
+            };
+            assert_eq!(
+                keys,
+                wanted,
+                "{}: {} is shown with other placeholders than its text has",
+                call.file.display(),
+                call.id
+            );
+        }
     }
 }

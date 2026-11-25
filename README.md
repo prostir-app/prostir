@@ -880,8 +880,9 @@ To add a language:
 `cargo test -p prostir-lang` checks the files: each parses, has only ids of English
 (Ukrainian has all of them) with the same placeholders, every id starts with a program's
 prefix, and each program's code names exactly the messages with its prefix (none missing
-from the file, none in the file that is never shown). The tests of the programs check
-that no text uses a long dash.
+from the file, none in the file that is never shown), and each call fills in the
+placeholders of its message. The long-dash check on the `.ftl` files (no text uses a long
+dash) lives in the same place, `crates/prostir-lang/tests/files.rs`.
 
 ## Similar projects
 
