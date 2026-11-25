@@ -544,6 +544,7 @@ window-q-bitrate-desc = { $n } Mbit/s for each monitor now. More is sharper and 
 window-q-mbit = { $n }
 window-q-sharp = Sharper text
 window-q-sharp-desc = A slower encoder setting that keeps small text clearer.
+window-q-sharp-desc-by-size = A slower encoder setting that keeps small text clearer. By default for monitors smaller than 2560x1440: larger ones take longer than a frame to encode with it.
 window-q-codec = Codec
 window-q-codec-desc = HEVC where the PC and the headset can, else H.264.
 window-q-cpu = Encode on the processor

@@ -640,7 +640,8 @@ fn quality_by_name() {
                 codec: prostir_window::api::CodecChoice::H264,
                 cpu: false
             },
-            Request::SetSharp { on: true },
+            // On by default: switched off.
+            Request::SetSharp { on: false },
             Request::SetCodec {
                 codec: prostir_window::api::CodecChoice::H264,
                 cpu: true
@@ -648,7 +649,8 @@ fn quality_by_name() {
         ]
     );
     let e = handle.state().encoding;
-    assert_eq!((e.bitrate, e.sharp, e.cpu), (50, true, true));
+    assert_eq!((e.bitrate, e.sharp, e.cpu), (50, false, true));
+    assert!(!e.sharp_by_size, "chosen");
 }
 
 #[test]

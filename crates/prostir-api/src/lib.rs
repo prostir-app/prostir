@@ -875,6 +875,9 @@ pub struct Encoding {
     /// Mbit/s for each monitor.
     pub bitrate: u32,
     pub sharp: bool,
+    /// Clearer text is not chosen: on only for monitors smaller than 2560x1440, which
+    /// it fits in the time of a frame.
+    pub sharp_by_size: bool,
     /// As chosen.
     pub codec: Codec,
     /// On the CPU, as chosen.
@@ -1302,6 +1305,7 @@ mod tests {
             encoding: Encoding {
                 bitrate: 30,
                 sharp: false,
+                sharp_by_size: false,
                 codec: Codec::H265,
                 cpu: false,
                 using: Some(Using {
@@ -1373,7 +1377,8 @@ mod tests {
             r#""state":"failed","failure":{"code":"Desktop","text":"KScreen"}}],"primary":103,"#,
             r#""limits":{"sizes":[[1920,1080]],"scales":[100,125],"displays_max":6,"#,
             r#""physical_max":2,"streams_max":8,"min":[640,360],"max":[3840,2160]},"#,
-            r#""encoding":{"bitrate":30,"sharp":false,"codec":"h265","cpu":false,"#,
+            r#""encoding":{"bitrate":30,"sharp":false,"sharp_by_size":false,"codec":"h265","#,
+            r#""cpu":false,"#,
             r#""using":{"codec":"h264","hardware":true},"outputs":[{"display":103,"#,
             r#""encoder":"x264","codec":"h264","hardware":false,"copies":true,"note":"y","#,
             r#""stats":{"window_ms":10000,"frames":600,"repeats":5,"bytes":30000000,"#,

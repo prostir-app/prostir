@@ -207,9 +207,10 @@ pub struct EncoderConfig {
     pub codec: Codec,
     pub bitrate_kbps: u32,
     pub backend: Backend,
-    /// Slower VA-API preset: clearer small text at the same bitrate for about 2 ms more
-    /// encoding per frame.
-    pub sharp: bool,
+    /// The slower VA-API preset (`target-usage` 4): clearer small text at the same
+    /// bitrate, for longer encoding. `Some(true)` for every picture, `Some(false)` for
+    /// none, `None` by the size of the picture (see [`slow_fits`]).
+    pub sharp: Option<bool>,
     /// The picture's rows bottom first, for headsets whose compositor shows a stream's
     /// rows the other way round (they name `caps::headset::ROWS_UP`): turned over in
     /// the step that converts the colours, so the headset shows it the right way up.
@@ -249,10 +250,34 @@ impl EncoderConfig {
         }
     }
 
-    /// VA-API `target-usage`: 4 is clearer, 6 is faster.
-    pub fn target_usage(&self) -> u32 {
-        if self.sharp { 4 } else { 6 }
+    /// VA-API `target-usage` for a picture of `size` (not known yet: none): 4 is
+    /// clearer, 6 is faster.
+    pub fn target_usage(&self, size: Option<(u32, u32)>) -> u32 {
+        target_usage(self.sharp, size)
     }
+}
+
+/// VA-API `target-usage` for a picture of `size` with the slower preset as `sharp`
+/// says (see [`EncoderConfig::sharp`]).
+pub fn target_usage(sharp: Option<bool>, size: Option<(u32, u32)>) -> u32 {
+    if sharp.unwrap_or_else(|| size.is_none_or(slow_fits)) {
+        4
+    } else {
+        6
+    }
+}
+
+/// The pixels of the smallest picture the slower preset is not used for by default.
+const SLOW_UP_TO: u64 = 2560 * 1440;
+
+/// Whether the slower preset is used by default for a picture of `(w, h)`: below
+/// 2560x1440. Measured here (Meteor Lake, iHD 26.3, HEVC at 30 Mbit/s, from the
+/// converter to the parser, every monitor moving at 60 frames a second): 1920x1080
+/// takes 8 to 9 ms a frame with `target-usage` 6 and 11.5 to 13 with 4, three of them
+/// 12 and 12.5 to 16; 2560x1440 takes 15 to 16 ms with 6 and 17.5 to 18.5 with 4, over
+/// the 16.7 ms of a frame, three of them 20 to 21 and 27.5 to 28.5.
+pub fn slow_fits((w, h): (u32, u32)) -> bool {
+    u64::from(w) * u64::from(h) < SLOW_UP_TO
 }
 
 pub enum EncoderEvent {
@@ -376,9 +401,35 @@ pub struct Encoder {
     /// The graphics devices it took, let go after the pipeline stopped (the fields
     /// drop after `Drop::drop` and in this order).
     devices: gpu::Lease,
+    /// How it is tuned for the size of its picture.
+    tuning: Arc<Mutex<Tuning>>,
     /// A fake hardware encoder that opened, counted until dropped.
     #[cfg(feature = "fake-desktop")]
     fake_open: bool,
+}
+
+/// What an encoder is tuned to for the size of its picture: the preset (see
+/// [`EncoderConfig::sharp`]), set again when the size is known or changes, before the
+/// encoder takes it.
+#[derive(Debug)]
+struct Tuning {
+    sharp: Option<bool>,
+    size: Option<(u32, u32)>,
+    /// What its encoder has now.
+    target_usage: u32,
+}
+
+impl Tuning {
+    /// Tunes `enc` to what `self` says now: `true` when that changed it.
+    fn apply(&mut self, enc: &gst::Element) -> bool {
+        let target_usage = target_usage(self.sharp, self.size);
+        if target_usage == self.target_usage || enc.find_property("target-usage").is_none() {
+            return false;
+        }
+        self.target_usage = target_usage;
+        enc.set_property("target-usage", target_usage);
+        true
+    }
 }
 
 /// Where the frames come from: the start of the pipeline, made by the platform (a
@@ -472,7 +523,7 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
                  key-int-max={VA_GOP} b-frames=0 ref-frames=1 target-usage={}",
                 cfg.va_flip(),
                 cfg.bitrate_kbps,
-                cfg.target_usage()
+                cfg.target_usage(None)
             ),
             "h264parse config-interval=-1",
             "video/x-h264,stream-format=byte-stream,alignment=au",
@@ -483,7 +534,7 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
                  key-int-max={VA_GOP} b-frames=0 ref-frames=1 target-usage={}",
                 cfg.va_flip(),
                 cfg.bitrate_kbps,
-                cfg.target_usage()
+                cfg.target_usage(None)
             ),
             "h265parse config-interval=-1",
             "video/x-h265,stream-format=byte-stream,alignment=au",
@@ -701,6 +752,11 @@ impl Encoder {
         let encoded = Arc::new(AtomicBool::new(false));
         let resumed = Arc::new(AtomicBool::new(false));
         let last_size = Mutex::new((0u32, 0u32));
+        let tuning = Arc::new(Mutex::new(Tuning {
+            sharp: cfg.sharp,
+            size: None,
+            target_usage: cfg.target_usage(None),
+        }));
         let probe = Arc::new(Mutex::new(Probe::default()));
         // Frames enter the encoder in order and (no B-frames) leave in order, so a FIFO
         // of arrival times pairs them up despite the encoder rewriting timestamps.
@@ -709,13 +765,35 @@ impl Encoder {
             .and_then(|e| e.static_pad("sink"))
         {
             // What the frames really come as (GPU buffers or memory, format, layout,
-            // rate): said once for each change.
+            // rate): said once for each change. The encoder is tuned for their size
+            // before it takes them.
             let node = node.clone();
+            let tuning = tuning.clone();
+            let enc = pipeline.by_name("enc").map(|e| e.downgrade());
             pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
                 if let Some(event) = info.event()
                     && let gst::EventView::Caps(c) = event.view()
                 {
                     info!("{node}: frames come as {}", c.caps());
+                    // GPU buffers' caps (`DMA_DRM`) are no `VideoInfo`.
+                    let size = c.caps().structure(0).and_then(|s| {
+                        Some((
+                            u32::try_from(s.get::<i32>("width").ok()?).ok()?,
+                            u32::try_from(s.get::<i32>("height").ok()?).ok()?,
+                        ))
+                    });
+                    let mut tuning = tuning.lock().unwrap();
+                    tuning.size = size;
+                    if let Some(enc) = enc.as_ref().and_then(gst::glib::WeakRef::upgrade)
+                        && tuning.apply(&enc)
+                    {
+                        info!(
+                            "{node}: target-usage {} for {}x{}",
+                            tuning.target_usage,
+                            size.unwrap_or_default().0,
+                            size.unwrap_or_default().1
+                        );
+                    }
                 }
                 gst::PadProbeReturn::Ok
             });
@@ -911,6 +989,7 @@ impl Encoder {
             note: None,
             copies: false,
             devices,
+            tuning,
             #[cfg(feature = "fake-desktop")]
             fake_open,
         };
@@ -1026,12 +1105,17 @@ impl Encoder {
         }
     }
 
-    /// Switches the VA-API speed/quality preset on the fly (no effect on x264).
-    pub fn set_target_usage(&self, value: u32) {
-        if let Some(enc) = self.pipeline.by_name("enc")
-            && enc.find_property("target-usage").is_some()
-        {
-            enc.set_property("target-usage", value);
+    /// Switches the VA-API speed/quality preset on the fly (no effect on x264), as
+    /// `sharp` says (see [`EncoderConfig::sharp`]) for the size of its picture.
+    pub fn set_sharp(&self, sharp: Option<bool>) {
+        let changed = {
+            let mut tuning = self.tuning.lock().unwrap();
+            tuning.sharp = sharp;
+            self.pipeline
+                .by_name("enc")
+                .is_some_and(|enc| tuning.apply(&enc))
+        };
+        if changed {
             self.force_keyframe();
         }
     }
@@ -1407,7 +1491,7 @@ mod tests {
             codec: prostir_proto::Codec::H264,
             bitrate_kbps: 1000,
             backend: Backend::X264,
-            sharp: false,
+            sharp: Some(false),
             rows_up: false,
         };
         let told = Arc::new(Mutex::new(0));
@@ -1431,6 +1515,23 @@ mod tests {
         assert_eq!(*told.lock().unwrap(), 0, "not told as the encoder's");
     }
 
+    /// The slower preset as chosen for every picture; not chosen, for pictures smaller
+    /// than 2560x1440 (portrait too), and before the size is known.
+    #[test]
+    fn the_slower_preset_by_size() {
+        use super::target_usage;
+        for size in [None, Some((1920, 1080)), Some((2560, 1440))] {
+            assert_eq!(target_usage(Some(true), size), 4);
+            assert_eq!(target_usage(Some(false), size), 6);
+        }
+        assert_eq!(target_usage(None, None), 4);
+        assert_eq!(target_usage(None, Some((1920, 1080))), 4);
+        assert_eq!(target_usage(None, Some((1920, 1200))), 4);
+        for big in [(2560, 1440), (1440, 2560), (3440, 1440), (3840, 2160)] {
+            assert_eq!(target_usage(None, Some(big)), 6, "{big:?}");
+        }
+    }
+
     /// For a headset that wants the rows bottom first, each encoder's way turns the
     /// picture over where it converts the colours (VA-API on the GPU, the others on the
     /// CPU after it), and only then; the CPU's way runs.
@@ -1448,7 +1549,7 @@ mod tests {
             codec,
             bitrate_kbps: 1000,
             backend,
-            sharp: false,
+            sharp: Some(false),
             rows_up,
         };
         use prostir_proto::Codec::{H264, H265};
@@ -1662,6 +1763,12 @@ mod live {
     /// (`PROSTIR_MEASURE_SECS`, `PROSTIR_MEASURE_SIZE=2560x1440`,
     /// `PROSTIR_MEASURE_STREAMS=4,6`); needs VA-API.
     ///
+    /// `PROSTIR_MEASURE_COMPARE=preset` compares the presets instead (`target-usage` 6
+    /// and 4, each pipeline with the displays a stream has); `PROSTIR_MEASURE_PATTERN`
+    /// is the producer's `videotestsrc` pattern (`ball`; `snow` changes every pixel of
+    /// every frame) and `PROSTIR_MEASURE_DRAWN` the size it is drawn at before it is
+    /// scaled up (`320x180`; the full size for as much detail as a screen has).
+    ///
     /// Frames come as GPU buffers made by a producer with a display of its own (as KWin
     /// makes them in its own process), pushed into an `appsrc` (as on Hyprland), and go
     /// through the same pipeline a stream uses. The time is from the frame entering the
@@ -1700,15 +1807,30 @@ mod live {
             .split(',')
             .filter_map(|n| n.trim().parse().ok())
             .collect();
+        let presets = std::env::var("PROSTIR_MEASURE_COMPARE").is_ok_and(|c| c == "preset");
+        let pattern = std::env::var("PROSTIR_MEASURE_PATTERN").unwrap_or_else(|_| "ball".into());
+        let drawn = std::env::var("PROSTIR_MEASURE_DRAWN").unwrap_or_else(|_| "320x180".into());
+        let (dw, dh) = drawn.split_once('x').unwrap();
+        let mbit: u32 = std::env::var("PROSTIR_MEASURE_MBIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
         for n in counts {
-            for shared in [false, true, false, true] {
+            for turn in [false, true, false, true] {
+                // Sharing in turn, or the presets with a VA display each, as a stream
+                // has (`SHARE_VA`).
+                let (shared, sharp) = if presets {
+                    (false, turn)
+                } else {
+                    (turn, false)
+                };
                 let gpu = GpuDevices::sharing_va();
                 let times: Arc<Mutex<Vec<f64>>> = Arc::default();
                 let mut running = Vec::new();
                 for i in 0..n {
                     let producer = gst::parse::launch(&format!(
-                        "videotestsrc is-live=true pattern=ball ! \
-                         video/x-raw,format=BGRx,width=320,height=180,framerate=60/1 ! \
+                        "videotestsrc is-live=true pattern={pattern} ! \
+                         video/x-raw,format=BGRx,width={dw},height={dh},framerate=60/1 ! \
                          vapostproc ! video/x-raw(memory:DMABuf),width={w},height={h} ! \
                          appsink name=out sync=false max-buffers=2 drop=true"
                     ))
@@ -1725,9 +1847,9 @@ mod live {
                     };
                     let cfg = EncoderConfig {
                         codec: prostir_proto::Codec::H265,
-                        bitrate_kbps: 20_000,
+                        bitrate_kbps: mbit * 1000,
                         backend: Backend::Va,
-                        sharp: false,
+                        sharp: Some(sharp),
                         rows_up: false,
                     };
                     let encoder = gst::parse::launch(&pipeline_description(&input, &cfg).unwrap())
@@ -1860,10 +1982,11 @@ mod live {
                 eprintln!(
                     "{n} streams {size}, {}: {fps:.1} frames/s each, mean {mean:.2} p50 {:.2} \
                      p95 {:.2} p99 {:.2} max {:.2} ms",
-                    if shared {
-                        "one shared VA display"
-                    } else {
-                        "a VA display each"
+                    match (presets, shared, sharp) {
+                        (true, _, true) => "target-usage 4",
+                        (true, _, false) => "target-usage 6",
+                        (false, true, _) => "one shared VA display",
+                        (false, false, _) => "a VA display each",
                     },
                     percentile(&mut t, 0.5),
                     percentile(&mut t, 0.95),

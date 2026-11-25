@@ -65,7 +65,7 @@ impl Control {
         }
         let wanted = store.wanted();
         let counting = wanted.count == prostir_api::Counting::Yes;
-        let settings = (wanted.bitrate, wanted.sharp, counting);
+        let settings = (wanted.bitrate, wanted.clear_text(), counting);
         if self.shown_settings != Some(settings) {
             tray::set_settings(self.tray.as_ref(), settings.0, settings.1, settings.2);
             self.shown_settings = Some(settings);
@@ -83,7 +83,7 @@ impl Brain {
             }
             TrayCommand::SetSharp(sharp) => {
                 info!("clearer text: {sharp}");
-                self.store.change(|s| s.sharp = sharp);
+                self.store.change(|s| s.choose_clear_text(sharp));
             }
             // The tray's item answers the question too: checked is a yes.
             TrayCommand::SetCounting(on) => {

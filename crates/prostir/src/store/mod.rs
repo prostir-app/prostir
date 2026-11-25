@@ -47,8 +47,9 @@ use screens::{migrate, parse_screens, screens_text};
 pub use settings::{Settings, is_word, perm_words};
 use settings::{hex, parse_settings, settings_text};
 
-/// The file format this version writes.
-const VERSION: u32 = 2;
+/// The file format this version writes. 3: clearer text is the default (see
+/// `settings::parse_settings`).
+const VERSION: u32 = 3;
 /// Numbers of screens are reserved this many at a time (see [`Store::new_id`]).
 pub const ID_BLOCK: u32 = 16;
 /// The first number the counter gives: above every number earlier builds gave out
@@ -409,7 +410,7 @@ impl Store {
         self.run.software = None;
         self.change(|s| {
             s.bitrate = bitrate;
-            s.sharp = sharp;
+            s.choose_clear_text(sharp);
             s.codec = codec;
             s.software = software;
         });

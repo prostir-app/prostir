@@ -160,7 +160,7 @@ fn wanted(specs: &[(u32, u32, u32)]) -> Wanted {
             codec: Codec::H264,
             bitrate_kbps: 8000,
             backend: Backend::X264,
-            sharp: false,
+            sharp: Some(false),
             rows_up: false,
         },
         streaming: true,

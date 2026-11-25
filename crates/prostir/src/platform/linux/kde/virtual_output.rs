@@ -920,7 +920,7 @@ mod tests {
             codec,
             bitrate_kbps: 8000,
             backend,
-            sharp: false,
+            sharp: Some(false),
             rows_up: false,
         };
         let kept = frames.clone();
@@ -1026,7 +1026,7 @@ mod tests {
             codec: prostir_proto::Codec::H264,
             bitrate_kbps: 4000,
             backend: Backend::X264,
-            sharp: false,
+            sharp: Some(false),
             rows_up: false,
         };
         let told = Arc::new(Mutex::new(Vec::new()));

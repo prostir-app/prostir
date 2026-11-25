@@ -2,6 +2,14 @@
 
 ## 0.2.0 (not released yet)
 
+### Clearer text
+
+- Sharper text is on by default for monitors smaller than 2560×1440 (with VA-API): at
+  the same bitrate small text is much clearer, and the keyframe of a 1080p monitor even
+  smaller. Larger monitors keep the faster setting, as the slower one takes longer than
+  a frame to encode there. Turning Sharper text on or off applies to every monitor;
+  settings of earlier versions keep it only where it was turned on.
+
 ### Sound, menu and video while the picture changes a lot
 
 - Sound, the microphone, focus and the menu's answers no longer wait while the PC sends

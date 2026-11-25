@@ -197,11 +197,12 @@ fn a_tray_change_without_monitors_survives_quitting() {
     let dir = TestDir::new("tray-offline");
     dir.save_monitors(TWO_MONITORS);
     let mut pc = Pc::start(&dir, &Options::default());
-    pc.tray("sharp on");
-    pc.wait_log(SOON, "clearer text: true");
+    // On by default; switched back.
+    pc.tray("sharp off");
+    pc.wait_log(SOON, "clearer text: false");
     pc.quit();
     assert!(
-        dir.saved("settings.txt").contains("sharp on\n"),
+        dir.saved("settings.txt").contains("sharp off\n"),
         "{}",
         dir.saved("settings.txt")
     );

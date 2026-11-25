@@ -269,7 +269,7 @@ pub struct Worker {
     /// The wanted state worked on; none until the first comes.
     wanted: Option<Wanted>,
     /// The bitrate and the text preset the encoders have.
-    tuning: Option<(u32, bool)>,
+    tuning: Option<(u32, Option<bool>)>,
     /// The primary output as last made primary.
     primary_made: Option<OutputKey>,
     /// A monitor or panel was made: the others' wallpaper goes to it.
@@ -426,7 +426,7 @@ impl Worker {
                     e.set_bitrate(tuning.0);
                 }
                 if tuning.1 != self.tuning.unwrap_or_default().1 {
-                    e.set_target_usage(wanted.encoding.target_usage());
+                    e.set_sharp(wanted.encoding.sharp);
                 }
             }
         }
