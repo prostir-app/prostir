@@ -5,7 +5,22 @@ use std::collections::HashMap;
 
 use glam::{Quat, Vec2, Vec3};
 
+use prostir_layout::space::{Monitor, PixelSize, Side, seen_over};
+use prostir_layout::view::reach_pair;
+
 use super::{Key, Placement, cuts};
+
+/// A share of a monitor's face another may be seen over or behind that is only an edge
+/// they share and the last bits of a float.
+const SEEN_SLACK: f64 = 0.001;
+
+/// Two monitors seen this close (a centimetre) are glued.
+const GLUED: f32 = 0.01;
+
+/// How deep as seen a monitor hung over the seam between two glued ones may reach into
+/// the second, a share of its height: a quarter. The owner's 3840x2160 hung over two
+/// 2560x1440 on an arc reaches 22 % into the second as the magnet leaves it.
+const SEAM_REACH: f64 = 0.25;
 
 /// Lines `value` (half size `half`) up with a neighbour at `other` (half size
 /// `other_half`) only when it is all but lined up already: centres, or first or last
@@ -195,6 +210,74 @@ fn settle_along<K: Key>(b: &Beside, n: &Part<K>, mw: f32, mh: f32) -> f32 {
     align(b.along, half_m, 0.0, half_n).clamp(-(half_n + half_m - shared), half_n + half_m - shared)
 }
 
+/// Whether `m`, joined to `n` as `b` says, is seen clear of `o` from `eye`: neither
+/// over nor behind it. Hung over the seam between `n` and an `o` glued beside it, it
+/// reaches past their corner, and where their row curves round the eye `o` hides a
+/// little of it: that is a monitor over two glued ones (which "Line up" then turns to
+/// reach no deeper than `prostir_layout::tidy::OVERLAP_MAX`), and it may reach as seen
+/// into `o` across `o`'s edge by [`SEAM_REACH`] of `o`'s height, and `o` into it as
+/// much of its own. Allocates nothing.
+fn seen_clear<K: Key>(
+    m: &Part<K>,
+    o: &Part<K>,
+    n: &Part<K>,
+    b: &Beside,
+    eye: Vec3,
+    monitors: &[(K, u32, u32)],
+) -> bool {
+    let over = |a: &Part<K>, c: &Part<K>| seen_over(&a.1, a.2, &c.1, c.2, eye) <= SEEN_SLACK;
+    if over(m, o) && over(o, m) {
+        return true;
+    }
+    // `o` glued beside `n` across the edge `m` hangs from, a corner of `o` on the line
+    // of that edge (their corners meet there), and `m` reaching past the end of that
+    // edge, over `o`'s side.
+    let (half_m, half_n) = if b.across {
+        (m.2 / 2.0, n.2 / 2.0)
+    } else {
+        (m.1.width / 2.0, n.1.width / 2.0)
+    };
+    let (hinge, way) = if b.across {
+        (Vec3::new(b.side * n.1.width / 2.0, 0.0, 0.0), Vec3::Y)
+    } else {
+        (Vec3::new(0.0, b.side * n.2 / 2.0, 0.0), Vec3::X)
+    };
+    let on_hinge = |c: Vec3| {
+        let l = n.1.rotation.inverse() * (c - n.1.position) - hinge;
+        l.reject_from_normalized(way).length() < GLUED
+    };
+    let over_the_seam = beside(&n.1, n.2, &o.1, o.2, eye).is_some_and(|g| {
+        g.across != b.across && g.gap < GLUED && g.side * b.along + half_m > half_n
+    }) && corners(&o.1, o.2).into_iter().any(on_hinge);
+    if !over_the_seam {
+        return false;
+    }
+    let monitor = |p: &Part<K>| {
+        let &(id, w, h) = monitors.iter().find(|x| x.0 == p.0)?;
+        Some(Monitor {
+            id,
+            px: PixelSize::new(w, h),
+            placement: Placement {
+                position: p.1.position - eye,
+                ..p.1
+            },
+        })
+    };
+    let side = match (b.across, b.side > 0.0) {
+        (true, true) => Side::Right,
+        (true, false) => Side::Left,
+        (false, true) => Side::Above,
+        (false, false) => Side::Below,
+    };
+    let (Some(mo), Some(mm)) = (monitor(o), monitor(m)) else {
+        return false;
+    };
+    let deep = |a: &Monitor<K>, c: &Monitor<K>, side: Side| {
+        reach_pair(a, c, side, 17).is_some_and(|r| r <= SEAM_REACH)
+    };
+    deep(&mo, &mm, side) && deep(&mm, &mo, side.opposite())
+}
+
 /// Where a monitor being let go of would stick: the monitor it joins and the edge.
 #[derive(Debug, Clone, Copy)]
 pub struct Stick<K> {
@@ -210,9 +293,9 @@ pub struct Stick<K> {
 /// monitor, as seen from `eye`) and at about the same distance, where it would stick
 /// to it, edge to edge, where along the edge it is (see [`hinge`]); `None` otherwise.
 /// Joined to its nearest neighbour, a monitor that would go through another one (a
-/// hinge turns it towards the eye, into a third monitor beside or under it) is joined
-/// to the next nearest instead, and with none it stays where it was let go. Worked
-/// out in `scratch`.
+/// hinge turns it towards the eye, into a third monitor beside or under it), lie over
+/// or behind one as seen, or turn its back to the eye is joined to the next nearest
+/// instead, and with none it stays where it was let go. Worked out in `scratch`.
 pub fn stick<K: Key>(
     placements: &HashMap<K, Placement>,
     monitors: &[(K, u32, u32)],
@@ -243,9 +326,17 @@ pub fn stick<K: Key>(
             continue;
         }
         first = false;
-        if all
-            .iter()
-            .any(|o| o.0 != id && cuts(&placement, m.2, &o.1, o.2))
+        // Turned away from the eye, through another one, or seen over or behind
+        // another one (hung from an edge in front of a monitor further away, or folded
+        // back behind the one it hangs from): not there.
+        let joined = (m.0, placement, m.2, m.3);
+        let facing = placement.normal().dot(eye - placement.position) > 0.0;
+        if !facing
+            || all.iter().any(|o| {
+                o.0 != id
+                    && (cuts(&placement, m.2, &o.1, o.2)
+                        || !seen_clear(&joined, o, &n, &b, eye, monitors))
+            })
         {
             continue;
         }

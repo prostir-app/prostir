@@ -1,7 +1,8 @@
 //! The arrangement's hard rule over everything that changes it, on a few hundred
 //! random desks (the same ones every run): no two displays ever cut into each other in
 //! the room, and the PC's own displays glued on its desktop stand two of its pixels
-//! apart. Each desk is laid out as its monitors' pictures come, one by one, then goes
+//! apart; and after the magnet, no monitor hides another from the eye (rays from the
+//! eye to a grid on each). Each desk is laid out as its monitors' pictures come, one by one, then goes
 //! through random steps: a monitor dropped next to another with the magnet on, one or
 //! two monitors added (the second asked before the first one's picture comes), two
 //! swapped, a stream coming back at another resolution, "Line up", and
@@ -75,6 +76,115 @@ fn cut(a: &Placement, ah: f32, b: &Placement, bh: f32) -> bool {
     crosses(a, ah, b, bh) || crosses(b, bh, a, ah)
 }
 
+/// How much of a display another may hide from the eye before it counts (3 %): a
+/// glued seam seen at a slant hides a sliver.
+const HIDDEN: f32 = 0.03;
+
+/// How much of a monitor hung over the seam between two glued ones the second may hide,
+/// or it of the second (a quarter): where their row curves round the eye the second
+/// reaches in front of it (the owner's 3840x2160 over two 2560x1440, as the magnet
+/// leaves it, until "Line up").
+const SEAM_HIDDEN: f32 = 0.25;
+
+/// The points of a 16 by 16 grid over a flat rectangle (place, height), each in the
+/// middle of its cell.
+fn grid(p: &Placement, h: f32) -> impl Iterator<Item = Vec3> + '_ {
+    const N: usize = 16;
+    (0..N * N).map(move |i| {
+        let (u, v) = (
+            ((i % N) as f32 + 0.5) / N as f32 - 0.5,
+            ((i / N) as f32 + 0.5) / N as f32 - 0.5,
+        );
+        p.position + p.rotation * Vec3::new(u * p.width, v * h, 0.0)
+    })
+}
+
+/// How much of `a` (place, height) `b` hides from `eye`: the share of a grid of points
+/// on `a` whose line of sight goes through `b` first. Worked out apart from the code
+/// under test: rays against flat rectangles.
+fn hidden_by(eye: Vec3, a: (&Placement, f32), b: (&Placement, f32)) -> f32 {
+    let (bp, bh) = b;
+    let n = bp.rotation * Vec3::Z;
+    let mut count = 0;
+    let mut hidden = 0;
+    for p in grid(a.0, a.1) {
+        count += 1;
+        let d = p - eye;
+        let denom = d.dot(n);
+        if denom.abs() < 1e-9 {
+            continue;
+        }
+        let t = (bp.position - eye).dot(n) / denom;
+        // In front of the point by more than a millimetre.
+        if t <= 0.0 || t * d.length() >= d.length() - 0.001 {
+            continue;
+        }
+        let l = bp.rotation.inverse() * (eye + d * t - bp.position);
+        if l.x.abs() < bp.width / 2.0 && l.y.abs() < bh / 2.0 {
+            hidden += 1;
+        }
+    }
+    hidden as f32 / count.max(1) as f32
+}
+
+/// How two displays meet in the room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Meeting {
+    /// An edge of each along one line (within 5 mm) over a centimetre at least: hung
+    /// from one hinge, or glued.
+    Edge,
+    /// Only a corner of one on an edge of the other (within a centimetre): a monitor
+    /// hung over the seam between two glued ones meets the second so.
+    Corner,
+    Apart,
+}
+
+impl Meeting {
+    /// How much of one of two that meet so the other may hide.
+    fn may_hide(self) -> f32 {
+        match self {
+            Meeting::Corner => SEAM_HIDDEN,
+            Meeting::Edge | Meeting::Apart => HIDDEN,
+        }
+    }
+}
+
+/// How `a` and `b` (place, height) meet.
+fn meeting(a: (&Placement, f32), b: (&Placement, f32)) -> Meeting {
+    let edges = |(p, h): (&Placement, f32)| {
+        let (x, y) = (p.width / 2.0, h / 2.0);
+        let c = [(-x, -y), (x, -y), (x, y), (-x, y)]
+            .map(|(u, v)| p.position + p.rotation * Vec3::new(u, v, 0.0));
+        [(c[0], c[1]), (c[1], c[2]), (c[2], c[3]), (c[3], c[0])]
+    };
+    let along = edges(a).into_iter().any(|(p, q)| {
+        let dir = (q - p).normalize();
+        edges(b).into_iter().any(|(r, s)| {
+            let off = |x: Vec3| (x - p).reject_from_normalized(dir).length();
+            let (t0, t1) = ((r - p).dot(dir), (s - p).dot(dir));
+            let overlap = t0.max(t1).min((q - p).length()) - t0.min(t1).max(0.0);
+            off(r) < 0.005 && off(s) < 0.005 && overlap > 0.01
+        })
+    });
+    if along {
+        return Meeting::Edge;
+    }
+    let on_edge = |c: Vec3, (p, q): (Vec3, Vec3)| {
+        let t = ((c - p).dot(q - p) / (q - p).length_squared()).clamp(0.0, 1.0);
+        c.distance(p.lerp(q, t)) < 0.01
+    };
+    let corner_on = |x: (&Placement, f32), y: (&Placement, f32)| {
+        edges(x)
+            .into_iter()
+            .any(|(c, _)| edges(y).into_iter().any(|e| on_edge(c, e)))
+    };
+    if corner_on(a, b) || corner_on(b, a) {
+        Meeting::Corner
+    } else {
+        Meeting::Apart
+    }
+}
+
 /// A desk being tried: the PC's list, and the PC's own displays on its desktop.
 struct Trial {
     sim: Sim,
@@ -143,20 +253,44 @@ impl Trial {
 
     /// Every pair of displays cutting into each other.
     fn cutting(&self) -> Vec<(u32, u32)> {
-        let all: Vec<(u32, Placement, f32)> = self
-            .list
+        let all = self.shown_displays();
+        let mut out = Vec::new();
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                if cut(&a.1, a.2, &b.1, b.2) {
+                    out.push((a.0, b.0));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every display placed and streaming: number, place, height.
+    fn shown_displays(&self) -> Vec<(u32, Placement, f32)> {
+        self.list
             .iter()
             .filter_map(|d| {
                 let p = *self.sim.world.placement(k(d.id.0))?;
                 self.sim.world.streams(k(d.id.0)).then_some(())?;
                 Some((d.id.0, p, self.height(d.id.0, &p)))
             })
-            .collect();
+            .collect()
+    }
+
+    /// Every display that hides more than [`HIDDEN`] of another from the eye: the one
+    /// hidden, the one in front, how much is hidden, and how the two meet.
+    fn hiding(&self) -> Vec<(u32, u32, f32, Meeting)> {
+        let eye = self.sim.world.center.0;
+        let all = self.shown_displays();
         let mut out = Vec::new();
-        for (i, a) in all.iter().enumerate() {
-            for b in &all[i + 1..] {
-                if cut(&a.1, a.2, &b.1, b.2) {
-                    out.push((a.0, b.0));
+        for a in &all {
+            for b in &all {
+                if a.0 == b.0 {
+                    continue;
+                }
+                let share = hidden_by(eye, (&a.1, a.2), (&b.1, b.2));
+                if share > HIDDEN {
+                    out.push((a.0, b.0, share, meeting((&a.1, a.2), (&b.1, b.2))));
                 }
             }
         }
@@ -234,16 +368,18 @@ impl Trial {
             rotation: (turn * op.rotation).normalize(),
             width: mp.width,
         };
-        // Only a drop that cuts into nothing as dropped.
+        // Only a drop that cuts into nothing as dropped, hides nothing and is hidden by
+        // nothing: what the magnet makes of it is what is checked.
         let others = self.list.iter().filter(|d| d.id.0 != m).filter_map(|d| {
             let q = *self.sim.world.placement(k(d.id.0))?;
             Some((q, self.height(d.id.0, &q)))
         });
-        if others
-            .collect::<Vec<_>>()
-            .iter()
-            .any(|(q, qh)| cut(&p, mh, q, *qh))
-        {
+        let eye = self.sim.world.center.0;
+        if others.collect::<Vec<_>>().iter().any(|(q, qh)| {
+            cut(&p, mh, q, *qh)
+                || hidden_by(eye, (&p, mh), (q, *qh)) > HIDDEN
+                || hidden_by(eye, (q, *qh), (&p, mh)) > HIDDEN
+        }) {
             return None;
         }
         let sim = &mut self.sim;
@@ -409,7 +545,10 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
             continue;
         }
         for _ in 0..6 {
-            let step = match steps[rng.below(steps.len())] {
+            let kind = steps[rng.below(steps.len())];
+            let dropped = kind == Step::Drop;
+            let hidden_before = if dropped { desk.hiding() } else { Vec::new() };
+            let step = match kind {
                 Step::Drop => desk.drop_near(&mut rng),
                 Step::Add => desk.add(&mut rng, false),
                 Step::AddTwice => desk.add(&mut rng, true),
@@ -422,10 +561,21 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
             desk.sim.after(1000);
             done.push(step);
             let (cutting, unglued) = (desk.cutting(), desk.unglued());
-            if !cutting.is_empty() || !unglued.is_empty() {
+            // After the magnet, nothing hides another that did not already (a monitor
+            // over two glued ones only a little of the second).
+            let hiding: Vec<_> = if dropped {
+                let was = |a: u32, b: u32| hidden_before.iter().any(|h| (h.0, h.1) == (a, b));
+                desk.hiding()
+                    .into_iter()
+                    .filter(|h| !was(h.0, h.1) && h.2 > h.3.may_hide())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if !cutting.is_empty() || !unglued.is_empty() || !hiding.is_empty() {
                 failures.push(format!(
                     "{ppd:?} case {case} {first:?}: {done:?}: cut {cutting:?}, glued apart \
-                     {unglued:?}"
+                     {unglued:?}, hidden (by, share, meeting) {hiding:?}"
                 ));
                 if std::env::var_os("PROSTIR_CUT_DEBUG").is_some() {
                     for (n, p) in &desk.sim.world.placements {
@@ -444,7 +594,8 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
     );
 }
 
-/// The magnet never joins a monitor to its neighbour through a third one.
+/// The magnet never joins a monitor to its neighbour through a third one, nor in front
+/// of or behind one.
 #[test]
 fn the_magnet_cuts_into_nothing() {
     holds_through(&[Step::Drop], 300);
@@ -494,8 +645,8 @@ fn each_step_at_one_to_one_cuts_into_nothing() {
 }
 
 /// The magnet on many more desks, of the standard size and made 1:1 on headsets of 25
-/// and 20 pixels a degree: never a monitor stuck over another nearly in its plane (two
-/// hinged on one edge to the same side), nor through one.
+/// and 20 pixels a degree: never a monitor folded over another (two hung from one edge
+/// to the same side), nor through one, nor seen over or behind one.
 #[test]
 fn the_magnet_cuts_into_nothing_on_many_desks() {
     for ppd in [None, Some(25.0), Some(20.0)] {
