@@ -283,6 +283,17 @@ pc-worker-run-outputs-screen-sharing = Показ екрана
 
 pc-worker-run-tests-kept-h-264-hevc-did-not = лишився H.264: HEVC не запустився
 
+## src/platform/linux/audio.rs
+
+pc-audio-prostir-headset = Prostir — шолом
+pc-audio-prostir-internal = Prostir (службовий)
+pc-audio-prostir-headset-microphone = Prostir — мікрофон шолома
+
+## src/platform/sound.rs
+
+# $name: the driver, $url: where to get it, $device: the device to choose
+pc-sound-needs-driver = Потрібен драйвер { $name }: { $url }. Після встановлення оберіть у програмах мікрофон «{ $device }».
+
 ### Settings window
 
 ## Сторінки

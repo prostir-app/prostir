@@ -27,11 +27,6 @@ pub fn code() -> &'static str {
     if ukrainian() { "uk" } else { "en" }
 }
 
-/// A text written in the code as a pair, until it moves into `lang/`.
-pub fn inline_t<'a>(uk: &'a str, en: &'a str) -> &'a str {
-    if ukrainian() { uk } else { en }
-}
-
 fn strings() -> &'static Strings {
     static STRINGS: OnceLock<Strings> = OnceLock::new();
     STRINGS.get_or_init(|| built_in(code()))

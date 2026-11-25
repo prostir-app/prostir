@@ -292,6 +292,17 @@ pc-worker-run-outputs-screen-sharing = Screen sharing
 
 pc-worker-run-tests-kept-h-264-hevc-did-not = kept H.264: HEVC did not start
 
+## src/platform/linux/audio.rs
+
+pc-audio-prostir-headset = Prostir headset
+pc-audio-prostir-internal = Prostir (internal)
+pc-audio-prostir-headset-microphone = Prostir headset microphone
+
+## src/platform/sound.rs
+
+# $name: the driver, $url: where to get it, $device: the device to choose
+pc-sound-needs-driver = Needs the { $name } driver: { $url }. Once it is installed, choose “{ $device }” as the microphone in programs.
+
 ### Settings window
 
 ## Pages
