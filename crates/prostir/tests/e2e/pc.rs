@@ -3,7 +3,7 @@
 //! with a session bus of its own for the local API (`dbus-daemon --session`, where
 //! it is installed).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -73,6 +73,29 @@ impl Drop for Slot {
     }
 }
 
+/// The lock on the tests' directory, held by the run until it ends: the directories are
+/// the same for every run in one target directory, so a second run would wipe the
+/// first one's session bus and its fake desktop's lock.
+static RUN_LOCK: std::sync::LazyLock<std::fs::File> = std::sync::LazyLock::new(|| {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join("e2e.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    if let Err(e) = file.try_lock() {
+        panic!(
+            "another run of these tests holds {} ({e}): two runs in one target directory \
+             wipe each other's directories; wait for it, or use another CARGO_TARGET_DIR",
+            path.display()
+        );
+    }
+    file
+});
+
 /// A directory for one test under Cargo's temporary directory. Removed when the test
 /// passes; kept (with the PC app's log) when it fails, to look at.
 pub struct TestDir(PathBuf);
@@ -80,6 +103,17 @@ pub struct TestDir(PathBuf);
 impl TestDir {
     pub fn new(name: &str) -> Self {
         Slot::take();
+        let _ = &*RUN_LOCK;
+        // A name is for one test: two with the same one would wipe each other's directory.
+        static NAMES: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+        let fresh = NAMES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(name.to_owned());
+        assert!(
+            fresh,
+            "two tests use the directory name {name:?}: give one its own"
+        );
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("e2e-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -361,9 +395,26 @@ impl Bus {
     pub fn start(dir: &Path) -> Option<Self> {
         let socket = dir.join("bus");
         let _ = std::fs::remove_file(&socket);
+        // Its own small configuration: the system's session one names directories of
+        // services, which would start the real desktop's (a notification daemon, the
+        // portals) on this bus.
+        let config = dir.join("bus.conf");
+        std::fs::write(
+            &config,
+            format!(
+                "<busconfig>\n<type>session</type>\n<listen>unix:path={}</listen>\n\
+                 <auth>EXTERNAL</auth>\n<policy context=\"default\">\n\
+                 <allow send_destination=\"*\" eavesdrop=\"true\"/>\n\
+                 <allow eavesdrop=\"true\"/>\n<allow own=\"*\"/>\n</policy>\n</busconfig>\n",
+                socket.display()
+            ),
+        )
+        .unwrap();
         let spawned = Command::new("dbus-daemon")
-            .args(["--session", "--nofork", "--print-address"])
-            .arg(format!("--address=unix:path={}", socket.display()))
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .arg(format!("--config-file={}", config.display()))
+            .args(["--nofork", "--print-address"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

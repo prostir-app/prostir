@@ -772,7 +772,7 @@ the table says. A new value later comes with a capability and a fallback of its 
 | 11 | the microphone as an up stream | | |
 | 12 | the camera | | |
 | 13 | poses | | |
-| 14 | uses the gaze for which display gets the most bits | | |
+| 14 | takes `Gaze` (for which display gets the most bits, from step 10) | | |
 
 | Enum | Value | Needs | Without it |
 |---|---|---|---|
@@ -815,7 +815,8 @@ go to the main headset, else to the first connected.
 | `DetachWindow` | changes and private |
 | `WindowHere`, `MouseTo`, `Prefs.gaze_mouse_ms` | input |
 | `Screenshot`, `Prefs.notifications` | private |
-| `FindMouse`, `RequestKeyframe`, `Gaze` | nothing (keyframes at most every 300 ms for a display, from all sessions together) |
+| `FindMouse`, `RequestKeyframe` | nothing (keyframes at most every 300 ms for a display, from all sessions together) |
+| `Gaze` | nothing, and the headset sends it only to a host that listed feature 14 |
 | `UpStart` | the microphone (or the camera, by kind) |
 | `Arrange`, `Volume` | the main headset: a guest's arrangement does not move the desktop, its volume does not move the PC's |
 | `Presence` | anyone: the host sends no frames and no sound to a headset not worn, pauses the desktop once no headset is worn, and ends the session of one taken off (see [End of session](#end-of-session)) |
@@ -996,7 +997,7 @@ are marked as such (their bytes never change). "Part" marks a part of the state 
 | 140 | `Up` | `up:u8, data:bytes*` | A piece of up stream `up`. Lane 1. |
 | 141 | `UpEnd` | `up:u8` | Up stream `up` ended. Lane 1. |
 | 133 | `Arrange` | `rows:list<Row>(max 32)` | How the displays stand around the user (see [Layout](#7-layout)). |
-| 137 | `Gaze` | `display:opt<DisplayId>, u:u16, v:u16` | The display the user looks at, and where on it (0 to 65535 from the top left). |
+| 137 | `Gaze` | `display:opt<DisplayId>, u:u16, v:u16` | The display the user looks at, and where on it (0 to 65535 from the top left); none (with `u` and `v` 0): none of this host's displays. The headset sends it only to a host that listed feature 14, only when the display looked at has changed and rested a moment (not for a move across one display), and at most four times a second. The host only logs it for now. |
 | 131 | `Request` | `req:u32, kind:u8, fields` | A change of the host's state (see [Requests](#requests)). |
 | 132 | `Reply` | `req:u32, outcome:Outcome` | The answer to the host's `Command` `req`, after the parts it changed. |
 | 124 | `MouseTo` | `id:DisplayId, u:u16, v:u16` | Put the mouse on display `id`, at `u`, `v` across its picture (0 to 65535). |

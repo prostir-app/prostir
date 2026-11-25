@@ -135,8 +135,12 @@ impl Session {
                 displays.mouse_to(ScreenId::from_wire(id), u, v);
             }
             ClientMsg::MouseTo { .. } => info!("the headset has no right to move the mouse"),
-            // Used for priorities from step 10 on.
-            ClientMsg::Gaze { .. } => {}
+            // Said when the monitor looked at changes, at most four times a second. Used
+            // for priorities from step 10 on; until then only the log shows it.
+            ClientMsg::Gaze { display, u, v } => match display {
+                Some(id) => debug!("gaze: the headset looks at display {} at {u},{v}", id.0),
+                None => debug!("gaze: the headset looks at none of the displays"),
+            },
             // Off the head and asleep: the session ends without the grace.
             ClientMsg::Asleep if !self.worn() => {
                 info!("the headset went to sleep");
