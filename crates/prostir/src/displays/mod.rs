@@ -5,7 +5,7 @@
 //! back ([`Displays::desk_done`]); nothing here waits for the desktop or an encoder.
 //! Delivery to the headsets is the [`Router`]'s.
 
-use crate::i18n::inline_t;
+use crate::i18n::t;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};

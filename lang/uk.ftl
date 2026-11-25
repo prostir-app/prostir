@@ -216,6 +216,38 @@ pc-wake-pair-it = Сполучити?
 pc-wake-pair = Сполучити
 pc-wake-to-pair-it-choose-pair-a = Щоб сполучити, виберіть «Сполучити новий шолом» у меню Prostir.
 
+## src/errors.rs
+
+pc-errors-the-pc-cannot-do-this = ПК цього не вміє
+pc-errors-this-headset-is-not-allowed-to = Цьому шолому це не дозволено
+pc-errors-no-such-display = Такого екрана немає
+pc-errors-the-pc-does-not-make-a = ПК не створює монітор
+pc-errors-the-last-monitor-cannot-be-removed = Останній монітор прибрати не можна
+pc-errors-no-active-window-on-the-pc = Немає активного вікна на ПК
+pc-errors-the-pc-s-desktop-did-not = Стільниця ПК цього не зробила
+pc-errors-the-encoder-did-not-start = Кодувальник не запустився
+pc-errors-the-picture-could-not-be-taken = Зображення не знято
+pc-errors-the-sound-could-not-be-switched = Звук не перемкнувся
+pc-errors-the-mouse-is-on-none-of = Миша не на жодному з екранів
+pc-errors-a-value-out-of-range = Неправильне значення
+
+## src/displays/arrange.rs
+
+pc-displays-arrange-the-order-does-not-match-the = Порядок не збігається з моніторами
+
+## src/displays/encoding.rs
+
+pc-displays-encoding-more = ще
+pc-displays-encoding-is-larger-than-the-headset-decodes = більше, ніж шолом декодує в
+
+## src/displays/parts.rs
+
+pc-displays-parts-more-streams-than-the-headset-takes = більше потоків, ніж шолом бере
+
+## src/displays/sound.rs
+
+pc-displays-sound-the-microphone-is-not-ready-yet = Мікрофон ще не готовий
+
 ### Settings window
 
 ## Сторінки

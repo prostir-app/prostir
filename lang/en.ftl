@@ -225,6 +225,38 @@ pc-wake-pair-it = Pair it?
 pc-wake-pair = Pair
 pc-wake-to-pair-it-choose-pair-a = To pair it, choose "Pair a new headset" in the Prostir menu.
 
+## src/errors.rs
+
+pc-errors-the-pc-cannot-do-this = The PC cannot do this
+pc-errors-this-headset-is-not-allowed-to = This headset is not allowed to do this
+pc-errors-no-such-display = No such display
+pc-errors-the-pc-does-not-make-a = The PC does not make a monitor of
+pc-errors-the-last-monitor-cannot-be-removed = The last monitor cannot be removed
+pc-errors-no-active-window-on-the-pc = No active window on the PC
+pc-errors-the-pc-s-desktop-did-not = The PC's desktop did not do it
+pc-errors-the-encoder-did-not-start = The encoder did not start
+pc-errors-the-picture-could-not-be-taken = The picture could not be taken
+pc-errors-the-sound-could-not-be-switched = The sound could not be switched
+pc-errors-the-mouse-is-on-none-of = The mouse is on none of the displays
+pc-errors-a-value-out-of-range = A value out of range
+
+## src/displays/arrange.rs
+
+pc-displays-arrange-the-order-does-not-match-the = The order does not match the monitors
+
+## src/displays/encoding.rs
+
+pc-displays-encoding-more = more
+pc-displays-encoding-is-larger-than-the-headset-decodes = is larger than the headset decodes in
+
+## src/displays/parts.rs
+
+pc-displays-parts-more-streams-than-the-headset-takes = more streams than the headset takes
+
+## src/displays/sound.rs
+
+pc-displays-sound-the-microphone-is-not-ready-yet = The microphone is not ready yet
+
 ### Settings window
 
 ## Pages

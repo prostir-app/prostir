@@ -352,13 +352,7 @@ impl Displays {
         sorted.sort_unstable();
         let current: Vec<ScreenId> = self.monitors().map(|s| s.id).collect();
         if sorted != current {
-            bail!(
-                "{}",
-                inline_t(
-                    "Порядок не збігається з моніторами",
-                    "The order does not match the monitors"
-                )
-            );
+            bail!("{}", t("pc-displays-arrange-the-order-does-not-match-the"));
         }
         // One row, in this order.
         self.rows = vec![ids.iter().map(|&id| desk::Entry::new(id)).collect()];
