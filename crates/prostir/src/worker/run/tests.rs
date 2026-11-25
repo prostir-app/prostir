@@ -378,6 +378,7 @@ fn a_monitor_that_cannot_be_made_again_ends_its_stream() {
             width: 64,
             height: 32,
             kbps: 30_000,
+            sharpens: false,
         },
     );
     router.on_event(

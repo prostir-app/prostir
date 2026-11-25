@@ -10,10 +10,12 @@
   a frame to encode there. Turning Sharper text on or off applies to every monitor;
   settings of earlier versions keep it only where it was turned on.
 - After a big change of the picture (another file, another tab) the first frame is
-  coarse: once the screen is still, it is sharpened after 0.7 s instead of about 4 s,
-  once per pause. Typing and scrolling make no extra keyframes. On KDE a still screen
-  now sends its picture again every 0.5 s instead of 2 s (a frame of a few KB), so the
-  sharp picture comes at once.
+  coarse: with Sharper text, once the screen is still, it is sharpened after about
+  0.7 s instead of about 4 s, once per pause (the faster setting cannot make a still
+  picture sharper than that first frame, so it keeps the keyframe after 3 s). Typing
+  and scrolling make no extra keyframes. On KDE a still screen now sends its picture
+  again every 0.75 s instead of 2 s (a frame of a few KB), so the sharp picture comes
+  then.
 - Over USB, monitors of 2560×1440 and larger stream at 60 Mbit/s instead of 30 while
   you have not chosen a quality yourself: the first frame after a big change is then
   nearly as sharp as a still one. A quality you choose holds for every monitor. The

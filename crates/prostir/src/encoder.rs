@@ -290,6 +290,9 @@ pub enum EncoderEvent {
         height: u32,
         /// The bitrate it encodes at, kbit/s.
         kbps: u32,
+        /// A keyframe of a still picture is sharper than a big frame (see
+        /// [`Encoder::tuned`]).
+        sharpens: bool,
     },
     Frame {
         pts_us: u64,
@@ -426,11 +429,14 @@ struct Tuning {
     /// What its encoder has now.
     kbps: u32,
     target_usage: u32,
+    /// On VA-API, where the preset is.
+    va: bool,
 }
 
 impl Tuning {
     fn new(cfg: &EncoderConfig) -> Self {
         Self {
+            va: cfg.backend == Backend::Va,
             small_kbps: cfg.bitrate_kbps,
             large_kbps: cfg.large_kbps,
             sharp: cfg.sharp,
@@ -438,6 +444,14 @@ impl Tuning {
             kbps: cfg.bitrate_kbps,
             target_usage: cfg.target_usage(None),
         }
+    }
+
+    /// Whether a keyframe of a still picture is sharper than a big frame of it: with
+    /// VA-API's slower preset a keyframe is about as good as one with a constant
+    /// quantiser of 10 (53 dB of the text); the faster one caps it lower than a big
+    /// frame at 60 Mbit/s (37 against 38.6 dB on 2560x1440). Not known of the others.
+    fn sharpens(&self) -> bool {
+        self.va && self.target_usage == 4
     }
 
     /// The bitrate for the picture's size now.
@@ -870,10 +884,15 @@ impl Encoder {
                             let mut last = last_size.lock().unwrap();
                             if *last != info {
                                 *last = info;
+                                let (kbps, sharpens) = {
+                                    let tuned = tuned.lock().unwrap();
+                                    (tuned.kbps, tuned.sharpens())
+                                };
                                 if on_event(EncoderEvent::Size {
                                     width: info.0,
                                     height: info.1,
-                                    kbps: tuned.lock().unwrap().kbps,
+                                    kbps,
+                                    sharpens,
                                 }) {
                                     request_keyframe(sink);
                                 }
@@ -1143,6 +1162,13 @@ impl Encoder {
             tuning.apply(&enc);
         }
         tuning.kbps
+    }
+
+    /// Its bitrate now, kbit/s, and whether a keyframe of a still picture is sharper
+    /// than a big frame (VA-API's slower preset).
+    pub fn tuned(&self) -> (u32, bool) {
+        let tuning = self.tuning.lock().unwrap();
+        (tuning.kbps, tuning.sharpens())
     }
 
     /// Switches the VA-API speed/quality preset on the fly (no effect on x264), as

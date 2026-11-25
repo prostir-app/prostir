@@ -113,7 +113,7 @@ fn clearer_text_by_default() {
         assert_eq!(s.sharp, sharp, "{text}");
         // Written as it holds, and read back so.
         let again = settings_text(&s, &kept);
-        assert!(again.starts_with(&format!("version {}\n", kept.version.max(3))));
+        assert!(again.starts_with(&format!("version {}\n", kept.version.max(4))));
         assert_eq!(again.contains("sharp"), sharp.is_some(), "{again}");
         assert_eq!(parse_settings(&again).0.sharp, sharp, "{again}");
     }
@@ -141,8 +141,11 @@ fn the_quality_is_chosen_only_once_chosen() {
         ("version 2\nbitrate 30\n", 30, false),
         ("version 2\nbitrate 50\n", 50, true),
         ("bitrate 30\n", 30, false),
-        ("version 3\nbitrate 30\n", 30, true),
-        ("version 3\n", 30, false),
+        // Builds of version 3 wrote it for everyone too.
+        ("version 3\nbitrate 30\n", 30, false),
+        ("version 3\nbitrate 50\n", 50, true),
+        ("version 4\nbitrate 30\n", 30, true),
+        ("version 4\n", 30, false),
     ] {
         let (s, kept) = parse_settings(text);
         assert_eq!((s.bitrate, s.bitrate_chosen), (bitrate, chosen), "{text}");
@@ -285,7 +288,7 @@ fn files_round_trip_and_keep_unknown_lines() {
         ..Settings::default()
     };
     let kept = Kept {
-        version: 3,
+        version: 4,
         unknown: vec!["theme dark".into()],
         ..Kept::default()
     };

@@ -434,12 +434,13 @@ impl Worker {
                 .filter_map(|(id, s)| Some((*id, s.encoder.as_ref()?)))
             {
                 if tuning.0 != self.tuning.unwrap_or_default().0 {
-                    let kbps = e.set_bitrate(tuning.0.0, tuning.0.1);
-                    self.shared.router.set_bitrate(id, kbps);
+                    e.set_bitrate(tuning.0.0, tuning.0.1);
                 }
                 if tuning.1 != self.tuning.unwrap_or_default().1 {
                     e.set_sharp(wanted.encoding.sharp);
                 }
+                let (kbps, sharpens) = e.tuned();
+                self.shared.router.set_tuning(id, kbps, sharpens);
             }
         }
         self.tuning = Some(tuning);

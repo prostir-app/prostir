@@ -188,9 +188,10 @@ pub fn is_word(value: &str) -> bool {
 /// The settings in `text`. Before version 3 clearer text was off by default and
 /// `sharp off` was written all the same, so it was mostly the default nobody chose:
 /// it is no choice (as `count on` is no answer); `sharp on` was chosen and stays. So
-/// is `bitrate 30`, the default; another quality was chosen. From version 3 on, a
-/// `sharp` or `bitrate` line is a choice and there is none without one. 0.1's
-/// `monitors.txt` has no version: as before version 3.
+/// is `bitrate 30` before version 4, the default (builds of version 3 still wrote it
+/// for everyone); another quality was chosen. From those versions on, a `sharp` or
+/// `bitrate` line is a choice and there is none without one. 0.1's `monitors.txt` has
+/// no version: as the oldest.
 pub(super) fn parse_settings(text: &str) -> (Settings, Kept) {
     let mut s = Settings::default();
     let mut kept = Kept::default();
@@ -287,19 +288,20 @@ pub(super) fn parse_settings(text: &str) -> (Settings, Kept) {
             kept.unknown.push(line.to_owned());
         }
     }
-    if kept.version < SHARP_CHOSEN {
-        if s.sharp == Some(false) {
-            s.sharp = None;
-        }
+    if kept.version < SHARP_CHOSEN && s.sharp == Some(false) {
+        s.sharp = None;
+    }
+    if kept.version < BITRATE_CHOSEN {
         // The default, written for everyone.
         s.bitrate_chosen &= s.bitrate != Settings::default().bitrate;
     }
     (s, kept)
 }
 
-/// The first version of `settings.txt` whose `sharp` and `bitrate` lines are always
-/// a choice.
+/// The first versions of `settings.txt` whose `sharp` and `bitrate` lines are always a
+/// choice.
 const SHARP_CHOSEN: u32 = 3;
+const BITRATE_CHOSEN: u32 = 4;
 
 pub(super) fn settings_text(s: &Settings, kept: &Kept) -> String {
     let mut text = format!(

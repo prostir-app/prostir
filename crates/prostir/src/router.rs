@@ -276,6 +276,11 @@ struct StreamSlot {
     unsettled: bool,
     /// Its encoder's bitrate, kbit/s, as it last said (0: not yet).
     kbps: u32,
+    /// Its encoder makes a keyframe of a still picture sharper than a big frame (see
+    /// `encoder::Tuning::sharpens`): only then is a coarse picture sharpened early. One
+    /// that caps its keyframes (VA-API's faster preset: 37 dB of a 2560x1440 picture
+    /// against 38.6 of a big frame at 60 Mbit/s) would make it worse.
+    sharpens: bool,
     /// A frame of a new picture since the last keyframe was big (a new file or tab:
     /// see [`big_frame`]), so it went out coarse within one frame's budget: a still
     /// picture after it is sharpened soon (see [`Router::still_keyframes`]).
@@ -320,6 +325,13 @@ impl StreamSlot {
             );
         }
         due
+    }
+
+    /// When it is to get the keyframe of a still screen (see
+    /// [`Router::still_keyframes`]): `early` after a big change, else `after`.
+    fn still_due(&self, after: Duration, early: Duration) -> Option<Instant> {
+        let wait = if self.coarse { early } else { after };
+        self.changed.filter(|_| self.unsettled).map(|t| t + wait)
     }
 
     /// Its picture moves: it sends frames now, and a keyframe asked of it comes with
@@ -870,6 +882,7 @@ impl Router {
             changed: None,
             unsettled: false,
             kbps: 0,
+            sharpens: false,
             coarse: false,
         };
         inner.streams.insert(id, slot);
@@ -916,7 +929,7 @@ impl Router {
     }
 
     /// A keyframe was asked of stream `id`, whose screen is still: on a still screen
-    /// the source sends nothing until its keepalive (500 ms on KDE, 2 s on Hyprland),
+    /// the source sends nothing until its keepalive (750 ms on KDE, 2 s on Hyprland),
     /// so it is asked for a
     /// picture now. A capture pushing its own frames sends its last one again
     /// (`keyframer`); a source that sends its picture when it starts (PipeWire on KDE)
@@ -1028,10 +1041,7 @@ impl Router {
             .unwrap()
             .streams
             .values_mut()
-            .filter(|s| {
-                let wait = if s.coarse { early } else { after };
-                s.unsettled && s.changed.is_some_and(|t| now.duration_since(t) >= wait)
-            })
+            .filter(|s| s.still_due(after, early).is_some_and(|t| now >= t))
             .map(|s| {
                 s.unsettled = false;
                 let sharpen = std::mem::take(&mut s.coarse);
@@ -1059,10 +1069,26 @@ impl Router {
         n
     }
 
-    /// The encoder of stream `id` encodes at `kbps` from now on.
-    pub fn set_bitrate(&self, id: ScreenId, kbps: u32) {
+    /// When [`Router::still_keyframes`] next has a keyframe to ask for, with the same
+    /// `after` and `early`: the control loop wakes then, so a coarse picture is
+    /// sharpened on time, not at its next housekeeping.
+    pub fn still_due(&self, after: Duration, early: Duration) -> Option<Instant> {
+        self.inner
+            .lock()
+            .unwrap()
+            .streams
+            .values()
+            .filter_map(|s| s.still_due(after, early))
+            .min()
+    }
+
+    /// The encoder of stream `id` encodes at `kbps` from now on, and sharpens a still
+    /// picture with a keyframe or not (see `StreamSlot::sharpens`).
+    pub fn set_tuning(&self, id: ScreenId, kbps: u32, sharpens: bool) {
         if let Some(slot) = self.inner.lock().unwrap().streams.get_mut(&id) {
             slot.kbps = kbps;
+            slot.sharpens = sharpens;
+            slot.coarse &= sharpens;
         }
     }
 
@@ -1190,6 +1216,7 @@ impl Router {
                 width,
                 height,
                 kbps,
+                sharpens,
             } => {
                 info!(
                     "{}: streaming {width}x{height} at {} Mbit/s",
@@ -1198,6 +1225,7 @@ impl Router {
                 );
                 slot.size = Some((width, height));
                 slot.kbps = kbps;
+                slot.sharpens = sharpens;
                 let mut fit_one = false;
                 for r in receivers.values_mut() {
                     let too_big = r.too_big(slot);
@@ -1265,7 +1293,8 @@ impl Router {
                     slot.unsettled = false;
                 }
                 // A keyframe is sharp; a big frame after it is not.
-                slot.coarse = !keyframe && (slot.coarse || big_frame(data.len(), slot.kbps));
+                slot.coarse =
+                    !keyframe && slot.sharpens && (slot.coarse || big_frame(data.len(), slot.kbps));
                 if keyframe {
                     let mut wanted = self.snapshot.lock().unwrap();
                     if wanted.as_ref().is_some_and(|(want, _)| *want == id)

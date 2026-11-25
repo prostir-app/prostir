@@ -94,11 +94,15 @@ pub struct OutputEncoding {
 /// [`Router::still_keyframes`]).
 const STILL: Duration = Duration::from_secs(3);
 /// The same after a big change (another file, another tab), whose picture went out
-/// coarse: it is sharpened this soon. A keyframe is the only way to sharpen a picture
-/// on VA-API (a change of bitrate on the way makes one), and one of `target-usage` 4
-/// is about as good as one with a constant quantiser of 10: measured on 2560x1440 text
-/// at 33 Mbit/s, from 34 to 53 dB (PSNR of the text), 3 s sooner than before.
-const STILL_EARLY: Duration = Duration::from_millis(700);
+/// coarse, where the encoder's keyframe is sharper (see `Router::still_keyframes`):
+/// asked for this soon, on time (the control loop wakes for it, see
+/// [`Displays::still_due`]). A capture that pushes its own frames sends its picture at
+/// once; KWin's stream sends it again 0.75 s after the last frame (its keepalive), so
+/// the keyframe comes then. A keyframe is the only way to sharpen a picture on VA-API
+/// (a change of bitrate on the way makes one), and one of `target-usage` 4 is about as
+/// good as one with a constant quantiser of 10: measured on 2560x1440 text at 33
+/// Mbit/s, from 34 to 53 dB (PSNR of the text), 3 s sooner than before.
+const STILL_EARLY: Duration = Duration::from_millis(650);
 
 /// A headset that waited this long for a fresh picture of a stream that sent nothing
 /// meanwhile gets it from the stream starting over.
@@ -648,7 +652,6 @@ impl Displays {
     /// primary output, window panels, the PC's own displays).
     pub fn tick(&mut self) {
         self.router.report();
-        self.router.still_keyframes(STILL, STILL_EARLY);
         self.router.pending_keyframes();
         self.sync_audio();
         // A way in for a recording that broke is made anew (nothing is asked), on the
@@ -823,6 +826,18 @@ impl Displays {
         } else {
             self.desk.ask(Job::Fresh([id].into()));
         }
+    }
+
+    /// When a still screen's keyframe is next to be asked for (see
+    /// [`Displays::still_keyframes`]): the control loop wakes then.
+    pub fn still_due(&self) -> Option<Instant> {
+        self.router.still_due(STILL, STILL_EARLY)
+    }
+
+    /// Asks for the keyframes of still screens that are due (see
+    /// [`Router::still_keyframes`]).
+    pub fn still_keyframes(&self) {
+        self.router.still_keyframes(STILL, STILL_EARLY);
     }
 
     /// Asks the encoder of screen `id` for a keyframe, without waiting for anyone.

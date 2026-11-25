@@ -47,9 +47,9 @@ use screens::{migrate, parse_screens, screens_text};
 pub use settings::{Settings, is_word, perm_words};
 use settings::{hex, parse_settings, settings_text};
 
-/// The file format this version writes. 3: clearer text and the quality are written
-/// only when chosen (see `settings::parse_settings`).
-const VERSION: u32 = 3;
+/// The file format this version writes. 3: clearer text is written only when chosen;
+/// 4: the quality too (see `settings::parse_settings`).
+const VERSION: u32 = 4;
 /// Numbers of screens are reserved this many at a time (see [`Store::new_id`]).
 pub const ID_BLOCK: u32 = 16;
 /// The first number the counter gives: above every number earlier builds gave out

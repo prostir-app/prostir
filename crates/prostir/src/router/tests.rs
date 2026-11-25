@@ -35,6 +35,7 @@ fn size(router: &Router, id: ScreenId) {
             width: 64,
             height: 32,
             kbps: 30_000,
+            sharpens: true,
         },
     );
 }
@@ -593,6 +594,77 @@ fn a_big_change_is_sharpened_early_once() {
     sized(&router, s, false, false, TYPED);
     std::thread::sleep(EARLY + Duration::from_millis(10));
     assert_eq!(router.still_keyframes(STILL, EARLY), 0);
+}
+
+/// An encoder whose keyframe is no sharper than a big frame (VA-API's faster preset)
+/// gets the usual keyframe of a still screen after a big change, not an early one;
+/// switched to one that sharpens, the next big change is sharpened early.
+#[test]
+fn only_an_encoder_that_sharpens_is_asked_early() {
+    let router = Router::new();
+    let s = id(5);
+    let _outbox = attach(&router, 1, headset());
+    router.publish(1, &BTreeSet::from([s]));
+    router.add_stream(s, Codec::H265, "test".into());
+    keyframe(&router, s);
+    router.set_tuning(s, 30_000, false);
+    sized(&router, s, false, false, BIG);
+    std::thread::sleep(EARLY + Duration::from_millis(10));
+    assert_eq!(router.still_keyframes(STILL, EARLY), 0, "not early");
+    std::thread::sleep(STILL);
+    assert_eq!(router.still_keyframes(STILL, EARLY), 1, "the usual one");
+    assert_eq!(counted(&router, s).sharpened, 0);
+    sized(&router, s, true, true, BIG);
+    router.set_tuning(s, 30_000, true);
+    sized(&router, s, false, false, BIG);
+    std::thread::sleep(EARLY + Duration::from_millis(10));
+    assert_eq!(router.still_keyframes(STILL, EARLY), 1, "early");
+    // A big change, then the encoder no longer sharpens: nothing early.
+    sized(&router, s, true, true, BIG);
+    sized(&router, s, false, false, BIG);
+    router.set_tuning(s, 30_000, false);
+    std::thread::sleep(EARLY + Duration::from_millis(10));
+    assert_eq!(router.still_keyframes(STILL, EARLY), 0);
+}
+
+/// The control loop wakes when a keyframe of a still screen is due (`still_due`), so
+/// the one that sharpens a coarse picture is asked for at its time, not at the next
+/// housekeeping, which comes every 500 ms.
+#[test]
+fn a_coarse_picture_is_sharpened_on_time() {
+    let router = Router::new();
+    let s = id(5);
+    let _outbox = attach(&router, 1, headset());
+    router.publish(1, &BTreeSet::from([s]));
+    router.add_stream(s, Codec::H265, "test".into());
+    keyframe(&router, s);
+    assert_eq!(router.still_due(STILL, EARLY), None, "settled");
+    let before = Instant::now();
+    sized(&router, s, false, false, BIG);
+    let after = Instant::now();
+    let due = router.still_due(STILL, EARLY).expect("due");
+    assert!(
+        due >= before + EARLY && due <= after + EARLY,
+        "{:?}",
+        due - before
+    );
+    // A keepalive changes nothing; the loop sleeps until then.
+    sized(&router, s, false, true, 100);
+    assert_eq!(router.still_due(STILL, EARLY), Some(due));
+    std::thread::sleep(due.saturating_duration_since(Instant::now()));
+    assert_eq!(router.still_keyframes(STILL, EARLY), 1);
+    let took = before.elapsed();
+    assert!(
+        took < EARLY + Duration::from_millis(40),
+        "asked {took:?} after"
+    );
+    assert_eq!(router.still_due(STILL, EARLY), None, "once");
+    // A small change: due after the usual time.
+    sized(&router, s, true, true, BIG);
+    let before = Instant::now();
+    sized(&router, s, false, false, TYPED);
+    let due = router.still_due(STILL, EARLY).expect("due");
+    assert!(due >= before + STILL && due <= Instant::now() + STILL);
 }
 
 /// Typing with pauses makes no keyframe in the pauses, only the usual one once it
