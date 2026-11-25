@@ -51,6 +51,15 @@ impl Background {
     pub fn is_room(self) -> bool {
         matches!(self, Background::Room | Background::RoomDim)
     }
+
+    /// How much of the room shows behind the monitors (1: all; less darkens it).
+    pub fn room_opacity(self) -> f32 {
+        if self == Background::RoomDim {
+            0.4
+        } else {
+            1.0
+        }
+    }
 }
 
 /// How the date on the palm menu is written.

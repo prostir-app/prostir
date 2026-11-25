@@ -93,6 +93,7 @@ const KEYS: &[&str] = &[
     "caps",
     "caps.off",
     "flip",
+    "room",
     "decoders",
     "decoders.pixels",
     "streams_max",
@@ -791,6 +792,8 @@ impl Selftest {
                     .map_or_else(|| "unsaid".to_owned(), |p| p.to_string())
             }),
         );
+        // How the room behind the monitors is shown (see `caps::room_ways`).
+        r.set("room", caps.room.map_or("none", |room| room.way.name()));
         r.set("streams_max", caps.streams_max);
         r.set("layers_max", caps.layers_max);
         match caps.volume_steps {

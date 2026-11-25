@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use anyhow::{Result, anyhow, bail};
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use log::{error, info, warn};
 use openxr as xr;
 use openxr::sys::Handle as _;
@@ -44,6 +44,7 @@ use crate::platform::meta::{self, passthrough};
 use crate::platform::openxr::input::Controls;
 use crate::platform::openxr::overlay::{self, Overlay, Sphere};
 use crate::platform::openxr::{self as xrutil, Gfx, ImageLayer, as_layer, egl, pose, posef, vec3};
+use crate::platform::room::Room;
 use crate::platform::sound::audio::Gains;
 use crate::platform::sound::mic::Mic;
 use crate::platform::store::StoreCheck;
@@ -72,6 +73,9 @@ const TOAST_PX: (u32, u32) = (1024, 132);
 const SCREEN_EVERY: Duration = Duration::from_millis(250);
 /// How often the wall clock is read for the menu's clock.
 const WALL_EVERY: Duration = Duration::from_secs(1);
+/// The side of the black layer over a dimmed room, in metres, a metre in front of
+/// the eyes: wider than any field of view.
+const DIM_SIZE: f32 = 40.0;
 /// Width of the placeholder's picture, in pixels (its height follows the monitor's
 /// shape).
 const PLACEHOLDER_PX: u32 = 1024;
@@ -235,7 +239,8 @@ struct Shell<'s> {
     /// Where the PC's sound comes from, for the audio thread.
     gains: Arc<Gains>,
     controls: Controls,
-    passthrough: Option<passthrough::Passthrough>,
+    /// The room behind the monitors, whichever way this headset shows it.
+    room: Room,
     /// Where the person's own files are (none in a selftest).
     external_dir: Option<PathBuf>,
     /// The effects being done, kept to be filled again.
@@ -307,9 +312,7 @@ impl Shell<'_> {
             Effect::Haptic(hand) => self.controls.pulse(self.session, hand),
             Effect::Xr(XrCmd::RefreshRate(hz)) => meta::set_display_rate(self.session, hz),
             Effect::Xr(XrCmd::Room { on, opacity }) => {
-                if let Some(pt) = &mut self.passthrough
-                    && let Err(e) = pt.set_room(on).and_then(|()| pt.set_room_opacity(opacity))
-                {
+                if let Err(e) = self.room.set(on, opacity) {
                     self.later
                         .push(Event::Platform(PlatformEvent::CamerasFailed(format!(
                             "{e:#}"
@@ -573,14 +576,39 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mic = Arc::new(Mic::new(settings.mic, app.clone()));
     let gains = Arc::new(Gains::default());
 
-    // Passthrough keeps the cameras busy and costs battery: only when "Room" is chosen.
-    let passthrough = if exts.fb_passthrough {
-        passthrough::Passthrough::new(&session, settings.background.is_room())
-            .inspect_err(|e| warn!("passthrough unavailable: {e:#}"))
-            .ok()
-    } else {
-        None
-    };
+    // The room behind the monitors, by the first way the runtime offers that can be
+    // made (see `caps::room_ways`). The cameras keep busy and cost battery: on only
+    // while a "Room" background is chosen.
+    let blend_modes: Vec<crate::caps::BlendMode> = instance
+        .enumerate_environment_blend_modes(system, xr::ViewConfigurationType::PRIMARY_STEREO)
+        .inspect_err(|e| warn!("blend modes: {e}"))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| match m {
+            xr::EnvironmentBlendMode::OPAQUE => Some(crate::caps::BlendMode::Opaque),
+            xr::EnvironmentBlendMode::ADDITIVE => Some(crate::caps::BlendMode::Additive),
+            xr::EnvironmentBlendMode::ALPHA_BLEND => Some(crate::caps::BlendMode::AlphaBlend),
+            _ => None,
+        })
+        .collect();
+    info!("blend modes: {blend_modes:?}");
+    let room_ways = crate::caps::room_ways(&crate::caps::RoomFound {
+        blend_modes: &blend_modes,
+        fb_passthrough: exts.fb_passthrough,
+        htc_passthrough: exts.htc_passthrough,
+    });
+    let room = Room::make(
+        &room_ways,
+        &session,
+        settings.background.is_room(),
+        settings.background.room_opacity(),
+    );
+    let room_caps = room.way().map(|way| crate::caps::RoomCaps {
+        way,
+        keyboard_window: room
+            .fb_ref()
+            .is_some_and(passthrough::Passthrough::window_supported),
+    });
 
     let local =
         session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
@@ -596,6 +624,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mut attach_layer = ImageLayer::new(&session, format, ATTACH_PX.0, ATTACH_PX.1, false)?;
     // What the "Attach" texture shows now: language and lit (pointed at).
     let mut attach_drawn: Option<(Texts, bool)> = None;
+    // The black layer over a dimmed room blended with the frame, and how dark.
+    let mut dim_layer: Option<(u8, ImageLayer)> = None;
     // The placeholder of a monitor being added: its layer, made for a size and
     // language.
     let mut placeholder: Option<(ImageLayer, (u32, u32), Texts)> = None;
@@ -665,7 +695,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         &instance,
         system,
         &session,
-        passthrough.as_ref(),
+        room_caps,
         hand_trackers.is_some(),
         model.clone(),
     );
@@ -730,7 +760,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         mic,
         gains,
         controls,
-        passthrough,
+        room,
         external_dir,
         fx: Vec::new(),
         later: Vec::new(),
@@ -924,7 +954,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     let flags = e.flags();
                     if flags.contains(xr::PassthroughStateChangedFlagsFB::NON_RECOVERABLE_ERROR) {
                         error!("the cameras failed for good");
-                        shell.passthrough = None;
+                        shell.room = Room::None;
                         shell.handle(now, Event::Platform(PlatformEvent::CamerasLost));
                     } else if flags.contains(xr::PassthroughStateChangedFlagsFB::RECOVERABLE_ERROR)
                     {
@@ -1083,7 +1113,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if !state.should_render {
             shell.model.tick(now, &FrameInput::hidden(wall));
             shell.apply(now);
-            frame_stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &[])?;
+            frame_stream.end(time, shell.room.blend_mode(), &[])?;
             continue;
         }
         // How long the menu took to draw in this frame, for the selftest.
@@ -1439,11 +1469,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // The keyboard window: placed in front of the user at desk height the first
         // time, then wherever it was moved.
         let mut keyboard_failed = false;
-        if let Some(pt) = shell
-            .passthrough
-            .as_mut()
-            .filter(|pt| pt.window_supported())
-        {
+        if let Some(pt) = shell.room.fb().filter(|pt| pt.window_supported()) {
             let shown = shell
                 .model
                 .keyboard_window()
@@ -1467,16 +1493,35 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         };
         let keyboard_layer = passthrough_layer(
             shell
-                .passthrough
-                .as_ref()
+                .room
+                .fb_ref()
                 .and_then(passthrough::Passthrough::window_layer),
         );
         let passthrough_layer = passthrough_layer(
             shell
-                .passthrough
-                .as_ref()
+                .room
+                .fb_ref()
                 .and_then(passthrough::Passthrough::room_layer),
         );
+        let htc_layer = shell.room.htc_passthrough().and_then(|p| p.layer(&local));
+        // The room blended with the frame and dimmed: a black layer over it, letting
+        // part of it through (made once for each darkness).
+        let dim = shell.room.dim();
+        if let Some(alpha) = dim
+            && dim_layer.as_ref().is_none_or(|(a, _)| *a != alpha)
+        {
+            let mut layer = ImageLayer::new(&session, format, 4, 4, true)?;
+            layer.upload(&gl, &[0, 0, 0, alpha].repeat(16))?;
+            dim_layer = Some((alpha, layer));
+        }
+        let dim_quad = dim.and(dim_layer.as_ref()).map(|(_, l)| {
+            l.quad(
+                &view,
+                pose(Vec3::new(0.0, 0.0, -1.0), Quat::IDENTITY),
+                DIM_SIZE,
+                DIM_SIZE,
+            )
+        });
         let model = &shell.model;
         let world = model.world();
         let pano = pano_layer
@@ -1628,7 +1673,11 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         let mut layers = reuse(std::mem::take(&mut buffers.layers));
         if let Some(l) = &passthrough_layer {
             layers.push(as_layer(l));
-        } else if let Some(l) = &pano {
+        } else if let Some(l) = &htc_layer {
+            layers.push(as_layer(l));
+        } else if let Some(l) = &dim_quad {
+            layers.push(as_layer(l));
+        } else if let Some(l) = pano.as_ref().filter(|_| !shell.room.shown()) {
             layers.push(as_layer(l));
         }
         layers.extend(keyboard_layer.iter().map(as_layer));
@@ -1666,7 +1715,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         let layers_wanted = layers.len();
         // As many layers as the compositor takes.
         layers.truncate(layers_max);
-        let ended = frame_stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &layers);
+        let ended = frame_stream.end(time, shell.room.blend_mode(), &layers);
         buffers.layers = reuse(layers);
         match ended {
             // One frame the compositor refused is not worth closing the app over.

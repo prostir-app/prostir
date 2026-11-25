@@ -1307,6 +1307,7 @@ fn profiles_are_a_list_the_pc_hears_of() {
 fn full_caps() -> Caps {
     Caps {
         room: Some(crate::caps::RoomCaps {
+            way: crate::caps::RoomWay::FbPassthrough,
             keyboard_window: true,
         }),
         hands: true,
@@ -1317,6 +1318,35 @@ fn full_caps() -> Caps {
         refresh_rates: vec![72.0, 80.0, 90.0, 120.0],
         ..test_caps()
     }
+}
+
+/// The room by whichever way the headset shows it: blended with the cameras' picture,
+/// the "Room" backgrounds as by a layer (no window onto the keyboard); on glasses, where
+/// the room always shows, none to choose.
+#[test]
+fn the_room_by_any_way_and_none_on_glasses() {
+    use crate::caps::{RoomCaps, RoomWay};
+    let with = |way| {
+        let caps = Caps {
+            room: Some(RoomCaps {
+                way,
+                keyboard_window: false,
+            }),
+            ..full_caps()
+        };
+        crate::view::build(&Sim::of(caps).m)
+    };
+    for way in [
+        RoomWay::Blend,
+        RoomWay::FbPassthrough,
+        RoomWay::HtcPassthrough,
+    ] {
+        let view = with(way);
+        assert!(view.room_available && !view.keyboard_available, "{way:?}");
+    }
+    let view = with(RoomWay::Glasses);
+    assert!(!view.room_available && !view.keyboard_available);
+    assert!(view.panorama_available, "the rest stays");
 }
 
 /// The menu offers only what the headset can do (the step 7 note, 4.4): everything
@@ -1360,6 +1390,7 @@ fn the_menu_shows_what_the_headset_can() {
     let view = crate::view::build(
         &Sim::of(Caps {
             room: Some(crate::caps::RoomCaps {
+                way: crate::caps::RoomWay::FbPassthrough,
                 keyboard_window: false,
             }),
             ..full_caps()
@@ -1712,6 +1743,7 @@ fn the_menu_button_closes_the_tips() {
 fn a_keyboard_window_that_fails_is_said_and_kept() {
     let mut caps = test_caps();
     caps.room = Some(crate::caps::RoomCaps {
+        way: crate::caps::RoomWay::FbPassthrough,
         keyboard_window: true,
     });
     let mut sim = Sim::of(caps);

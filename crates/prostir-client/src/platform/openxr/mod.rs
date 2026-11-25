@@ -48,6 +48,7 @@ pub fn extensions(available: &xr::ExtensionSet, minimal: bool) -> xr::ExtensionS
     on.bd_controller_interaction = available.bd_controller_interaction;
     on.htc_vive_focus3_controller_interaction = available.htc_vive_focus3_controller_interaction;
     crate::platform::meta::extensions(available, &mut on);
+    crate::platform::htc::extensions(available, &mut on);
     on
 }
 
