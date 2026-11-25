@@ -25,6 +25,7 @@ desktop = [
     "dep:gbm",
     "dep:gstreamer-allocators",
     "dep:ksni",
+    "dep:pipewire",
     "dep:wayland-client",
     "dep:wayland-protocols",
     "dep:wayland-protocols-plasma",
@@ -71,7 +72,10 @@ ksni = { version = "0.3", default-features = false, features = ["blocking", "asy
 zbus.workspace = true
 wayland-protocols = { version = "0.32", features = ["client", "unstable"], optional = true }
 gbm = { version = "0.18.0", default-features = false, optional = true }
-gstreamer-allocators = { version = "0.25", optional = true }
+gstreamer-allocators = { version = "0.25", features = ["v1_16"], optional = true }
+# KWin's streams read straight from PipeWire (not through `pipewiresrc`), with the
+# pointer and the changed parts of the picture that come with each frame.
+pipewire = { version = "0.10", features = ["v0_3_33"], optional = true }
 serde_json.workspace = true
 wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = true }
 
@@ -156,6 +160,7 @@ gstreamer1-plugins-base = "*"
 gstreamer1-plugins-good = "*"
 gstreamer1-plugins-bad-free = "*"
 pipewire-gstreamer = "*"
+pipewire-libs = "*"
 pipewire-utils = "*"
 pipewire-pulseaudio = "*"
 pulseaudio-utils = "*"

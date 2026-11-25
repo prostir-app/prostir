@@ -15,7 +15,7 @@ depends=('glibc' 'gcc-libs' 'gstreamer' 'gst-plugins-base-libs' 'gst-plugins-goo
          'pipewire-audio' 'pulse-native-provider' 'libpulse' 'mesa' 'curl'
          # Loaded at run time: wayland by the service too, the rest by the settings window.
          'libglvnd' 'wayland' 'libxkbcommon')
-makedepends=('cargo' 'pkgconf')
+makedepends=('cargo' 'pkgconf' 'clang')
 optdepends=('gst-plugins-ugly: encoding on the CPU with x264 (NVIDIA, or no VA-API encoder)'
             'intel-media-driver: hardware encoding on Intel graphics'
             'libkscreen: arranging the monitors on KDE Plasma (kscreen-doctor)'

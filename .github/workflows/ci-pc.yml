@@ -60,7 +60,7 @@ jobs:
       - uses: ./.github/actions/system-libraries
         with:
           packages: >-
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pkg-config
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libpipewire-0.3-dev libclang-dev pkg-config
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
             gstreamer1.0-plugins-ugly gstreamer1.0-tools dbus-daemon
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch

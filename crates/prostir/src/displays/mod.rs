@@ -97,8 +97,8 @@ const STILL: Duration = Duration::from_secs(3);
 /// coarse, where the encoder's keyframe is sharper (see `Router::still_keyframes`):
 /// asked for this soon, on time (the control loop wakes for it, see
 /// [`Displays::still_due`]). A capture that pushes its own frames sends its picture at
-/// once; KWin's stream sends it again 0.75 s after the last frame (its keepalive), so
-/// the keyframe comes then. A keyframe is the only way to sharpen a picture on VA-API
+/// once (KWin's stream through the feed too; through `pipewiresrc` it came with the
+/// keepalive, 0.75 s after the last frame), so the keyframe comes then. A keyframe is the only way to sharpen a picture on VA-API
 /// (a change of bitrate on the way makes one), and one of `target-usage` 4 is about as
 /// good as one with a constant quantiser of 10: measured on 2560x1440 text at 33
 /// Mbit/s, from 34 to 53 dB (PSNR of the text), 3 s sooner than before.

@@ -16,6 +16,11 @@
   and scrolling make no extra keyframes. On KDE a still screen now sends its picture
   again every 0.75 s instead of 2 s (a frame of a few KB), so the sharp picture comes
   then.
+- On KDE Plasma, Prostir reads the monitors' pictures from PipeWire itself (no longer
+  through GStreamer's `pipewiresrc`), with nothing copied, in the same formats as
+  before. The sharpened picture after a big change now comes at once when it is due,
+  not with the next repeat. Building Prostir now needs the PipeWire headers
+  (`libpipewire-0.3-dev`, `pipewire-devel`) and libclang.
 - Over USB, monitors of 2560×1440 and larger stream at 60 Mbit/s instead of 30 while
   you have not chosen a quality yourself: the first frame after a big change is then
   nearly as sharp as a still one. A quality you choose holds for every monitor. The
