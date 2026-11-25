@@ -34,7 +34,7 @@ use log::{info, warn};
 use prostir_proto::link::{Closer, RecordSender};
 use prostir_proto::request::{Asked, Command, Outcome};
 use prostir_proto::secure::{self, Identity, TrustStore};
-use prostir_proto::state::{DisplayId, ErrorCode, Gen, HeadsetState, ReqId};
+use prostir_proto::state::{DisplayId, ErrorCode, Gen, HeadsetState, ReqId, VolumeAsk};
 use prostir_proto::{ClientMsg, Codec, HeadsetGoodbye, HostMsg};
 
 use crate::connecting::Ended;
@@ -215,6 +215,8 @@ pub enum NetEvent {
         language: Option<Lang>,
         opened_with: HeadsetState,
     },
+    /// PC `pc` asks the headset to take its slider's level.
+    VolumeAsk { pc: PcId, asked: VolumeAsk },
     /// A part of PC `pc`'s state, checked: the snapshot's parts one by one, then each
     /// change.
     Part(PcId, HostMsg),

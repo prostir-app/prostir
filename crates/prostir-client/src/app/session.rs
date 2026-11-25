@@ -87,6 +87,7 @@ impl Model {
             }
             NetEvent::Part(pc, part) => self.part_came(pc, part),
             NetEvent::Command { pc, req, asked } => self.take_command(pc, req, &asked),
+            NetEvent::VolumeAsk { pc, asked } => self.volume_asked(pc, &asked),
             NetEvent::Notice(_, text) => self.show_toast(text),
             NetEvent::Reply { pc, req, outcome } => {
                 match (self.answered(pc, req, &outcome), outcome) {
@@ -239,6 +240,12 @@ impl Model {
         }
         if now.profiles != opened_with.profiles {
             self.tell_profiles();
+        }
+        if let Some(part) = now.volume
+            && now.volume != opened_with.volume
+        {
+            self.effects
+                .push(Effect::Tell(pc, ClientMsg::Volume { part }));
         }
         // Asleep already as the session opened (`Open` says only "not worn").
         if self.presence.state() == presence::State::Asleep {

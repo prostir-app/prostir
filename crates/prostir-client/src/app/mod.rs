@@ -20,6 +20,7 @@ mod hands;
 mod session;
 #[cfg(test)]
 mod tests;
+mod volume;
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -91,6 +92,8 @@ pub struct Start {
     /// The headset's own system language.
     pub system_lang: Option<Lang>,
     pub battery: Option<(u8, bool)>,
+    /// The system's volume now, percent and muted (`None`: it could not be read).
+    pub volume: Option<(u8, bool)>,
     /// What the headset can do (its model among it), as the shell found it.
     pub caps: Caps,
     /// The display rate now, as the runtime says (`None`: it does not).
@@ -161,6 +164,10 @@ pub enum PlatformEvent {
     Mic { permission: u8, denied: bool },
     /// The battery was read.
     Battery(Option<(u8, bool)>),
+    /// The system's volume was read (now and then while a session is open, and right
+    /// after each set): `level` percent, muted or not, after the `done`th
+    /// [`SoundCmd::SetVolume`].
+    Volume { level: u8, muted: bool, done: u32 },
     /// The system moved the room's origin to where the person is now (its "recenter"):
     /// what stands in the room moves with it, as it always did.
     SpaceMoved,
@@ -228,6 +235,10 @@ pub enum SoundCmd {
     /// Where the sound comes from, as an angle to the right of where the user looks
     /// (`None`: from straight ahead).
     Place(Option<f32>),
+    /// Put the system's volume at `level` percent (muted or not), without the system's
+    /// own display of it; the `n`th set (its reading says so, see
+    /// [`PlatformEvent::Volume`]).
+    SetVolume { level: u8, muted: bool, n: u32 },
 }
 
 /// For the microphone.
@@ -258,6 +269,9 @@ pub enum SystemCmd {
     /// The menu opened: the person may have put a language file or a background
     /// picture on the headset meanwhile.
     LookForFiles,
+    /// Follow the system's volume, of `steps` above silence, read this often (`None`:
+    /// only after a set or a volume button), and at once when this starts.
+    WatchVolume { steps: u8, every: Option<Duration> },
 }
 
 /// A short message shown on its own, below the line of sight.
@@ -424,6 +438,8 @@ pub struct Model {
     profiles_changed: bool,
     /// The palm menu showed when last looked at.
     palm_shown: bool,
+    /// The volume shared with the PC (`None`: the app cannot set the system's).
+    volume: Option<volume::SharedVolume>,
 
     // The frame.
     /// Head position and gaze.
@@ -496,13 +512,26 @@ impl Model {
             lang,
             system_lang,
             battery,
-            caps,
+            volume,
+            mut caps,
             refresh_hz,
             custom_panorama,
             update_from,
             mic_permission,
             only,
         } = start;
+        // A volume that could not be read is not shared: the PC is not told of it.
+        let volume = match (
+            caps.volume_steps
+                .filter(|_| caps.offers(Offer::SharedVolume)),
+            volume,
+        ) {
+            (Some(steps), Some(now)) => Some(volume::SharedVolume::new(steps, now)),
+            _ => {
+                caps.volume_steps = None;
+                None
+            }
+        };
         let world = World::new(desk, keyboard, caps.cylinder, &settings);
         let mut m = Self {
             now,
@@ -549,6 +578,7 @@ impl Model {
             mic_told: mic_permission,
             profiles_changed: false,
             palm_shown: false,
+            volume,
             head: (Vec3::ZERO, -Vec3::Z),
             head_right: Vec3::X,
             view_eye: None,
@@ -762,8 +792,13 @@ impl Model {
         for file in self.saves.take() {
             self.effects.push(Effect::Save(file));
         }
+        self.watch_volume();
+        let volume = self.volume_changed();
         if self.profiles_changed {
             self.tell_profiles();
+        } else if volume {
+            let state = self.headset_state();
+            self.session.set_headset(state);
         }
     }
 
@@ -1082,6 +1117,7 @@ impl Model {
                 }
             }
             PlatformEvent::Battery(battery) => self.battery_read(battery),
+            PlatformEvent::Volume { level, muted, done } => self.volume_read(level, muted, done),
             PlatformEvent::SpaceMoved => {
                 // In the room's terms nothing moved: the arrangement went with the
                 // origin. The menu's map is drawn from the eyes again.
@@ -1535,10 +1571,13 @@ impl Model {
     pub fn headset_state(&self) -> HeadsetState {
         HeadsetState {
             profiles: Some(self.profiles_part()),
+            // With its count of the headset's own changes.
+            volume: self.volume.as_ref().map(volume::SharedVolume::now),
             ..headset_state(
                 &self.settings,
                 self.presence.worn(),
                 self.headset.battery,
+                self.volume.as_ref().map(|v| (v.now().level, v.now().muted)),
                 self.headset.mic_permission,
                 &self.headset.caps,
             )
@@ -1849,23 +1888,30 @@ fn prefs_of(s: &Settings) -> Prefs {
 }
 
 /// What the headset says about itself when it opens a session: what it can do, its
-/// settings, whether it is worn, its battery, the microphone's switch and `permission`;
-/// what it can do as `caps` says.
+/// settings, whether it is worn, its battery, its volume (percent and muted: shared
+/// where `caps` offers it and it could be read), the microphone's switch and
+/// `permission`; what it can do as `caps` says.
 pub fn headset_state(
     settings: &Settings,
     worn: bool,
     battery: Option<(u8, bool)>,
+    volume: Option<(u8, bool)>,
     permission: u8,
     caps: &Caps,
 ) -> HeadsetState {
     let mic = mic_state(settings, permission);
+    let mut told = caps.headset_caps();
+    let volume = volume.filter(|_| caps.offers(Offer::SharedVolume));
+    if volume.is_none() {
+        told.features.retain(|f| *f != caps::headset::VOLUME);
+    }
     HeadsetState {
-        caps: Some(caps.headset_caps()),
+        caps: Some(told),
         prefs: Some(prefs_of(settings)),
         presence: Some(Presence { worn }),
         battery: battery.map(|(percent, charging)| Battery { percent, charging }),
-        // The headset's own volume follows the PC's slider from 0.2.0 step 7.11.
-        volume: None,
+        volume: volume
+            .map(|(level, muted)| prostir_proto::volume::HeadsetVolume::new(level, muted).now()),
         up: std::iter::once((mic.kind, mic)).collect(),
         // The model adds them (see `Model::headset_state`).
         profiles: None,

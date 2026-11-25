@@ -270,6 +270,7 @@ fn connected(layers_max: u8) -> Loop {
         ),
         system_lang: None,
         battery: Some((80, false)),
+        volume: Some((40, false)),
         caps: Caps {
             equirect: true,
             cylinder: true,

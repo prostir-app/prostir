@@ -188,8 +188,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if shell.exit {
             break;
         }
-        if polled.input_waiting {
-            events::hand_back_keys(app);
+        if polled.input_waiting && events::hand_back_keys(app) {
+            shell.system.volume_button();
         }
         if events::openxr(
             &xr.instance,

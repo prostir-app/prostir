@@ -877,6 +877,7 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 shared.tell(NetEvent::Command { pc, req, asked });
             }
             HostMsg::Notice { text } => shared.tell(NetEvent::Notice(pc, text)),
+            HostMsg::VolumeAsk { asked } => shared.tell(NetEvent::VolumeAsk { pc, asked }),
             // What the next queries ask for this PC with: from this PC's own session
             // only, kept under its key.
             HostMsg::FindSecret { secret } => shared.note(Inbox::Secret {
