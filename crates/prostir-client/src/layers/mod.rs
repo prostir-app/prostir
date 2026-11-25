@@ -25,17 +25,20 @@
 //! 1. what is wrong with a monitor that still shows its picture (the words over it);
 //! 2. the monitors, the farthest first (one that cannot be shown and has its reason in
 //!    its place counts as a monitor there; the one in a hand is the nearest);
-//! 3. the window onto the keyboard, then the background;
-//! 4. the placeholder, "Attach", the toast;
+//! 3. the placeholder, "Attach", the toast: a small sign goes before the room;
+//! 4. the window onto the keyboard, then the background;
 //! 5. last, and with the compositor's least ([`crate::caps::LAYERS_AT_LEAST`]) never:
 //!    the person's own, the pointer dots, the menu's button, the palm menu, the menu,
 //!    the hands and rays.
 //!
 //! The streams the PC is told the headset takes leave [`crate::caps::RESERVED_LAYERS`]
-//! for the background, the menu, its button and the hands, so only what comes on top
-//! of those (the dots, the toast, the palm menu...) can push a monitor out. The model
-//! hears how many monitors are hidden when that changes (see [`Plan::news`]) and says
-//! so once.
+//! for the background, the menu, its button, the hands, the dots of the two rays and
+//! the toast, so pointing or a message never pushes a monitor out; only what comes on
+//! top of those (the palm menu, "Attach", the keyboard's window, a dot under a
+//! fingertip...) can. The model hears how many monitors are hidden when that changes
+//! (see [`Plan::news`]) and says so once. That number is counted as if there were no
+//! toast and no dots: the toast saying so never hides one more monitor and so says
+//! more, and a dot that comes and goes with the hand says nothing.
 //!
 //! Nothing is allocated once the plan's lists are long enough: it is kept from frame
 //! to frame and filled again.
@@ -139,13 +142,24 @@ enum Rank {
     Over(u32),
     /// A monitor, or the reason in its place, by nearness (the higher the nearer).
     Monitor(u32),
+    /// The placeholder (0), "Attach" (1), the toast ([`Rank::TOAST`]).
+    Said(u8),
     /// The window onto the keyboard (0), the background (1).
     Room(u8),
-    /// The placeholder (0), "Attach" (1), the toast (2).
-    Said(u8),
-    /// The pointer dots (0), the menu's button (1), the palm menu (2), the menu (3),
-    /// the hands and rays (4).
+    /// The pointer dots ([`Rank::DOT`]), the menu's button (1), the palm menu (2), the
+    /// menu (3), the hands and rays (4).
     Own(u8),
+}
+
+impl Rank {
+    const TOAST: Self = Self::Said(2);
+    const DOT: Self = Self::Own(0);
+
+    /// Left out when the hidden monitors are counted (see the module): the toast that
+    /// says so, and the dots that come and go with the hands.
+    fn uncounted(self) -> bool {
+        self == Self::TOAST || self == Self::DOT
+    }
 }
 
 /// How near a monitor `distance` metres from the head is, for [`Rank`]: the nearer,
@@ -186,7 +200,8 @@ impl Plan {
         self.wanted
     }
 
-    /// How many monitors did not fit (or the reasons in their places).
+    /// How many monitors (or the reasons in their places) do not fit, counted as if
+    /// there were no toast and no pointer dots (see the module).
     pub fn hidden(&self) -> usize {
         self.hidden
     }
@@ -227,8 +242,12 @@ impl Plan {
         for &(_, at) in &self.ranks[..max] {
             self.stays[usize::from(at)] = true;
         }
-        self.hidden = self.ranks[max..]
+        // The monitors that would not fit without the toast and the dots.
+        self.hidden = self
+            .ranks
             .iter()
+            .filter(|(rank, _)| !rank.uncounted())
+            .skip(max)
             .filter(|(rank, _)| matches!(rank, Rank::Monitor(_)))
             .count();
         let mut i = 0;
@@ -342,7 +361,7 @@ pub fn plan(model: &Model, hands: &Hands, ready: &impl Ready, plan: &mut Plan) {
             },
             height: TOAST_WIDTH * TOAST_PX.1 as f32 / TOAST_PX.0 as f32,
         };
-        plan.push(Layer::Toast(quad), Rank::Said(2));
+        plan.push(Layer::Toast(quad), Rank::TOAST);
     }
     if let Some(at) = hands
         .attach_for()
@@ -377,7 +396,7 @@ pub fn plan(model: &Model, hands: &Hands, ready: &impl Ready, plan: &mut Plan) {
         let size = 0.011 * hit.t.clamp(0.3, 4.0);
         plan.push(
             Layer::Cursor(dot(hit.point, hit.normal, 0.004, size)),
-            Rank::Own(0),
+            Rank::DOT,
         );
     }
     // Under a fingertip near the menu: a dot that shrinks as the finger gets closer.
@@ -386,7 +405,7 @@ pub fn plan(model: &Model, hands: &Hands, ready: &impl Ready, plan: &mut Plan) {
     for (_, at, z, _) in hands.pokes() {
         let point = menu.position + menu.rotation * Vec3::new(at.x, at.y, 0.0);
         let size = 0.006 + z.max(0.0) * 0.15;
-        plan.push(Layer::Cursor(dot(point, normal, 0.002, size)), Rank::Own(0));
+        plan.push(Layer::Cursor(dot(point, normal, 0.002, size)), Rank::DOT);
     }
     plan.budget(usize::from(model.headset().caps.layers_max));
 }

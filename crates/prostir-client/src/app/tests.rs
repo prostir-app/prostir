@@ -1962,6 +1962,16 @@ fn monitors_that_do_not_fit_are_said_once() {
             .f("headset-layers-hidden", &[("count", 1.into())])
     );
     assert_eq!(plan.news(), None);
+    // The toast itself takes a layer once placed, but the count stays: no more said.
+    sim.frames(Duration::from_millis(50));
+    crate::layers::plan(&sim.m, &hands, &AllReady, &mut plan);
+    assert!(
+        plan.layers()
+            .iter()
+            .any(|l| matches!(l, crate::layers::Layer::Toast(_)))
+    );
+    assert_eq!(plan.hidden(), 1);
+    assert_eq!(plan.news(), None);
     // Shown again for a moment, and hidden again: not said again.
     sim.handle(Event::Platform(PlatformEvent::LayersHidden(0)));
     sim.after(Duration::from_secs(2));

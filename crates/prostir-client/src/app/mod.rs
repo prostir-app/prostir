@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use glam::{Vec2, Vec3};
-use log::{info, warn};
+use log::{debug, info, warn};
 use prostir_proto::request::{Outcome, Request};
 use prostir_proto::state::{
     self, Battery, DisplayId, ErrorCode, Gen, HeadsetState, PcState, Prefs, Presence, ReqId, caps,
@@ -1123,7 +1123,7 @@ impl Model {
         let h = &mut self.hidden;
         if hidden == 0 {
             if h.now > 0 {
-                info!("every monitor shows again");
+                debug!("every monitor shows again");
                 h.all_shown_since = Some(now);
             }
             h.now = 0;

@@ -33,34 +33,47 @@ fn monitor(n: u32) -> Layer {
     })
 }
 
-/// A frame as the plan makes it: the background, monitors 1 to 4 far to near (4 m to
-/// 1 m), recovering words over monitor 2, the button, the menu, the toast, the hands
-/// and two dots.
-fn frame() -> Plan {
-    let mut p = Plan::new();
-    fill(&mut p);
-    p
-}
-
-/// The layers of [`frame`] into `p`.
-fn fill(p: &mut Plan) {
+/// The layers of a frame into `p`: the background, monitors 1 to 4 far to near (4 m to
+/// 1 m), the button and the hands; with `more`, also recovering words over monitor 2,
+/// the menu, the toast and two dots.
+fn fill(p: &mut Plan, more: bool) {
     p.push(Layer::Background, Rank::Room(1));
     for n in 1..=4 {
         p.push(monitor(n), Rank::Monitor(nearness(5.0 - n as f32)));
     }
-    p.push(
-        Layer::Trouble {
-            id: k(2),
-            quad: quad(),
-        },
-        Rank::Over(nearness(3.0)),
-    );
+    if more {
+        p.push(
+            Layer::Trouble {
+                id: k(2),
+                quad: quad(),
+            },
+            Rank::Over(nearness(3.0)),
+        );
+    }
     p.push(Layer::MenuButton(quad()), Rank::Own(1));
-    p.push(Layer::Menu(quad()), Rank::Own(3));
-    p.push(Layer::Toast(quad()), Rank::Said(2));
+    if more {
+        p.push(Layer::Menu(quad()), Rank::Own(3));
+        p.push(Layer::Toast(quad()), Rank::TOAST);
+    }
     p.push(Layer::Hands, Rank::Own(4));
-    p.push(Layer::Cursor(quad()), Rank::Own(0));
-    p.push(Layer::Cursor(quad()), Rank::Own(0));
+    if more {
+        p.push(Layer::Cursor(quad()), Rank::DOT);
+        p.push(Layer::Cursor(quad()), Rank::DOT);
+    }
+}
+
+/// The frame of [`fill`] with all of it.
+fn frame() -> Plan {
+    let mut p = Plan::new();
+    fill(&mut p, true);
+    p
+}
+
+/// The frame of [`fill`] without the words, the menu, the toast and the dots.
+fn plain() -> Plan {
+    let mut p = Plan::new();
+    fill(&mut p, false);
+    p
 }
 
 /// What the layers are, in order, by a short name each.
@@ -116,30 +129,50 @@ fn the_words_over_a_picture_go_first() {
 /// Then the monitors, the farthest first, and each one hidden is counted.
 #[test]
 fn the_farthest_monitors_go_next() {
+    let mut p = plain();
+    p.budget(5);
+    assert_eq!(names(&p), ["bg", "m3", "m4", "button", "hands"]);
+    assert_eq!(p.hidden(), 2);
+    assert_eq!(p.news(), Some(2));
+    assert_eq!(p.news(), None, "said once");
+}
+
+/// The toast and the dots take places when they show, but the monitors hidden are
+/// counted without them: the toast that says so never makes it say more, and a dot
+/// that comes and goes with a hand says nothing.
+#[test]
+fn the_toast_and_the_dots_are_not_counted() {
     let mut p = frame();
     p.budget(9);
-    assert_eq!(p.hidden(), 2);
     assert_eq!(
         names(&p),
         [
             "bg", "m3", "m4", "button", "menu", "toast", "hands", "dot", "dot"
         ]
     );
-    assert_eq!(p.news(), Some(2));
-    assert_eq!(p.news(), None, "said once");
+    assert_eq!(p.hidden(), 0, "without the toast and the dots all fit");
+    let mut p = frame();
+    p.budget(6);
+    assert_eq!(names(&p), ["bg", "button", "menu", "hands", "dot", "dot"]);
+    assert_eq!(p.hidden(), 2, "without them two monitors fit, of four");
+    // The toast alone, over a frame one short: still the one monitor.
+    let mut p = plain();
+    p.push(Layer::Toast(quad()), Rank::TOAST);
+    p.budget(6);
+    assert_eq!(names(&p), ["bg", "m3", "m4", "button", "hands", "toast"]);
+    assert_eq!(p.hidden(), 1);
+    let mut without = plain();
+    without.budget(6);
+    assert_eq!(without.hidden(), 1);
 }
 
-/// With no room for a monitor at all, the background, then the toast; the person's own
-/// (the dots, the button, the menu, the hands) stay to the last.
+/// With no room for a monitor at all, the toast goes before the background; the
+/// person's own (the dots, the button, the menu, the hands) stay to the last.
 #[test]
 fn the_persons_own_stay_to_the_last() {
     let mut p = frame();
     p.budget(6);
-    assert_eq!(p.hidden(), 4);
-    assert_eq!(
-        names(&p),
-        ["button", "menu", "toast", "hands", "dot", "dot"]
-    );
+    assert_eq!(names(&p), ["bg", "button", "menu", "hands", "dot", "dot"]);
     let mut p = frame();
     p.budget(5);
     assert_eq!(names(&p), ["button", "menu", "hands", "dot", "dot"]);
@@ -153,6 +186,29 @@ fn the_persons_own_stay_to_the_last() {
     let mut p = frame();
     p.budget(2);
     assert_eq!(names(&p), ["menu", "hands"]);
+}
+
+/// A small sign (the placeholder, "Attach", the toast) goes before the room and the
+/// window onto the keyboard.
+#[test]
+fn signs_go_before_the_room() {
+    let mut p = Plan::new();
+    p.push(Layer::Background, Rank::Room(1));
+    p.push(Layer::KeyboardWindow, Rank::Room(0));
+    p.push(monitor(1), Rank::Monitor(nearness(1.0)));
+    p.push(Layer::Placeholder(quad()), Rank::Said(0));
+    p.push(Layer::Toast(quad()), Rank::TOAST);
+    p.push(Layer::Attach(quad()), Rank::Said(1));
+    p.push(Layer::Hands, Rank::Own(4));
+    p.budget(5);
+    assert_eq!(names(&p), ["bg", "keys", "toast", "attach", "hands"]);
+    p.clear();
+    p.push(Layer::Background, Rank::Room(1));
+    p.push(Layer::KeyboardWindow, Rank::Room(0));
+    p.push(Layer::Toast(quad()), Rank::TOAST);
+    p.push(Layer::Hands, Rank::Own(4));
+    p.budget(3);
+    assert_eq!(names(&p), ["bg", "keys", "hands"]);
 }
 
 /// The reason in the place of a monitor that cannot be shown counts as that monitor:
@@ -188,17 +244,17 @@ fn the_monitor_in_a_hand_stays() {
 /// The next frame starts afresh, and says when the number changes, also back to none.
 #[test]
 fn each_frame_is_planned_anew() {
-    let mut p = frame();
-    p.budget(9);
+    let mut p = plain();
+    p.budget(5);
     assert_eq!(p.news(), Some(2));
     p.clear();
-    fill(&mut p);
-    p.budget(8);
+    fill(&mut p, false);
+    p.budget(4);
     assert_eq!(p.news(), Some(3), "one more");
     p.clear();
-    fill(&mut p);
+    fill(&mut p, false);
     p.budget(16);
-    assert_eq!(p.layers().len(), 12);
+    assert_eq!(p.layers().len(), 7);
     assert_eq!(p.news(), Some(0), "every monitor shows again");
     assert_eq!(p.news(), None);
 }
