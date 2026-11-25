@@ -17,6 +17,7 @@ use super::shell::Shell;
 use super::start::{Stage, Xr};
 use super::{Gpu, Kept};
 use crate::app::{Event, PlatformEvent};
+use crate::clarity::Quality;
 use crate::ids::DisplayKey;
 use crate::layers::{self, Layer, Plan, Quad};
 use crate::layout::Cylinder;
@@ -112,6 +113,10 @@ impl layers::Ready for Have<'_> {
         self.pictures.attach_drawn.is_some()
     }
 
+    fn metrics(&self) -> bool {
+        self.pictures.metrics_drawn.is_some()
+    }
+
     fn hands(&self) -> bool {
         self.hands
     }
@@ -122,6 +127,7 @@ fn picture_of<'p>(pictures: &'p Pictures, layer: &Layer) -> Option<(&'p ImageLay
     Some(match *layer {
         Layer::Trouble { id, quad } => (&pictures.trouble_layers.get(&id)?.2, quad),
         Layer::Placeholder(quad) => (&pictures.placeholder.as_ref()?.0, quad),
+        Layer::Metrics(quad) => (pictures.metrics_layer.as_ref()?, quad),
         Layer::MenuButton(quad) => (&pictures.button_layer, quad),
         Layer::Menu(quad) => (&pictures.panel_layer, quad),
         Layer::Toast(quad) => (&pictures.toast_layer, quad),
@@ -168,19 +174,25 @@ pub fn end(
         .as_ref()
         .map(|v| overlay::projection_layer(local, v));
 
-    // Supersampled and sharpened, and the stream's picture the right way up, where
-    // the runtime can.
-    let quality = meta::sharper();
-    let quality_next: *const std::ffi::c_void = if exts.fb_composition_layer_settings {
-        (&raw const quality).cast()
-    } else {
-        ptr::null()
+    // Supersampled and sharpened as each monitor's scale says, and the stream's
+    // picture the right way up, where the runtime can: one chain for each of the four
+    // ways, made on the stack.
+    let qualities = Quality::ALL.map(meta::sharper);
+    let quality_next = |i: usize| -> *const std::ffi::c_void {
+        if exts.fb_composition_layer_settings {
+            (&raw const qualities[i]).cast()
+        } else {
+            ptr::null()
+        }
     };
-    let flip = meta::flipped(quality_next);
-    let video_next = if exts.fb_composition_layer_image_layout {
-        (&raw const flip).cast()
-    } else {
-        quality_next
+    let flips = [0, 1, 2, 3].map(|i| meta::flipped(quality_next(i)));
+    let video_next = |quality: Quality| -> *const std::ffi::c_void {
+        let i = quality.index();
+        if exts.fb_composition_layer_image_layout {
+            (&raw const flips[i]).cast()
+        } else {
+            quality_next(i)
+        }
     };
 
     // The keyboard window: placed in front of the user at desk height the first
@@ -284,7 +296,7 @@ pub fn end(
     dims.extend(plan.layers().iter().filter_map(|l| match l {
         Layer::Monitor(m) => Some(xr::sys::CompositionLayerColorScaleBiasKHR {
             ty: xr::sys::CompositionLayerColorScaleBiasKHR::TYPE,
-            next: video_next,
+            next: video_next(m.quality),
             color_scale: xr::Color4f {
                 r: m.bright,
                 g: m.bright,
@@ -315,7 +327,7 @@ pub fn end(
                 Some(dim) => monitor(
                     m,
                     dim,
-                    video_next,
+                    video_next(m.quality),
                     MonitorLayers {
                         exts,
                         video: &shell.video,

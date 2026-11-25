@@ -14,11 +14,11 @@
 
 use glam::{DVec3, Vec3};
 
-use crate::circle::{EYE_DROP, Limits, MAX_ONE, clear_of, least_radius, on_cylinder};
+use crate::circle::{EYE_DROP, Limits, MAX_ONE, RADIUS, clear_of, least_radius, on_cylinder};
 use crate::rows::rows_of;
+use crate::size::Size;
 use crate::space::{
-    Frame, METRES_PER_PIXEL, Monitor, PixelSize, Placement, Seen, azimuth, covers, cuts,
-    seen_local, unwrap,
+    Frame, Monitor, PixelSize, Placement, Seen, azimuth, covers, cuts, seen_local, unwrap,
 };
 use crate::view::Room;
 
@@ -60,7 +60,7 @@ pub fn place_within<K: Copy + Ord>(
     one: f32,
 ) -> Placement {
     if monitors.is_empty() {
-        let w = px.w as f32 * METRES_PER_PIXEL;
+        let w = limits.sizes.others.metres(px, limits.radius).0;
         return frame.place(on_cylinder(
             0.0,
             -EYE_DROP,
@@ -92,7 +92,7 @@ pub fn place_within<K: Copy + Ord>(
             let Some((_, e, eh)) = end.and_then(|&k| find(k)) else {
                 continue;
             };
-            let width = px.w as f32 * e.width / px_w_of(monitors, end.copied());
+            let width = new_width(limits, px, monitors, end.copied(), e.width);
             let c = beside(&e, eh, width, side, one);
             candidates.extend(c.map(|p| (p, Some(r))));
         }
@@ -101,7 +101,7 @@ pub fn place_within<K: Copy + Ord>(
     for (row, up) in rings {
         for &k in row.into_iter().flatten() {
             let Some((_, e, eh)) = find(k) else { continue };
-            let width = px.w as f32 * e.width / px_w_of(monitors, Some(k));
+            let width = new_width(limits, px, monitors, Some(k), e.width);
             let height = width * px.aspect();
             let at = over(&e, eh, width, height, up, one);
             candidates.extend(at.map(|p| (p, None)));
@@ -170,8 +170,9 @@ pub fn place_within<K: Copy + Ord>(
 /// to the eye, and so high): it covers its neighbours there, and they are to be pushed
 /// aside along the row. `rows`: as for [`place_new`]. `any`: any monitor, else only one
 /// too wide for the row's circle (not on a wall, where a row has room along it).
-/// `None` without monitors, for a monitor `any` leaves out, or where the row with it
-/// would take more than [`AROUND`].
+/// `size`: how large new monitors are made, its width next to its neighbour's as
+/// [`Size::beside`] says. `None` without monitors, for a monitor `any` leaves out, or
+/// where the row with it would take more than [`AROUND`].
 pub fn into_row<K: Copy + Ord>(
     monitors: &[Monitor<K>],
     frame: &Frame,
@@ -179,6 +180,7 @@ pub fn into_row<K: Copy + Ord>(
     px: PixelSize,
     rows: Option<&[Vec<K>]>,
     any: bool,
+    size: Size,
 ) -> Option<Placement> {
     let room = Room::new(frame, monitors);
     let seen = room.seen();
@@ -234,7 +236,7 @@ pub fn into_row<K: Copy + Ord>(
         d(a.0).total_cmp(&d(b.0))
     })?;
     let (e, _, e_px) = row[by];
-    let width = px.w as f32 * e.width / e_px as f32;
+    let width = size.beside(px, e_px, e.width, RADIUS);
     let circle = Vec3::new(at.x, 0.0, at.z).length();
     let cylinder = on_a_cylinder(&e);
     if !any && (!cylinder || least_radius(width) <= circle) {
@@ -275,11 +277,19 @@ fn circle_for(width: f32, around: f32, one: f32) -> f32 {
     least.max(width / (2.0 * (one / 2.0).sin()))
 }
 
-/// The stream width of `k` (pixels), to keep the new monitor's pixels the size of its
-/// neighbour's.
-fn px_w_of<K: Copy + PartialEq>(monitors: &[Monitor<K>], k: Option<K>) -> f32 {
-    k.and_then(|k| monitors.iter().find(|m| m.id == k))
-        .map_or(1.0, |m| m.px.w.max(1) as f32)
+/// The width of a new monitor of `px` next to `k` (`width` wide): its pixels the size
+/// of its neighbour's as `limits.sizes` makes new ones (see [`Size::beside`]).
+fn new_width<K: Copy + PartialEq>(
+    limits: &Limits,
+    px: PixelSize,
+    monitors: &[Monitor<K>],
+    k: Option<K>,
+    width: f32,
+) -> f32 {
+    let beside = k
+        .and_then(|k| monitors.iter().find(|m| m.id == k))
+        .map_or(1, |m| m.px.w.max(1));
+    limits.sizes.others.beside(px, beside, width, limits.radius)
 }
 
 /// Whether `e` faces the vertical axis through the eye (it stands on a cylinder around
@@ -370,7 +380,7 @@ fn fallback<K>(
         .map(|m| Vec3::new(m.1.position.x, 0.0, m.1.position.z).length())
         .collect();
     radii.sort_by(f32::total_cmp);
-    let width = px.w as f32 * METRES_PER_PIXEL;
+    let width = limits.sizes.others.metres(px, limits.radius).0;
     let height = width * px.aspect();
     let radius = circle_for(width, radii[radii.len() / 2].max(limits.radius), one);
     let az = azimuth(gaze) as f32;

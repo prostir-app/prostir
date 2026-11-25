@@ -91,6 +91,12 @@ struct Sim {
 impl Sim {
     /// Started with `layout.txt` holding `text` (none: no file).
     fn new(text: Option<&str>) -> Self {
+        Self::on(text, None)
+    }
+
+    /// [`Sim::new`] on a headset of `ppd` pixels per degree (`None`: a model not in the
+    /// table, the standard size).
+    fn on(text: Option<&str>, ppd: Option<f32>) -> Self {
         let desk = text.map_or_else(Desk::default, |t| Desk::parse(t).unwrap().0);
         let s = Settings::default();
         #[expect(
@@ -99,7 +105,7 @@ impl Sim {
         )]
         let now = Instant::now();
         Self {
-            world: World::new(desk, None, true, &s),
+            world: World::new(desk, None, true, ppd, &s),
             s,
             now,
             head: (Vec3::ZERO, -Vec3::Z),
@@ -1851,5 +1857,176 @@ fn a_monitor_added_over_a_row_is_in_view() {
         .iter()
         .all(|g| g.is_some_and(|g| g.abs() < 1e-3)),
         "resting on the row as seen"
+    );
+}
+
+use crate::clarity::{Filter, MonitorSize};
+
+/// How many of the headset's pixels (25 a degree) a pixel of `n`'s stream takes at its
+/// middle, where
+/// it is placed, seen from the eye.
+fn scale_of(sim: &Sim, n: u32) -> f32 {
+    sim.world.shown_scale(k(n)).expect("worked out")
+}
+
+/// On a headset of 25 pixels a degree the first monitors are made 1:1: two QHD side by
+/// side on the circle of
+/// 1.1 m, each pixel one of the headset's at its middle, so larger than the standard
+/// size; on a headset not in the table, the standard size as before.
+#[test]
+fn the_first_monitors_are_made_one_to_one() {
+    let mut sim = Sim::on(None, Some(25.0));
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    for n in 1..=2 {
+        sim.stream(n, QHD);
+    }
+    sim.settled();
+    let mut standard = Sim::new(None);
+    standard.connect(PC);
+    standard.list(vec![monitor(1, QHD), monitor(2, QHD)]);
+    for n in 1..=2 {
+        standard.stream(n, QHD);
+    }
+    standard.settled();
+    for n in 1..=2 {
+        let (p, was) = (sim.place(k(n)), standard.place(k(n)));
+        assert!(
+            (scale_of(&sim, n) - 1.0).abs() < 0.01,
+            "{}",
+            scale_of(&sim, n)
+        );
+        assert!(p.width > was.width * 1.1, "{} {}", p.width, was.width);
+        // The edges stay 1.1 m from the eye (around it): larger, not nearer.
+        let edge = p.position + p.rotation * Vec3::X * p.width / 2.0;
+        let around = Vec3::new(edge.x, 0.0, edge.z).length();
+        assert!((around - layout::RADIUS).abs() < 1e-3, "{around}");
+        assert_eq!(standard.world.shown_scale(k(n)), None, "not known");
+        assert_eq!(standard.world.layer_quality(k(n)), Quality::BOTH);
+        // Shown at 1:1: sharpened, not supersampled.
+        assert_eq!(
+            sim.world.layer_quality(k(n)),
+            Quality {
+                super_sampling: false,
+                sharpening: true
+            }
+        );
+    }
+}
+
+/// A monitor the person placed (here as `layout.txt` keeps it, at the standard size)
+/// stays exactly where and as large as it was when the headset makes new ones 1:1: the
+/// new one goes beside it, as large to the eye as it (the same scale), and nothing else
+/// moves. Its layer keeps both filters: it is shown smaller than 0.9.
+#[test]
+fn a_monitor_placed_by_hand_is_left_as_it_is() {
+    let mut was = Desk::default();
+    let mut laid = layout::arrange(Preset::Arc, &[(k(1), 2560, 1440)], None, &[], None);
+    let p = laid.get_mut(&k(1)).unwrap();
+    p.position.x += 0.2;
+    p.width *= 0.9;
+    let sizes = laid.keys().map(|k| (*k, QHD)).collect();
+    was.keep(
+        laid.clone(),
+        &sizes,
+        ((Vec3::ZERO, 0.0), layout::RADIUS, 0.0),
+        false,
+    );
+    let mut text = String::new();
+    was.write_text(&mut text);
+    let mut sim = Sim::on(Some(&text), Some(25.0));
+    sim.connect(PC);
+    sim.list(vec![monitor(1, QHD)]);
+    sim.stream(1, QHD);
+    sim.settled();
+    assert!(near(&sim.place(k(1)), &laid[&k(1)]), "as it was kept");
+    let kept = sim.place(k(1));
+    let scale = scale_of(&sim, 1);
+    assert!(scale < 0.9, "{scale}");
+    assert_eq!(sim.world.layer_quality(k(1)), Quality::BOTH);
+    // A new monitor of another size comes.
+    sim.list(vec![monitor(1, QHD), monitor(2, (1920, 1080))]);
+    sim.stream(2, (1920, 1080));
+    sim.settled();
+    assert_eq!(sim.place(k(1)), kept, "untouched");
+    // As much smaller than its own 1:1 size as the one beside it is than its own.
+    let one = layout::Size::Seen {
+        ppd: 25.0,
+        scale: 1.0,
+    };
+    let own = |w: u32, h: u32| {
+        one.metres(prostir_layout::space::PixelSize::new(w, h), 1.1)
+            .0
+    };
+    let new = sim.place(k(2)).width / own(1920, 1080);
+    let beside = kept.width / own(2560, 1440);
+    assert!((new - beside).abs() < 1e-4, "{new} beside {beside}");
+}
+
+/// "For development": each size lays the monitors out again at once (1:1, the main one
+/// only, 0.85, standard), and "Reset" puts them back where they were; the filters
+/// follow the choices with the next frame.
+#[test]
+fn the_sizes_for_development_and_reset() {
+    let mut sim = Sim::on(None, Some(25.0));
+    sim.connect(PC);
+    sim.list(three());
+    for n in 1..=3 {
+        sim.stream(n, QHD);
+    }
+    sim.settled();
+    let before = sim.places();
+    assert!(!sim.world.can_reset_size());
+    let dev = *sim.world.dev();
+    let set = |sim: &mut Sim, size| {
+        sim.world.set_dev(&sim.s, Dev { size, ..dev }, sim.now);
+        sim.settled();
+    };
+    let made_at = |scale| {
+        layout::Size::Seen { ppd: 25.0, scale }
+            .metres(prostir_layout::space::PixelSize::new(QHD.0, QHD.1), 1.1)
+            .0
+    };
+    set(&mut sim, MonitorSize::Scale85);
+    for n in 1..=3 {
+        assert!((sim.place(k(n)).width - made_at(0.85)).abs() < 1e-5);
+    }
+    set(&mut sim, MonitorSize::Standard);
+    let standard: Vec<f32> = (1..=3).map(|n| sim.place(k(n)).width).collect();
+    assert!(
+        standard
+            .iter()
+            .all(|w| (w - 2560.0 * layout::METRES_PER_PIXEL).abs() < 1e-5)
+    );
+    set(&mut sim, MonitorSize::MainOnly);
+    let main = sim.world.primary().map_or(2, |k| k.id.0);
+    for n in 1..=3 {
+        let w = sim.place(k(n)).width;
+        if n == main {
+            assert!(w > standard[0] && w <= made_at(1.0) + 1e-5, "{n}: {w}");
+        } else {
+            assert!((w - standard[0]).abs() < 1e-5, "{n}: {w}");
+        }
+    }
+    assert!(sim.world.can_reset_size());
+    sim.world.reset_size(sim.now);
+    sim.settled();
+    assert!(same_places(&sim.places(), &before), "back as it was");
+    assert_eq!(sim.world.dev().size, MonitorSize::default());
+    assert!(!sim.world.can_reset_size());
+    // The filters: forced on and off over the rule.
+    let forced = Dev {
+        super_sampling: Filter::On,
+        sharpening: Filter::Off,
+        ..*sim.world.dev()
+    };
+    sim.world.set_dev(&sim.s, forced, sim.now);
+    sim.after(20);
+    assert_eq!(
+        sim.world.layer_quality(k(1)),
+        Quality {
+            super_sampling: true,
+            sharpening: false
+        }
     );
 }

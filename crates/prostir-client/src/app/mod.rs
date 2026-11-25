@@ -482,6 +482,9 @@ pub struct Model {
     not_owned: Option<NotOwned>,
     /// The monitors that do not fit in the compositor's layers.
     hidden: Hidden,
+    /// The monitor the head looked at in the last frame, while the numbers of "For
+    /// development" are shown (see [`Model::metrics_place`]); not in the menu.
+    looked_monitor: Option<DisplayKey>,
 }
 
 impl Model {
@@ -503,7 +506,8 @@ impl Model {
             mic_permission,
             only,
         } = start;
-        let world = World::new(desk, keyboard, caps.cylinder, &settings);
+        let ppd = crate::clarity::pixels_per_degree(&caps.model);
+        let world = World::new(desk, keyboard, caps.cylinder, ppd, &settings);
         let mut m = Self {
             now,
             rev: 0,
@@ -574,6 +578,7 @@ impl Model {
             first_failure: None,
             not_owned: None,
             hidden: Hidden::default(),
+            looked_monitor: None,
         };
         // The language's file had lines that could not be read: said once, in front.
         if let Some(warning) = m.texts().warning() {
@@ -700,6 +705,42 @@ impl Model {
     /// The toast shown now.
     pub fn toast(&self) -> Option<&Toast> {
         self.menu.toast.as_ref()
+    }
+
+    /// The numbers of "For development" are shown next to the monitor looked at: in
+    /// the preview build, while chosen.
+    pub fn metrics_shown(&self) -> bool {
+        crate::PREVIEW && self.world.dev().metrics
+    }
+
+    /// The monitor whose numbers of "For development" are shown (see
+    /// [`Model::metrics_place`]).
+    pub fn metrics_for(&self) -> Option<DisplayKey> {
+        self.looked_monitor
+            .filter(|_| self.metrics_shown())
+            .filter(|id| self.world.shown(*id).is_some())
+    }
+
+    /// Where the numbers of "For development" stand: just under the monitor looked at,
+    /// turned as it is, as large to the eye at any distance. `None` while not shown.
+    pub fn metrics_place(&self) -> Option<crate::layers::Quad> {
+        let id = self.metrics_for()?;
+        let p = *self.world.shown(id)?;
+        let below = self.world.height_of(id) / 2.0;
+        let d = p.position.distance(self.head.0).max(0.3);
+        let width = 0.3 * d;
+        let (w, h) = crate::layers::METRICS_PX;
+        let height = width * h as f32 / w as f32;
+        let up = p.rotation * Vec3::Y;
+        let out = p.rotation * Vec3::Z;
+        Some(crate::layers::Quad {
+            at: Placement {
+                position: p.position - up * (below + 0.01 * d + height / 2.0) + out * 0.005,
+                rotation: p.rotation,
+                width,
+            },
+            height,
+        })
     }
 
     /// "Where is the mouse": on which monitor, where across its image, how far the
@@ -940,6 +981,7 @@ impl Model {
         self.place_sound();
         self.remind_rest(input.dt);
         let looked = self.looked(input.focused);
+        self.looked_monitor = looked.map(|(k, _)| k);
         self.tell_gaze(looked);
         if input.focused {
             self.follow_gaze(looked);
@@ -1816,6 +1858,7 @@ fn tab_code(tab: Tab) -> u8 {
         Tab::Settings(Section::Controls) => 7,
         Tab::Profiles => 8,
         Tab::Settings(Section::Paired) => 9,
+        Tab::Settings(Section::Dev) => 10,
     }
 }
 
@@ -1831,6 +1874,8 @@ fn tab_from_code(code: u8) -> Tab {
         7 => Tab::Settings(Section::Controls),
         8 => Tab::Profiles,
         9 => Tab::Settings(Section::Paired),
+        // "For development" only where the build has it.
+        10 if crate::PREVIEW => Tab::Settings(Section::Dev),
         _ => Tab::Quick,
     }
 }

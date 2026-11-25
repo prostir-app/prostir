@@ -118,10 +118,11 @@ impl Model {
     }
 
     /// The monitor the head looks at and where on it, as drawn; worked out only when
-    /// something uses it (a PC that takes the gaze, or the mouse that follows it),
-    /// and only while the app has the focus.
+    /// something uses it (a PC that takes the gaze, the mouse that follows it, or the
+    /// numbers of "For development"), and only while the app has the focus.
     pub(super) fn looked(&self, focused: bool) -> Option<(DisplayKey, Vec2)> {
-        if !focused || !(self.settings.gaze_mouse || self.any_takes_gaze()) {
+        if !focused || !(self.settings.gaze_mouse || self.any_takes_gaze() || self.metrics_shown())
+        {
             return None;
         }
         let (head, forward) = self.head;

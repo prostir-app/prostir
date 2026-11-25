@@ -1,6 +1,7 @@
 //! The menu's actions (and the same done by a command of the PC, the palm menu or the
 //! selftest), by the part of the menu they belong to.
 
+mod dev;
 mod look;
 mod monitors;
 mod pc;
@@ -110,6 +111,11 @@ impl Model {
             | Action::OpenMenu
             | Action::Close
             | Action::HideNote => self.act_settings(action),
+            Action::DevSize(_)
+            | Action::DevSizeReset
+            | Action::DevSuperSampling(_)
+            | Action::DevSharpening(_)
+            | Action::DevMetrics(_) => self.act_dev(action),
         }
         self.world_done();
     }

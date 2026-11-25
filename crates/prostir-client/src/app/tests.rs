@@ -2089,6 +2089,10 @@ impl crate::layers::Ready for AllReady {
     fn attach(&self) -> bool {
         true
     }
+    // The numbers of "For development" (the preview build) are not counted here.
+    fn metrics(&self) -> bool {
+        false
+    }
     fn hands(&self) -> bool {
         true
     }
@@ -2294,4 +2298,57 @@ fn the_layers_go_back_to_front() {
     for id in order {
         assert_eq!(planned(&plan, id), sim.m.world().shown(id).copied());
     }
+}
+
+/// On a headset of 25 pixels a degree (in the table) the monitors are made 1:1 and
+/// their layers only sharpened. "For
+/// development" (shown in the preview build only) lays them out again at another size
+/// at once, its filters change the layers' with the next frame, and "Reset" puts the
+/// monitors back; the menu hears of each (its change moves).
+#[test]
+fn for_development_changes_the_sizes_and_the_filters() {
+    use crate::clarity::{Filter, MonitorSize, Quality};
+    let mut sim = Sim::of(Caps {
+        model: crate::platform::pixels::MODELS[0].0.into(),
+        ..test_caps()
+    });
+    sim.connect(&[1, 2]);
+    assert_eq!(crate::view::build(&sim.m).dev.is_some(), crate::PREVIEW);
+    let world = sim.m.world();
+    assert_eq!(world.pixels_per_degree(), Some(25.0));
+    let scale = world.shown_scale(k(1)).expect("known");
+    assert!((scale - 1.0).abs() < 0.02, "{scale}");
+    let only_sharpened = Quality {
+        super_sampling: false,
+        sharpening: true,
+    };
+    assert_eq!(world.layer_quality(k(1)), only_sharpened);
+    let before = *world.placement(k(1)).expect("placed");
+    let rev = sim.m.rev();
+    sim.menu(Action::DevSize(MonitorSize::Standard));
+    assert!(sim.m.rev() > rev);
+    sim.frames(20 * MS);
+    let world = sim.m.world();
+    assert_eq!(world.dev().size, MonitorSize::Standard);
+    let standard = *world.placement(k(1)).expect("placed");
+    assert!(standard.width < before.width * 0.9);
+    assert_eq!(world.layer_quality(k(1)), Quality::BOTH, "shown smaller");
+    sim.menu(Action::DevSuperSampling(Filter::Off));
+    sim.menu(Action::DevSharpening(Filter::Off));
+    sim.frames(20 * MS);
+    assert_eq!(
+        sim.m.world().layer_quality(k(1)),
+        Quality {
+            super_sampling: false,
+            sharpening: false
+        }
+    );
+    sim.menu(Action::DevSizeReset);
+    sim.frames(20 * MS);
+    let world = sim.m.world();
+    assert_eq!(world.dev().size, MonitorSize::OneToOne);
+    assert_eq!(*world.placement(k(1)).expect("placed"), before);
+    sim.menu(Action::DevMetrics(false));
+    assert!(!sim.m.world().dev().metrics);
+    assert_eq!(sim.m.metrics_place(), None);
 }

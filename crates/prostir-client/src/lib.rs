@@ -15,6 +15,7 @@ pub mod app;
 pub mod background;
 pub mod backoff;
 pub mod caps;
+pub mod clarity;
 pub mod commands;
 pub mod connecting;
 pub mod device;
@@ -41,6 +42,11 @@ pub mod ui;
 pub mod video;
 pub mod view;
 pub mod world;
+
+/// The preview build (`PROSTIR_PREVIEW=1 scripts/build-apk.sh`, the feature `preview`):
+/// the menu has its "For development" part and the numbers next to the monitor looked
+/// at. Never the store's build.
+pub const PREVIEW: bool = cfg!(all(feature = "preview", not(feature = "store")));
 
 #[cfg(target_os = "android")]
 mod alloc_count;

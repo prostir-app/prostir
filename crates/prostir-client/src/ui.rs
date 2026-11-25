@@ -12,6 +12,7 @@ use prostir_proto::Codec;
 use prostir_proto::state::{Encoding, ErrorCode, Limits};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, PixmapMut, Rect, Stroke, Transform};
 
+use crate::clarity::{Dev, Filter, MonitorSize};
 use crate::ids::DisplayKey;
 use crate::lang::{Language, Moment, Texts};
 use crate::note::{Kind, Note};
@@ -254,6 +255,18 @@ pub struct UiState {
     /// What the menu says under the button pressed last: done, waiting for the PC, or
     /// why it failed (see `note`).
     pub note: Option<Note>,
+    /// "For development", in the preview build only (`None`: no such part).
+    pub dev: Option<DevView>,
+}
+
+/// What "For development" shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DevView {
+    pub dev: Dev,
+    /// The headset's pixels per degree are known: the sizes by them can be chosen.
+    pub known: bool,
+    /// "Reset" has something to put back.
+    pub can_reset: bool,
 }
 
 /// Which control asked the PC for something: its answer is said under the button pressed
@@ -342,6 +355,8 @@ pub enum Section {
     /// The PCs this headset is paired with.
     Paired,
     Help,
+    /// "For development": in the preview build only (see `UiState::dev`).
+    Dev,
 }
 
 impl Tab {
@@ -474,6 +489,15 @@ pub enum Action {
     Brightness(u8),
     /// The note under a button was pressed: it goes.
     HideNote,
+    /// "For development": how large the monitors are made (laid out again at once).
+    DevSize(MonitorSize),
+    /// "For development": the monitors back as they were before another size.
+    DevSizeReset,
+    /// "For development": the layers' supersampling and sharpening.
+    DevSuperSampling(Filter),
+    DevSharpening(Filter),
+    /// "For development": the numbers next to the monitor looked at.
+    DevMetrics(bool),
     Close,
 }
 
@@ -4265,8 +4289,13 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
         (Section::Pc, l.t("headset-section-pc")),
         (Section::Paired, l.t("headset-section-paired")),
         (Section::Help, l.t("headset-section-help")),
+        (Section::Dev, l.t("headset-section-dev")),
     ];
-    for (i, (sec, label)) in sections.into_iter().enumerate() {
+    // "For development" only where the build has it.
+    let sections = sections
+        .into_iter()
+        .filter(|(sec, _)| *sec != Section::Dev || s.dev.is_some());
+    for (i, (sec, label)) in sections.enumerate() {
         let r = rect(nx, top + i as f32 * 60.0, nw, 52.0);
         if sec == section {
             items.push(button(r, label, Style::TabOn, None));
@@ -4449,6 +4478,11 @@ fn settings_page(
         }
         Section::Paired => paired_pcs(s, items, cx, cw.min(700.0), ctop + 10.0),
         Section::Controls => build_controls(s, items, cx, cw.min(640.0), ctop),
+        Section::Dev => {
+            if let Some(dev) = s.dev {
+                build_dev(s, dev, items, cx, cw.min(700.0), ctop);
+            }
+        }
         Section::Help => {
             hints(l, items, cx, ctop + 10.0);
             items.push(button(
@@ -4825,6 +4859,188 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
         ],
     );
     y
+}
+
+/// "For development" (the preview build): how large the monitors are made and "Reset",
+/// the layers' filters, the numbers next to the monitor looked at, and the PC's
+/// settings that change how text looks, side by side.
+fn build_dev(s: &UiState, v: DevView, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
+    let l = &s.texts;
+    let dev = v.dev;
+    let (half, gap) = ((w - 16.0) / 2.0, 16.0);
+    let size = |label, size: MonitorSize, known: bool| {
+        (label, Action::DevSize(size), dev.size == size, known)
+    };
+    segmented(
+        items,
+        x,
+        w,
+        &mut y,
+        l.t("headset-dev-size"),
+        vec![
+            size(
+                l.t("headset-dev-size-standard"),
+                MonitorSize::Standard,
+                true,
+            ),
+            size(l.t("headset-dev-size-one"), MonitorSize::OneToOne, v.known),
+            size(l.t("headset-dev-size-main"), MonitorSize::MainOnly, v.known),
+            size(l.t("headset-dev-size-85"), MonitorSize::Scale85, v.known),
+        ],
+    );
+    if !v.known {
+        items.push(text(
+            x,
+            y - 24.0,
+            17.0,
+            false,
+            MUTED,
+            l.t("headset-dev-unknown"),
+        ));
+        y += 16.0;
+    }
+    let filter = |title, now: Filter, make: fn(Filter) -> Action| {
+        let option = |label, f: Filter| (label, make(f), now == f, true);
+        (
+            title,
+            vec![
+                option(l.t("headset-dev-auto"), Filter::Auto),
+                option(l.t("headset-on"), Filter::On),
+                option(l.t("headset-off"), Filter::Off),
+            ],
+        )
+    };
+    let (title, options) = filter(
+        l.t("headset-dev-super-sampling"),
+        dev.super_sampling,
+        Action::DevSuperSampling,
+    );
+    segmented(items, x, w, &mut y, title, options);
+    let (title, options) = filter(
+        l.t("headset-dev-sharpening"),
+        dev.sharpening,
+        Action::DevSharpening,
+    );
+    segmented(items, x, w, &mut y, title, options);
+    // The numbers, and "Reset" of the size on their right.
+    let top = y;
+    let on = dev.metrics;
+    segmented(
+        items,
+        x,
+        half,
+        &mut y,
+        l.t("headset-dev-metrics"),
+        vec![
+            (l.t("headset-off"), Action::DevMetrics(false), !on, true),
+            (l.t("headset-on"), Action::DevMetrics(true), on, true),
+        ],
+    );
+    items.push(button(
+        rect(x + half + gap, top + 18.0, half, 48.0),
+        l.t("headset-dev-reset"),
+        if v.can_reset {
+            Style::Normal
+        } else {
+            Style::Disabled
+        },
+        v.can_reset.then_some(Action::DevSizeReset),
+    ));
+    // The PC's settings that change how text looks, as on its own page.
+    let Some(pc) = &s.pc else {
+        items.push(text(
+            x,
+            y + 10.0,
+            19.0,
+            false,
+            MUTED,
+            l.t("headset-pc-not-connected"),
+        ));
+        return;
+    };
+    let wanted = pc.wanted;
+    let can = |codec: Codec, gpu: bool| pc.choices.contains(&(codec, gpu));
+    let gpu = !wanted.software;
+    let none = EncodingChange::default();
+    let set = Action::SetEncoding;
+    const RATES: [u16; 3] = [33, 60, 100];
+    let rates: Vec<String> = RATES
+        .iter()
+        .map(|&q| l.f("headset-dev-mbit", &[("rate", q.into())]))
+        .collect();
+    segmented(
+        items,
+        x,
+        w,
+        &mut y,
+        l.t("headset-pc-quality"),
+        RATES
+            .into_iter()
+            .zip(&rates)
+            .map(|(q, label)| {
+                let change = EncodingChange {
+                    bitrate: Some(q),
+                    ..none
+                };
+                (label.as_str(), set(change), wanted.bitrate == q, true)
+            })
+            .collect(),
+    );
+    let mut y2 = y;
+    segmented(
+        items,
+        x,
+        half,
+        &mut y,
+        l.t("headset-pc-codec"),
+        vec![
+            (
+                "HEVC",
+                set(EncodingChange {
+                    codec: Some(Codec::H265),
+                    ..none
+                }),
+                wanted.codec == Some(Codec::H265),
+                gpu && can(Codec::H265, true),
+            ),
+            (
+                "H.264",
+                set(EncodingChange {
+                    codec: Some(Codec::H264),
+                    ..none
+                }),
+                wanted.codec == Some(Codec::H264),
+                can(Codec::H264, true) || can(Codec::H264, false),
+            ),
+        ],
+    );
+    segmented(
+        items,
+        x + half + gap,
+        half,
+        &mut y2,
+        l.t("headset-pc-sharp"),
+        vec![
+            (
+                l.t("headset-off"),
+                set(EncodingChange {
+                    sharp: Some(false),
+                    ..none
+                }),
+                !wanted.sharp,
+                gpu,
+            ),
+            (
+                l.t("headset-on"),
+                set(EncodingChange {
+                    sharp: Some(true),
+                    ..none
+                }),
+                wanted.sharp,
+                gpu,
+            ),
+        ],
+    );
 }
 
 /// PC sound and headset microphone.
@@ -5310,6 +5526,11 @@ mod tests {
             add_scale: 100,
             active_profile: None,
             note: None,
+            dev: Some(DevView {
+                dev: Dev::default(),
+                known: true,
+                can_reset: true,
+            }),
         }
     }
 
@@ -5885,6 +6106,7 @@ mod tests {
                 Tab::Settings(Section::Pc),
                 Tab::Settings(Section::Paired),
                 Tab::Settings(Section::Help),
+                Tab::Settings(Section::Dev),
                 Tab::Profiles,
             ] {
                 let mut st = sample_state();
@@ -6268,6 +6490,7 @@ mod tests {
                 Tab::Settings(Section::Pc),
                 Tab::Settings(Section::Paired),
                 Tab::Settings(Section::Help),
+                Tab::Settings(Section::Dev),
                 Tab::Profiles,
             ] {
                 let mut st = sample_state();

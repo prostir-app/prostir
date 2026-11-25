@@ -21,7 +21,8 @@ use std::ops::Range;
 
 use glam::{Quat, Vec3};
 
-use crate::space::{METRES_PER_PIXEL, PixelSize, Placement, facing, in_view};
+use crate::size::Sizes;
+use crate::space::{PixelSize, Placement, facing, in_view};
 
 /// Distance from the eye to the monitors' edges by default.
 pub const RADIUS: f32 = 1.1;
@@ -72,6 +73,8 @@ pub struct Limits {
     pub max_rows: usize,
     /// Space between neighbours in a row, metres (as a chord between their edges).
     pub gap: f32,
+    /// How large the monitors are made for their pixels, on [`Limits::radius`].
+    pub sizes: Sizes,
 }
 
 impl Default for Limits {
@@ -82,6 +85,7 @@ impl Default for Limits {
             max_radius: MAX_RADIUS,
             max_rows: MAX_ROWS,
             gap: 0.0,
+            sizes: Sizes::default(),
         }
     }
 }
@@ -380,23 +384,30 @@ pub fn rows<K: Copy + Ord>(
     primary: Option<K>,
     limits: &Limits,
 ) -> (Vec<Range<usize>>, f32) {
-    let sorted = items(monitors);
+    let sorted = items(monitors, primary, limits);
     match preset {
         Preset::Arc | Preset::Overhead => rows_in_view(&sorted, primary, row_level(preset), limits),
         Preset::Wall => wall_rows_in_view(&sorted, primary, limits),
     }
 }
 
-/// `monitors` as the arrangement takes them: key, width and height in metres.
-fn items<K: Copy>(monitors: &[(K, PixelSize)]) -> Vec<Item<K>> {
+/// `monitors` as the arrangement takes them: key, width and height in metres, each as
+/// large as `limits.sizes` makes it on `limits.radius` (the main one, `primary` or else
+/// the middle one, by its own size).
+fn items<K: Copy + PartialEq>(
+    monitors: &[(K, PixelSize)],
+    primary: Option<K>,
+    limits: &Limits,
+) -> Vec<Item<K>> {
+    let main = primary
+        .and_then(|p| monitors.iter().position(|m| m.0 == p))
+        .unwrap_or_else(|| monitors.len().saturating_sub(1) / 2);
     monitors
         .iter()
-        .map(|&(id, px)| {
-            (
-                id,
-                px.w as f32 * METRES_PER_PIXEL,
-                px.h as f32 * METRES_PER_PIXEL,
-            )
+        .enumerate()
+        .map(|(i, &(id, px))| {
+            let (w, h) = limits.sizes.of(i == main).metres(px, limits.radius);
+            (id, w, h)
         })
         .collect()
 }
@@ -450,7 +461,7 @@ pub fn arrange<K: Copy + Ord>(
     curve: Option<f32>,
     limits: &Limits,
 ) -> BTreeMap<K, Placement> {
-    let sorted = items(monitors);
+    let sorted = items(monitors, primary, limits);
     let height_of = |id: K| sorted.iter().find(|m| m.0 == id).map_or(0.0, |m| m.2);
 
     let mut out = BTreeMap::new();
@@ -479,10 +490,7 @@ pub fn arrange<K: Copy + Ord>(
     };
 
     if let Some((id, px)) = mirror {
-        let (mut w, mut h) = (
-            px.w as f32 * METRES_PER_PIXEL,
-            px.h as f32 * METRES_PER_PIXEL,
-        );
+        let (mut w, mut h) = limits.sizes.others.metres(px, limits.radius);
         if w > MIRROR_MAX_WIDTH {
             h *= MIRROR_MAX_WIDTH / w;
             w = MIRROR_MAX_WIDTH;
@@ -822,6 +830,73 @@ fn wall_distance(widest: f32, limits: &Limits) -> f32 {
     limits.radius.max(widest / (2.0 * WALL_HALF_ANGLE.tan()))
 }
 
+/// The smallest scale [`largest_scale`] tries: below it the monitors would be smaller
+/// than the standard size made them on a crowded desk.
+pub const MIN_SCALE: f32 = 0.5;
+
+/// The largest scale, from [`MIN_SCALE`] to 1, at which `preset` lays out `monitors`
+/// (and the laptop screen `mirror`, `curve` as for [`arrange`]) with the sizes
+/// `sized(scale)` gives (see [`crate::size`]) on its own circle: standing on
+/// `limits.radius` (a wall at that distance), the circle not grown and none further
+/// away to come into view, and every monitor in view ([`in_view`]). The largest one
+/// scale for all, so they keep to one another as they would at 1:1. `None` where not
+/// even [`MIN_SCALE`] does: then the circle grows as it must, at the standard size.
+///
+/// Found in steps of 0.05 from the top and then to within 0.003 between the first that
+/// does and the one before; the scale given always does.
+pub fn largest_scale<K: Copy + Ord>(
+    preset: Preset,
+    monitors: &[(K, PixelSize)],
+    primary: Option<K>,
+    mirror: Option<(K, PixelSize)>,
+    curve: Option<f32>,
+    limits: &Limits,
+    sized: impl Fn(f32) -> Sizes,
+) -> Option<f32> {
+    let pitch = if preset == Preset::Overhead {
+        OVERHEAD_PITCH
+    } else {
+        0.0
+    };
+    let frame = crate::space::Frame::tilted(Vec3::ZERO, 0.0, pitch);
+    let fits = |scale: f32| {
+        let at = Limits {
+            sizes: sized(scale),
+            ..*limits
+        };
+        let (_, radius) = rows(preset, monitors, primary, &at);
+        radius <= limits.radius
+            && arrange(preset, monitors, primary, mirror, curve, &at)
+                .values()
+                .all(|p| in_view(&frame.unplace(*p)))
+    };
+    if monitors.is_empty() || fits(1.0) {
+        return Some(1.0);
+    }
+    let mut failed = 1.0f32;
+    let mut scale = 1.0f32;
+    loop {
+        scale = (scale - 0.05).max(MIN_SCALE);
+        if fits(scale) {
+            break;
+        }
+        if scale <= MIN_SCALE {
+            return None;
+        }
+        failed = scale;
+    }
+    let (mut lo, mut hi) = (scale, failed);
+    while hi - lo > 0.003 {
+        let mid = (lo + hi) / 2.0;
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Some(lo)
+}
+
 /// Tilts everything up for the overhead preset.
 fn finish<K: Ord>(preset: Preset, mut out: BTreeMap<K, Placement>) -> BTreeMap<K, Placement> {
     if preset == Preset::Overhead {
@@ -837,6 +912,8 @@ fn finish<K: Ord>(preset: Preset, mut out: BTreeMap<K, Placement>) -> BTreeMap<K
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::space::METRES_PER_PIXEL;
 
     fn widths(px: &[u32]) -> Vec<f32> {
         px.iter().map(|&p| p as f32 * METRES_PER_PIXEL).collect()
@@ -962,8 +1039,8 @@ mod tests {
         let mut failures = Vec::new();
         for &preset in presets {
             for desk in desks {
-                let sorted = items(desk);
                 for primary in std::iter::once(None).chain((0..desk.len() as u32).map(Some)) {
+                    let sorted = items(desk, primary, &limits);
                     let sizes: Vec<(u32, u32)> = desk.iter().map(|m| (m.1.w, m.1.h)).collect();
                     let case = format!("{preset:?} {sizes:?}, primary {primary:?}");
                     let (now, radius) = rows(preset, desk, primary, &limits);
@@ -1018,7 +1095,7 @@ mod tests {
                 .zip(sizes)
                 .map(|(i, &(w, h))| (i, PixelSize::new(w, h)))
                 .collect();
-            let sorted = items(&desk);
+            let sorted = items(&desk, primary, &limits);
             let (was, radius) = rows_before(Preset::Arc, &sorted, primary, &limits);
             let before = laid(Preset::Arc, &sorted, primary, &was, radius, &limits);
             assert!(
@@ -1097,5 +1174,173 @@ mod tests {
         let r = fit_radius(&w, &Limits::default());
         assert!(row_arc(&w, r, 0.0) <= ARC);
         assert!(row_arc(&w, r * 0.999, 0.0) > ARC, "{r}");
+    }
+
+    /// Sizes seen at `scale` on 25 pixels per degree (a Quest 3).
+    fn seen(scale: f32) -> Sizes {
+        Sizes::all(crate::size::Size::Seen { ppd: 25.0, scale })
+    }
+
+    /// `n` monitors of `w` by `h`, numbered from 0.
+    fn alike(n: u32, w: u32, h: u32) -> Vec<(u32, PixelSize)> {
+        (0..n).map(|i| (i, PixelSize::new(w, h))).collect()
+    }
+
+    /// The highest middle of `placed`, degrees over eye level.
+    fn highest(placed: &BTreeMap<u32, Placement>) -> f32 {
+        placed
+            .values()
+            .map(|p| {
+                let along = Vec3::new(p.position.x, 0.0, p.position.z).length();
+                p.position.y.atan2(along)
+            })
+            .fold(f32::MIN, f32::max)
+            .to_degrees()
+    }
+
+    /// Up to three full HD monitors fit at 1:1 in one row on the circle of 1.1 m, each
+    /// 68 degrees wide and 41 high, seen one pixel to one of the headset's at its
+    /// middle; four go to the largest scale at which they still fit in 210 degrees.
+    #[test]
+    fn full_hd_at_one_to_one() {
+        let base = Limits::default();
+        for n in 1..=3 {
+            let desk = alike(n, 1920, 1080);
+            let scale = largest_scale(Preset::Arc, &desk, None, None, None, &base, seen);
+            assert_eq!(scale, Some(1.0), "{n}");
+            let limits = Limits {
+                sizes: seen(1.0),
+                ..base
+            };
+            let (rows, radius) = rows(Preset::Arc, &desk, None, &limits);
+            assert_eq!((rows.len(), radius), (1, RADIUS));
+            for p in arrange(Preset::Arc, &desk, None, None, None, &limits).values() {
+                let d = Vec3::new(p.position.x, 0.0, p.position.z).length();
+                let wide = 2.0 * (p.width / 2.0 / d).atan().to_degrees();
+                let high = 2.0 * (p.height(desk[0].1) / 2.0 / d).atan().to_degrees();
+                assert!(
+                    (wide - 68.0).abs() < 1.0 && (high - 41.0).abs() < 1.0,
+                    "{wide} {high}"
+                );
+                let scale = crate::size::shown_scale(p.width, 1920, p.position.length(), 25.0);
+                assert!((scale - 1.0).abs() < 0.01, "{scale}");
+                assert!(in_view(p));
+            }
+        }
+        let four = alike(4, 1920, 1080);
+        let scale =
+            largest_scale(Preset::Arc, &four, None, None, None, &base, seen).expect("a scale");
+        assert!((0.7..0.85).contains(&scale), "{scale}");
+        let limits = Limits {
+            sizes: seen(scale),
+            ..base
+        };
+        let (rows, radius) = rows(Preset::Arc, &four, None, &limits);
+        assert_eq!((rows.len(), radius), (1, RADIUS));
+    }
+
+    /// Two rows: of full HD at 1:1 on the circle of 1.1 m, the row over the main one
+    /// within 40 degrees of eye level; of QHD the one over would be out of view there,
+    /// and at 1:1 the circle would have to grow, so both rows go to the largest scale
+    /// that keeps it (about 0.93).
+    #[test]
+    fn two_rows_at_the_largest_scale_in_view() {
+        let base = Limits::default();
+        for (desk, least, most) in [
+            (alike(6, 1920, 1080), 1.0, 1.0),
+            (alike(4, 2560, 1440), 0.85, 0.97),
+        ] {
+            let at_one = Limits {
+                sizes: seen(1.0),
+                ..base
+            };
+            let (_, further) = rows(Preset::Arc, &desk, Some(1), &at_one);
+            let scale = largest_scale(Preset::Arc, &desk, Some(1), None, None, &base, seen)
+                .expect("a scale");
+            assert!((least..=most).contains(&scale), "{scale}");
+            assert_eq!(scale < 1.0, further > RADIUS, "{further}");
+            let limits = Limits {
+                sizes: seen(scale),
+                ..base
+            };
+            let (rows, radius) = rows(Preset::Arc, &desk, Some(1), &limits);
+            assert_eq!((rows.len(), radius), (2, RADIUS), "{rows:?}");
+            let placed = arrange(Preset::Arc, &desk, Some(1), None, None, &limits);
+            assert!(all_in_view(Preset::Arc, &placed));
+            let top = highest(&placed);
+            assert!((25.0..=40.0).contains(&top), "{top}");
+        }
+    }
+
+    /// Every desk of one to three monitors of common sizes, every primary, every preset,
+    /// with the laptop's lid and without, all at 1:1 or the main one only: at the scale
+    /// found, never above 1, the circle is the one it starts from, every monitor is in
+    /// view and no row takes more than 210 degrees; where none is found, not even the
+    /// smallest scale does.
+    #[test]
+    fn the_scale_found_keeps_the_circle_and_everything_in_view() {
+        let main_only = |scale: f32| Sizes {
+            main: crate::size::Size::Seen { ppd: 20.0, scale },
+            others: crate::size::Size::STANDARD,
+        };
+        let sized: [&dyn Fn(f32) -> Sizes; 2] = [&seen, &main_only];
+        let lid = (99, PixelSize::new(2880, 1800));
+        let base = Limits::default();
+        let mut failures = Vec::new();
+        let mut found = 0;
+        for preset in [Preset::Arc, Preset::Overhead, Preset::Wall] {
+            for desk in desks(1..=3) {
+                for primary in std::iter::once(None).chain((0..desk.len() as u32).map(Some)) {
+                    for (k, sized) in sized.iter().enumerate() {
+                        for mirror in [None, Some(lid)] {
+                            let case = format!("{preset:?} {desk:?} {primary:?} {k} {mirror:?}");
+                            let Some(scale) =
+                                largest_scale(preset, &desk, primary, mirror, None, &base, sized)
+                            else {
+                                let at = Limits {
+                                    sizes: sized(MIN_SCALE),
+                                    ..base
+                                };
+                                let (_, radius) = rows(preset, &desk, primary, &at);
+                                let placed = arrange(preset, &desk, primary, mirror, None, &at);
+                                if radius <= RADIUS && all_in_view(preset, &placed) {
+                                    failures.push(format!("{case}: none, yet the least fits"));
+                                }
+                                continue;
+                            };
+                            found += 1;
+                            let at = Limits {
+                                sizes: sized(scale),
+                                ..base
+                            };
+                            let (rows, radius) = rows(preset, &desk, primary, &at);
+                            let placed = arrange(preset, &desk, primary, mirror, None, &at);
+                            if !(MIN_SCALE..=1.0).contains(&scale)
+                                || radius > RADIUS
+                                || !all_in_view(preset, &placed)
+                            {
+                                failures.push(format!("{case}: {scale} on {radius}"));
+                            }
+                            if preset != Preset::Wall {
+                                let sorted = items(&desk, primary, &at);
+                                let w: Vec<f32> = sorted.iter().map(|m| m.1).collect();
+                                for row in rows {
+                                    if row_arc(&w[row.clone()], radius, 0.0) > ARC + 1e-4 {
+                                        failures.push(format!("{case}: {row:?} too wide"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{}:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+        assert!(found > 1000, "{found}");
     }
 }

@@ -195,5 +195,10 @@ pub fn build(m: &Model) -> UiState {
         profile_page: menu.profile_page,
         active_profile: menu.active_profile,
         note: menu.notes.shown().cloned(),
+        dev: crate::PREVIEW.then(|| ui::DevView {
+            dev: *world.dev(),
+            known: world.pixels_per_degree().is_some(),
+            can_reset: world.can_reset_size(),
+        }),
     }
 }

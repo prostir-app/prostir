@@ -19,6 +19,10 @@ store = []
 # The selftest against a fake PC in the app's own process (scripts/selftest-headset.sh):
 # every build but the store's.
 selftest = ["dep:prostir-testkit"]
+# The preview build of an unreleased version (scripts/build-apk.sh with
+# PROSTIR_PREVIEW=1): the menu's "For development" part, to try how monitors and their
+# layers are shown. Never with `store`.
+preview = []
 
 [lib]
 name = "prostir"

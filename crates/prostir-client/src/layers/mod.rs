@@ -13,7 +13,8 @@
 //!    `World::draw_list` has them, the one in a hand last), of every PC together;
 //! 4. what is wrong with a monitor's picture: over it while it recovers, in its place
 //!    while it cannot be shown;
-//! 5. the placeholder of a monitor being added;
+//! 5. the placeholder of a monitor being added, the numbers next to the monitor looked
+//!    at (the preview build's "For development");
 //! 6. the menu's button, the menu, the toast, "Attach", the palm menu;
 //! 7. the hands and rays, then the pointer dots.
 //!
@@ -22,7 +23,8 @@
 //! the menu is drawn in the menu's own picture.
 //!
 //! **Over budget** (more wanted than the compositor takes), what goes first:
-//! 1. what is wrong with a monitor that still shows its picture (the words over it);
+//! 1. the numbers of "For development", then what is wrong with a monitor that still
+//!    shows its picture (the words over it);
 //! 2. the monitors, the farthest first (one that cannot be shown and has its reason in
 //!    its place counts as a monitor there; the one in a hand is the nearest);
 //! 3. the placeholder, "Attach", the toast: a small sign goes before the room;
@@ -51,6 +53,7 @@ mod tests;
 use glam::Vec3;
 
 use crate::app::{Model, TOAST_WIDTH};
+use crate::clarity::Quality;
 use crate::ids::{DisplayKey, Target};
 use crate::interaction::Hands;
 use crate::layout::{Placement, facing};
@@ -61,6 +64,8 @@ use crate::world::{
 
 /// The toast's picture, in pixels: its layer has its shape.
 pub const TOAST_PX: (u32, u32) = (1024, 132);
+/// The picture of the numbers of "For development", in pixels.
+pub const METRICS_PX: (u32, u32) = (1024, 88);
 
 /// A flat picture where it is drawn: its middle, how it faces, how wide
 /// (`at.width`) and how high, in metres.
@@ -82,6 +87,9 @@ pub struct Monitor {
     pub bright: f32,
     /// How far it faded in (0 to 1).
     pub alpha: f32,
+    /// The compositor's filters for it, by the scale it is shown at (see
+    /// `World::layer_quality`).
+    pub quality: Quality,
 }
 
 /// A layer of the frame (see the module for the order).
@@ -99,6 +107,8 @@ pub enum Layer {
     },
     /// The monitor being added.
     Placeholder(Quad),
+    /// The numbers next to the monitor looked at ("For development").
+    Metrics(Quad),
     MenuButton(Quad),
     Menu(Quad),
     Toast(Quad),
@@ -130,6 +140,8 @@ pub trait Ready {
     fn palm(&self) -> bool;
     /// "Attach" drawn.
     fn attach(&self) -> bool;
+    /// The numbers of "For development" drawn.
+    fn metrics(&self) -> bool;
     /// The hands and rays drawn this frame.
     fn hands(&self) -> bool;
 }
@@ -301,6 +313,7 @@ pub fn plan(model: &Model, hands: &Hands, ready: &impl Ready, plan: &mut Plan) {
                     curve: on,
                     bright,
                     alpha: t,
+                    quality: world.layer_quality(id),
                 }),
                 Rank::Monitor(nearness(distance)),
             );
@@ -332,6 +345,9 @@ pub fn plan(model: &Model, hands: &Hands, ready: &impl Ready, plan: &mut Plan) {
             height: a.height(),
         };
         plan.push(Layer::Placeholder(quad), Rank::Said(0));
+    }
+    if let Some(quad) = model.metrics_place().filter(|_| ready.metrics()) {
+        plan.push(Layer::Metrics(quad), Rank::Over(0));
     }
     if let Some(at) = world.button() {
         let quad = Quad {

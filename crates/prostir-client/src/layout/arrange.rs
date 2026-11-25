@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use glam::{Quat, Vec3};
 use log::debug;
 use prostir_layout::circle::{self, Limits};
+use prostir_layout::size::Sizes;
 use prostir_layout::space::{Frame, Monitor, azimuth, covers, cuts, see};
 use prostir_layout::view::Room;
 use prostir_layout::{place, rows, tidy};
@@ -38,11 +39,77 @@ pub fn preset_radius<K: Key>(
     monitors: &[(K, u32, u32)],
     primary: Option<K>,
 ) -> f32 {
+    preset_radius_sized(preset, monitors, primary, Sizes::default())
+}
+
+/// [`preset_radius`] with the monitors made as large as `sizes` says.
+pub fn preset_radius_sized<K: Key>(
+    preset: Preset,
+    monitors: &[(K, u32, u32)],
+    primary: Option<K>,
+    sizes: Sizes,
+) -> f32 {
     circle::radius_of(
         shape(preset),
         &pixel_sizes(monitors),
         primary,
+        &Limits {
+            sizes,
+            ..Limits::default()
+        },
+    )
+}
+
+/// The circle new monitors go on: its radius, and how large they are made.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Circle {
+    pub radius: f32,
+    pub sizes: Sizes,
+}
+
+/// A circle of this radius, the monitors of the standard size.
+impl From<f32> for Circle {
+    fn from(radius: f32) -> Self {
+        Self {
+            radius,
+            sizes: Sizes::default(),
+        }
+    }
+}
+
+impl Circle {
+    fn limits(self) -> Limits {
+        Limits {
+            radius: self.radius,
+            sizes: self.sizes,
+            ..Limits::default()
+        }
+    }
+}
+
+/// The largest scale at which `preset` lays out `monitors` (and the PC's own displays
+/// `physical`) on its own circle with every one in view, each made by `sized(scale)`
+/// (see `prostir_layout::circle::largest_scale`); `None` where not even the smallest
+/// does.
+pub fn largest_scale<K: Key>(
+    preset: Preset,
+    monitors: &[(K, u32, u32)],
+    primary: Option<K>,
+    physical: &[Physical<K>],
+    curve: Option<f32>,
+    sized: impl Fn(f32) -> Sizes,
+) -> Option<f32> {
+    let group = physical
+        .first()
+        .map(|first| (first.0, group_size(physical)));
+    circle::largest_scale(
+        shape(preset),
+        &pixel_sizes(monitors),
+        primary,
+        group.map(|(id, (w, h))| (id, prostir_layout::space::PixelSize::new(w, h))),
+        curve,
         &Limits::default(),
+        sized,
     )
 }
 
@@ -65,6 +132,18 @@ pub fn arrange<K: Key>(
     physical: &[Physical<K>],
     curve: Option<f32>,
 ) -> HashMap<K, Placement> {
+    arrange_sized(preset, monitors, primary, physical, curve, Sizes::default())
+}
+
+/// [`arrange`] with the monitors made as large as `sizes` says.
+pub fn arrange_sized<K: Key>(
+    preset: Preset,
+    monitors: &[(K, u32, u32)],
+    primary: Option<K>,
+    physical: &[Physical<K>],
+    curve: Option<f32>,
+    sizes: Sizes,
+) -> HashMap<K, Placement> {
     let group = physical
         .first()
         .map(|first| (first.0, group_size(physical)));
@@ -74,7 +153,10 @@ pub fn arrange<K: Key>(
         primary,
         group.map(|(id, (w, h))| (id, prostir_layout::space::PixelSize::new(w, h))),
         curve,
-        &Limits::default(),
+        &Limits {
+            sizes,
+            ..Limits::default()
+        },
     )
     .into_iter()
     .collect();
@@ -315,8 +397,8 @@ pub fn glued_pairs<K: Key>(
 /// (it is not among them), which do not move: at the end of the longest row with
 /// room, the end nearest the gaze (a direction in the room); over the top row or under
 /// the bottom one only when no row has room; covering nothing (see
-/// `prostir_layout::place`). The first one goes straight ahead on a circle of
-/// `radius`. `previous`: the rows the PC has.
+/// `prostir_layout::place`). The first one goes straight ahead on `circle` (a radius,
+/// or one with the size new monitors are made). `previous`: the rows the PC has.
 #[allow(clippy::too_many_arguments)]
 pub fn place_new<K: Key>(
     placements: &HashMap<K, Placement>,
@@ -326,7 +408,7 @@ pub fn place_new<K: Key>(
     tilt: f32,
     gaze: Vec3,
     previous: &[Vec<K>],
-    radius: f32,
+    circle: impl Into<Circle>,
 ) -> Placement {
     let all = placed(placements, monitors);
     let frame = frame(center, tilt);
@@ -337,10 +419,7 @@ pub fn place_new<K: Key>(
         gaze,
         prostir_layout::space::PixelSize::new(size.0, size.1),
         Some(&rows),
-        &Limits {
-            radius,
-            ..Limits::default()
-        },
+        &circle.into().limits(),
     )
 }
 
@@ -362,11 +441,12 @@ pub fn place_in_view<K: Key>(
     tilt: f32,
     gaze: Vec3,
     previous: &[Vec<K>],
-    radius: f32,
+    circle: impl Into<Circle>,
     any: bool,
 ) -> (Placement, bool) {
+    let circle = circle.into();
     let at = place_new(
-        placements, monitors, size, center, tilt, gaze, previous, radius,
+        placements, monitors, size, center, tilt, gaze, previous, circle,
     );
     if in_view(&at, (center, tilt)) {
         return (at, false);
@@ -375,20 +455,18 @@ pub fn place_in_view<K: Key>(
     let all = placed(placements, monitors);
     let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
     let px = prostir_layout::space::PixelSize::new(size.0, size.1);
-    if let Some(p) = place::into_row(&all, &frame, gaze, px, Some(&rows), false) {
+    let new = circle.sizes.others;
+    if let Some(p) = place::into_row(&all, &frame, gaze, px, Some(&rows), false, new) {
         return (p, true);
     }
     if let Some(p) = back_into_view(at, px, &all, &frame) {
         return (p, false);
     }
-    if any && let Some(p) = place::into_row(&all, &frame, gaze, px, Some(&rows), true) {
+    if any && let Some(p) = place::into_row(&all, &frame, gaze, px, Some(&rows), true, new) {
         return (p, true);
     }
     // No room in the row: over or under one, further away, so seen lower.
-    let limits = Limits {
-        radius,
-        ..Limits::default()
-    };
+    let limits = circle.limits();
     let far = place::place_within(&all, &frame, gaze, px, Some(&rows), &limits, FAR_ONE);
     (
         if in_view(&far, (center, tilt)) {
@@ -483,17 +561,14 @@ pub fn place_waiting<K: Key>(
     tilt: f32,
     gaze: Vec3,
     previous: &[Vec<K>],
-    radius: f32,
+    circle: impl Into<Circle>,
     into: Placement,
 ) -> Placement {
     let frame = frame(center, tilt);
     let all = placed(placements, monitors);
     let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
     let px = prostir_layout::space::PixelSize::new(size.0, size.1);
-    let limits = Limits {
-        radius,
-        ..Limits::default()
-    };
+    let limits = circle.into().limits();
     let far = place::place_within(&all, &frame, gaze, px, Some(&rows), &limits, FAR_ONE);
     if in_view(&far, (center, tilt)) {
         return far;

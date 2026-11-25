@@ -11,11 +11,13 @@ use std::time::{Duration, Instant};
 use super::Gpu;
 use crate::app::Model;
 use crate::background;
+use crate::clarity::{self, Metrics};
 use crate::ids::DisplayKey;
 use crate::interaction::{Hands, Menu, Menus};
 use crate::lang::Texts;
-use crate::layers::TOAST_PX;
+use crate::layers::{METRICS_PX, TOAST_PX};
 use crate::platform::openxr::ImageLayer;
+use crate::platform::video::SurfaceVideo;
 use crate::settings::Background;
 use crate::ui::{self, Action, Panel};
 use crate::view::View;
@@ -127,6 +129,15 @@ pub struct Pictures {
     button_hovered: bool,
     pub panels: Panels,
     pub wrist_layer: ImageLayer,
+    /// The numbers of "For development" next to the monitor looked at (the preview
+    /// build only), and what they say (`None`: not drawn yet).
+    pub metrics_layer: Option<ImageLayer>,
+    pub metrics_drawn: Option<String>,
+    /// What they were last worked out for: the monitor, its scale, the language, and
+    /// the last count of its stream's bytes with when it was taken.
+    metrics_for: Option<(DisplayKey, Option<f32>, Texts)>,
+    metrics_count: Option<(DisplayKey, Instant, u64)>,
+    metrics_mbit: Option<f32>,
     /// The panorama shown and the background it was made for.
     pub pano_layer: Option<(Background, ImageLayer)>,
     pano_job: Option<(Background, JoinHandle<Panorama>)>,
@@ -148,6 +159,17 @@ impl Pictures {
         let mut cursor_layer = ImageLayer::new(session, format, CURSOR_PX, CURSOR_PX, true)?;
         let toast_layer = ImageLayer::new(session, format, TOAST_PX.0, TOAST_PX.1, false)?;
         let attach_layer = ImageLayer::new(session, format, ATTACH_PX.0, ATTACH_PX.1, false)?;
+        let metrics_layer = if crate::PREVIEW {
+            Some(ImageLayer::new(
+                session,
+                format,
+                METRICS_PX.0,
+                METRICS_PX.1,
+                false,
+            )?)
+        } else {
+            None
+        };
         cursor_layer.upload(gl, &ui::cursor_image(CURSOR_PX))?;
         button_layer.upload(gl, &ui::menu_button_image(BUTTON_PX, false))?;
         let panels = Panels {
@@ -172,6 +194,11 @@ impl Pictures {
             button_hovered: false,
             panels,
             wrist_layer,
+            metrics_layer,
+            metrics_drawn: None,
+            metrics_for: None,
+            metrics_count: None,
+            metrics_mbit: None,
             pano_layer: None,
             pano_job: None,
             pano_failed: None,
@@ -365,6 +392,67 @@ impl Pictures {
             }
         }
         Ok(menu_drawn)
+    }
+
+    /// The numbers of "For development" for the monitor looked at (see
+    /// `Model::metrics_for`): its scale, its stream's megabits a second over the last
+    /// second, its last keyframe's size. Worked out and drawn again only when the
+    /// monitor, its scale or the language changes, or once a second for the rate.
+    pub fn metrics(
+        &mut self,
+        gl: &glow::Context,
+        model: &Model,
+        video: &SurfaceVideo,
+        now: Instant,
+    ) -> Result<()> {
+        let (Some(id), Some(layer)) = (model.metrics_for(), &mut self.metrics_layer) else {
+            self.metrics_count = None;
+            return Ok(());
+        };
+        let (bytes, keyframe) = video.received(id).unwrap_or((0, None));
+        let mut due = false;
+        match self.metrics_count {
+            Some((was, at, before)) if was == id => {
+                let passed = now.saturating_duration_since(at);
+                if passed >= Duration::from_secs(1) {
+                    let bits = bytes.saturating_sub(before) as f64 * 8.0;
+                    self.metrics_mbit = Some((bits / passed.as_secs_f64() / 1e6) as f32);
+                    self.metrics_count = Some((id, now, bytes));
+                    due = true;
+                }
+            }
+            _ => {
+                self.metrics_count = Some((id, now, bytes));
+                self.metrics_mbit = None;
+            }
+        }
+        let scale = model.world().shown_scale(id);
+        let texts = model.texts();
+        let same = self
+            .metrics_for
+            .as_ref()
+            .is_some_and(|(k, s, t)| *k == id && *s == scale && t == texts);
+        if same && !due {
+            return Ok(());
+        }
+        self.metrics_for = Some((id, scale, texts.clone()));
+        let text = clarity::metrics_text(
+            texts,
+            &Metrics {
+                scale,
+                mbit: self.metrics_mbit,
+                keyframe,
+            },
+        );
+        if self.metrics_drawn.as_deref() != Some(text.as_str()) {
+            let picture = self
+                .panels
+                .main
+                .toast_image(&text, METRICS_PX.0, METRICS_PX.1);
+            layer.upload(gl, &picture)?;
+            self.metrics_drawn = Some(text);
+        }
+        Ok(())
     }
 
     /// The black layer over a room blended with the frame and dimmed, letting part of

@@ -30,6 +30,7 @@ fn monitor(n: u32) -> Layer {
         curve: None,
         bright: 1.0,
         alpha: 1.0,
+        quality: Quality::BOTH,
     })
 }
 
@@ -86,6 +87,7 @@ fn names(p: &Plan) -> Vec<String> {
             Layer::Monitor(m) => format!("m{}", m.id.id.0),
             Layer::Trouble { id, .. } => format!("t{}", id.id.0),
             Layer::Placeholder(_) => "adding".into(),
+            Layer::Metrics(_) => "metrics".into(),
             Layer::MenuButton(_) => "button".into(),
             Layer::Menu(_) => "menu".into(),
             Layer::Toast(_) => "toast".into(),

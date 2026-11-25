@@ -1,6 +1,6 @@
 //! Renders the headset menu to a PNG for checking the design on the desktop.
 //! cargo run -p prostir-client --example panel_preview -- panel.png [hover_x hover_y]
-//! Environment: WRIST=1 (the wrist menu), TAB=monitors|profiles|look|sound|language|pc|paired|help (default: quick), LANG_UI=en|uk|qps (qps: the longer pseudo-language), PAIR=show|type|failed, OFFLINE=1, KEYPAD=…, NOTE=done|failed|waiting|saved (what the page says under a button pressed on it), PHYSICAL=n (the PC's own displays, 0 to 5; 2 by default), PHYSICAL_MAX=n (how many of them the PC lets show; 4 by default), PROFILES=n (saved profiles; 3 by default), SELECTED=1 (the second monitor picked on the map), NO_SCALE=1 (a PC without monitors at another scale)
+//! Environment: WRIST=1 (the wrist menu), TAB=monitors|profiles|look|sound|language|pc|paired|help|dev (default: quick), DEV=1 ("For development", as the preview build has it; UNKNOWN_HEADSET=1: a headset not in the table), LANG_UI=en|uk|qps (qps: the longer pseudo-language), PAIR=show|type|failed, OFFLINE=1, KEYPAD=…, NOTE=done|failed|waiting|saved (what the page says under a button pressed on it), PHYSICAL=n (the PC's own displays, 0 to 5; 2 by default), PHYSICAL_MAX=n (how many of them the PC lets show; 4 by default), PROFILES=n (saved profiles; 3 by default), SELECTED=1 (the second monitor picked on the map), NO_SCALE=1 (a PC without monitors at another scale)
 
 use prostir::ids::{DisplayKey, PcId};
 use prostir::lang::{BUILTIN, Known, Lang, Language, Loader, Texts};
@@ -349,6 +349,7 @@ fn main() {
             Ok("paired") => Tab::Settings(Section::Paired),
             Ok("profiles") => Tab::Profiles,
             Ok("help") => Tab::Settings(Section::Help),
+            Ok("dev") => Tab::Settings(Section::Dev),
             Ok("controls") => Tab::Settings(Section::Controls),
             _ => Tab::Quick,
         },
@@ -362,6 +363,12 @@ fn main() {
         add_scale: 100,
         active_profile: Some(1),
         note: None,
+        // "For development", as the preview build has it (DEV=1).
+        dev: std::env::var("DEV").is_ok().then(|| prostir::ui::DevView {
+            dev: prostir::clarity::Dev::default(),
+            known: std::env::var("UNKNOWN_HEADSET").is_err(),
+            can_reset: true,
+        }),
         texts,
         languages: languages.into(),
         language_page: 0,
