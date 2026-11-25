@@ -287,7 +287,7 @@ fn only_the_main_headset_changes_the_limits() {
     };
     assert_eq!(ids.len(), usize::from(max));
 
-    let dir = TestDir::new("guest");
+    let dir = TestDir::new("limits-guest");
     dir.save_screens("next 200\nrow\nscreen 0 640x360\n");
     let mut keys = dir.pair();
     let key = prostir_proto::secure::to_hex(&keys.identity.public);

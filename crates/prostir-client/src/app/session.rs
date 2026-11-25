@@ -216,6 +216,7 @@ impl Model {
             self.say_paired(host);
         }
         self.sessions.insert(pc);
+        self.gaze_told.forget(pc);
         self.world.connected(pc);
         if language.is_some() && language != self.settings.pc_language {
             self.settings.pc_language = language;
