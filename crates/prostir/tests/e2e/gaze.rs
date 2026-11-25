@@ -13,7 +13,12 @@ use crate::{SOON, session};
 /// monitor and for none.
 #[test]
 fn the_pc_takes_the_gaze_and_logs_it() {
-    let (_dir, mut pc, _keys, mut headset) = session("gaze", &Options::default());
+    // The PC logs it at the debug level: it only shows for what a later step does.
+    let options = Options {
+        env: vec![("RUST_LOG".into(), "info,prostir::session=debug".into())],
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("gaze", &options);
     let pc_caps = headset.view().pc.caps.clone().unwrap();
     assert!(pc_caps.has(caps::pc::GAZE), "{pc_caps:?}");
     // The fake headset says it can tell where the user looks.

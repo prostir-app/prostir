@@ -60,6 +60,11 @@ impl Told {
         }
     }
 
+    /// A message went out at `now`: the next waits for [`EVERY`].
+    pub(super) fn said(&mut self, now: Instant) {
+        self.sent = Some(now);
+    }
+
     /// One frame: `looked` is the monitor the gaze is on and where on it (`None`: on
     /// none of those whose PC takes the gaze). What to say, if the gaze has rested on
     /// another monitor long enough and the last message is old enough.
@@ -85,7 +90,6 @@ impl Told {
         }
         let left = std::mem::replace(&mut self.monitor, key);
         self.candidate = None;
-        self.sent = Some(now);
         let point = |v: f32| (v.clamp(0.0, 1.0) * 65535.0) as u16;
         Some(Say {
             leave: left
@@ -140,8 +144,9 @@ impl Model {
         let Some(say) = self.gaze_told.step(self.now, looked) else {
             return;
         };
+        let mut went = false;
         if let Some(pc) = say.leave {
-            self.say_gaze(
+            went |= self.say_gaze(
                 pc,
                 ClientMsg::Gaze {
                     display: None,
@@ -151,7 +156,7 @@ impl Model {
             );
         }
         if let Some((k, u, v)) = say.arrive {
-            self.say_gaze(
+            went |= self.say_gaze(
                 k.pc,
                 ClientMsg::Gaze {
                     display: Some(k.id),
@@ -160,13 +165,19 @@ impl Model {
                 },
             );
         }
+        // A message to a PC that is gone does not count against the next one.
+        if went {
+            self.gaze_told.said(self.now);
+        }
     }
 
-    /// Sends `msg` to `pc` if it is in a session and takes the gaze.
-    fn say_gaze(&mut self, pc: PcId, msg: ClientMsg) {
-        if self.takes_gaze(pc) {
+    /// Sends `msg` to `pc` if it is in a session and takes the gaze; whether it went.
+    fn say_gaze(&mut self, pc: PcId, msg: ClientMsg) -> bool {
+        let takes = self.takes_gaze(pc);
+        if takes {
             self.send_to(pc, msg);
         }
+        takes
     }
 }
 
@@ -181,6 +192,15 @@ mod tests {
 
     const A: PcId = PcId([1; 8]);
     const B: PcId = PcId([2; 8]);
+
+    /// One frame as the model takes it: a message that was said counts at once.
+    fn stepped(t: &mut Told, now: Instant, looked: Option<(DisplayKey, Vec2)>) -> Option<Say> {
+        let say = t.step(now, looked);
+        if say.is_some() {
+            t.said(now);
+        }
+        say
+    }
 
     fn key(pc: PcId, n: u32) -> DisplayKey {
         DisplayKey::new(pc, DisplayId(n))
@@ -201,8 +221,7 @@ mod tests {
         (0..=ms / 11)
             .filter_map(|i| {
                 let at = i * 11;
-                t.step(from + Duration::from_millis(at), looked)
-                    .map(|s| (at, s))
+                stepped(t, from + Duration::from_millis(at), looked).map(|s| (at, s))
             })
             .collect()
     }
@@ -239,7 +258,8 @@ mod tests {
         let said: Vec<_> = (0..200u64)
             .filter_map(|i| {
                 let uv = Vec2::new((i % 10) as f32 / 10.0, 0.5);
-                t.step(
+                stepped(
+                    &mut t,
                     t0 + Duration::from_millis(500 + i * 11),
                     Some((key(A, 1), uv)),
                 )
@@ -257,7 +277,11 @@ mod tests {
         let mut said = Vec::new();
         for i in 0..40u64 {
             let looked = if i % 2 == 0 { at(A, 2) } else { at(A, 1) };
-            said.extend(t.step(t0 + Duration::from_millis(500 + i * 50), looked));
+            said.extend(stepped(
+                &mut t,
+                t0 + Duration::from_millis(500 + i * 50),
+                looked,
+            ));
         }
         assert!(said.is_empty(), "{said:?}");
         let t1 = t0 + Duration::from_millis(3000);
@@ -279,7 +303,7 @@ mod tests {
             } else {
                 at(A, 2)
             };
-            said.extend(t.step(t0 + Duration::from_millis(ms), looked).map(|_| ms));
+            said.extend(stepped(&mut t, t0 + Duration::from_millis(ms), looked).map(|_| ms));
         }
         assert!(said.len() > 15, "it does tell: {}", said.len());
         for w in said.windows(2) {

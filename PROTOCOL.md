@@ -772,7 +772,7 @@ the table says. A new value later comes with a capability and a fallback of its 
 | 11 | the microphone as an up stream | | |
 | 12 | the camera | | |
 | 13 | poses | | |
-| 14 | uses the gaze for which display gets the most bits | | |
+| 14 | takes `Gaze` (for which display gets the most bits, from step 10) | | |
 
 | Enum | Value | Needs | Without it |
 |---|---|---|---|
@@ -815,7 +815,8 @@ go to the main headset, else to the first connected.
 | `DetachWindow` | changes and private |
 | `WindowHere`, `MouseTo`, `Prefs.gaze_mouse_ms` | input |
 | `Screenshot`, `Prefs.notifications` | private |
-| `FindMouse`, `RequestKeyframe`, `Gaze` | nothing (keyframes at most every 300 ms for a display, from all sessions together) |
+| `FindMouse`, `RequestKeyframe` | nothing (keyframes at most every 300 ms for a display, from all sessions together) |
+| `Gaze` | nothing, and the headset sends it only to a host that listed feature 14 |
 | `UpStart` | the microphone (or the camera, by kind) |
 | `Arrange`, `Volume` | the main headset: a guest's arrangement does not move the desktop, its volume does not move the PC's |
 | `Presence` | anyone: the host sends no frames and no sound to a headset not worn, pauses the desktop once no headset is worn, and ends the session of one taken off (see [End of session](#end-of-session)) |
