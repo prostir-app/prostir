@@ -15,8 +15,9 @@
 //! The file names its language in a message of its own, `language-name`.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use fluent_bundle::concurrent::FluentBundle;
 use fluent_bundle::{FluentArgs, FluentResource, FluentValue};
@@ -148,16 +149,20 @@ impl Catalog {
     }
 
     /// Every file for `code`, in the order they apply: built in, then the folders from
-    /// the least important to the most.
-    fn sources(&self, code: &str) -> Vec<(String, Cow<'static, str>)> {
+    /// the least important to the most. The flag is set for a file from a folder.
+    fn sources(&self, code: &str) -> Vec<(String, Cow<'static, str>, bool)> {
         let mut out = Vec::new();
         if let Some((_, text)) = self.builtin.iter().find(|(c, _)| *c == code) {
-            out.push((format!("{code}.ftl (built in)"), Cow::Borrowed(*text)));
+            out.push((
+                format!("{code}.ftl (built in)"),
+                Cow::Borrowed(*text),
+                false,
+            ));
         }
         for dir in self.dirs.iter().rev() {
             let path = dir.join(format!("{code}.ftl"));
             match read_capped(&path, FILE_MAX).map(String::from_utf8) {
-                Ok(Ok(text)) => out.push((path.display().to_string(), Cow::Owned(text))),
+                Ok(Ok(text)) => out.push((path.display().to_string(), Cow::Owned(text), true)),
                 Ok(Err(_)) => log::warn!("{}: not UTF-8 text, not used", path.display()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => log::warn!("{}: not used: {e}", path.display()),
@@ -227,7 +232,19 @@ impl Catalog {
             log::warn!("Fluent's built-in functions: {e}");
         }
         let mut has_any = false;
-        for (file, text) in self.sources(code) {
+        let english = self.builtin.iter().find(|(c, _)| *c == FALLBACK);
+        for (file, text, dropped) in self.sources(code) {
+            if dropped && let Some((_, english)) = english {
+                for id in check(english, &text).extra {
+                    warn_once(
+                        &format!("{file} {id}"),
+                        format_args!(
+                            "{file}: {id} is not a message of English and is never shown; \
+                             ids now start with window- or headset- (pc- for the PC app)"
+                        ),
+                    );
+                }
+            }
             let resource = match FluentResource::try_new(text.into_owned()) {
                 Ok(r) => r,
                 Err((r, errors)) => {
@@ -309,11 +326,33 @@ fn format(
 ) -> Option<String> {
     let pattern = bundle.get_message(id)?.value()?;
     let mut errors = Vec::new();
-    Some(
-        bundle
-            .format_pattern(pattern, args, &mut errors)
-            .into_owned(),
-    )
+    let text = bundle
+        .format_pattern(pattern, args, &mut errors)
+        .into_owned();
+    if !errors.is_empty() {
+        let what: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        warn_once(
+            &format!("format {id}"),
+            format_args!(
+                "{id}: Fluent could not fill in the text: {}",
+                what.join("; ")
+            ),
+        );
+    }
+    Some(text)
+}
+
+/// Logs a warning the first time `key` is seen: a text shown on every frame, or a file
+/// read again for each language, would otherwise fill the log.
+fn warn_once(key: &str, message: std::fmt::Arguments<'_>) {
+    static SEEN: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+    let first = SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key.to_owned());
+    if first {
+        log::warn!("{message}");
+    }
 }
 
 /// The XDG data folders for `domain`, the most important first.

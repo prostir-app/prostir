@@ -10,6 +10,7 @@ on:
       - "crates/prostir-client/**"
       - "crates/prostir-proto/**"
       - "crates/prostir-layout/**"
+      - "crates/prostir-lang/**"
       - "lang/**"
       - ".cargo/**"
       - "Cargo.toml"
@@ -20,6 +21,7 @@ on:
       - "crates/prostir-client/**"
       - "crates/prostir-proto/**"
       - "crates/prostir-layout/**"
+      - "crates/prostir-lang/**"
       - "lang/**"
       - ".cargo/**"
       - "Cargo.toml"
@@ -51,6 +53,7 @@ jobs:
       - run: cargo fmt -p prostir-client --check
       - run: cargo clippy -p prostir-client --all-targets --locked -- -D warnings
       - run: cargo test -p prostir-client --locked
+      - run: cargo test -p prostir-lang --locked --test files
 
   android:
     runs-on: ubuntu-24.04
