@@ -116,6 +116,7 @@ impl Model {
                                 .f("headset-toast-profile-switched", &[("name", name.into())]);
                             let note = Note::done(Some(Action::ApplyProfile(slot)), &text);
                             self.tell(note, true, true);
+                            self.profile_scales(pc, slot, &ids);
                             let keys = ids.into_iter().map(|id| DisplayKey::new(pc, id)).collect();
                             self.world
                                 .profile_made(keys, &self.settings, self.head.1, now);

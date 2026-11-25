@@ -5,7 +5,7 @@
 
 use log::{info, warn};
 use prostir_proto::request::{Outcome, Request};
-use prostir_proto::state::{DisplayKind, caps};
+use prostir_proto::state::{DisplayId, DisplayKind, caps};
 
 use super::Model;
 use crate::autoscale::{self, Monitor};
@@ -20,6 +20,24 @@ impl Model {
             .caps
             .as_ref()
             .is_some_and(|c| c.has(caps::pc::SCALE_IN_PLACE))
+    }
+
+    /// The scale a monitor of `size` pixels added now in Auto is made at, so it needs
+    /// no second change once shown: the smallest of the PC's scales its place in the
+    /// room wants; 100 % where the headset's pixels per degree are not known.
+    pub(super) fn new_auto_scale(&self, size: (u32, u32)) -> u16 {
+        let Some(limits) = self.pc().limits.as_ref() else {
+            return 100;
+        };
+        self.world
+            .shown_if_added(size, self.head.1, &self.settings)
+            .map_or(100, |p| self.auto.new_scale(p, &limits.scales))
+    }
+
+    /// The line Auto's scale reaches, in hundredths, as "For development" shows it.
+    #[cfg(feature = "preview")]
+    pub fn auto_line(&self) -> u8 {
+        self.auto.line_percent()
     }
 
     /// Whether monitor `k` is in Auto, as its PC says.
@@ -144,9 +162,53 @@ impl Model {
         }
     }
 
+    /// Profile `slot` was switched to, its monitors made as `ids` (in its order) on PC
+    /// `pc`: each in Auto as the profile has it, and one not in Auto at its scale (a
+    /// monitor of its size kept from before may have another, chosen in Auto). Where
+    /// the PC changes scales in place only; the PC's lists came before the answer.
+    pub(super) fn profile_scales(&mut self, pc: PcId, slot: usize, ids: &[DisplayId]) {
+        let in_place = self
+            .session
+            .pc(pc)
+            .and_then(|p| p.state.caps.as_ref())
+            .is_some_and(|c| c.has(caps::pc::SCALE_IN_PLACE));
+        let Some(profile) = self.profiles.get(slot).filter(|_| in_place) else {
+            return;
+        };
+        let mut asks = Vec::new();
+        for (i, (&id, mode)) in ids.iter().zip(&profile.monitors).enumerate() {
+            let key = DisplayKey::new(pc, id);
+            let auto = profile.auto.contains(&i);
+            let now = self.display(key).map(|d| d.mode.scale);
+            match (auto, self.is_auto(key)) {
+                (true, false) => asks.push(Request::SetScaleAuto { id, on: true }),
+                // A scale chosen by hand also takes it out of Auto.
+                (false, _) if now.is_some_and(|s| s != mode.scale) => {
+                    asks.push(Request::SetScale {
+                        id,
+                        scale: mode.scale,
+                    });
+                }
+                (false, true) => asks.push(Request::SetScaleAuto { id, on: false }),
+                _ => {}
+            }
+        }
+        for asked in asks {
+            let id = match &asked {
+                Request::SetScale { id, .. } | Request::SetScaleAuto { id, .. } => *id,
+                _ => continue,
+            };
+            let key = DisplayKey::new(pc, id);
+            if let Some(req) = self.session.ask(Some(pc), ui::Asked::Scale(key), self.now) {
+                info!("request {}: {asked:?} (profile)", req.0);
+                self.send_to(pc, prostir_proto::ClientMsg::request(req, asked));
+            }
+        }
+    }
+
     /// A monitor added at a scale chosen by hand (not Auto) was made, `id` on PC `pc`:
     /// it leaves Auto, which the PC gives every new monitor.
-    pub(super) fn added_fixed(&mut self, pc: PcId, id: prostir_proto::state::DisplayId) {
+    pub(super) fn added_fixed(&mut self, pc: PcId, id: DisplayId) {
         if !self
             .session
             .pc(pc)

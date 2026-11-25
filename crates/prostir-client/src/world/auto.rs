@@ -5,14 +5,27 @@
 use glam::Vec3;
 
 use super::World;
+use crate::clarity;
 use crate::ids::DisplayKey;
 use crate::layout::Placement;
+use crate::settings::Settings;
 
 /// Two monitors whose edges are this close where they go (metres) are glued: the
 /// magnet leaves them edge to edge (`layout::stick`), a hand's tremor apart at most.
 const GLUED_WITHIN: f32 = 0.03;
 
 impl World {
+    /// How many headset pixels a pixel of a monitor of `size` pixels would take, added
+    /// now (the user looking along `gaze`): where its placeholder stands, which it
+    /// takes once its picture comes. None where the headset's pixels per degree are
+    /// not known, or in cinema (new monitors are not placed there).
+    pub fn shown_if_added(&self, size: (u32, u32), gaze: Vec3, s: &Settings) -> Option<f32> {
+        let ppd = self.ppd.filter(|_| !self.cinema)?;
+        let (place, _) = self.waiting_place(size, gaze);
+        let curve = self.curve_radius(s);
+        Some(clarity::shown(&place, size.0, self.center.0, curve, ppd))
+    }
+
     /// A monitor is in a hand or being resized, or a profile is being switched to:
     /// nothing is settled.
     pub fn moving(&self) -> bool {

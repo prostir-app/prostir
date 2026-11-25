@@ -119,7 +119,8 @@ impl Model {
             | Action::DevSizeReset
             | Action::DevSuperSampling(_)
             | Action::DevSharpening(_)
-            | Action::DevMetrics(_) => self.act_dev(action),
+            | Action::DevMetrics(_)
+            | Action::DevAutoLine(_) => self.act_dev(action),
         }
         self.world_done();
     }

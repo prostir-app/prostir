@@ -13,13 +13,16 @@ impl Model {
         match action {
             Action::Add { width, height } => {
                 // At the scale chosen, where the PC makes it; in Auto (the PC makes every
-                // new monitor so) at 100 %, the headset choosing once it is shown.
+                // new monitor so) at the one its place in the room wants, so it needs no
+                // second change once shown.
                 let auto = self.can_auto() && self.menu.add_auto;
                 let offered =
                     self.pc().limits.as_ref().is_some_and(|l| {
                         self.can_scale() && l.scales.contains(&self.menu.add_scale)
                     });
-                let scale = if offered && !auto {
+                let scale = if auto {
+                    self.new_auto_scale((width, height))
+                } else if offered {
                     self.menu.add_scale
                 } else {
                     100

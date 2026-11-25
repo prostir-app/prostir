@@ -2688,3 +2688,74 @@ fn auto_asks_the_scale_a_monitor_wants() {
     sim.frames(Duration::from_secs(5));
     assert!(requests(&sim.take()).is_empty(), "a guest");
 }
+
+/// With Auto: a profile keeps which monitors were in it, and switched to, gives the
+/// monitors it made Auto or the profile's own scale; a monitor added in Auto is made
+/// at the scale its place in the room wants, not at 100 % to change once shown.
+#[test]
+fn auto_in_profiles_and_new_monitors() {
+    let mut sim = Sim::of(Caps {
+        model: crate::platform::pixels::MODELS[0].0.into(),
+        ..test_caps()
+    });
+    sim.connect(&[1, 2]);
+    sim.limits(4, true);
+    sim.host_can(vec![caps::pc::SCALE, caps::pc::SCALE_IN_PLACE]);
+    sim.net(NetEvent::Part(
+        PC,
+        HostMsg::Access {
+            part: state::Access::MAIN,
+        },
+    ));
+    let auto = |ids: Vec<u32>| HostMsg::ScaleAuto {
+        part: state::ScaleAuto {
+            auto: ids.into_iter().map(DisplayId).collect(),
+        },
+    };
+    sim.net(NetEvent::Part(PC, auto(vec![2])));
+    sim.menu(Action::NewProfile);
+    // The profile's monitors are in the order of the line-up.
+    let order: Vec<DisplayId> = sim.m.world().monitors().iter().map(|m| m.0.id).collect();
+    let second = order.iter().position(|id| *id == DisplayId(2)).unwrap();
+    assert_eq!(sim.m.profiles()[0].auto, [second], "monitor 2");
+    // Now monitor 1 in Auto, 2 not: switched back, 1 leaves Auto at its scale, 2
+    // takes Auto again.
+    sim.net(NetEvent::Part(PC, auto(vec![1])));
+    sim.take();
+    sim.menu(Action::ApplyProfile(0));
+    let switch = requests(&sim.take()).first().expect("asked").0;
+    sim.reply(switch, Outcome::Ids { ids: order });
+    let asked: Vec<Request> = requests(&sim.take()).into_iter().map(|r| r.1).collect();
+    assert!(
+        asked.contains(&Request::SetScaleAuto {
+            id: DisplayId(1),
+            on: false
+        }),
+        "{asked:?}"
+    );
+    assert!(
+        asked.contains(&Request::SetScaleAuto {
+            id: DisplayId(2),
+            on: true
+        }),
+        "{asked:?}"
+    );
+    // Added in Auto: at the scale its place wants (the headset knows its pixels).
+    sim.frames(Duration::from_secs(1));
+    sim.take();
+    let p = sim
+        .m
+        .world()
+        .shown_if_added((3840, 2160), sim.m.head.1, &sim.m.settings)
+        .expect("known");
+    let want = crate::autoscale::smallest(p, &[100, 125, 150], crate::autoscale::LINE).unwrap();
+    sim.menu(Action::Add {
+        width: 3840,
+        height: 2160,
+    });
+    let asked = requests(&sim.take());
+    assert!(
+        matches!(&asked[..], [(_, Request::AddDisplay { mode })] if mode.scale == want),
+        "{want}: {asked:?}"
+    );
+}

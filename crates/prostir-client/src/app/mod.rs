@@ -1366,8 +1366,15 @@ impl Model {
             .filter(|d| d.is_shown_physical())
             .filter_map(|d| self.key(d.id))
             .collect();
-        self.world
-            .profile(shown, |k| self.display(k).map_or(100, |d| d.mode.scale))
+        let mut profile = self
+            .world
+            .profile(shown, |k| self.display(k).map_or(100, |d| d.mode.scale));
+        // Which are in Auto, by place (the profile's monitors are the lineup's).
+        let monitors = self.world.monitors();
+        profile.auto = (0..profile.monitors.len())
+            .filter(|&i| monitors.get(i).is_some_and(|m| self.is_auto(m.0)))
+            .collect();
+        profile
     }
 
     /// The placeholder of a monitor being added goes once its picture is there, it

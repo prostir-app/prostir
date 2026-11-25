@@ -275,6 +275,8 @@ pub struct DevView {
     pub known: bool,
     /// "Reset" has something to put back.
     pub can_reset: bool,
+    /// The line Auto's scale reaches, in hundredths (see `autoscale::LINES`).
+    pub auto_line: u8,
 }
 
 /// Which control asked the PC for something: its answer is said under the button pressed
@@ -519,6 +521,9 @@ pub enum Action {
     /// "For development": the numbers next to the monitor looked at.
     #[cfg(feature = "preview")]
     DevMetrics(bool),
+    /// "For development": the line Auto's scale reaches, in hundredths.
+    #[cfg(feature = "preview")]
+    DevAutoLine(u8),
     Close,
 }
 
@@ -4987,6 +4992,7 @@ fn build_dev(s: &UiState, v: DevView, items: &mut Vec<Item>, x: f32, w: f32, mut
     let size = |label, size: MonitorSize, known: bool| {
         (label, Action::DevSize(size), dev.size == size, known)
     };
+    let top_of_size = y;
     segmented(
         items,
         x,
@@ -5004,6 +5010,22 @@ fn build_dev(s: &UiState, v: DevView, items: &mut Vec<Item>, x: f32, w: f32, mut
             size(l.t("headset-dev-size-85"), MonitorSize::Scale85, v.known),
         ],
     );
+    // "Reset" of the size, small on the right of its title.
+    let reset_w = 220.0;
+    let mut reset = button(
+        rect(x + w - reset_w, top_of_size - 26.0, reset_w, 36.0),
+        l.t("headset-dev-reset"),
+        if v.can_reset {
+            Style::Normal
+        } else {
+            Style::Disabled
+        },
+        v.can_reset.then_some(Action::DevSizeReset),
+    );
+    if let Item::Button { size, .. } = &mut reset {
+        *size = 16.0;
+    }
+    items.push(reset);
     if !v.known {
         items.push(text(
             x,
@@ -5038,7 +5060,8 @@ fn build_dev(s: &UiState, v: DevView, items: &mut Vec<Item>, x: f32, w: f32, mut
         Action::DevSharpening,
     );
     segmented(items, x, w, &mut y, title, options);
-    // The numbers, and "Reset" of the size on their right.
+    // The numbers, and on their right the line of Auto's scale: headset pixels a
+    // logical pixel takes at least.
     let top = y;
     let on = dev.metrics;
     segmented(
@@ -5052,16 +5075,28 @@ fn build_dev(s: &UiState, v: DevView, items: &mut Vec<Item>, x: f32, w: f32, mut
             (l.t("headset-on"), Action::DevMetrics(true), on, true),
         ],
     );
-    items.push(button(
-        rect(x + half + gap, top + 18.0, half, 48.0),
-        l.t("headset-dev-reset"),
-        if v.can_reset {
-            Style::Normal
-        } else {
-            Style::Disabled
-        },
-        v.can_reset.then_some(Action::DevSizeReset),
-    ));
+    let lines = crate::autoscale::LINES.map(|line| {
+        let label = l.t(match line {
+            85 => "headset-dev-line-85",
+            90 => "headset-dev-line-90",
+            _ => "headset-dev-line-100",
+        });
+        (
+            label,
+            Action::DevAutoLine(line),
+            v.auto_line == line,
+            v.known,
+        )
+    });
+    let mut right = top;
+    segmented(
+        items,
+        x + half + gap,
+        half,
+        &mut right,
+        l.t("headset-dev-auto-line"),
+        lines.to_vec(),
+    );
     // The PC's settings that change how text looks, as on its own page.
     let Some(pc) = &s.pc else {
         items.push(text(
@@ -5657,6 +5692,7 @@ mod tests {
                 dev: Dev::default(),
                 known: true,
                 can_reset: true,
+                auto_line: 85,
             }),
         }
     }

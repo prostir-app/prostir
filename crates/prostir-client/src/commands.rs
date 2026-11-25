@@ -111,6 +111,7 @@ mod tests {
     fn three() -> Slots {
         let p = profiles::Profile {
             name: None,
+            auto: Vec::new(),
             monitors: vec![prostir_proto::state::Mode::new(1920, 1080)],
             primary: 0,
             shown: Vec::new(),

@@ -373,6 +373,7 @@ fn main() {
             dev: prostir::clarity::Dev::default(),
             known: std::env::var("UNKNOWN_HEADSET").is_err(),
             can_reset: true,
+            auto_line: 85,
         }),
         texts,
         languages: languages.into(),

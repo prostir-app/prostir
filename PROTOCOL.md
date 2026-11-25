@@ -1230,6 +1230,11 @@ arrangement held for 0.8 s with nothing in a hand, goes up only once `k` fell be
 0.82 and down only where `k` stays at 0.88 or more, asks a monitor at most every 3 s,
 and does not ask again a scale the host did not give while the monitor keeps its size.
 A headset whose pixels per degree it does not know asks nothing; a guest asks nothing.
+A monitor it adds in Auto it asks for at the scale its place wants already
+(`AddDisplay`'s `mode.scale`), so it needs no second change; one added at a scale chosen
+by hand it takes out of Auto (`SetScaleAuto`) once made. A profile keeps which of its
+monitors were in Auto: switched to, the headset turns Auto on for those and gives the
+others the profile's scale.
 
 The host gives a scale its desktop does not take for that size as the nearest it takes
 among `Limits.scales`, larger first (Hyprland takes only scales that make whole

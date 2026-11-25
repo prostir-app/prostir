@@ -27,11 +27,15 @@ use crate::ids::{DisplayKey, PcId};
 /// one logical pixel still lands on most of a headset pixel, and text is no worse
 /// than at 1:1 with the compositor's sharpening (`plans/clarity-2026-11.md`, 6).
 pub const LINE: f32 = 0.85;
-/// A larger scale is asked only once `k` fell below this...
-pub const UP_BELOW: f32 = 0.82;
-/// ... and a smaller one only when it keeps `k` at this or more: a monitor moved about
-/// the line does not go back and forth.
-pub const DOWN_FROM: f32 = 0.88;
+/// A larger scale is asked only once `k` fell this far below the line (0.82)...
+pub const UP_BELOW: f32 = LINE - MARGIN;
+/// ... and a smaller one only when it keeps `k` this far above it (0.88): a monitor
+/// moved about the line does not go back and forth.
+pub const DOWN_FROM: f32 = LINE + MARGIN;
+/// How far past the line `k` goes before the scale changes, either way.
+pub const MARGIN: f32 = 0.03;
+/// The lines "For development" offers (preview build), in hundredths.
+pub const LINES: [u8; 3] = [85, 90, 100];
 /// How long the arrangement holds, nothing in a hand, before a scale is asked: as the
 /// desktop's arrangement (`world::ARRANGE_AFTER`).
 pub const SETTLE: Duration = crate::world::ARRANGE_AFTER;
@@ -113,15 +117,20 @@ fn spread_at(ps: &[f32], scales: &[u16], floor: f32) -> f32 {
 }
 
 /// The scale a monitor at `now` percent goes to, shown at `p`, the group choosing `to`
-/// for it, `own` its own choice: up only once `k` fell below [`UP_BELOW`] (or to stand
-/// as its glued neighbours, `to` above `own`), down only where `k` stays at
-/// [`DOWN_FROM`] or more.
+/// for it, `own` its own choice, by the line [`LINE`]: up only once `k` fell below
+/// [`UP_BELOW`] (or to stand as its glued neighbours, `to` above `own`), down only where
+/// `k` stays at [`DOWN_FROM`] or more.
 pub fn settle_on(p: f32, now: u16, to: u16, own: u16) -> u16 {
+    settle_by(LINE, p, now, to, own)
+}
+
+/// [`settle_on`] by the line `line`, the margin [`MARGIN`] either way.
+pub fn settle_by(line: f32, p: f32, now: u16, to: u16, own: u16) -> u16 {
     use std::cmp::Ordering::{Equal, Greater, Less};
     match to.cmp(&now) {
         Equal => now,
-        Greater if k(p, now) < UP_BELOW || to > own => to,
-        Less if k(p, to) >= DOWN_FROM => to,
+        Greater if k(p, now) < line - MARGIN || to > own => to,
+        Less if k(p, to) >= line + MARGIN => to,
         _ => now,
     }
 }
@@ -158,9 +167,32 @@ pub struct Auto {
     tracks: HashMap<DisplayKey, Track>,
     /// When the monitors were last looked at.
     looked: Option<Instant>,
+    /// The line `k` is to reach, in hundredths: [`LINE`] unless "For development"
+    /// (preview build) chose another of [`LINES`]; none, [`LINE`].
+    line: Option<u8>,
 }
 
 impl Auto {
+    /// The line `k` is to reach.
+    pub fn line(&self) -> f32 {
+        self.line.map_or(LINE, |l| f32::from(l) / 100.0)
+    }
+
+    /// The line in hundredths, as "For development" shows it.
+    pub fn line_percent(&self) -> u8 {
+        self.line.unwrap_or(85)
+    }
+
+    /// Another line (hundredths, one of [`LINES`]), from "For development".
+    pub fn set_line(&mut self, line: u8) {
+        self.line = (LINES.contains(&line) && line != 85).then_some(line);
+    }
+
+    /// The scale a monitor shown at `p` is made at, of `scales`: by the line, alone.
+    pub fn new_scale(&self, p: f32, scales: &[u16]) -> u16 {
+        smallest(p, scales, self.line()).unwrap_or(100)
+    }
+
     /// Whether the monitors are to be looked at `now` (at most every [`LOOK_EVERY`]).
     pub fn look_due(&mut self, now: Instant) -> bool {
         if self
@@ -184,6 +216,7 @@ impl Auto {
         now: Instant,
     ) -> Option<(DisplayKey, u16)> {
         let n = monitors.len().min(MAX);
+        let line = self.line();
         let mut chosen = [100_u16; MAX];
         let mut own = [100_u16; MAX];
         let mut ps = [0.0_f32; MAX];
@@ -202,15 +235,15 @@ impl Auto {
                     m += 1;
                 }
             }
-            for_group(&ps[..m], scales, LINE, &mut out[..m]);
+            for_group(&ps[..m], scales, line, &mut out[..m]);
             for (j, &i) in members[..m].iter().enumerate() {
                 chosen[i] = out[j];
-                own[i] = smallest(ps[j], scales, LINE).unwrap_or(100);
+                own[i] = smallest(ps[j], scales, line).unwrap_or(100);
             }
         }
         let mut asked = None;
         for (i, mon) in monitors.iter().enumerate().take(n) {
-            let to = settle_on(mon.p, mon.now, chosen[i], own[i]);
+            let to = settle_by(line, mon.p, mon.now, chosen[i], own[i]);
             let track = self.tracks.entry(mon.key).or_default();
             // A refusal holds while the monitor keeps its size.
             if track.refused.is_some_and(|(_, size)| size != mon.size) {
@@ -427,6 +460,27 @@ mod tests {
         // Answered but never at it: not given, not asked again at that size.
         assert_eq!(auto.due(&resized, &SCALES, false, at(28_000)), None);
         assert_eq!(auto.due(&resized, &SCALES, false, at(40_000)), None);
+    }
+
+    /// Another line from "For development": the same monitor wants more; back at
+    /// 0.85, as before.
+    #[test]
+    fn another_line() {
+        let mut auto = Auto::default();
+        assert_eq!(auto.new_scale(0.77, &SCALES), 125);
+        auto.set_line(100);
+        assert_eq!(auto.line_percent(), 100);
+        assert_eq!(auto.new_scale(0.77, &SCALES), 150);
+        assert_eq!(
+            settle_by(1.0, 0.99, 100, 125, 125),
+            100,
+            "within the margin"
+        );
+        assert_eq!(settle_by(1.0, 0.96, 100, 125, 125), 125);
+        auto.set_line(85);
+        assert_eq!(auto.line(), LINE);
+        auto.set_line(42);
+        assert_eq!(auto.line(), LINE, "not one of the lines");
     }
 
     /// A headset model not in the table has no `p`: the app puts no such monitor in

@@ -208,6 +208,7 @@ pub fn build(m: &Model) -> UiState {
             dev: *world.dev(),
             known: world.pixels_per_degree().is_some(),
             can_reset: world.can_reset_size(),
+            auto_line: m.auto_line(),
         }),
         #[cfg(not(feature = "preview"))]
         dev: None,

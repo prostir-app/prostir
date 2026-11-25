@@ -30,7 +30,9 @@
   arrangement held for a moment, with a margin either way; monitors glued edge to
   edge get scales that keep the seam seamless. Choosing a number in the headset, in
   the settings window or in the desktop's display settings turns Auto off for that
-  monitor. Monitors kept from before are not in Auto until you choose it.
+  monitor. Monitors kept from before are not in Auto until you choose it. A monitor
+  added in Auto starts at the scale it needs, and profiles keep which monitors are in
+  Auto.
 
 - KDE Plasma 6.0 to 6.7: KWin hides its screencast interface from a program that no
   application shortcut names, so Prostir found no way to add monitors. The shortcut
