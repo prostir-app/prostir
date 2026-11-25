@@ -25,6 +25,8 @@ pub mod interaction;
 pub mod lang;
 pub mod layers;
 pub mod layout;
+#[cfg(feature = "preview")]
+pub mod metrics;
 pub mod net;
 pub mod note;
 pub mod outbox;

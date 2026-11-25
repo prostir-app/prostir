@@ -203,31 +203,6 @@ pub struct Metrics {
     pub keyframe: Option<u32>,
 }
 
-/// [`Metrics`] in words, one line.
-#[cfg(feature = "preview")]
-pub fn metrics_text(texts: &crate::lang::Texts, m: &Metrics) -> String {
-    let mut parts = Vec::with_capacity(3);
-    if let Some(scale) = m.scale {
-        parts.push(texts.f(
-            "headset-dev-metrics-scale",
-            &[("scale", format!("{scale:.2}").into())],
-        ));
-    }
-    if let Some(mbit) = m.mbit {
-        parts.push(texts.f(
-            "headset-dev-metrics-rate",
-            &[("rate", format!("{mbit:.1}").into())],
-        ));
-    }
-    if let Some(bytes) = m.keyframe {
-        parts.push(texts.f(
-            "headset-dev-metrics-keyframe",
-            &[("size", (bytes.div_ceil(1024)).into())],
-        ));
-    }
-    parts.join(" · ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,29 +323,5 @@ mod tests {
         assert!((curved - degrees * 25.0 / 1920.0).abs() < 1e-3, "{curved}");
         let nearer = shown(&p, 1920, Vec3::new(0.0, 0.0, -0.3), None, 25.0);
         assert!(nearer > flat);
-    }
-
-    /// The numbers in words, each where it is known.
-    #[cfg(feature = "preview")]
-    #[test]
-    fn the_numbers_in_words() {
-        let texts = crate::lang::builtin("en");
-        let all = metrics_text(
-            &texts,
-            &Metrics {
-                scale: Some(1.004),
-                mbit: Some(31.46),
-                keyframe: Some(400_000),
-            },
-        );
-        assert!(all.contains("1.00"), "{all}");
-        assert!(all.contains("31.5"), "{all}");
-        assert!(all.contains("391"), "{all}");
-        let none = Metrics {
-            scale: None,
-            mbit: None,
-            keyframe: None,
-        };
-        assert_eq!(metrics_text(&texts, &none), "");
     }
 }

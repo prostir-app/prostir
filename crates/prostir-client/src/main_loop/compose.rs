@@ -115,7 +115,7 @@ impl layers::Ready for Have<'_> {
 
     #[cfg(feature = "preview")]
     fn metrics(&self) -> bool {
-        self.pictures.metrics_drawn.is_some()
+        self.pictures.metrics.ready()
     }
 
     fn hands(&self) -> bool {

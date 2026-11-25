@@ -11,8 +11,6 @@ use std::time::{Duration, Instant};
 use super::Gpu;
 use crate::app::Model;
 use crate::background;
-#[cfg(feature = "preview")]
-use crate::clarity::{self, Metrics};
 use crate::ids::DisplayKey;
 use crate::interaction::{Hands, Menu, Menus};
 use crate::lang::Texts;
@@ -138,15 +136,7 @@ pub struct Pictures {
     #[cfg(feature = "preview")]
     pub metrics_layer: ImageLayer,
     #[cfg(feature = "preview")]
-    pub metrics_drawn: Option<String>,
-    /// What they were last worked out for: the monitor, its scale, the language, and
-    /// the last count of its stream's bytes with when it was taken.
-    #[cfg(feature = "preview")]
-    metrics_for: Option<(DisplayKey, Option<f32>, Texts)>,
-    #[cfg(feature = "preview")]
-    metrics_count: Option<(DisplayKey, Instant, u64)>,
-    #[cfg(feature = "preview")]
-    metrics_mbit: Option<f32>,
+    pub metrics: crate::metrics::Label,
     /// The panorama shown and the background it was made for.
     pub pano_layer: Option<(Background, ImageLayer)>,
     pano_job: Option<(Background, JoinHandle<Panorama>)>,
@@ -197,13 +187,7 @@ impl Pictures {
             #[cfg(feature = "preview")]
             metrics_layer,
             #[cfg(feature = "preview")]
-            metrics_drawn: None,
-            #[cfg(feature = "preview")]
-            metrics_for: None,
-            #[cfg(feature = "preview")]
-            metrics_count: None,
-            #[cfg(feature = "preview")]
-            metrics_mbit: None,
+            metrics: crate::metrics::Label::new(),
             pano_layer: None,
             pano_job: None,
             pano_failed: None,
@@ -400,9 +384,7 @@ impl Pictures {
     }
 
     /// The numbers of "For development" for the monitor looked at (see
-    /// `Model::metrics_for`): its scale, its stream's megabits a second over the last
-    /// second, its last keyframe's size. Worked out and drawn again only when the
-    /// monitor, its scale or the language changes, or once a second for the rate.
+    /// `metrics::Label`): drawn and uploaded again only when what they say changes.
     #[cfg(feature = "preview")]
     pub fn metrics(
         &mut self,
@@ -411,52 +393,12 @@ impl Pictures {
         video: &SurfaceVideo,
         now: Instant,
     ) -> Result<()> {
-        let Some(id) = model.metrics_for() else {
-            self.metrics_count = None;
-            return Ok(());
-        };
-        let (bytes, keyframe) = video.received(id).unwrap_or((0, None));
-        let mut due = false;
-        match self.metrics_count {
-            Some((was, at, before)) if was == id => {
-                let passed = now.saturating_duration_since(at);
-                if passed >= Duration::from_secs(1) {
-                    let bits = bytes.saturating_sub(before) as f64 * 8.0;
-                    self.metrics_mbit = Some((bits / passed.as_secs_f64() / 1e6) as f32);
-                    self.metrics_count = Some((id, now, bytes));
-                    due = true;
-                }
-            }
-            _ => {
-                self.metrics_count = Some((id, now, bytes));
-                self.metrics_mbit = None;
-            }
-        }
-        let scale = model.world().shown_scale(id);
-        let texts = model.texts();
-        let same = self
-            .metrics_for
-            .as_ref()
-            .is_some_and(|(k, s, t)| *k == id && *s == scale && t == texts);
-        if same && !due {
-            return Ok(());
-        }
-        self.metrics_for = Some((id, scale, texts.clone()));
-        let text = clarity::metrics_text(
-            texts,
-            &Metrics {
-                scale,
-                mbit: self.metrics_mbit,
-                keyframe,
-            },
-        );
-        if self.metrics_drawn.as_deref() != Some(text.as_str()) {
-            let picture = self
-                .panels
-                .main
-                .toast_image(&text, METRICS_PX.0, METRICS_PX.1);
-            self.metrics_layer.upload(gl, &picture)?;
-            self.metrics_drawn = Some(text);
+        let received = |id| video.received(id);
+        if let Some(picture) = self
+            .metrics
+            .update(&mut self.panels.main, model, received, now)
+        {
+            self.metrics_layer.upload(gl, picture)?;
         }
         Ok(())
     }
