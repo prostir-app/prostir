@@ -1915,6 +1915,49 @@ fn the_first_monitors_are_made_one_to_one() {
     }
 }
 
+/// The owner's desk (two QHD and a QHD standing on end, the first the primary display;
+/// with the laptop's own display under it and without) laid out by the preset on a
+/// headset of 25 pixels a degree: no monitor smaller than the standard size shows it,
+/// and without the lid the row as large as fits around the user (0.93 of the
+/// headset's pixels, the standard size 0.77 and 0.67).
+#[test]
+fn the_preset_never_makes_a_monitor_smaller_than_the_standard_size() {
+    let start = |ppd, lid: bool| {
+        let mut sim = Sim::on(None, ppd);
+        sim.connect(PC);
+        let mut displays = vec![monitor(1, QHD), monitor(2, QHD), monitor(3, (1440, 2560))];
+        if lid {
+            displays.push(laptop(9));
+        }
+        let displays = Displays {
+            displays,
+            primary: Some(DisplayId(1)),
+        };
+        sim.world
+            .listed(sim.pc, &displays, &sim.s, sim.head, sim.now);
+        for n in 1..=2 {
+            sim.stream(n, QHD);
+        }
+        sim.stream(3, (1440, 2560));
+        if lid {
+            sim.stream(9, (2880, 1800));
+        }
+        sim.settled();
+        sim.world.preset_chosen(&sim.s, sim.now);
+        sim.settled();
+        sim
+    };
+    for lid in [false, true] {
+        let (sim, standard) = (start(Some(25.0), lid), start(None, lid));
+        for (n, w) in [(1, 2560), (2, 2560), (3, 1440)] {
+            let was = clarity::shown(&standard.place(k(n)), w, Vec3::ZERO, None, 25.0);
+            let now = scale_of(&sim, n);
+            assert!(now >= was - 1e-3, "{lid} {n}: {now}, standard {was}");
+            assert!(lid || (0.9..1.0).contains(&now), "{n}: {now}");
+        }
+    }
+}
+
 /// A monitor the person placed (here as `layout.txt` keeps it, at the standard size)
 /// stays exactly where and as large as it was when the headset makes new ones 1:1: the
 /// new one goes beside it, as large to the eye as it (the same scale), and nothing else
