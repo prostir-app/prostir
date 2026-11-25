@@ -378,13 +378,24 @@ pub fn pixel_budget(max_w: u32, max_h: u32, sizes: &mut impl Sizes) -> Option<(u
     Some((u32::try_from(area((w, h))).unwrap_or(u32::MAX), (w, h)))
 }
 
-/// `d` as told: itself, or for a decoder of no size or no budget what was taken for
-/// granted for its codec (`None` for a codec without that either).
+/// `d` as told: itself; for a decoder with sides but no budget, what was taken for
+/// granted for its codec within those sides; for one of no size, what was taken for
+/// granted (`None` for a codec without that).
 pub fn decoder_or_unsaid(d: Decoder) -> Option<Decoder> {
-    if d.max_w > 0 && d.max_h > 0 && d.max_pixels.is_some() {
+    let sized = d.max_w > 0 && d.max_h > 0;
+    if sized && d.max_pixels.is_some() {
         return Some(d);
     }
-    DECODERS_UNSAID.into_iter().find(|u| u.codec == d.codec)
+    let unsaid = DECODERS_UNSAID.into_iter().find(|u| u.codec == d.codec)?;
+    Some(if sized {
+        Decoder {
+            max_w: d.max_w.min(unsaid.max_w),
+            max_h: d.max_h.min(unsaid.max_h),
+            ..unsaid
+        }
+    } else {
+        unsaid
+    })
 }
 
 #[cfg(test)]
@@ -674,7 +685,21 @@ mod tests {
         };
         assert_eq!(pixel_budget(4096, 4096, &mut none), None);
         assert_eq!(pixel_budget(0, 0, &mut none), None);
-        assert_eq!(told(Codec::H265, 4096, 4096, &mut none), DECODERS_UNSAID[1]);
+        // Its sides still hold where they are smaller than what is taken for granted.
+        let smaller = Decoder {
+            max_w: 4096,
+            max_h: 4096,
+            ..DECODERS_UNSAID[1]
+        };
+        assert_eq!(told(Codec::H265, 4096, 4096, &mut none), smaller);
+        assert_eq!(told(Codec::H264, 8192, 4320, &mut none), DECODERS_UNSAID[0]);
+        let no_size = Decoder {
+            codec: Codec::H265,
+            max_w: 0,
+            max_h: 0,
+            max_pixels: None,
+        };
+        assert_eq!(decoder_or_unsaid(no_size), Some(DECODERS_UNSAID[1]));
         let av1 = Decoder {
             codec: Codec::Av1,
             max_w: 0,
