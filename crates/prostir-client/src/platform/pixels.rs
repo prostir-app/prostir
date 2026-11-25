@@ -16,13 +16,21 @@ pub const MODELS: [(&str, f32); 4] = [
 ];
 
 /// The pixels per degree of the headset `model` (as `crate::device::model_name` names
-/// it: maker and model); `None` for a model not in the table, which keeps the standard
-/// size.
+/// it: maker and model, maybe with an edition after it, "Quest 3S Xbox Edition"); the
+/// longest model of the table it starts with, word for word; `None` for a model not in
+/// the table, which keeps the standard size.
 pub fn per_degree(model: &str) -> Option<f32> {
     let model = model.trim().to_lowercase();
     let at = model.find("quest")?;
-    let name: String = model[at..].split_whitespace().collect::<Vec<_>>().join(" ");
-    MODELS.iter().find(|(m, _)| *m == name).map(|(_, ppd)| *ppd)
+    let words: Vec<&str> = model[at..].split_whitespace().collect();
+    MODELS
+        .iter()
+        .filter(|(m, _)| {
+            let table: Vec<&str> = m.split(' ').collect();
+            words.len() >= table.len() && words[..table.len()] == table[..]
+        })
+        .max_by_key(|(m, _)| m.len())
+        .map(|(_, ppd)| *ppd)
 }
 
 #[cfg(test)]
@@ -37,6 +45,8 @@ mod tests {
         assert_eq!(per_degree("Meta Quest 3S"), Some(20.0));
         assert_eq!(per_degree("Oculus Quest 2"), Some(20.0));
         assert_eq!(per_degree("Quest  Pro"), Some(22.0));
+        assert_eq!(per_degree("Meta Quest 3S Xbox Edition"), Some(20.0));
+        assert_eq!(per_degree("Quest 30"), None);
         assert_eq!(per_degree("Oculus Quest"), None);
         assert_eq!(per_degree("Quest 4"), None);
         assert_eq!(per_degree("Other 4"), None);

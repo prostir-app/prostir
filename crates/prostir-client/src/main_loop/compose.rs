@@ -113,6 +113,7 @@ impl layers::Ready for Have<'_> {
         self.pictures.attach_drawn.is_some()
     }
 
+    #[cfg(feature = "preview")]
     fn metrics(&self) -> bool {
         self.pictures.metrics_drawn.is_some()
     }
@@ -127,7 +128,8 @@ fn picture_of<'p>(pictures: &'p Pictures, layer: &Layer) -> Option<(&'p ImageLay
     Some(match *layer {
         Layer::Trouble { id, quad } => (&pictures.trouble_layers.get(&id)?.2, quad),
         Layer::Placeholder(quad) => (&pictures.placeholder.as_ref()?.0, quad),
-        Layer::Metrics(quad) => (pictures.metrics_layer.as_ref()?, quad),
+        #[cfg(feature = "preview")]
+        Layer::Metrics(quad) => (&pictures.metrics_layer, quad),
         Layer::MenuButton(quad) => (&pictures.button_layer, quad),
         Layer::Menu(quad) => (&pictures.panel_layer, quad),
         Layer::Toast(quad) => (&pictures.toast_layer, quad),

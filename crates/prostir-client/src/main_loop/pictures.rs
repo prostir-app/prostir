@@ -11,12 +11,16 @@ use std::time::{Duration, Instant};
 use super::Gpu;
 use crate::app::Model;
 use crate::background;
+#[cfg(feature = "preview")]
 use crate::clarity::{self, Metrics};
 use crate::ids::DisplayKey;
 use crate::interaction::{Hands, Menu, Menus};
 use crate::lang::Texts;
-use crate::layers::{METRICS_PX, TOAST_PX};
+#[cfg(feature = "preview")]
+use crate::layers::METRICS_PX;
+use crate::layers::TOAST_PX;
 use crate::platform::openxr::ImageLayer;
+#[cfg(feature = "preview")]
 use crate::platform::video::SurfaceVideo;
 use crate::settings::Background;
 use crate::ui::{self, Action, Panel};
@@ -131,12 +135,17 @@ pub struct Pictures {
     pub wrist_layer: ImageLayer,
     /// The numbers of "For development" next to the monitor looked at (the preview
     /// build only), and what they say (`None`: not drawn yet).
-    pub metrics_layer: Option<ImageLayer>,
+    #[cfg(feature = "preview")]
+    pub metrics_layer: ImageLayer,
+    #[cfg(feature = "preview")]
     pub metrics_drawn: Option<String>,
     /// What they were last worked out for: the monitor, its scale, the language, and
     /// the last count of its stream's bytes with when it was taken.
+    #[cfg(feature = "preview")]
     metrics_for: Option<(DisplayKey, Option<f32>, Texts)>,
+    #[cfg(feature = "preview")]
     metrics_count: Option<(DisplayKey, Instant, u64)>,
+    #[cfg(feature = "preview")]
     metrics_mbit: Option<f32>,
     /// The panorama shown and the background it was made for.
     pub pano_layer: Option<(Background, ImageLayer)>,
@@ -159,17 +168,8 @@ impl Pictures {
         let mut cursor_layer = ImageLayer::new(session, format, CURSOR_PX, CURSOR_PX, true)?;
         let toast_layer = ImageLayer::new(session, format, TOAST_PX.0, TOAST_PX.1, false)?;
         let attach_layer = ImageLayer::new(session, format, ATTACH_PX.0, ATTACH_PX.1, false)?;
-        let metrics_layer = if crate::PREVIEW {
-            Some(ImageLayer::new(
-                session,
-                format,
-                METRICS_PX.0,
-                METRICS_PX.1,
-                false,
-            )?)
-        } else {
-            None
-        };
+        #[cfg(feature = "preview")]
+        let metrics_layer = ImageLayer::new(session, format, METRICS_PX.0, METRICS_PX.1, false)?;
         cursor_layer.upload(gl, &ui::cursor_image(CURSOR_PX))?;
         button_layer.upload(gl, &ui::menu_button_image(BUTTON_PX, false))?;
         let panels = Panels {
@@ -194,10 +194,15 @@ impl Pictures {
             button_hovered: false,
             panels,
             wrist_layer,
+            #[cfg(feature = "preview")]
             metrics_layer,
+            #[cfg(feature = "preview")]
             metrics_drawn: None,
+            #[cfg(feature = "preview")]
             metrics_for: None,
+            #[cfg(feature = "preview")]
             metrics_count: None,
+            #[cfg(feature = "preview")]
             metrics_mbit: None,
             pano_layer: None,
             pano_job: None,
@@ -398,6 +403,7 @@ impl Pictures {
     /// `Model::metrics_for`): its scale, its stream's megabits a second over the last
     /// second, its last keyframe's size. Worked out and drawn again only when the
     /// monitor, its scale or the language changes, or once a second for the rate.
+    #[cfg(feature = "preview")]
     pub fn metrics(
         &mut self,
         gl: &glow::Context,
@@ -405,7 +411,7 @@ impl Pictures {
         video: &SurfaceVideo,
         now: Instant,
     ) -> Result<()> {
-        let (Some(id), Some(layer)) = (model.metrics_for(), &mut self.metrics_layer) else {
+        let Some(id) = model.metrics_for() else {
             self.metrics_count = None;
             return Ok(());
         };
@@ -449,7 +455,7 @@ impl Pictures {
                 .panels
                 .main
                 .toast_image(&text, METRICS_PX.0, METRICS_PX.1);
-            layer.upload(gl, &picture)?;
+            self.metrics_layer.upload(gl, &picture)?;
             self.metrics_drawn = Some(text);
         }
         Ok(())

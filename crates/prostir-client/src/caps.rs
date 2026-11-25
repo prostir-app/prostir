@@ -158,8 +158,9 @@ pub struct Caps {
     pub streams_max: u8,
     /// The system's volume steps above silence; `None`: the app cannot set it.
     pub volume_steps: Option<u8>,
-    /// The headset as the system names it: shown on the PC and logged, never decided
-    /// by.
+    /// The headset as the system names it: shown on the PC and logged, and looked up
+    /// only for its display's pixels per degree (`platform::pixels`); what it can do is
+    /// never decided by it.
     pub model: String,
 }
 

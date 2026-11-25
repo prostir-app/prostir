@@ -45,8 +45,11 @@ pub mod world;
 
 /// The preview build (`PROSTIR_PREVIEW=1 scripts/build-apk.sh`, the feature `preview`):
 /// the menu has its "For development" part and the numbers next to the monitor looked
-/// at. Never the store's build.
-pub const PREVIEW: bool = cfg!(all(feature = "preview", not(feature = "store")));
+/// at. Never the store's build: that code is not even built there.
+pub const PREVIEW: bool = cfg!(feature = "preview");
+
+#[cfg(all(feature = "preview", feature = "store"))]
+compile_error!("the preview build is never a store build: `preview` and `store` together");
 
 #[cfg(target_os = "android")]
 mod alloc_count;

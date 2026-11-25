@@ -1,6 +1,7 @@
 //! The menu's actions (and the same done by a command of the PC, the palm menu or the
 //! selftest), by the part of the menu they belong to.
 
+#[cfg(feature = "preview")]
 mod dev;
 mod look;
 mod monitors;
@@ -111,6 +112,7 @@ impl Model {
             | Action::OpenMenu
             | Action::Close
             | Action::HideNote => self.act_settings(action),
+            #[cfg(feature = "preview")]
             Action::DevSize(_)
             | Action::DevSizeReset
             | Action::DevSuperSampling(_)

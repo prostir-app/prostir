@@ -65,6 +65,7 @@ use crate::world::{
 /// The toast's picture, in pixels: its layer has its shape.
 pub const TOAST_PX: (u32, u32) = (1024, 132);
 /// The picture of the numbers of "For development", in pixels.
+#[cfg(feature = "preview")]
 pub const METRICS_PX: (u32, u32) = (1024, 88);
 
 /// A flat picture where it is drawn: its middle, how it faces, how wide
@@ -108,6 +109,7 @@ pub enum Layer {
     /// The monitor being added.
     Placeholder(Quad),
     /// The numbers next to the monitor looked at ("For development").
+    #[cfg(feature = "preview")]
     Metrics(Quad),
     MenuButton(Quad),
     Menu(Quad),
@@ -141,6 +143,7 @@ pub trait Ready {
     /// "Attach" drawn.
     fn attach(&self) -> bool;
     /// The numbers of "For development" drawn.
+    #[cfg(feature = "preview")]
     fn metrics(&self) -> bool;
     /// The hands and rays drawn this frame.
     fn hands(&self) -> bool;
@@ -346,6 +349,7 @@ pub fn plan(model: &Model, hands: &Hands, ready: &impl Ready, plan: &mut Plan) {
         };
         plan.push(Layer::Placeholder(quad), Rank::Said(0));
     }
+    #[cfg(feature = "preview")]
     if let Some(quad) = model.metrics_place().filter(|_| ready.metrics()) {
         plan.push(Layer::Metrics(quad), Rank::Over(0));
     }

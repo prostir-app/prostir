@@ -22,6 +22,10 @@ pub fn pixels_per_degree(model: &str) -> Option<f32> {
 /// as well as sharpened; from it on only sharpened: supersampling blurs a picture shown
 /// about as large as the display's pixels.
 pub const SUPER_SAMPLING_BELOW: f32 = 0.9;
+/// How far past [`SUPER_SAMPLING_BELOW`] the scale goes before supersampling turns on
+/// or off again (0.88 on, 0.92 off), so a monitor moved about that scale does not
+/// flicker between the two.
+pub const SUPER_SAMPLING_SLACK: f32 = 0.02;
 
 /// How large the monitors of a preset are made (the menu's "For development").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -121,9 +125,15 @@ impl Quality {
 /// The filters of a layer shown at `scale` headset pixels per stream pixel (`None`:
 /// not known, the headset not in the table): below [`SUPER_SAMPLING_BELOW`]
 /// supersampled and sharpened, from it on sharpened only, not known both; unless `dev`
-/// says otherwise.
-pub fn quality(scale: Option<f32>, dev: &Dev) -> Quality {
-    let small = scale.is_none_or(|s| s < SUPER_SAMPLING_BELOW);
+/// says otherwise. `was`: whether it was supersampled by the scale before (`None`: it
+/// was not shown): then it changes only [`SUPER_SAMPLING_SLACK`] past the line.
+pub fn quality(scale: Option<f32>, dev: &Dev, was: Option<bool>) -> Quality {
+    let line = match was {
+        None => SUPER_SAMPLING_BELOW,
+        Some(true) => SUPER_SAMPLING_BELOW + SUPER_SAMPLING_SLACK,
+        Some(false) => SUPER_SAMPLING_BELOW - SUPER_SAMPLING_SLACK,
+    };
+    let small = scale.is_none_or(|s| s < line);
     Quality {
         super_sampling: dev.super_sampling.on(small),
         sharpening: dev.sharpening.on(true),
@@ -181,6 +191,7 @@ pub fn shown(p: &Placement, width: u32, eye: Vec3, curve: Option<f32>, ppd: f32)
 }
 
 /// The numbers shown next to the monitor looked at, while developing.
+#[cfg(feature = "preview")]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
     /// Headset pixels per stream pixel at its middle (`None`: the headset's pixels are
@@ -193,6 +204,7 @@ pub struct Metrics {
 }
 
 /// [`Metrics`] in words, one line.
+#[cfg(feature = "preview")]
 pub fn metrics_text(texts: &crate::lang::Texts, m: &Metrics) -> String {
     let mut parts = Vec::with_capacity(3);
     if let Some(scale) = m.scale {
@@ -231,18 +243,23 @@ mod tests {
             super_sampling: false,
             sharpening: true,
         };
-        assert_eq!(quality(Some(0.7), &auto), both);
-        assert_eq!(quality(Some(0.899), &auto), both);
-        assert_eq!(quality(Some(0.9), &auto), sharp);
-        assert_eq!(quality(Some(1.2), &auto), sharp);
-        assert_eq!(quality(None, &auto), both);
+        assert_eq!(quality(Some(0.7), &auto, None), both);
+        assert_eq!(quality(Some(0.899), &auto, None), both);
+        assert_eq!(quality(Some(0.9), &auto, None), sharp);
+        assert_eq!(quality(Some(1.2), &auto, None), sharp);
+        assert_eq!(quality(None, &auto, None), both);
+        // Moved about the line: it changes only past 0.88 or 0.92.
+        assert_eq!(quality(Some(0.91), &auto, Some(true)), both);
+        assert_eq!(quality(Some(0.921), &auto, Some(true)), sharp);
+        assert_eq!(quality(Some(0.89), &auto, Some(false)), sharp);
+        assert_eq!(quality(Some(0.879), &auto, Some(false)), both);
         let forced = Dev {
             super_sampling: Filter::On,
             sharpening: Filter::Off,
             ..auto
         };
         assert_eq!(
-            quality(Some(1.0), &forced),
+            quality(Some(1.0), &forced, None),
             Quality {
                 super_sampling: true,
                 sharpening: false
@@ -252,7 +269,7 @@ mod tests {
             super_sampling: Filter::Off,
             ..auto
         };
-        assert_eq!(quality(Some(0.5), &none), sharp);
+        assert_eq!(quality(Some(0.5), &none, None), sharp);
     }
 
     /// Each of the four is at its place in the list of them.
@@ -334,6 +351,7 @@ mod tests {
     }
 
     /// The numbers in words, each where it is known.
+    #[cfg(feature = "preview")]
     #[test]
     fn the_numbers_in_words() {
         let texts = crate::lang::builtin("en");

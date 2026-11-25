@@ -2353,6 +2353,7 @@ impl crate::layers::Ready for AllReady {
         true
     }
     // The numbers of "For development" (the preview build) are not counted here.
+    #[cfg(feature = "preview")]
     fn metrics(&self) -> bool {
         false
     }
@@ -2568,6 +2569,7 @@ fn the_layers_go_back_to_front() {
 /// development" (shown in the preview build only) lays them out again at another size
 /// at once, its filters change the layers' with the next frame, and "Reset" puts the
 /// monitors back; the menu hears of each (its change moves).
+#[cfg(feature = "preview")]
 #[test]
 fn for_development_changes_the_sizes_and_the_filters() {
     use crate::clarity::{Filter, MonitorSize, Quality};
@@ -2576,7 +2578,7 @@ fn for_development_changes_the_sizes_and_the_filters() {
         ..test_caps()
     });
     sim.connect(&[1, 2]);
-    assert_eq!(crate::view::build(&sim.m).dev.is_some(), crate::PREVIEW);
+    assert!(crate::view::build(&sim.m).dev.is_some());
     let world = sim.m.world();
     assert_eq!(world.pixels_per_degree(), Some(25.0));
     let scale = world.shown_scale(k(1)).expect("known");

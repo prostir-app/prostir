@@ -21,8 +21,8 @@ store = []
 selftest = ["dep:prostir-testkit"]
 # The preview build of an unreleased version (scripts/build-apk.sh with
 # PROSTIR_PREVIEW=1): the menu's "For development" part, to try how monitors and their
-# layers are shown. Never with `store`.
-preview = []
+# layers are shown, and its texts. Never with `store` (the build refuses).
+preview = ["prostir-lang/preview"]
 
 [lib]
 name = "prostir"

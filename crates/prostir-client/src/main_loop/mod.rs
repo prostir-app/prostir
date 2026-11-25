@@ -274,6 +274,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 .pictures
                 .draw(gpu, &shell.model, &kept.hands, &mut kept.view_cache, timed)?;
         // The numbers of "For development" (the preview build, while chosen).
+        #[cfg(feature = "preview")]
         stage
             .pictures
             .metrics(&xr.gl, &shell.model, &shell.video, now)?;

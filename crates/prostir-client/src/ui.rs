@@ -12,7 +12,9 @@ use prostir_proto::Codec;
 use prostir_proto::state::{Encoding, ErrorCode, Limits};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, PixmapMut, Rect, Stroke, Transform};
 
-use crate::clarity::{Dev, Filter, MonitorSize};
+use crate::clarity::Dev;
+#[cfg(feature = "preview")]
+use crate::clarity::{Filter, MonitorSize};
 use crate::ids::DisplayKey;
 use crate::lang::{Language, Moment, Texts};
 use crate::note::{Kind, Note};
@@ -356,6 +358,7 @@ pub enum Section {
     Paired,
     Help,
     /// "For development": in the preview build only (see `UiState::dev`).
+    #[cfg(feature = "preview")]
     Dev,
 }
 
@@ -490,13 +493,19 @@ pub enum Action {
     /// The note under a button was pressed: it goes.
     HideNote,
     /// "For development": how large the monitors are made (laid out again at once).
+    #[cfg(feature = "preview")]
     DevSize(MonitorSize),
-    /// "For development": the monitors back as they were before another size.
+    /// "For development": the monitors back where they stood before another size;
+    /// those added in between stay where they were put.
+    #[cfg(feature = "preview")]
     DevSizeReset,
     /// "For development": the layers' supersampling and sharpening.
+    #[cfg(feature = "preview")]
     DevSuperSampling(Filter),
+    #[cfg(feature = "preview")]
     DevSharpening(Filter),
     /// "For development": the numbers next to the monitor looked at.
+    #[cfg(feature = "preview")]
     DevMetrics(bool),
     Close,
 }
@@ -4289,13 +4298,16 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
         (Section::Pc, l.t("headset-section-pc")),
         (Section::Paired, l.t("headset-section-paired")),
         (Section::Help, l.t("headset-section-help")),
-        (Section::Dev, l.t("headset-section-dev")),
     ];
     // "For development" only where the build has it.
-    let sections = sections
-        .into_iter()
-        .filter(|(sec, _)| *sec != Section::Dev || s.dev.is_some());
-    for (i, (sec, label)) in sections.enumerate() {
+    #[cfg(feature = "preview")]
+    let dev = s
+        .dev
+        .is_some()
+        .then(|| (Section::Dev, l.t("headset-section-dev")));
+    #[cfg(not(feature = "preview"))]
+    let dev = None;
+    for (i, (sec, label)) in sections.into_iter().chain(dev).enumerate() {
         let r = rect(nx, top + i as f32 * 60.0, nw, 52.0);
         if sec == section {
             items.push(button(r, label, Style::TabOn, None));
@@ -4478,6 +4490,7 @@ fn settings_page(
         }
         Section::Paired => paired_pcs(s, items, cx, cw.min(700.0), ctop + 10.0),
         Section::Controls => build_controls(s, items, cx, cw.min(640.0), ctop),
+        #[cfg(feature = "preview")]
         Section::Dev => {
             if let Some(dev) = s.dev {
                 build_dev(s, dev, items, cx, cw.min(700.0), ctop);
@@ -4864,6 +4877,7 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
 /// "For development" (the preview build): how large the monitors are made and "Reset",
 /// the layers' filters, the numbers next to the monitor looked at, and the PC's
 /// settings that change how text looks, side by side.
+#[cfg(feature = "preview")]
 fn build_dev(s: &UiState, v: DevView, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) {
     let l = &s.texts;
     let dev = v.dev;
@@ -5402,6 +5416,14 @@ mod tests {
         #[expect(clippy::disallowed_methods, reason = "built-in files only, in a test")]
         let texts = loader.load(crate::lang::Lang::new("qps").expect("a code"));
         texts
+    }
+
+    /// "For development", where the build has it.
+    fn dev_tab() -> Option<Tab> {
+        #[cfg(feature = "preview")]
+        return Some(Tab::Settings(Section::Dev));
+        #[cfg(not(feature = "preview"))]
+        None
     }
 
     pub fn sample_state() -> UiState {
@@ -6106,9 +6128,11 @@ mod tests {
                 Tab::Settings(Section::Pc),
                 Tab::Settings(Section::Paired),
                 Tab::Settings(Section::Help),
-                Tab::Settings(Section::Dev),
                 Tab::Profiles,
-            ] {
+            ]
+            .into_iter()
+            .chain(dev_tab())
+            {
                 let mut st = sample_state();
                 st.texts = lang.clone();
                 st.tab = tab;
@@ -6490,9 +6514,11 @@ mod tests {
                 Tab::Settings(Section::Pc),
                 Tab::Settings(Section::Paired),
                 Tab::Settings(Section::Help),
-                Tab::Settings(Section::Dev),
                 Tab::Profiles,
-            ] {
+            ]
+            .into_iter()
+            .chain(dev_tab())
+            {
                 let mut st = sample_state();
                 st.texts = lang.clone();
                 st.tab = tab;

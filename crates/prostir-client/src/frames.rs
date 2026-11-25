@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::VecDeque;
+#[cfg(feature = "preview")]
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::Thread;
@@ -39,11 +40,13 @@ pub const QUEUE_ROOM: usize = 16;
 pub struct FrameQueue {
     queued: Mutex<Queued>,
     /// What came for it, for the numbers shown while developing (see [`Received`]).
+    #[cfg(feature = "preview")]
     received: Arc<Received>,
 }
 
 /// What came of a stream so far: atomics the network side counts in and anyone may
-/// read, never a lock in the way of the frames.
+/// read, never a lock in the way of the frames. The preview build's only.
+#[cfg(feature = "preview")]
 #[derive(Debug, Default)]
 pub struct Received {
     /// The bytes of every frame that came.
@@ -52,6 +55,7 @@ pub struct Received {
     keyframe: AtomicU32,
 }
 
+#[cfg(feature = "preview")]
 impl Received {
     /// The bytes of every frame so far, and of the last keyframe (`None` before one).
     pub fn get(&self) -> (u64, Option<u32>) {
@@ -107,6 +111,7 @@ impl Default for FrameQueue {
                 closed: false,
                 decoder: None,
             }),
+            #[cfg(feature = "preview")]
             received: Arc::default(),
         }
     }
@@ -139,6 +144,7 @@ impl FrameQueue {
     /// is behind. A keyframe always goes in, in place of the frames still waiting:
     /// they came before it and are of no use once it is decoded.
     pub fn push(&self, frame: Frame, now: Instant) -> Pushed {
+        #[cfg(feature = "preview")]
         self.received.count(&frame);
         let decoder = {
             let mut q = self.lock();
@@ -197,6 +203,7 @@ impl Frames {
     }
 
     /// What came of the stream so far (see [`Received`]), to read from elsewhere.
+    #[cfg(feature = "preview")]
     pub fn received(&self) -> Arc<Received> {
         self.0.received.clone()
     }
@@ -419,6 +426,7 @@ mod tests {
 
     /// Every frame's bytes are counted, and the last keyframe's size is kept, also
     /// for a frame the decoder is too far behind to take.
+    #[cfg(feature = "preview")]
     #[test]
     fn what_came_is_counted() {
         let t = Instant::now();

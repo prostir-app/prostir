@@ -500,6 +500,7 @@ pub struct Model {
     hidden: Hidden,
     /// The monitor the head looked at in the last frame, while the numbers of "For
     /// development" are shown (see [`Model::metrics_place`]); not in the menu.
+    #[cfg(feature = "preview")]
     looked_monitor: Option<DisplayKey>,
 }
 
@@ -608,6 +609,7 @@ impl Model {
             first_failure: None,
             not_owned: None,
             hidden: Hidden::default(),
+            #[cfg(feature = "preview")]
             looked_monitor: None,
         };
         // The language's file had lines that could not be read: said once, in front.
@@ -740,11 +742,12 @@ impl Model {
     /// The numbers of "For development" are shown next to the monitor looked at: in
     /// the preview build, while chosen.
     pub fn metrics_shown(&self) -> bool {
-        crate::PREVIEW && self.world.dev().metrics
+        cfg!(feature = "preview") && self.world.dev().metrics
     }
 
     /// The monitor whose numbers of "For development" are shown (see
     /// [`Model::metrics_place`]).
+    #[cfg(feature = "preview")]
     pub fn metrics_for(&self) -> Option<DisplayKey> {
         self.looked_monitor
             .filter(|_| self.metrics_shown())
@@ -752,20 +755,36 @@ impl Model {
     }
 
     /// Where the numbers of "For development" stand: just under the monitor looked at,
-    /// turned as it is, as large to the eye at any distance. `None` while not shown.
+    /// turned as it is, as large to the eye at any distance; where something stands
+    /// there (a row under it, the PC's own display), just over it; where something
+    /// stands there too, beside it on its right, its bottom edge level with the
+    /// monitor's. `None` while not shown. Nothing is allocated.
+    #[cfg(feature = "preview")]
     pub fn metrics_place(&self) -> Option<crate::layers::Quad> {
         let id = self.metrics_for()?;
         let p = *self.world.shown(id)?;
-        let below = self.world.height_of(id) / 2.0;
+        let (half_w, half_h) = (p.width / 2.0, self.world.height_of(id) / 2.0);
         let d = p.position.distance(self.head.0).max(0.3);
         let width = 0.3 * d;
         let (w, h) = crate::layers::METRICS_PX;
         let height = width * h as f32 / w as f32;
-        let up = p.rotation * Vec3::Y;
-        let out = p.rotation * Vec3::Z;
+        let gap = 0.01 * d;
+        // In the monitor's own plane: x right, y up, from its middle.
+        let below = Vec2::new(0.0, -(half_h + gap + height / 2.0));
+        let above = Vec2::new(0.0, half_h + gap + height / 2.0);
+        let beside = Vec2::new(half_w + gap + width / 2.0, -half_h + height / 2.0);
+        let at = [below, above, beside]
+            .into_iter()
+            .find(|c| !self.world.stands_at(&p, *c, Vec2::new(width, height), id))
+            .unwrap_or(below);
+        let (right, up, out) = (
+            p.rotation * Vec3::X,
+            p.rotation * Vec3::Y,
+            p.rotation * Vec3::Z,
+        );
         Some(crate::layers::Quad {
             at: Placement {
-                position: p.position - up * (below + 0.01 * d + height / 2.0) + out * 0.005,
+                position: p.position + right * at.x + up * at.y + out * 0.005,
                 rotation: p.rotation,
                 width,
             },
@@ -1016,7 +1035,10 @@ impl Model {
         self.place_sound();
         self.remind_rest(input.dt);
         let looked = self.looked(input.focused);
-        self.looked_monitor = looked.map(|(k, _)| k);
+        #[cfg(feature = "preview")]
+        {
+            self.looked_monitor = looked.map(|(k, _)| k);
+        }
         self.tell_gaze(looked);
         if input.focused {
             self.follow_gaze(looked);
@@ -1897,6 +1919,7 @@ fn tab_code(tab: Tab) -> u8 {
         Tab::Settings(Section::Controls) => 7,
         Tab::Profiles => 8,
         Tab::Settings(Section::Paired) => 9,
+        #[cfg(feature = "preview")]
         Tab::Settings(Section::Dev) => 10,
     }
 }
@@ -1914,7 +1937,8 @@ fn tab_from_code(code: u8) -> Tab {
         8 => Tab::Profiles,
         9 => Tab::Settings(Section::Paired),
         // "For development" only where the build has it.
-        10 if crate::PREVIEW => Tab::Settings(Section::Dev),
+        #[cfg(feature = "preview")]
+        10 => Tab::Settings(Section::Dev),
         _ => Tab::Quick,
     }
 }

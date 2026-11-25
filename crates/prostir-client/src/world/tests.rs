@@ -1860,6 +1860,7 @@ fn a_monitor_added_over_a_row_is_in_view() {
     );
 }
 
+#[cfg(feature = "preview")]
 use crate::clarity::{Filter, MonitorSize};
 
 /// How many of the headset's pixels (25 a degree) a pixel of `n`'s stream takes at its
@@ -1949,13 +1950,15 @@ fn a_monitor_placed_by_hand_is_left_as_it_is() {
     sim.stream(2, (1920, 1080));
     sim.settled();
     assert_eq!(sim.place(k(1)), kept, "untouched");
-    // As much smaller than its own 1:1 size as the one beside it is than its own.
-    let one = layout::Size::Seen {
-        ppd: 25.0,
-        scale: 1.0,
+    // New ones are made at the scale it is shown at (not the standard size: it was
+    // made smaller by hand), as much smaller than their own size as it is than its own.
+    let made = sim.world.sized.others;
+    let layout::Size::Seen { scale: at, .. } = made else {
+        panic!("{made:?}");
     };
+    assert!((at - scale).abs() < 1e-4, "{at} {scale}");
     let own = |w: u32, h: u32| {
-        one.metres(prostir_layout::space::PixelSize::new(w, h), 1.1)
+        made.metres(prostir_layout::space::PixelSize::new(w, h), 1.1)
             .0
     };
     let new = sim.place(k(2)).width / own(1920, 1080);
@@ -1966,6 +1969,7 @@ fn a_monitor_placed_by_hand_is_left_as_it_is() {
 /// "For development": each size lays the monitors out again at once (1:1, the main one
 /// only, 0.85, standard), and "Reset" puts them back where they were; the filters
 /// follow the choices with the next frame.
+#[cfg(feature = "preview")]
 #[test]
 fn the_sizes_for_development_and_reset() {
     let mut sim = Sim::on(None, Some(25.0));
@@ -2029,4 +2033,52 @@ fn the_sizes_for_development_and_reset() {
             sharpening: false
         }
     );
+}
+
+/// A desk kept at the standard size (here by a build before 1:1) stays at it on a
+/// headset that makes new monitors 1:1: the PC's own display shown is laid under it at
+/// the standard size, and stays so when the curve changes (which lays it out again);
+/// new monitors beside it get the standard size too.
+#[test]
+fn a_standard_desk_from_the_file_keeps_the_standard_size() {
+    let mut was = Desk::default();
+    let laid = layout::arrange(
+        Preset::Arc,
+        &[(k(1), 2560, 1440), (k(2), 2560, 1440)],
+        None,
+        &[],
+        None,
+    );
+    let sizes = laid.keys().map(|k| (*k, QHD)).collect();
+    was.keep(
+        laid,
+        &sizes,
+        ((Vec3::ZERO, 0.0), layout::RADIUS, 0.0),
+        false,
+    );
+    let mut text = String::new();
+    was.write_text(&mut text);
+    let run = |ppd| {
+        let mut sim = Sim::on(Some(&text), ppd);
+        sim.connect(PC);
+        sim.list(vec![monitor(1, QHD), monitor(2, QHD), laptop(9)]);
+        for n in 1..=2 {
+            sim.stream(n, QHD);
+        }
+        sim.stream(9, (2880, 1800));
+        sim.settled();
+        assert_eq!(sim.world.sized, layout::Sizes::default(), "{ppd:?}");
+        let lid = sim.place(k(9));
+        sim.s.curve = crate::settings::Curve::Gentle;
+        sim.world.curve_chosen(&sim.s);
+        sim.settled();
+        sim.s.curve = crate::settings::Curve::Flat;
+        sim.world.curve_chosen(&sim.s);
+        sim.settled();
+        assert!(near(&sim.place(k(9)), &lid), "{ppd:?}: the lid as it was");
+        assert_eq!(sim.world.sized, layout::Sizes::default());
+        lid
+    };
+    let (standard, one) = (run(None), run(Some(25.0)));
+    assert!(near(&standard, &one), "{standard:?} {one:?}");
 }

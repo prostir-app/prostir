@@ -87,6 +87,7 @@ fn names(p: &Plan) -> Vec<String> {
             Layer::Monitor(m) => format!("m{}", m.id.id.0),
             Layer::Trouble { id, .. } => format!("t{}", id.id.0),
             Layer::Placeholder(_) => "adding".into(),
+            #[cfg(feature = "preview")]
             Layer::Metrics(_) => "metrics".into(),
             Layer::MenuButton(_) => "button".into(),
             Layer::Menu(_) => "menu".into(),
