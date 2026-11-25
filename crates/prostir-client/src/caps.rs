@@ -51,6 +51,10 @@ pub struct Caps {
     pub color_scale: bool,
     /// The cameras: the "Room" backgrounds, and what they can do more.
     pub room: Option<RoomCaps>,
+    /// The compositor turns a layer's picture over
+    /// (`XR_FB_composition_layer_image_layout`); without, the PC sends a stream's rows
+    /// bottom first (`caps::headset::ROWS_UP`), as the compositor shows a surface's.
+    pub image_flip: bool,
     /// Tracked hands (`XR_EXT_hand_tracking`).
     pub hands: bool,
     /// The hands' ray and pinch from the runtime (`XR_EXT_hand_interaction`); without,
@@ -197,6 +201,7 @@ impl Caps {
             equirect: false,
             color_scale: false,
             room: None,
+            image_flip: false,
             hands: false,
             hand_aim: false,
             menu_gesture: false,
@@ -264,13 +269,19 @@ impl Caps {
     pub fn headset_caps(&self) -> HeadsetCaps {
         let told = || self.decoders.iter().filter(|d| d.max_w > 0 && d.max_h > 0);
         let codec = |d: &Decoder| prostir_proto::wire::encode(&d.codec).map_or(0, |b| b[0]);
+        let mut features = vec![
+            caps::headset::PHYSICAL,
+            caps::headset::WINDOWS,
+            caps::headset::COMMANDS,
+            caps::headset::MIC,
+        ];
+        // The compositor shows a surface's rows bottom first and cannot turn the layer
+        // over: the PC turns the picture over instead.
+        if !self.image_flip {
+            features.push(caps::headset::ROWS_UP);
+        }
         HeadsetCaps {
-            features: vec![
-                caps::headset::PHYSICAL,
-                caps::headset::WINDOWS,
-                caps::headset::COMMANDS,
-                caps::headset::MIC,
-            ],
+            features,
             decoders: told()
                 .map(|d| state::Decoder {
                     codec: codec(d),
@@ -303,6 +314,7 @@ impl Caps {
             ("equirect", !self.equirect),
             ("color_scale", !self.color_scale),
             ("room", self.room.is_none()),
+            ("image_flip", !self.image_flip),
             (
                 "keyboard_window",
                 self.room.is_none_or(|r| !r.keyboard_window),
@@ -413,6 +425,7 @@ mod tests {
             room: Some(RoomCaps {
                 keyboard_window: true,
             }),
+            image_flip: true,
             hands: true,
             hand_aim: true,
             menu_gesture: true,
@@ -465,6 +478,8 @@ mod tests {
             },
             &[Offer::KeyboardWindow],
         );
+        // The picture turned over by the PC instead: nothing hidden.
+        without(|c| c.image_flip = false, &[]);
         without(|c| c.hands = false, &[Offer::Hands]);
         without(|c| c.hand_aim = false, &[Offer::HandRay]);
         without(|c| c.menu_gesture = false, &[Offer::MenuGesture]);
@@ -482,8 +497,8 @@ mod tests {
         assert_eq!(offered(&c), [Offer::SharedVolume]);
         assert_eq!(
             c.missing(),
-            "refresh_rates,perf_levels,cylinder,equirect,color_scale,room,keyboard_window,\
-             hands,hand_aim,menu_gesture"
+            "refresh_rates,perf_levels,cylinder,equirect,color_scale,room,image_flip,\
+             keyboard_window,hands,hand_aim,menu_gesture"
         );
         assert_eq!(c.rate(false), None);
         assert_eq!(c.rate(true), None);
@@ -556,6 +571,10 @@ mod tests {
         assert!(!told.fits(Codec::H265, 1920, 1080));
         assert_eq!((told.streams_max, told.layers_max), (3, 32));
         assert!(told.has(caps::headset::MIC));
+        // The compositor turns the picture over: the rows go top first.
+        assert!(!told.has(caps::headset::ROWS_UP));
+        c.image_flip = false;
+        assert!(c.headset_caps().has(caps::headset::ROWS_UP));
     }
 
     #[test]

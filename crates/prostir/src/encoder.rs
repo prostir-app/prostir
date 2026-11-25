@@ -173,9 +173,32 @@ pub struct EncoderConfig {
     /// Slower VA-API preset: clearer small text at the same bitrate for about 2 ms more
     /// encoding per frame.
     pub sharp: bool,
+    /// The picture's rows bottom first, for headsets whose compositor shows a stream's
+    /// rows the other way round (they name `caps::headset::ROWS_UP`): turned over in
+    /// the step that converts the colours, so the headset shows it the right way up.
+    pub rows_up: bool,
 }
 
 impl EncoderConfig {
+    /// What turns the picture over on the CPU, after the colours are converted: empty
+    /// when the rows go top first.
+    fn flip(&self) -> &'static str {
+        if self.rows_up {
+            " ! videoflip video-direction=vert"
+        } else {
+            ""
+        }
+    }
+
+    /// The same for VA-API's converter, which turns it over on the GPU as it converts.
+    fn va_flip(&self) -> &'static str {
+        if self.rows_up {
+            " video-direction=vert"
+        } else {
+            ""
+        }
+    }
+
     /// VA-API `target-usage`: 4 is clearer, 6 is faster.
     pub fn target_usage(&self) -> u32 {
         if self.sharp { 4 } else { 6 }
@@ -354,8 +377,9 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         #[cfg(feature = "fake-desktop")]
         (Codec::H264, Backend::Fake) => (
             format!(
-                "videoconvert name=enc_in n-threads=0 ! video/x-raw,format=I420 ! valve drop={} ! x264enc name=enc tune=zerolatency speed-preset=superfast \
+                "videoconvert name=enc_in n-threads=0 ! video/x-raw,format=I420{} ! valve drop={} ! x264enc name=enc tune=zerolatency speed-preset=superfast \
                  bitrate={} key-int-max={X264_GOP} bframes=0",
+                cfg.flip(),
                 !probe::fake::opens(),
                 cfg.bitrate_kbps
             ),
@@ -364,8 +388,9 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         ),
         (Codec::H264, Backend::X264) => (
             format!(
-                "videoconvert name=enc_in n-threads=0 ! video/x-raw,format=I420 ! x264enc name=enc tune=zerolatency speed-preset=superfast \
+                "videoconvert name=enc_in n-threads=0 ! video/x-raw,format=I420{} ! x264enc name=enc tune=zerolatency speed-preset=superfast \
                  bitrate={} key-int-max={X264_GOP} bframes=0",
+                cfg.flip(),
                 cfg.bitrate_kbps
             ),
             "h264parse config-interval=-1",
@@ -373,8 +398,9 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         ),
         (Codec::H264, Backend::Nvenc) => (
             format!(
-                "videoconvert name=enc_in n-threads=0 ! {NVENC_IN} ! nvh264enc name=enc rc-mode=cbr \
+                "videoconvert name=enc_in n-threads=0 ! {NVENC_IN}{} ! nvh264enc name=enc rc-mode=cbr \
                  bitrate={} gop-size=-1 bframes=0 zerolatency=true",
+                cfg.flip(),
                 cfg.bitrate_kbps
             ),
             "h264parse config-interval=-1",
@@ -382,8 +408,9 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         ),
         (Codec::H265, Backend::Nvenc) => (
             format!(
-                "videoconvert name=enc_in n-threads=0 ! {NVENC_IN} ! nvh265enc name=enc rc-mode=cbr \
+                "videoconvert name=enc_in n-threads=0 ! {NVENC_IN}{} ! nvh265enc name=enc rc-mode=cbr \
                  bitrate={} gop-size=-1 bframes=0 zerolatency=true",
+                cfg.flip(),
                 cfg.bitrate_kbps
             ),
             "h265parse config-interval=-1",
@@ -391,8 +418,9 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         ),
         (Codec::H264, Backend::Va) => (
             format!(
-                "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah264enc name=enc rate-control=cbr bitrate={} \
+                "vapostproc name=enc_in{} ! video/x-raw(memory:VAMemory),format=NV12 ! vah264enc name=enc rate-control=cbr bitrate={} \
                  key-int-max={VA_GOP} b-frames=0 ref-frames=1 target-usage={}",
+                cfg.va_flip(),
                 cfg.bitrate_kbps,
                 cfg.target_usage()
             ),
@@ -401,8 +429,9 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
         ),
         (Codec::H265, Backend::Va) => (
             format!(
-                "vapostproc name=enc_in ! video/x-raw(memory:VAMemory),format=NV12 ! vah265enc name=enc rate-control=cbr bitrate={} \
+                "vapostproc name=enc_in{} ! video/x-raw(memory:VAMemory),format=NV12 ! vah265enc name=enc rate-control=cbr bitrate={} \
                  key-int-max={VA_GOP} b-frames=0 ref-frames=1 target-usage={}",
+                cfg.va_flip(),
                 cfg.bitrate_kbps,
                 cfg.target_usage()
             ),
@@ -1324,6 +1353,7 @@ mod tests {
             bitrate_kbps: 1000,
             backend: Backend::X264,
             sharp: false,
+            rows_up: false,
         };
         let told = Arc::new(Mutex::new(0));
         let kept = told.clone();
@@ -1344,6 +1374,80 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(*told.lock().unwrap(), 0, "not told as the encoder's");
+    }
+
+    /// For a headset that wants the rows bottom first, each encoder's way turns the
+    /// picture over where it converts the colours (VA-API on the GPU, the others on the
+    /// CPU after it), and only then; the CPU's way runs.
+    #[test]
+    fn rows_bottom_first_where_the_colours_are_converted() {
+        use super::{Backend, EncoderConfig, Input, encoding};
+        let input = Input {
+            source: "videotestsrc num-buffers=3 ! video/x-raw,width=320,height=180,framerate=60/1"
+                .into(),
+            label: "test".into(),
+            frame_rate: None,
+            live: false,
+        };
+        let cfg = |backend, codec, rows_up| EncoderConfig {
+            codec,
+            bitrate_kbps: 1000,
+            backend,
+            sharp: false,
+            rows_up,
+        };
+        use prostir_proto::Codec::{H264, H265};
+        for (backend, codec, flip) in [
+            (
+                Backend::X264,
+                H264,
+                "format=I420 ! videoflip video-direction=vert ! x264enc",
+            ),
+            (
+                Backend::Nvenc,
+                H264,
+                "NV12 } ! videoflip video-direction=vert ! nvh264enc",
+            ),
+            (
+                Backend::Nvenc,
+                H265,
+                "NV12 } ! videoflip video-direction=vert ! nvh265enc",
+            ),
+            (
+                Backend::Va,
+                H264,
+                "vapostproc name=enc_in video-direction=vert !",
+            ),
+            (
+                Backend::Va,
+                H265,
+                "vapostproc name=enc_in video-direction=vert !",
+            ),
+        ] {
+            let turned = encoding(&input, &cfg(backend, codec, true)).unwrap();
+            assert!(turned.contains(flip), "{turned}");
+            let plain = encoding(&input, &cfg(backend, codec, false)).unwrap();
+            assert!(!plain.contains("video-direction"), "{plain}");
+        }
+        gst::init().unwrap();
+        if gst::ElementFactory::find("x264enc").is_none() {
+            eprintln!("skipped: no x264enc");
+            return;
+        }
+        let description = format!(
+            "{} ! fakesink",
+            encoding(&input, &cfg(Backend::X264, H264, true)).unwrap()
+        );
+        let pipeline = gst::parse::launch(&description).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let bus = pipeline.bus().unwrap();
+        let ended = bus.timed_pop_filtered(
+            gst::ClockTime::from_seconds(10),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+        pipeline.set_state(gst::State::Null).unwrap();
+        let ended = ended.expect("the pipeline ends");
+        assert_eq!(ended.type_(), gst::MessageType::Eos, "{ended:?}");
     }
 
     /// Told live, the answer to the latency query that passes the pad says live,
@@ -1568,6 +1672,7 @@ mod live {
                         bitrate_kbps: 20_000,
                         backend: Backend::Va,
                         sharp: false,
+                        rows_up: false,
                     };
                     let encoder = gst::parse::launch(&pipeline_description(&input, &cfg).unwrap())
                         .unwrap()

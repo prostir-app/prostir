@@ -405,6 +405,20 @@ static DECODER_RATE_MAX: AtomicBool = AtomicBool::new(false);
 /// plus one.
 static READ_TIME_CODES: AtomicBool = AtomicBool::new(false);
 static TIME_CODE_STREAM: AtomicU32 = AtomicU32::new(0);
+/// The PC sends the rows bottom first (`caps::headset::ROWS_UP`): the time code is in
+/// the decoded picture's last rows, upside down.
+static ROWS_UP: AtomicBool = AtomicBool::new(false);
+
+/// Whether the PC sends the rows bottom first (see [`rows_up`]); set before the
+/// decoders start.
+pub fn set_rows_up(on: bool) {
+    ROWS_UP.store(on, Ordering::Relaxed);
+}
+
+/// The PC sends the rows bottom first: the decoded picture is upside down.
+pub fn rows_up() -> bool {
+    ROWS_UP.load(Ordering::Relaxed)
+}
 
 /// Whether the decoders are to read the time code of one stream (see
 /// [`reads_time_code`]); set before they start.

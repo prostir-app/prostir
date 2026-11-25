@@ -748,6 +748,7 @@ impl Selftest {
         // Who turns the stream's picture the right way up: the compositor (the
         // runtime's extension), or the PC, which sends its rows bottom first.
         self.report.set("flip", if flip { "layer" } else { "pc" });
+        super::set_rows_up(!flip);
         if let Ok(p) = instance.properties() {
             self.report.set(
                 "runtime",

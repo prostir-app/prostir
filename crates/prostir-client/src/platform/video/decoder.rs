@@ -167,8 +167,15 @@ fn time_code_reader(
                 return;
             };
             let size = |v: i32| usize::try_from(v).unwrap_or(0);
-            if let Some(pc_ms) = prostir_proto::timecode::read(luma, size(stride), size(w), size(h))
-            {
+            let (stride, w, h) = (size(stride), size(w), size(h));
+            // Upside down, the code's middle row is 8 rows from the bottom: the rows
+            // from 16 above that read as its first ones.
+            let from = h.saturating_sub(prostir_proto::timecode::CELL + 1) * stride;
+            let luma = match luma.get(from..) {
+                Some(rows) if crate::selftest::rows_up() => rows,
+                _ => luma,
+            };
+            if let Some(pc_ms) = prostir_proto::timecode::read(luma, stride, w, h) {
                 crate::selftest::time_code(pc_ms, at_us);
             }
         }))

@@ -231,6 +231,9 @@ pub mod caps {
         pub const PHYSICAL: Feature = Feature(7);
         /// Shows window panels.
         pub const WINDOWS: Feature = Feature(8);
+        /// Its compositor shows a stream's rows bottom first: the PC sends them so, and
+        /// the picture shows the right way up.
+        pub const ROWS_UP: Feature = Feature(9);
     }
 }
 

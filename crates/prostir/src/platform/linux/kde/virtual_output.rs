@@ -921,6 +921,7 @@ mod tests {
             bitrate_kbps: 8000,
             backend,
             sharp: false,
+            rows_up: false,
         };
         let kept = frames.clone();
         let encoder = Encoder::start(
@@ -1026,6 +1027,7 @@ mod tests {
             bitrate_kbps: 4000,
             backend: Backend::X264,
             sharp: false,
+            rows_up: false,
         };
         let told = Arc::new(Mutex::new(Vec::new()));
         let kept = told.clone();

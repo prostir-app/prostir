@@ -276,6 +276,7 @@ impl Worker {
         slot.output = Some(output);
         slot.encoder = Some(encoder);
         slot.started_for = Some((wanted.encoding.backend, wanted.encoding.codec));
+        slot.rows_up = wanted.encoding.rows_up;
         self.slots.insert(id, slot);
         self.layout_due = true;
         self.wallpapers_due = true;

@@ -43,6 +43,20 @@ fn the_codec_is_one_every_headset_decodes() {
     assert_eq!(Displays::codec_for(Codec::H264, &[both, h264]), Codec::H264);
 }
 
+/// The rows go bottom first only when every headset with a session asks for it.
+#[test]
+fn rows_bottom_first_only_for_all() {
+    let rows_up = state::HeadsetCaps {
+        features: vec![state::caps::headset::ROWS_UP],
+        ..state::HeadsetCaps::default()
+    };
+    let plain = state::HeadsetCaps::default();
+    assert!(Displays::rows_up_for(std::slice::from_ref(&rows_up)));
+    assert!(!Displays::rows_up_for(&[rows_up, plain.clone()]));
+    assert!(!Displays::rows_up_for(&[plain]));
+    assert!(!Displays::rows_up_for(&[]));
+}
+
 /// A display of the PC is known by its EDID wherever it is plugged in; one that says
 /// nothing, or the same as another, by its connector; another display in the same
 /// connector is another display.

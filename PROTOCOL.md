@@ -767,7 +767,7 @@ the table says. A new value later comes with a capability and a fallback of its 
 | 6 | notifications | 6 | says where the user looks |
 | 7 | which display the sound comes from | 7 | shows displays of the PC itself |
 | 8 | commands | 8 | shows window panels |
-| 9 | "No limits" | | |
+| 9 | "No limits" | 9 | wants a stream's rows bottom first |
 | 10 | monitors with a scale | | |
 | 11 | the microphone as an up stream | | |
 | 12 | the camera | | |
@@ -1193,6 +1193,11 @@ in either order.
   for H.265, in front of the IDR picture.
 - `keyframe` is `1` for frames that can be decoded on their own.
 - No B-frames: decode order is display order.
+- Rows go top first, except to a headset that names capability 9: its compositor shows
+  a stream's rows bottom first (an Android surface without a way to turn a layer
+  over), so the host turns the picture over before encoding it. One picture goes to
+  every headset with a session, so the host turns it over only when all of them name
+  9.
 - `pts_us` is the presentation timestamp in microseconds from the host's capture clock
   (0 if the encoder gave none). Its starting point is implementation-defined; use it to
   order frames and for latency figures, not as wall-clock time.
