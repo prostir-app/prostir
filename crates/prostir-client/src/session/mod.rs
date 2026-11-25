@@ -999,7 +999,10 @@ impl Session {
         // the cable is the user's choice too: picking is over, or the search would
         // wait for a tap once the cable goes.
         let s = &mut self.search;
-        if s.choice == Some(addr) || s.choice_pc == Some(pc) || s.picking {
+        // Only the cable counts: a session queued for a link that "Change PC" or
+        // forgetting just left (over Wi-Fi, or the PC left at the cable) is no choice.
+        let picked_at_cable = s.picking && is_usb(addr) && !s.left_usb.contains(&pc);
+        if s.choice == Some(addr) || s.choice_pc == Some(pc) || picked_at_cable {
             s.choice = None;
             s.choice_pc = None;
             s.picking = false;
@@ -1385,7 +1388,19 @@ impl Session {
             return Takes::AllBut(s.left_usb.clone());
         }
         if s.preferred.is_empty() {
-            return Takes::Any;
+            // Not a PC with a link on its way or in a session (over Wi-Fi, say): a handshake with it each round
+            // would only be let go, then the rest.
+            let linked: Vec<PcId> = self
+                .links
+                .iter()
+                .filter(|(_, l)| !matches!(l, Link::Lost { .. }))
+                .map(|(pc, _)| *pc)
+                .collect();
+            return if linked.is_empty() {
+                Takes::Any
+            } else {
+                Takes::AllBut(linked)
+            };
         }
         Takes::Only(
             s.preferred
