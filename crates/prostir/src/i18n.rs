@@ -32,16 +32,21 @@ fn strings() -> &'static Strings {
     STRINGS.get_or_init(|| built_in(code()))
 }
 
+/// The ids of the PC's messages that have no placeholders: the ones `t` can show.
+fn plain_ids() -> impl Iterator<Item = String> {
+    prostir_lang::plain_ids(prostir_lang::BUILTIN[0].1)
+        .into_iter()
+        .filter(|id| id.starts_with(PREFIX))
+}
+
 /// The text of message `id` that has no placeholders, in the PC's language. Every such
 /// message is formatted once, at the first call, so a call is a lookup that allocates
-/// nothing; an id no file has shows as itself.
+/// nothing; an id no file has, or one with placeholders (those go through `f`), shows
+/// as itself.
 pub fn t(id: &'static str) -> &'static str {
     static TEXTS: OnceLock<HashMap<String, &'static str>> = OnceLock::new();
     let texts = TEXTS.get_or_init(|| {
-        let (english, _) = prostir_lang::messages(prostir_lang::BUILTIN[0].1);
-        english
-            .into_keys()
-            .filter(|id| id.starts_with(PREFIX))
+        plain_ids()
             .map(|id| {
                 // Kept for the life of the program, as the texts in the code were.
                 let text: &'static str = Box::leak(strings().t(&id).into_boxed_str());
@@ -97,12 +102,34 @@ mod tests {
         );
     }
 
+    /// The texts `t` renders up front come out whole in each language: Fluent has
+    /// nothing to report for them (a text that needs arguments is not among them).
+    #[test]
+    fn the_texts_rendered_up_front_have_no_fluent_errors() {
+        let plain: Vec<String> = plain_ids().collect();
+        assert!(plain.len() > 10, "{plain:?}");
+        assert!(!plain.iter().any(|id| id == "pc-quality-custom"));
+        for code in ["en", "uk"] {
+            let strings = built_in(code);
+            for id in &plain {
+                let errors = strings.errors_without_args(id);
+                assert!(errors.is_empty(), "{code} {id}: {errors:?}");
+            }
+        }
+        // A text that does need arguments does report, so the check can fail.
+        let needy = built_in("en").errors_without_args("pc-quality-custom");
+        assert!(!needy.is_empty());
+        // `t` still gives the text of one without placeholders, and the id of one with.
+        assert_ne!(t("pc-ctl-done"), "pc-ctl-done");
+        assert_eq!(t("pc-quality-custom"), "pc-quality-custom");
+    }
+
     /// A text is the one of the PC's language, and an id nobody wrote shows as itself.
     #[test]
     fn a_text_is_looked_up_by_its_id() {
-        let own = strings().t("pc-quality-custom");
-        assert_eq!(own, f("pc-quality-custom", &[]));
-        assert_eq!(t("pc-quality-custom"), own);
+        let own = strings().t("pc-ctl-done");
+        assert_eq!(own, f("pc-ctl-done", &[]));
+        assert_eq!(t("pc-ctl-done"), own);
         assert_eq!(t("no-such-text"), "no-such-text");
         assert!(count("pc-quality-custom", 40).contains("40"));
     }
