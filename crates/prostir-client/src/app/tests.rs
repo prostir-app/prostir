@@ -1983,3 +1983,239 @@ fn a_fixed_volume_is_not_shared() {
         })
     );
 }
+
+/// What the shell has for the plan of the frame's layers: a picture for every monitor,
+/// every picture drawn, nothing wrong with any.
+struct AllReady;
+
+impl crate::layers::Ready for AllReady {
+    fn background(&self) -> bool {
+        true
+    }
+    fn keyboard_window(&self) -> bool {
+        false
+    }
+    fn picture(&self, _: DisplayKey) -> Option<(u32, u32)> {
+        Some((2560, 1440))
+    }
+    fn trouble(&self, _: DisplayKey) -> bool {
+        false
+    }
+    fn placeholder(&self) -> bool {
+        true
+    }
+    fn menu(&self) -> bool {
+        true
+    }
+    fn palm(&self) -> bool {
+        true
+    }
+    fn attach(&self) -> bool {
+        true
+    }
+    fn hands(&self) -> bool {
+        true
+    }
+}
+
+/// Where monitor `id` is drawn in `plan`.
+fn planned(plan: &crate::layers::Plan, id: DisplayKey) -> Option<Placement> {
+    plan.layers().iter().find_map(|l| match l {
+        crate::layers::Layer::Monitor(m) if m.id == id => Some(m.quad.at),
+        _ => None,
+    })
+}
+
+/// Scenario 17: a drag and the frame's layers in one pass of the loop, as the shell
+/// runs them: the monitor is drawn where the hand put it in this very frame, never
+/// where it was the frame before; and a monitor still gliding to its place is taken
+/// where it is drawn, without a jump.
+#[test]
+fn a_dragged_monitor_is_drawn_where_the_hand_put_it_in_the_same_frame() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::Close);
+    // The first monitor of the row glides to the second one's place.
+    let id = sim.m.world().monitors()[0].0;
+    sim.menu(Action::Move { id, delta: 1 });
+    let input = frame(HandState::default());
+    sim.now += 11 * MS;
+    sim.m.tick(sim.now, &input);
+    sim.m.animate(sim.now, &input);
+    let world = sim.m.world();
+    let drawn = *world.shown(id).expect("drawn");
+    let target = *world.placement(id).expect("placed");
+    assert!(
+        drawn.position.distance(target.position) > 0.05,
+        "still gliding"
+    );
+    let origin = Vec3::new(0.0, -0.3, 0.0);
+    let mut right = HandState {
+        ray: Some(Ray {
+            origin,
+            dir: (drawn.position - origin).normalize(),
+        }),
+        ..HandState::default()
+    };
+    let mut hands = Hands::new();
+    let mut plan = crate::layers::Plan::new();
+    // One pass: the hands, the end of the frame, the layers.
+    let mut pass = |sim: &mut Sim, hands: &mut Hands, dir: Vec3| -> Option<Placement> {
+        sim.now += 11 * MS;
+        right.grab.update(1.0);
+        right.ray = Some(Ray { origin, dir });
+        let input = frame(right);
+        sim.m.tick(sim.now, &input);
+        hands.buttons(sim.now, &input, &mut sim.m);
+        hands.step(sim.now, &input, &mut sim.m, &mut Pictures(None));
+        sim.m.animate(sim.now, &input);
+        crate::layers::plan(&sim.m, hands, &AllReady, &mut plan);
+        sim.check_view();
+        planned(&plan, id)
+    };
+    let straight = (drawn.position - origin).normalize();
+    let grabbed = pass(&mut sim, &mut hands, straight).expect("planned");
+    assert!(sim.m.world().holds(Thing::Display(id)));
+    assert!(
+        grabbed.position.distance(drawn.position) < 0.02,
+        "taken where it was drawn: {grabbed:?}, drawn {drawn:?}"
+    );
+    // The hand moves: each frame draws where the hand put the monitor in it.
+    let mut before = grabbed;
+    for i in 1..=20 {
+        let turn = glam::Quat::from_rotation_y(-0.01 * i as f32);
+        let now = pass(&mut sim, &mut hands, turn * straight).expect("planned");
+        let placed = *sim.m.world().placement(id).expect("placed");
+        assert_eq!(now, placed, "frame {i}: drawn where the hand put it");
+        assert!(
+            now.position.distance(before.position) > 1e-4,
+            "frame {i}: it moved in this frame"
+        );
+        before = now;
+    }
+}
+
+/// With fewer layers than the frame wants, the farthest monitor is not drawn and the
+/// person is told once; told again only after a while with every monitor shown.
+#[test]
+fn monitors_that_do_not_fit_are_said_once() {
+    let mut sim = Sim::of(Caps {
+        layers_max: 6,
+        ..test_caps()
+    });
+    sim.connect(&[1, 2, 3, 4]);
+    sim.menu(Action::Close);
+    sim.frames(Duration::from_secs(1));
+    let mut plan = crate::layers::Plan::new();
+    let hands = Hands::new();
+    crate::layers::plan(&sim.m, &hands, &AllReady, &mut plan);
+    // The background, four monitors, the menu's button and the hands: one too many.
+    assert_eq!(plan.wanted(), 7);
+    assert_eq!(plan.layers().len(), 6);
+    assert_eq!(plan.hidden(), 1);
+    let world = sim.m.world();
+    let farthest = world
+        .draw_list()
+        .iter()
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|d| d.1)
+        .expect("drawn");
+    assert_eq!(planned(&plan, farthest), None, "the farthest is not drawn");
+    assert!(
+        world
+            .draw_list()
+            .iter()
+            .all(|&(_, id)| id == farthest || planned(&plan, id).is_some())
+    );
+    assert!(matches!(
+        plan.layers().last(),
+        Some(crate::layers::Layer::Hands)
+    ));
+    let said = |sim: &Sim| sim.m.toast().map(|t| (t.n, t.text.clone()));
+    let hidden = plan.news().expect("said");
+    sim.handle(Event::Platform(PlatformEvent::LayersHidden(hidden)));
+    let told = said(&sim).expect("told");
+    assert_eq!(
+        told.1,
+        sim.m
+            .texts()
+            .f("headset-layers-hidden", &[("count", 1.into())])
+    );
+    assert_eq!(plan.news(), None);
+    // The toast itself takes a layer once placed, but the count stays: no more said.
+    sim.frames(Duration::from_millis(50));
+    crate::layers::plan(&sim.m, &hands, &AllReady, &mut plan);
+    assert!(
+        plan.layers()
+            .iter()
+            .any(|l| matches!(l, crate::layers::Layer::Toast(_)))
+    );
+    assert_eq!(plan.hidden(), 1);
+    assert_eq!(plan.news(), None);
+    // Shown again for a moment, and hidden again: not said again.
+    sim.handle(Event::Platform(PlatformEvent::LayersHidden(0)));
+    sim.after(Duration::from_secs(2));
+    sim.handle(Event::Platform(PlatformEvent::LayersHidden(1)));
+    assert_eq!(said(&sim).map(|t| t.0), Some(told.0), "the same toast");
+    // One more hidden: said.
+    sim.handle(Event::Platform(PlatformEvent::LayersHidden(2)));
+    let more = said(&sim).expect("told");
+    assert_ne!(more.0, told.0);
+    // A minute with every monitor shown: the next one is said again.
+    sim.handle(Event::Platform(PlatformEvent::LayersHidden(0)));
+    sim.after(HIDDEN_SAID_AGAIN);
+    sim.handle(Event::Platform(PlatformEvent::LayersHidden(1)));
+    assert_ne!(said(&sim).map(|t| t.0), Some(more.0), "said again");
+}
+
+/// The layers in their order: the background, the monitors, the menu's button, the
+/// menu, the toast and the palm menu, the hands, the dots.
+#[test]
+fn the_layers_go_back_to_front() {
+    use crate::layers::Layer;
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::OpenMenu);
+    sim.frames(Duration::from_millis(500));
+    let mut plan = crate::layers::Plan::new();
+    let hands = Hands::new();
+    crate::layers::plan(&sim.m, &hands, &AllReady, &mut plan);
+    let kinds: Vec<&str> = plan
+        .layers()
+        .iter()
+        .map(|l| match l {
+            Layer::Background => "background",
+            Layer::Monitor(_) => "monitor",
+            Layer::MenuButton(_) => "button",
+            Layer::Menu(_) => "menu",
+            Layer::Hands => "hands",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "background",
+            "monitor",
+            "monitor",
+            "button",
+            "menu",
+            "hands"
+        ]
+    );
+    assert_eq!(plan.hidden(), 0);
+    // Where each monitor is drawn, as the world draws it, in its order.
+    let order: Vec<DisplayKey> = sim.m.world().draw_list().iter().map(|d| d.1).collect();
+    let monitors: Vec<DisplayKey> = plan
+        .layers()
+        .iter()
+        .filter_map(|l| match l {
+            Layer::Monitor(m) => Some(m.id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(monitors, order);
+    for id in order {
+        assert_eq!(planned(&plan, id), sim.m.world().shown(id).copied());
+    }
+}

@@ -20,11 +20,12 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use glam::Vec3;
-use prostir::app::{By, Effect, Event, Model, Start};
+use prostir::app::{By, Effect, Event, Model, PlatformEvent, Start};
 use prostir::caps::{self, Caps};
 use prostir::ids::{DisplayKey, PcId};
 use prostir::interaction::{Button, FrameInput, HandState, Hands, Head, Menu, Menus};
 use prostir::lang::{self, LangState};
+use prostir::layers::{self, Plan, Ready};
 use prostir::layout::{Desk, Ray};
 use prostir::net::NetEvent;
 use prostir::platform::store::Store as _;
@@ -119,6 +120,41 @@ struct Loop {
     main_rev: Option<u64>,
     /// How many times the menu's state was made.
     builds: u64,
+    /// The frame's layers.
+    plan: Plan,
+}
+
+/// What the shell has for the layers: every picture drawn.
+struct Drawn;
+
+impl Ready for Drawn {
+    fn background(&self) -> bool {
+        true
+    }
+    fn keyboard_window(&self) -> bool {
+        false
+    }
+    fn picture(&self, _: DisplayKey) -> Option<(u32, u32)> {
+        Some((2560, 1440))
+    }
+    fn trouble(&self, _: DisplayKey) -> bool {
+        false
+    }
+    fn placeholder(&self) -> bool {
+        true
+    }
+    fn menu(&self) -> bool {
+        true
+    }
+    fn palm(&self) -> bool {
+        true
+    }
+    fn attach(&self) -> bool {
+        true
+    }
+    fn hands(&self) -> bool {
+        true
+    }
 }
 
 impl Loop {
@@ -173,6 +209,11 @@ impl Loop {
                 let _ = self.m.magnet(id);
             }
         }
+        // The frame's layers, and the model told when monitors do not fit.
+        layers::plan(&self.m, &self.hands, &Drawn, &mut self.plan);
+        if let Some(hidden) = self.plan.news() {
+            self.handle(Event::Platform(PlatformEvent::LayersHidden(hidden)));
+        }
     }
 
     /// `frames` frames with the right hand as `right` says for each, after 30 to
@@ -199,8 +240,9 @@ fn ray_at(target: Vec3) -> Option<Ray> {
     })
 }
 
-/// The model with a PC in a session, two monitors streaming, a second of frames.
-fn connected() -> Loop {
+/// The model with a PC in a session, two monitors streaming, a second of frames, on a
+/// headset whose compositor takes `layers_max` layers.
+fn connected(layers_max: u8) -> Loop {
     let now = Instant::now();
     let m = Model::new(Start {
         now,
@@ -221,6 +263,7 @@ fn connected() -> Loop {
             cylinder: true,
             color_scale: true,
             refresh_rates: vec![72.0, 90.0],
+            layers_max,
             ..Caps::without_extensions(
                 "Test headset".into(),
                 caps::DECODERS_UNSAID.to_vec(),
@@ -243,6 +286,7 @@ fn connected() -> Loop {
         palm_rev: None,
         main_rev: None,
         builds: 0,
+        plan: Plan::new(),
     };
     l.now += Duration::from_millis(1);
     l.m.tick(l.now, &FrameInput::hidden(None));
@@ -299,7 +343,7 @@ fn connected() -> Loop {
 /// One test, so nothing else runs on this thread between the counts.
 #[test]
 fn a_frame_takes_no_memory() {
-    let mut l = connected();
+    let mut l = connected(16);
     let target =
         l.m.world()
             .shown(DisplayKey::new(PC, DisplayId(1)))
@@ -361,13 +405,36 @@ fn a_frame_takes_no_memory() {
     assert!(monitor(&l), "the drag held a monitor");
 }
 
+/// On a compositor that takes fewer layers than the frame wants, the plan leaves the
+/// farthest monitor out every frame, still without memory, and the person is told
+/// before that (not in the frames counted).
+#[test]
+fn a_frame_over_the_layers_budget_takes_no_memory() {
+    let mut l = connected(4);
+    assert!(l.plan.hidden() > 0, "a monitor left out");
+    assert_eq!(l.plan.layers().len(), 4);
+    assert!(l.m.toast().is_some(), "said");
+    assert_eq!(l.measure(300, |_| HandState::default()), (0, 0), "quiet");
+    let target =
+        l.m.world()
+            .shown(DisplayKey::new(PC, DisplayId(2)))
+            .expect("drawn")
+            .position;
+    let on_monitor = HandState {
+        ray: ray_at(target),
+        ..HandState::default()
+    };
+    assert_eq!(l.measure(300, |_| on_monitor), (0, 0), "a ray on a monitor");
+    assert!(l.plan.hidden() > 0);
+}
+
 /// The menu's picture as the ray goes over it, button to button and off it, twice: the
 /// first time each button's part is drawn (and kept), the second time it is only
 /// copied, without memory (`ui::Panel::render_if_dirty`). Each change is a part, never
 /// the whole picture.
 #[test]
 fn pointing_about_the_menu_takes_no_memory() {
-    let mut l = connected();
+    let mut l = connected(16);
     l.handle(Event::Menu(Action::OpenMenu, By::Elsewhere));
     for tab in [
         prostir::ui::Tab::Quick,
@@ -415,7 +482,7 @@ fn pointing_about_the_menu_takes_no_memory() {
 #[test]
 fn the_allocator_counts() {
     let start = allocations();
-    let l = connected();
+    let l = connected(16);
     let made = allocations();
     assert!(made > start);
     let _ = prostir::view::build(&l.m);

@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use glam::{Vec2, Vec3};
-use log::{info, warn};
+use log::{debug, info, warn};
 use prostir_proto::request::{Outcome, Request};
 use prostir_proto::state::{
     self, Battery, DisplayId, ErrorCode, Gen, HeadsetState, PcState, Prefs, Presence, ReqId, caps,
@@ -74,6 +74,9 @@ const REST_OFF: Duration = Duration::from_secs(5 * 60);
 /// The store says the app is not the person's: how long the message shows before the
 /// app closes.
 const NOT_OWNED_FOR: Duration = Duration::from_secs(6);
+/// Every monitor shown this long, the next one hidden for want of layers is said
+/// again.
+const HIDDEN_SAID_AGAIN: Duration = Duration::from_secs(60);
 
 /// What the model starts with: what the files held, what the system said, what the
 /// headset can.
@@ -185,6 +188,9 @@ pub enum PlatformEvent {
     /// Whether the person's own background picture is on the headset (looked for when
     /// the menu opened).
     CustomPanorama(bool),
+    /// This many monitors do not fit in the layers the compositor takes (see
+    /// `layers::plan`): said when the number changes.
+    LayersHidden(usize),
 }
 
 /// What the model asks the shell to do, in order.
@@ -381,6 +387,17 @@ impl ClockFace {
     }
 }
 
+/// The monitors that do not fit in the compositor's layers (see `layers`).
+#[derive(Debug, Default)]
+struct Hidden {
+    /// How many now.
+    now: usize,
+    /// How many the person was told of.
+    told: usize,
+    /// Since when every monitor shows again.
+    all_shown_since: Option<Instant>,
+}
+
 /// The store said the app is not the person's.
 #[derive(Debug)]
 struct NotOwned {
@@ -476,6 +493,8 @@ pub struct Model {
     first_failure: Option<(persist::File, String)>,
 
     not_owned: Option<NotOwned>,
+    /// The monitors that do not fit in the compositor's layers.
+    hidden: Hidden,
 }
 
 impl Model {
@@ -580,6 +599,7 @@ impl Model {
             save_failures: persist::Dirty::default(),
             first_failure: None,
             not_owned: None,
+            hidden: Hidden::default(),
         };
         // The language's file had lines that could not be read: said once, in front.
         if let Some(warning) = m.texts().warning() {
@@ -1126,7 +1146,43 @@ impl Model {
                 self.show_error(text);
             }
             PlatformEvent::CustomPanorama(there) => self.headset.custom_panorama = there,
+            PlatformEvent::LayersHidden(hidden) => self.layers_hidden(hidden),
         }
+    }
+
+    /// `hidden` monitors do not fit in the compositor's layers now (the farthest go
+    /// first, see `layers`). The person is told once, when more go than were said; after
+    /// a while with every monitor shown, the next time is said again.
+    fn layers_hidden(&mut self, hidden: usize) {
+        let now = self.now;
+        let h = &mut self.hidden;
+        if hidden == 0 {
+            if h.now > 0 {
+                debug!("every monitor shows again");
+                h.all_shown_since = Some(now);
+            }
+            h.now = 0;
+            return;
+        }
+        if h.all_shown_since
+            .take()
+            .is_some_and(|at| now.saturating_duration_since(at) >= HIDDEN_SAID_AGAIN)
+        {
+            h.told = 0;
+        }
+        h.now = hidden;
+        if hidden <= h.told {
+            return;
+        }
+        h.told = hidden;
+        warn!(
+            "{hidden} monitors hidden: the compositor takes {} layers in a frame",
+            self.headset.caps.layers_max
+        );
+        let text = self
+            .texts()
+            .f("headset-layers-hidden", &[("count", hidden.into())]);
+        self.show_toast(text);
     }
 
     /// What became of a stream's video (of its generation streaming now only). A

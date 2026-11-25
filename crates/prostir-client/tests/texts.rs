@@ -37,7 +37,43 @@ const SOURCES: &[(&str, &str)] = &[
         "app/actions/settings.rs",
         include_str!("../src/app/actions/settings.rs"),
     ),
-    ("main_loop.rs", include_str!("../src/main_loop.rs")),
+    ("main_loop/mod.rs", include_str!("../src/main_loop/mod.rs")),
+    (
+        "main_loop/acts.rs",
+        include_str!("../src/main_loop/acts.rs"),
+    ),
+    (
+        "main_loop/compose.rs",
+        include_str!("../src/main_loop/compose.rs"),
+    ),
+    (
+        "main_loop/events.rs",
+        include_str!("../src/main_loop/events.rs"),
+    ),
+    (
+        "main_loop/input.rs",
+        include_str!("../src/main_loop/input.rs"),
+    ),
+    (
+        "main_loop/no_selftest.rs",
+        include_str!("../src/main_loop/no_selftest.rs"),
+    ),
+    (
+        "main_loop/pictures.rs",
+        include_str!("../src/main_loop/pictures.rs"),
+    ),
+    (
+        "main_loop/shell.rs",
+        include_str!("../src/main_loop/shell.rs"),
+    ),
+    (
+        "main_loop/spheres.rs",
+        include_str!("../src/main_loop/spheres.rs"),
+    ),
+    (
+        "main_loop/start.rs",
+        include_str!("../src/main_loop/start.rs"),
+    ),
     ("view.rs", include_str!("../src/view.rs")),
     (
         "interaction/mod.rs",
@@ -112,6 +148,8 @@ const OTHER_CODE: &[(&str, &str)] = &[
     ("layout/stick.rs", include_str!("../src/layout/stick.rs")),
     ("layout/tests.rs", include_str!("../src/layout/tests.rs")),
     ("lib.rs", include_str!("../src/lib.rs")),
+    ("layers/mod.rs", include_str!("../src/layers/mod.rs")),
+    ("layers/tests.rs", include_str!("../src/layers/tests.rs")),
     (
         "platform/sound/mod.rs",
         include_str!("../src/platform/sound/mod.rs"),
