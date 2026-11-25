@@ -431,7 +431,9 @@ pub fn place_new<K: Key>(
 /// [`make_room`]). Another where it was, further away (see [`back_into_view`]), where
 /// that is in view; else, with `any`, into the main row as well. With no room in the
 /// row (it would go all the way around), a monitor too wide for the circle goes over or
-/// under a row on a wider circle (see [`FAR_ONE`]) where that is in view.
+/// under a row on a wider circle (see [`FAR_ONE`]) where that is in view. In view
+/// nowhere clear of every other: in view where it is seen over or behind another by
+/// [`SLIVER`] at most; only with no such place either, where [`place_new`] put it.
 #[allow(clippy::too_many_arguments)]
 pub fn place_in_view<K: Key>(
     placements: &HashMap<K, Placement>,
@@ -468,15 +470,23 @@ pub fn place_in_view<K: Key>(
     // No room in the row: over or under one, further away, so seen lower.
     let limits = circle.limits();
     let far = place::place_within(&all, &frame, gaze, px, Some(&rows), &limits, FAR_ONE);
-    (
-        if in_view(&far, (center, tilt)) {
-            far
-        } else {
-            at
-        },
-        false,
-    )
+    if in_view(&far, (center, tilt)) {
+        return (far, false);
+    }
+    // Nowhere in view clear of every other: in view, seen over or behind another by a
+    // sliver of either at most.
+    let sliver = |one: f32| {
+        place::place_in_view_within(&all, &frame, gaze, px, Some(&rows), &limits, one, SLIVER)
+    };
+    if let Some(p) = sliver(circle::MAX_ONE).or_else(|| sliver(FAR_ONE)) {
+        return (p, false);
+    }
+    (at, false)
 }
+
+/// How much of either's face a new monitor may be seen over or behind another where
+/// it has no place in view clear of every other (3 %).
+const SLIVER: f64 = 0.03;
 
 /// `at`, a place over (or under) a row out of view for a monitor of stream size `px`,
 /// carried away from the eye as if its circle were larger (see [`further`]), its
@@ -1041,6 +1051,26 @@ fn clear_up_of(
     hi + more
 }
 
+/// The first of `at(k)` that is some, `p` carried `k` times as far (see [`further`])
+/// for `k` from 1 up to where its edges reach `circle::VIEW_RADIUS` from the eye, in
+/// forty steps.
+fn further_in_view(
+    p: Placement,
+    frame: &Frame,
+    at: impl Fn(f32) -> Option<Placement>,
+) -> Option<Placement> {
+    let local = frame.unplace(p);
+    let along = Vec3::new(local.position.x, 0.0, local.position.z).length();
+    let reach = (along * along + local.width * local.width / 4.0).sqrt();
+    if along < 1e-6 || reach >= circle::VIEW_RADIUS {
+        return None;
+    }
+    let most = circle::VIEW_RADIUS / reach;
+    (1..=40)
+        .map(|i| 1.0 + (most - 1.0) * i as f32 / 40.0)
+        .find_map(at)
+}
+
 /// How much further a monitor lifted out from behind another goes (a centimetre): seen
 /// apart, not meeting.
 const SEEN_CLEAR: f32 = 0.01;
@@ -1119,6 +1149,28 @@ fn clear_above_and_below<K: Key>(
             }
             let up = frame.to_local(op.position).y >= frame.to_local(mp.position).y;
             let dir = if up { 1.0 } else { -1.0 };
+            // One monitor lifted out of view goes further away instead, where it is
+            // seen nearer eye level: as little further as it takes to be in view and
+            // clear of this one.
+            if !group.contains(&o) {
+                let clear_at = |p: Placement| {
+                    lifted(
+                        p,
+                        frame,
+                        dir * clear_up_of(p, oh, &[(mp, mh)], frame, dir, newly_seen),
+                    )
+                };
+                let seen = |p: &Placement| prostir_layout::space::in_view(&frame.unplace(*p));
+                if !seen(&clear_at(op))
+                    && let Some(p) = further_in_view(op, frame, |k| {
+                        Some(clear_at(further(op, frame, k, false))).filter(seen)
+                    })
+                {
+                    placements.insert(o, p);
+                    work.push(o);
+                    continue;
+                }
+            }
             // The whole piece, as far as the member that needs it most.
             let members = piece(o);
             let t = members
