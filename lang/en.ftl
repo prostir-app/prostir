@@ -180,6 +180,51 @@ pc-local-prostir-is-already-running = Prostir is already running
 pc-local-but-not-on-this-session-bus = , but not on this session bus: its window opens from the session it was started in
 pc-local-this-prostir-was-started-by-another = this Prostir was started by another one, which found none running: it starts no other
 
+## src/pairing.rs
+
+pc-pairing-wrong-pairing-codes = Wrong pairing codes
+pc-pairing-someone-typed-wrong-codes-several = Someone typed wrong codes several times. New attempts now have to wait.
+pc-pairing-too-many-wrong-codes-try-again = Too many wrong codes. Try again in
+pc-pairing-min = min.
+pc-pairing-another-headset-is-pairing-with-this = Another headset is pairing with this PC right now. Try again in a minute.
+pc-pairing-no-code-was-typed-on-the = No code was typed on the PC
+pc-pairing-the-pc-has-no-dialog-for = The PC has no dialog for the code. Choose "The other way: code on the PC, type it here".
+pc-pairing-headset = Headset
+pc-pairing-headset-paired = Headset paired
+pc-pairing-can-connect-now = can connect now.
+pc-pairing-pairing-a-headset = Pairing a headset
+pc-pairing-type-this-code-in-the-headset = Type this code in the headset:
+pc-pairing-older = older
+pc-pairing-update-prostir-on-the-pc = Update Prostir on the PC
+pc-pairing-the-headset-app-is-newer = The headset app is newer:
+pc-pairing-the-pc-has = the PC has
+pc-pairing-update-prostir-in-the-headset = Update Prostir in the headset
+pc-pairing-the-headset-app-is-older = The headset app is older:
+pc-pairing-the-headset-and-pc-builds-are = The headset and PC builds are from different versions of the branch
+pc-pairing-the-headset-has = The headset has
+pc-pairing-update-both = Update both.
+
+## src/sessions.rs
+
+pc-sessions-this-pc-no-longer-trusts-this = This PC no longer trusts this headset. Pair them again.
+pc-sessions-another-headset-is-already-connected = Another headset is already connected to this PC.
+
+## src/session/mod.rs
+
+pc-session-headset-battery = Headset battery:
+pc-session-the-headset-battery-is-low = The headset battery is low
+pc-session-the-headset-takes-no-commands = The headset takes no commands
+pc-session-the-headset-does-not-answer = The headset does not answer
+pc-session-the-headset-disconnected = The headset disconnected
+pc-session-the-desktop-does-not-respond = The desktop does not respond
+
+## src/wake.rs
+
+pc-wake-new-headset-nearby = New headset nearby
+pc-wake-pair-it = Pair it?
+pc-wake-pair = Pair
+pc-wake-to-pair-it-choose-pair-a = To pair it, choose "Pair a new headset" in the Prostir menu.
+
 ### Settings window
 
 ## Pages

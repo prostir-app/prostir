@@ -62,11 +62,7 @@ impl Brain {
             info!("the headset from {from} was forgotten meanwhile: turning it away");
             return turn_away(
                 conn,
-                i18n::inline_t(
-                    "Цей ПК більше не довіряє шолому. Сполучіть їх знову.",
-                    "This PC no longer trusts this headset. Pair them again.",
-                )
-                .into(),
+                i18n::t("pc-sessions-this-pc-no-longer-trusts-this").into(),
             );
         }
         match brain::admit(self.sessions.keys(), &key, brain::max_headsets()) {
@@ -86,11 +82,7 @@ impl Brain {
                 warn!("another headset has a session: turning {from} away");
                 return turn_away(
                     conn,
-                    i18n::inline_t(
-                        "До ПК уже підключено інший шолом.",
-                        "Another headset is already connected to this PC.",
-                    )
-                    .into(),
+                    i18n::t("pc-sessions-another-headset-is-already-connected").into(),
                 );
             }
         }

@@ -32,7 +32,7 @@ use log::{debug, info, warn};
 
 use crate::door;
 use crate::find::{self, Responder};
-use crate::i18n::inline_t;
+use crate::i18n::t;
 use crate::platform::dialogs::{self, Notice};
 use crate::platform::signals;
 use crate::platform::sockets::{self, Sockets};
@@ -84,13 +84,10 @@ pub enum Wake {
 /// The notice of a new headset nearby, with its button (see `crate::door`).
 pub fn new_headset_notice() -> Option<Notice> {
     dialogs::notice(
-        inline_t("Новий шолом поруч", "New headset nearby"),
-        inline_t("Сполучити?", "Pair it?"),
-        inline_t("Сполучити", "Pair"),
-        inline_t(
-            "Щоб сполучити, виберіть «Сполучити новий шолом» у меню Prostir.",
-            "To pair it, choose \"Pair a new headset\" in the Prostir menu.",
-        ),
+        t("pc-wake-new-headset-nearby"),
+        t("pc-wake-pair-it"),
+        t("pc-wake-pair"),
+        t("pc-wake-to-pair-it-choose-pair-a"),
     )
 }
 

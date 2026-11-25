@@ -171,6 +171,51 @@ pc-local-prostir-is-already-running = Prostir уже працює
 pc-local-but-not-on-this-session-bus = , але не на цій сеансовій шині: його вікно відкривається з сеансу, де його запущено
 pc-local-this-prostir-was-started-by-another = цей Prostir запустив інший, який не знайшов запущеного: цей не запускає ще один
 
+## src/pairing.rs
+
+pc-pairing-wrong-pairing-codes = Неправильні коди сполучення
+pc-pairing-someone-typed-wrong-codes-several = Хтось кілька разів ввів неправильний код. Нові спроби тепер чекають.
+pc-pairing-too-many-wrong-codes-try-again = Забагато неправильних кодів. Спробуйте за
+pc-pairing-min = хв.
+pc-pairing-another-headset-is-pairing-with-this = Інший шолом саме сполучається з цим ПК. Спробуйте за хвилину.
+pc-pairing-no-code-was-typed-on-the = На ПК код не введено
+pc-pairing-the-pc-has-no-dialog-for = На ПК немає вікна для коду. Виберіть «Навпаки: код на ноутбуці, ввести тут».
+pc-pairing-headset = Шолом
+pc-pairing-headset-paired = Шолом сполучено
+pc-pairing-can-connect-now = тепер може підключатися.
+pc-pairing-pairing-a-headset = Сполучення шолома
+pc-pairing-type-this-code-in-the-headset = Введіть у шоломі код
+pc-pairing-older = старіша
+pc-pairing-update-prostir-on-the-pc = Оновіть Prostir на ПК
+pc-pairing-the-headset-app-is-newer = Застосунок у шоломі новіший:
+pc-pairing-the-pc-has = а на ПК
+pc-pairing-update-prostir-in-the-headset = Оновіть Prostir у шоломі
+pc-pairing-the-headset-app-is-older = Застосунок у шоломі старіший:
+pc-pairing-the-headset-and-pc-builds-are = Збірки шолома й ПК з різних версій гілки
+pc-pairing-the-headset-has = У шоломі
+pc-pairing-update-both = Оновіть обидві.
+
+## src/sessions.rs
+
+pc-sessions-this-pc-no-longer-trusts-this = Цей ПК більше не довіряє шолому. Сполучіть їх знову.
+pc-sessions-another-headset-is-already-connected = До ПК уже підключено інший шолом.
+
+## src/session/mod.rs
+
+pc-session-headset-battery = Заряд шолома:
+pc-session-the-headset-battery-is-low = Шолом скоро розрядиться
+pc-session-the-headset-takes-no-commands = Шолом не виконує команд
+pc-session-the-headset-does-not-answer = Шолом не відповідає
+pc-session-the-headset-disconnected = Шолом відключився
+pc-session-the-desktop-does-not-respond = Стільниця не відповідає
+
+## src/wake.rs
+
+pc-wake-new-headset-nearby = Новий шолом поруч
+pc-wake-pair-it = Сполучити?
+pc-wake-pair = Сполучити
+pc-wake-to-pair-it-choose-pair-a = Щоб сполучити, виберіть «Сполучити новий шолом» у меню Prostir.
+
 ### Settings window
 
 ## Сторінки
