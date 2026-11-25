@@ -18,7 +18,7 @@ use prostir_proto::request::{Asked, Command, Request as HeadsetRequest};
 use prostir_proto::state::{self as wire, DisplayId, HeadsetCaps, Limits, Mode, caps};
 
 use crate::api::{self, ApiError, CodecChoice, CtlReply, Failure, Reply, Request};
-use crate::i18n::inline_t;
+use crate::i18n::t;
 use crate::platform::{self, MonitorSpec};
 use crate::screen::ScreenId;
 use crate::worker::JobId;
@@ -59,10 +59,7 @@ pub fn fits_the_wire(command: &Command) -> Result<(), Failure> {
             ApiError::BadArgument,
             format!(
                 "{} {}",
-                inline_t(
-                    "Назва профілю задовга, байтів щонайбільше:",
-                    "A profile's name is too long, bytes at most:"
-                ),
+                t("pc-local-a-profile-s-name-is-too"),
                 wire::MAX_DISPLAY_NAME
             ),
         ));
@@ -74,10 +71,7 @@ pub fn fits_the_wire(command: &Command) -> Result<(), Failure> {
     msg.encode().map(drop).map_err(|e| {
         Failure::new(
             ApiError::BadArgument,
-            format!(
-                "{}: {e}",
-                inline_t("Команда не годиться", "The command does not fit")
-            ),
+            format!("{}: {e}", t("pc-local-the-command-does-not-fit")),
         )
     })
 }
@@ -109,7 +103,7 @@ fn unsupported(text: &str) -> CtlReply {
 fn failed(e: &anyhow::Error) -> CtlReply {
     warn!("local API: {e:#}");
     let text = e.downcast_ref::<errors::UserError>().map_or_else(
-        || inline_t("Не вдалося", "It did not work").to_owned(),
+        || t("pc-local-it-did-not-work").to_owned(),
         ToString::to_string,
     );
     CtlReply::failed(api::of_code(errors::code_of(e)), text)
@@ -197,14 +191,11 @@ impl Brain {
         info!("local API: {}", logged(&request));
         if let Some(command) = command_of(&request) {
             if self.sessions.is_empty() {
-                let text = inline_t("Шолом не підключено", "No headset is connected");
+                let text = t("pc-local-no-headset-is-connected");
                 return self.answer(reply, CtlReply::failed(ApiError::NotConnected, text));
             }
             if self.roles.main.is_none() {
-                let text = inline_t(
-                    "Команди з ПК виконує лише головний шолом, а підключено гостя",
-                    "Commands from the PC go to the main headset; a guest is connected",
-                );
+                let text = t("pc-local-commands-from-the-pc-go-to");
                 return self.answer(reply, CtlReply::failed(ApiError::NotAllowed, text));
             }
             if let Err(why) = fits_the_wire(&command) {
@@ -255,14 +246,11 @@ impl Brain {
             .filter(char::is_ascii_digit)
             .collect::<String>();
         if digits.len() != 6 || code.chars().any(|c| !c.is_ascii_digit() && c != ' ') {
-            let text = inline_t("Код: шість цифр", "The code: six digits");
+            let text = t("pc-local-the-code-six-digits");
             return self.answer(reply, CtlReply::failed(ApiError::BadArgument, text));
         }
         if self.code_reply.is_some() || !pairing::type_code(digits) {
-            let text = inline_t(
-                "Жоден шолом не чекає на код",
-                "No headset is waiting for a code",
-            );
+            let text = t("pc-local-no-headset-is-waiting-for-a");
             return self.answer(reply, CtlReply::failed(ApiError::NotAllowed, text));
         }
         self.code_reply = Some(reply);
@@ -280,10 +268,7 @@ impl Brain {
     /// takes it, and the answer comes once it did (see [`Brain::shot_taken`]).
     fn screenshot(&mut self, n: u32, reply: Reply) {
         let Some(displays) = self.displays.as_mut() else {
-            let text = inline_t(
-                "Знімок можна зробити, поки монітори є на стільниці",
-                "A screenshot is taken while the monitors are on the desktop",
-            );
+            let text = t("pc-local-a-screenshot-is-taken-while-the");
             return self.answer(reply, unsupported(text));
         };
         if displays.desk_stuck() {
@@ -344,10 +329,7 @@ impl Brain {
     /// waiting for it are answered now, as no answer comes any more.
     pub(crate) fn shots_without_monitors(&mut self) {
         for (_, _, reply) in self.shots.over(Instant::now(), true) {
-            let text = inline_t(
-                "Монітори зникли зі стільниці раніше, ніж знімок",
-                "The monitors left the desktop before the screenshot",
-            );
+            let text = t("pc-local-the-monitors-left-the-desktop-before");
             self.answer(reply, unsupported(text));
         }
     }
@@ -448,7 +430,7 @@ impl Brain {
                 if !crate::store::BITRATES.contains(&mbit) {
                     return CtlReply::failed(
                         ApiError::BadArgument,
-                        inline_t("Якість: від 5 до 100 Мбіт/с", "Quality: 5 to 100 Mbit/s"),
+                        t("pc-local-quality-5-to-100-mbit-s"),
                     );
                 }
                 self.store.set_bitrate(mbit);
@@ -475,10 +457,7 @@ impl Brain {
             }
             Request::Autostart { on } => {
                 if !platform::autostart::available() {
-                    return unsupported(inline_t(
-                        "Тут Prostir не вмикає автозапуск сам",
-                        "Starting with the session is not set from here on this PC",
-                    ));
+                    return unsupported(t("pc-local-starting-with-the-session-is-not"));
                 }
                 self.set_autostart(on);
                 done()
@@ -517,10 +496,7 @@ impl Brain {
                 self.quit_asked = true;
                 done()
             }
-            Request::SetMic { .. } => unsupported(inline_t(
-                "Мікрофон шолома вмикають лише в шоломі",
-                "The headset microphone is switched in the headset only",
-            )),
+            Request::SetMic { .. } => unsupported(t("pc-local-the-headset-microphone-is-switched")),
             Request::PairNewHeadset => {
                 let seconds = self
                     .door
@@ -544,24 +520,15 @@ impl Brain {
                     }
                     Err(e) => failed(&e),
                 },
-                None => unsupported(inline_t(
-                    "Монітори розставляються, поки вони є на стільниці",
-                    "Monitors are placed while they are on the desktop",
-                )),
+                None => unsupported(t("pc-local-monitors-are-placed-while-they-are")),
             },
             Request::Volume { level } if level > 100 => {
                 CtlReply::failed(ApiError::BadArgument, "level: 0 to 100")
             }
             Request::Volume { level } => match self.lead_mut().map(|s| s.volume_from_pc(level)) {
-                None => unsupported(inline_t(
-                    "Гучність шолома змінюється, поки він підключений",
-                    "The headset's volume is changed while it is connected",
-                )),
+                None => unsupported(t("pc-local-the-headset-s-volume-is-changed")),
                 Some(true) => done(),
-                Some(false) => unsupported(inline_t(
-                    "Гучність цього шолома з ПК не змінюється: лише його кнопками",
-                    "This headset's volume is not changed from the PC, only with its buttons",
-                )),
+                Some(false) => unsupported(t("pc-local-this-headset-s-volume-is-not")),
             },
             // Handled above.
             Request::Recenter
@@ -763,19 +730,13 @@ impl Brain {
             [] => {
                 return CtlReply::failed(
                     ApiError::BadArgument,
-                    format!(
-                        "{} {which}",
-                        inline_t("Немає сполученого шолома", "No paired headset")
-                    ),
+                    format!("{} {which}", t("pc-local-no-paired-headset")),
                 );
             }
             _ => {
                 return CtlReply::failed(
                     ApiError::BadArgument,
-                    inline_t(
-                        "Так названо кілька шоломів: назвіть ключем",
-                        "Several headsets have this name: give its key",
-                    ),
+                    t("pc-local-several-headsets-have-this-name-give"),
                 );
             }
         };
@@ -987,11 +948,7 @@ impl Brain {
         {
             problems.push(api::Problem {
                 code: ApiError::NotAllowed,
-                text: inline_t(
-                    "Система шолома не дозволяє записувати мікрофон",
-                    "The headset's system does not let it record its microphone",
-                )
-                .into(),
+                text: t("pc-local-the-headset-s-system-does-not").into(),
             });
         }
         if let Some(f) = &mic_failure {
@@ -1242,15 +1199,12 @@ pub fn wake_running(pid: Option<u32>) -> std::io::Result<crate::ctl::Woken> {
 /// What says that Prostir (`pid`, where known) runs, but not on this session bus.
 pub fn not_on_this_bus(pid: Option<u32>) -> String {
     let who = pid.map_or_else(String::new, |pid| {
-        format!(" ({} {pid})", inline_t("процес", "process"))
+        format!(" ({} {pid})", t("pc-local-process"))
     });
     format!(
         "{}{who}{}",
-        inline_t("Prostir уже працює", "Prostir is already running"),
-        inline_t(
-            ", але не на цій сеансовій шині: його вікно відкривається з сеансу, де його запущено",
-            ", but not on this session bus: its window opens from the session it was started in",
-        ),
+        t("pc-local-prostir-is-already-running"),
+        t("pc-local-but-not-on-this-session-bus"),
     )
 }
 
@@ -1311,9 +1265,8 @@ pub const STARTED_TO_OPEN: &str = "PROSTIR_STARTED_TO_OPEN";
 fn start_detached(errors: std::process::Stdio) -> std::io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
     if std::env::var_os(STARTED_TO_OPEN).is_some() {
-        return Err(std::io::Error::other(inline_t(
-            "цей Prostir запустив інший, який не знайшов запущеного: цей не запускає ще один",
-            "this Prostir was started by another one, which found none running: it starts no other",
+        return Err(std::io::Error::other(t(
+            "pc-local-this-prostir-was-started-by-another",
         )));
     }
     let mut command = std::process::Command::new(this_program()?);

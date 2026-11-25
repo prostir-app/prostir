@@ -99,6 +99,78 @@ pc-main-prostir-is-not-running = Prostir не працює
 pc-main-port = Порт
 pc-main-is-taken-by-another-program = зайнятий іншою програмою.
 
+## src/platform/linux/tray.rs
+
+pc-tray-on = увімкнено
+pc-tray-off = вимкнено
+pc-tray-headset-taken-off-streaming-paused = Шолом знято, трансляцію призупинено
+pc-tray-headset-connected = Шолом підключено
+pc-tray-waiting-for-the-headset = Чекаю на шолом…
+pc-tray-a-pc-display-in-the-headset = , екран ПК у шоломі
+pc-tray-no-virtual-monitors = Віртуальних моніторів немає
+pc-tray-virtual-monitors = Віртуальних моніторів
+pc-tray-pairing-code = Код сполучення
+pc-tray-other-headsets = Інших шоломів
+pc-tray-the-desktop-does-not-respond = Стільниця не відповідає
+pc-tray-headset-microphone-no-permission = Мікрофон шолома: немає дозволу
+pc-tray-headset-battery = Заряд шолома:
+pc-tray-charging = , заряджається
+pc-tray-bring-the-monitors-in-front = Монітори перед собою
+pc-tray-no-limits = Без обмежень
+pc-tray-video-quality = Якість відео
+pc-tray-sharper-text-about-2-ms-more = Чіткіший текст (кодування на ~2 мс довше)
+pc-tray-count-this-pc-among-users = Рахувати цей ПК серед користувачів
+pc-tray-start-with-the-system = Запускати разом із системою
+pc-tray-settings = Налаштування…
+pc-tray-stop-pairing = Зупинити сполучення
+pc-tray-pair-a-new-headset = Сполучити новий шолом
+pc-tray-forget-paired-headsets = Забути сполучені шоломи
+pc-tray-quit = Вийти
+pc-tray-quality-economy = Економна: 15 Мбіт/с
+pc-tray-quality-normal = Звичайна: 30 Мбіт/с
+pc-tray-quality-high = Висока: 50 Мбіт/с
+
+## src/platform/linux/dialogs.rs
+
+pc-dialogs-a-headset-wants-to-connect-type =
+    Шолом хоче підключитися.
+    Введіть код, який він показує:
+pc-dialogs-code-from-the-headset = { "Код із шолома: " }
+
+## src/platform/linux/autostart.rs
+
+pc-autostart-starting-with-hyprland = Запуск разом із Hyprland
+pc-autostart-for-prostir-to-wait-for-the = Щоб Prostir чекав на шолом після входу, додайте в конфіг Hyprland рядок: exec-once = prostir serve
+
+## src/platform/local_api.rs
+
+pc-local-api-prostir-is-quitting = Prostir завершує роботу
+
+## src/local.rs
+
+pc-local-a-profile-s-name-is-too = Назва профілю задовга, байтів щонайбільше:
+pc-local-the-command-does-not-fit = Команда не годиться
+pc-local-it-did-not-work = Не вдалося
+pc-local-no-headset-is-connected = Шолом не підключено
+pc-local-commands-from-the-pc-go-to = Команди з ПК виконує лише головний шолом, а підключено гостя
+pc-local-the-code-six-digits = Код: шість цифр
+pc-local-no-headset-is-waiting-for-a = Жоден шолом не чекає на код
+pc-local-a-screenshot-is-taken-while-the = Знімок можна зробити, поки монітори є на стільниці
+pc-local-the-monitors-left-the-desktop-before = Монітори зникли зі стільниці раніше, ніж знімок
+pc-local-quality-5-to-100-mbit-s = Якість: від 5 до 100 Мбіт/с
+pc-local-starting-with-the-session-is-not = Тут Prostir не вмикає автозапуск сам
+pc-local-the-headset-microphone-is-switched = Мікрофон шолома вмикають лише в шоломі
+pc-local-monitors-are-placed-while-they-are = Монітори розставляються, поки вони є на стільниці
+pc-local-the-headset-s-volume-is-changed = Гучність шолома змінюється, поки він підключений
+pc-local-this-headset-s-volume-is-not = Гучність цього шолома з ПК не змінюється: лише його кнопками
+pc-local-no-paired-headset = Немає сполученого шолома
+pc-local-several-headsets-have-this-name-give = Так названо кілька шоломів: назвіть ключем
+pc-local-the-headset-s-system-does-not = Система шолома не дозволяє записувати мікрофон
+pc-local-process = процес
+pc-local-prostir-is-already-running = Prostir уже працює
+pc-local-but-not-on-this-session-bus = , але не на цій сеансовій шині: його вікно відкривається з сеансу, де його запущено
+pc-local-this-prostir-was-started-by-another = цей Prostir запустив інший, який не знайшов запущеного: цей не запускає ще один
+
 ### Settings window
 
 ## Сторінки

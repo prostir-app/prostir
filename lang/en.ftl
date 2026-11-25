@@ -108,6 +108,78 @@ pc-main-prostir-is-not-running = Prostir is not running
 pc-main-port = Port
 pc-main-is-taken-by-another-program = is taken by another program.
 
+## src/platform/linux/tray.rs
+
+pc-tray-on = on
+pc-tray-off = off
+pc-tray-headset-taken-off-streaming-paused = Headset taken off, streaming paused
+pc-tray-headset-connected = Headset connected
+pc-tray-waiting-for-the-headset = Waiting for the headset…
+pc-tray-a-pc-display-in-the-headset = , a PC display in the headset
+pc-tray-no-virtual-monitors = No virtual monitors
+pc-tray-virtual-monitors = Virtual monitors
+pc-tray-pairing-code = Pairing code
+pc-tray-other-headsets = Other headsets
+pc-tray-the-desktop-does-not-respond = The desktop does not respond
+pc-tray-headset-microphone-no-permission = Headset microphone: no permission
+pc-tray-headset-battery = Headset battery:
+pc-tray-charging = , charging
+pc-tray-bring-the-monitors-in-front = Bring the monitors in front
+pc-tray-no-limits = No limits
+pc-tray-video-quality = Video quality
+pc-tray-sharper-text-about-2-ms-more = Sharper text (about 2 ms more encoding)
+pc-tray-count-this-pc-among-users = Count this PC among users
+pc-tray-start-with-the-system = Start with the system
+pc-tray-settings = Settings…
+pc-tray-stop-pairing = Stop pairing
+pc-tray-pair-a-new-headset = Pair a new headset
+pc-tray-forget-paired-headsets = Forget paired headsets
+pc-tray-quit = Quit
+pc-tray-quality-economy = Economy: 15 Mbit/s
+pc-tray-quality-normal = Normal: 30 Mbit/s
+pc-tray-quality-high = High: 50 Mbit/s
+
+## src/platform/linux/dialogs.rs
+
+pc-dialogs-a-headset-wants-to-connect-type =
+    A headset wants to connect.
+    Type the code it shows:
+pc-dialogs-code-from-the-headset = { "Code from the headset: " }
+
+## src/platform/linux/autostart.rs
+
+pc-autostart-starting-with-hyprland = Starting with Hyprland
+pc-autostart-for-prostir-to-wait-for-the = For Prostir to wait for the headset after login, add this line to the Hyprland config: exec-once = prostir serve
+
+## src/platform/local_api.rs
+
+pc-local-api-prostir-is-quitting = Prostir is quitting
+
+## src/local.rs
+
+pc-local-a-profile-s-name-is-too = A profile's name is too long, bytes at most:
+pc-local-the-command-does-not-fit = The command does not fit
+pc-local-it-did-not-work = It did not work
+pc-local-no-headset-is-connected = No headset is connected
+pc-local-commands-from-the-pc-go-to = Commands from the PC go to the main headset; a guest is connected
+pc-local-the-code-six-digits = The code: six digits
+pc-local-no-headset-is-waiting-for-a = No headset is waiting for a code
+pc-local-a-screenshot-is-taken-while-the = A screenshot is taken while the monitors are on the desktop
+pc-local-the-monitors-left-the-desktop-before = The monitors left the desktop before the screenshot
+pc-local-quality-5-to-100-mbit-s = Quality: 5 to 100 Mbit/s
+pc-local-starting-with-the-session-is-not = Starting with the session is not set from here on this PC
+pc-local-the-headset-microphone-is-switched = The headset microphone is switched in the headset only
+pc-local-monitors-are-placed-while-they-are = Monitors are placed while they are on the desktop
+pc-local-the-headset-s-volume-is-changed = The headset's volume is changed while it is connected
+pc-local-this-headset-s-volume-is-not = This headset's volume is not changed from the PC, only with its buttons
+pc-local-no-paired-headset = No paired headset
+pc-local-several-headsets-have-this-name-give = Several headsets have this name: give its key
+pc-local-the-headset-s-system-does-not = The headset's system does not let it record its microphone
+pc-local-process = process
+pc-local-prostir-is-already-running = Prostir is already running
+pc-local-but-not-on-this-session-bus = , but not on this session bus: its window opens from the session it was started in
+pc-local-this-prostir-was-started-by-another = this Prostir was started by another one, which found none running: it starts no other
+
 ### Settings window
 
 ## Pages
