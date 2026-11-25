@@ -1,7 +1,7 @@
-//! The frame's layers, back to front, as OpenXR takes them, and the frame's end:
-//! the room or the panorama, the window onto the keyboard, the monitors, what is
-//! wrong with their pictures, the placeholder, the menu's button, the menu, the
-//! toast, "Attach", the palm menu, the hands and rays, the pointer dots.
+//! The frame's layers as OpenXR takes them, and the frame's end: what `layers::plan`
+//! says is shown, in its order, each made of the picture the shell has for it (the
+//! room or the panorama, the window onto the keyboard, a monitor's stream, a picture
+//! drawn on the CPU, the hands and rays).
 
 use std::ptr;
 use std::time::Instant;
@@ -12,20 +12,19 @@ use log::warn;
 use openxr as xr;
 use openxr::sys::Handle as _;
 
-use super::Kept;
-use super::pictures::TOAST_PX;
+use super::pictures::Pictures;
 use super::shell::Shell;
 use super::start::{Stage, Xr};
-use crate::app::{Event, PlatformEvent, TOAST_WIDTH};
-use crate::ids::Target;
-use crate::layout::{self, Cylinder};
+use super::{Gpu, Kept};
+use crate::app::{Event, PlatformEvent};
+use crate::ids::DisplayKey;
+use crate::layers::{self, Layer, Plan, Quad};
+use crate::layout::Cylinder;
 use crate::platform::meta::{self, passthrough};
 use crate::platform::openxr::overlay::{self, Sphere};
-use crate::platform::openxr::{self as xrutil, Gfx, as_layer, pose, posef};
-use crate::world::{
-    ATTACH_WIDTH, BUTTON_SIZE, KEYBOARD_ASPECT, WRIST_MENU_WIDTH, attach_height, panel_height,
-    panel_width, wrist_menu_height,
-};
+use crate::platform::openxr::{self as xrutil, Gfx, ImageLayer, as_layer, pose, posef};
+use crate::platform::video::SurfaceVideo;
+use crate::world::KEYBOARD_ASPECT;
 
 /// The side of the black layer over a dimmed room, in metres, a metre in front of
 /// the eyes: wider than any field of view.
@@ -37,15 +36,30 @@ pub struct Buffers {
     /// Where the eyes are, for the hands and rays.
     views: [xr::View; 2],
     pub spheres: Vec<Sphere>,
+    /// What is shown, where, in which order.
+    pub plan: Plan,
+    /// Each monitor's colour scale, in the plan's order.
     dims: Vec<xr::sys::CompositionLayerColorScaleBiasKHR>,
+    /// The flat layers and the curved ones, in the plan's order.
     quads: Vec<xr::sys::CompositionLayerQuad>,
     cylinders: Vec<xr::sys::CompositionLayerCylinderKHR>,
-    cursors: Vec<xr::sys::CompositionLayerQuad>,
-    /// What is wrong with a monitor's picture, over it or in its place.
-    troubles: Vec<xr::sys::CompositionLayerQuad>,
+    /// Where each layer of the plan was made, in its order.
+    made: Vec<Made>,
     /// The layers' list for `end`: its memory only, empty between frames (see
     /// [`reuse`]).
     layers: Vec<&'static xr::CompositionLayerBase<'static, Gfx>>,
+}
+
+/// Where a layer of the plan was made.
+#[derive(Debug, Clone, Copy)]
+enum Made {
+    Quad(usize),
+    Cylinder(usize),
+    Background,
+    KeyboardWindow,
+    Hands,
+    /// Its picture went in the meantime: left out.
+    Nothing,
 }
 
 /// An empty list of references in the memory of `v` (emptied): a list kept from frame
@@ -56,8 +70,72 @@ fn reuse<'a, 'b, T, U: 'b>(mut v: Vec<&'a T>) -> Vec<&'b U> {
     v.into_iter().filter_map(|_| None).collect()
 }
 
-/// The hands and rays drawn (`kept.buffers.spheres`, filled), the layers made and the
-/// frame at `time` ended: how many layers it wanted.
+/// What the shell has a picture for, for the plan.
+struct Have<'a> {
+    background: bool,
+    keyboard_window: bool,
+    hands: bool,
+    video: &'a SurfaceVideo,
+    pictures: &'a Pictures,
+}
+
+impl layers::Ready for Have<'_> {
+    fn background(&self) -> bool {
+        self.background
+    }
+
+    fn keyboard_window(&self) -> bool {
+        self.keyboard_window
+    }
+
+    fn picture(&self, id: DisplayKey) -> Option<(u32, u32)> {
+        self.video.image(id).map(|m| (m.width, m.height))
+    }
+
+    fn trouble(&self, id: DisplayKey) -> bool {
+        self.pictures.trouble_layers.contains_key(&id)
+    }
+
+    fn placeholder(&self) -> bool {
+        self.pictures.placeholder.is_some()
+    }
+
+    fn menu(&self) -> bool {
+        self.pictures.panel_layer.ready()
+    }
+
+    fn palm(&self) -> bool {
+        self.pictures.wrist_layer.ready()
+    }
+
+    fn attach(&self) -> bool {
+        self.pictures.attach_drawn.is_some()
+    }
+
+    fn hands(&self) -> bool {
+        self.hands
+    }
+}
+
+/// The picture of a planned flat layer (not a monitor's).
+fn picture_of<'p>(pictures: &'p Pictures, layer: &Layer) -> Option<(&'p ImageLayer, Quad)> {
+    Some(match *layer {
+        Layer::Trouble { id, quad } => (&pictures.trouble_layers.get(&id)?.2, quad),
+        Layer::Placeholder(quad) => (&pictures.placeholder.as_ref()?.0, quad),
+        Layer::MenuButton(quad) => (&pictures.button_layer, quad),
+        Layer::Menu(quad) => (&pictures.panel_layer, quad),
+        Layer::Toast(quad) => (&pictures.toast_layer, quad),
+        Layer::Attach(quad) => (&pictures.attach_layer, quad),
+        Layer::Palm(quad) => (&pictures.wrist_layer, quad),
+        Layer::Cursor(quad) => (&pictures.cursor_layer, quad),
+        Layer::Background | Layer::KeyboardWindow | Layer::Monitor(_) | Layer::Hands => {
+            return None;
+        }
+    })
+}
+
+/// The hands and rays drawn (`kept.buffers.spheres`, filled), the layers planned and
+/// made, and the frame at `time` ended: how many layers it wanted.
 pub fn end(
     xr: &Xr,
     stage: &mut Stage,
@@ -90,7 +168,6 @@ pub fn end(
         .as_ref()
         .map(|v| overlay::projection_layer(local, v));
 
-    // ---- Layers, back to front ----
     // Supersampled and sharpened, and the stream's picture the right way up, where
     // the runtime can.
     let quality = meta::sharper();
@@ -148,7 +225,7 @@ pub fn end(
     // part of it through (made once for each darkness).
     let dim = shell.room.dim();
     pictures.dim(
-        super::Gpu {
+        Gpu {
             session,
             gl,
             format,
@@ -164,12 +241,10 @@ pub fn end(
         )
     });
     let model = &shell.model;
-    let world = model.world();
-    let settings = *model.settings();
     let pano = pictures
         .pano_layer
         .as_ref()
-        .filter(|(b, _)| *b == model.settings().background)
+        .filter(|(b, _)| *b == model.settings().background && !shell.room.shown())
         .map(|(_, l)| xr::sys::CompositionLayerEquirect2KHR {
             ty: xr::sys::CompositionLayerEquirect2KHR::TYPE,
             next: ptr::null(),
@@ -183,26 +258,38 @@ pub fn end(
             upper_vertical_angle: std::f32::consts::FRAC_PI_2,
             lower_vertical_angle: -std::f32::consts::FRAC_PI_2,
         });
+    // Behind everything: the cameras' room, by whichever way this headset shows it,
+    // else its dimming, else the panorama.
+    let background: Option<&xr::CompositionLayerBase<'_, Gfx>> = passthrough_layer
+        .as_ref()
+        .map(as_layer)
+        .or_else(|| htc_layer.as_ref().map(as_layer))
+        .or_else(|| dim_quad.as_ref().map(as_layer))
+        .or_else(|| pano.as_ref().map(as_layer));
 
-    // Far monitors first so nearer (and grabbed) ones draw on top.
-    let curve = world.curve_radius(&settings);
-    let order = world.draw_list();
+    // What is shown, where, and in which order.
+    let have = Have {
+        background: background.is_some(),
+        keyboard_window: keyboard_layer.is_some(),
+        hands: hands_layer.is_some(),
+        video: &shell.video,
+        pictures,
+    };
+    let plan = &mut buffers.plan;
+    layers::plan(model, hands, &have, plan);
+
+    // The monitors' colour scales first: their layers point at them.
     let dims = &mut buffers.dims;
     dims.clear();
-    dims.extend(order.iter().map(|(_, id)| {
-        // Fading in: premultiplied, so colour and alpha scale together.
-        let t = world.appear(*id);
-        let t = t * t * (3.0 - 2.0 * t);
-        // Focus dimming, the brightness setting and fading in, together.
-        let b = world.brightness(*id) * t * f32::from(settings.brightness) / 100.0;
-        xr::sys::CompositionLayerColorScaleBiasKHR {
+    dims.extend(plan.layers().iter().filter_map(|l| match l {
+        Layer::Monitor(m) => Some(xr::sys::CompositionLayerColorScaleBiasKHR {
             ty: xr::sys::CompositionLayerColorScaleBiasKHR::TYPE,
             next: video_next,
             color_scale: xr::Color4f {
-                r: b,
-                g: b,
-                b,
-                a: t,
+                r: m.bright,
+                g: m.bright,
+                b: m.bright,
+                a: m.alpha,
             },
             color_bias: xr::Color4f {
                 r: 0.0,
@@ -210,171 +297,58 @@ pub fn end(
                 b: 0.0,
                 a: 0.0,
             },
-        }
+        }),
+        _ => None,
     }));
     let (quads, cylinders) = (&mut buffers.quads, &mut buffers.cylinders);
     quads.clear();
     cylinders.clear();
-    for (dim, (_, id)) in dims.iter().zip(order) {
-        let scale = dim.color_scale;
-        let fading = exts.khr_composition_layer_color_scale_bias && scale.a < 1.0;
-        let layer_flags = if fading {
-            xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA
-        } else {
-            xr::CompositionLayerFlags::EMPTY
-        };
-        let next = if exts.khr_composition_layer_color_scale_bias && scale.r < 1.0 {
-            ptr::from_ref(dim).cast()
-        } else {
-            video_next
-        };
-        let (Some(m), Some(p)) = (shell.video.image(*id), world.shown(*id)) else {
-            continue;
-        };
-        let height = p.width * m.height as f32 / m.width.max(1) as f32;
-        let sub_image = xr::sys::SwapchainSubImage {
-            swapchain: m.swapchain.as_raw(),
-            image_rect: xr::Rect2Di {
-                offset: xr::Offset2Di { x: 0, y: 0 },
-                extent: xr::Extent2Di {
-                    width: m.width as i32,
-                    height: m.height as i32,
-                },
+    let made = &mut buffers.made;
+    made.clear();
+    let mut dims = dims.iter();
+    for layer in plan.layers() {
+        let m = match layer {
+            Layer::Background => Made::Background,
+            Layer::KeyboardWindow => Made::KeyboardWindow,
+            Layer::Hands => Made::Hands,
+            Layer::Monitor(m) => match dims.next() {
+                Some(dim) => monitor(
+                    m,
+                    dim,
+                    video_next,
+                    MonitorLayers {
+                        exts,
+                        video: &shell.video,
+                        local,
+                        quads,
+                        cylinders,
+                    },
+                ),
+                None => Made::Nothing,
             },
-            image_array_index: 0,
+            _ => match picture_of(pictures, layer) {
+                Some((picture, Quad { at, height })) => {
+                    quads.push(picture.quad(local, posef(&at), at.width, height));
+                    Made::Quad(quads.len() - 1)
+                }
+                None => Made::Nothing,
+            },
         };
-        // Window panels stay flat.
-        if let Some(radius) = curve.filter(|_| !world.is_window(*id)) {
-            let c = Cylinder::new(p, radius);
-            cylinders.push(xr::sys::CompositionLayerCylinderKHR {
-                ty: xr::sys::CompositionLayerCylinderKHR::TYPE,
-                next,
-                layer_flags,
-                space: local.as_raw(),
-                eye_visibility: xr::EyeVisibility::BOTH,
-                sub_image,
-                pose: pose(c.center, p.rotation),
-                radius: c.radius,
-                central_angle: c.central_angle,
-                aspect_ratio: c.arc_length() / height,
-            });
-        } else {
-            quads.push(xr::sys::CompositionLayerQuad {
-                ty: xr::sys::CompositionLayerQuad::TYPE,
-                next,
-                layer_flags,
-                space: local.as_raw(),
-                eye_visibility: xr::EyeVisibility::BOTH,
-                sub_image,
-                pose: posef(p),
-                size: xr::Extent2Df {
-                    width: p.width,
-                    height,
-                },
-            });
-        }
+        made.push(m);
     }
 
-    let button = world.button().map(|b| {
-        pictures
-            .button_layer
-            .quad(local, posef(&b), BUTTON_SIZE, BUTTON_SIZE)
-    });
-    let panel_quad = (model.menu().open && pictures.panel_layer.ready()).then(|| {
-        pictures.panel_layer.quad(
-            local,
-            posef(&world.menu()),
-            panel_width(settings.large_menu),
-            panel_height(settings.large_menu),
-        )
-    });
-    let cursors = &mut buffers.cursors;
-    cursors.clear();
-    cursors.extend(hands.picks().iter().flatten().map(|&Target { hit, .. }| {
-        let size = 0.011 * hit.t.clamp(0.3, 4.0);
-        let at = hit.point + hit.normal * 0.004;
-        pictures.cursor_layer.quad(
-            local,
-            pose(at, layout::facing(at, at + hit.normal)),
-            size,
-            size,
-        )
-    }));
-    // Under a fingertip near the menu: a dot that shrinks as the finger gets closer.
-    for (_, at, z, _) in hands.pokes() {
-        let place = &world.menu();
-        let normal = place.rotation * Vec3::Z;
-        let point = place.position + place.rotation * Vec3::new(at.x, at.y, 0.0) + normal * 0.002;
-        let size = 0.006 + z.max(0.0) * 0.15;
-        cursors.push(pictures.cursor_layer.quad(
-            local,
-            pose(point, layout::facing(point, point + normal)),
-            size,
-            size,
-        ));
-    }
-
+    // The list in the plan's order, each from where it was made.
     let mut layers = reuse(std::mem::take(&mut buffers.layers));
-    if let Some(l) = &passthrough_layer {
-        layers.push(as_layer(l));
-    } else if let Some(l) = &htc_layer {
-        layers.push(as_layer(l));
-    } else if let Some(l) = &dim_quad {
-        layers.push(as_layer(l));
-    } else if let Some(l) = pano.as_ref().filter(|_| !shell.room.shown()) {
-        layers.push(as_layer(l));
-    }
-    layers.extend(keyboard_layer.iter().map(as_layer));
-    layers.extend(cylinders.iter().map(as_layer));
-    layers.extend(quads.iter().map(as_layer));
-    let troubles = &mut buffers.troubles;
-    troubles.clear();
-    for (_, id) in order {
-        if let (Some((_, _, l)), Some(p)) = (pictures.trouble_layers.get(id), world.shown(*id)) {
-            troubles.push(l.quad(local, posef(p), p.width, world.height_of(*id)));
-        }
-    }
-    layers.extend(troubles.iter().map(as_layer));
-    let placeholder_quad = world.adding().and_then(|a| {
-        let (layer, _, _) = pictures.placeholder.as_ref()?;
-        Some(layer.quad(local, posef(&a.place), a.place.width, a.height()))
-    });
-    layers.extend(placeholder_quad.iter().map(as_layer));
-    layers.extend(button.iter().map(as_layer));
-    layers.extend(panel_quad.iter().map(as_layer));
-    let toast_quad = model.toast().and_then(|t| t.place).map(|p| {
-        pictures.toast_layer.quad(
-            local,
-            posef(&p),
-            TOAST_WIDTH,
-            TOAST_WIDTH * TOAST_PX.1 as f32 / TOAST_PX.0 as f32,
-        )
-    });
-    layers.extend(toast_quad.iter().map(as_layer));
-    let attach_quad = hands
-        .attach_for()
-        .filter(|_| pictures.attach_drawn.is_some())
-        .and_then(|id| world.attach_place(id))
-        .map(|p| {
-            pictures
-                .attach_layer
-                .quad(local, posef(&p), ATTACH_WIDTH, attach_height())
+    for m in made.iter() {
+        layers.extend(match *m {
+            Made::Quad(i) => quads.get(i).map(as_layer),
+            Made::Cylinder(i) => cylinders.get(i).map(as_layer),
+            Made::Background => background,
+            Made::KeyboardWindow => keyboard_layer.as_ref().map(as_layer),
+            Made::Hands => hands_layer.as_ref().map(as_layer),
+            Made::Nothing => None,
         });
-    layers.extend(attach_quad.iter().map(as_layer));
-    let wrist_quad = world
-        .wrist()
-        .filter(|_| pictures.wrist_layer.ready())
-        .map(|w| {
-            pictures
-                .wrist_layer
-                .quad(local, posef(&w), WRIST_MENU_WIDTH, wrist_menu_height())
-        });
-    layers.extend(wrist_quad.iter().map(as_layer));
-    layers.extend(hands_layer.iter().map(as_layer));
-    layers.extend(cursors.iter().map(as_layer));
-    let layers_wanted = layers.len();
-    // As many layers as the compositor takes.
-    layers.truncate(stage.layers_max);
+    }
     let ended = stage.stream.end(time, shell.room.blend_mode(), &layers);
     buffers.layers = reuse(layers);
     match ended {
@@ -388,5 +362,95 @@ pub fn end(
         }
         other => other?,
     }
-    Ok(layers_wanted)
+    // The person hears when monitors do not fit, or fit again.
+    let wanted = buffers.plan.wanted();
+    if let Some(hidden) = buffers.plan.news() {
+        shell.handle(now, Event::Platform(PlatformEvent::LayersHidden(hidden)));
+    }
+    Ok(wanted)
+}
+
+/// Where the monitors' layers are made.
+struct MonitorLayers<'a> {
+    exts: &'a xr::ExtensionSet,
+    video: &'a SurfaceVideo,
+    local: &'a xr::Space,
+    quads: &'a mut Vec<xr::sys::CompositionLayerQuad>,
+    cylinders: &'a mut Vec<xr::sys::CompositionLayerCylinderKHR>,
+}
+
+/// Monitor `m`'s layer, its colour scale `dim`, its stream's picture after
+/// `video_next`, made in `to`.
+fn monitor(
+    m: &layers::Monitor,
+    dim: &xr::sys::CompositionLayerColorScaleBiasKHR,
+    video_next: *const std::ffi::c_void,
+    to: MonitorLayers<'_>,
+) -> Made {
+    let MonitorLayers {
+        exts,
+        video,
+        local,
+        quads,
+        cylinders,
+    } = to;
+    let scale = dim.color_scale;
+    let fading = exts.khr_composition_layer_color_scale_bias && scale.a < 1.0;
+    let layer_flags = if fading {
+        xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA
+    } else {
+        xr::CompositionLayerFlags::EMPTY
+    };
+    let next = if exts.khr_composition_layer_color_scale_bias && scale.r < 1.0 {
+        ptr::from_ref(dim).cast()
+    } else {
+        video_next
+    };
+    // Planned only with a picture, which stays until the next pass.
+    let Some(image) = video.image(m.id) else {
+        return Made::Nothing;
+    };
+    let sub_image = xr::sys::SwapchainSubImage {
+        swapchain: image.swapchain.as_raw(),
+        image_rect: xr::Rect2Di {
+            offset: xr::Offset2Di { x: 0, y: 0 },
+            extent: xr::Extent2Di {
+                width: image.width as i32,
+                height: image.height as i32,
+            },
+        },
+        image_array_index: 0,
+    };
+    let Quad { at: p, height } = m.quad;
+    if let Some(radius) = m.curve {
+        let c = Cylinder::new(&p, radius);
+        cylinders.push(xr::sys::CompositionLayerCylinderKHR {
+            ty: xr::sys::CompositionLayerCylinderKHR::TYPE,
+            next,
+            layer_flags,
+            space: local.as_raw(),
+            eye_visibility: xr::EyeVisibility::BOTH,
+            sub_image,
+            pose: pose(c.center, p.rotation),
+            radius: c.radius,
+            central_angle: c.central_angle,
+            aspect_ratio: c.arc_length() / height,
+        });
+        Made::Cylinder(cylinders.len() - 1)
+    } else {
+        quads.push(xr::sys::CompositionLayerQuad {
+            ty: xr::sys::CompositionLayerQuad::TYPE,
+            next,
+            layer_flags,
+            space: local.as_raw(),
+            eye_visibility: xr::EyeVisibility::BOTH,
+            sub_image,
+            pose: posef(&p),
+            size: xr::Extent2Df {
+                width: p.width,
+                height,
+            },
+        });
+        Made::Quad(quads.len() - 1)
+    }
 }

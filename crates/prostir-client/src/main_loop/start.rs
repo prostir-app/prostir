@@ -154,8 +154,6 @@ pub struct Stage {
     /// Tracked hands and pointer rays, drawn on top of everything.
     pub hand_trackers: Option<[xr::HandTracker; 2]>,
     pub overlay: Option<Overlay>,
-    /// The layers the compositor takes in a frame.
-    pub layers_max: usize,
 }
 
 /// What the loop works with, made at the start.
@@ -321,7 +319,6 @@ pub fn start<'s>(
         t.caps(&caps);
         t.set_perf(session);
     }
-    let layers_max = usize::from(caps.layers_max);
 
     let (net_tx, net_rx) = mpsc::channel();
     // A selftest connects to its fake PC and nothing else, never to a real PC.
@@ -394,7 +391,6 @@ pub fn start<'s>(
             pictures,
             hand_trackers,
             overlay,
-            layers_max,
         },
         net_rx,
         vm,

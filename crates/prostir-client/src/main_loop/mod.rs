@@ -12,7 +12,9 @@
 //! The loop is [`run`]; its parts each have a module: the start (`start`), the
 //! model's effects and the threads' news (`shell`), Android's and OpenXR's events
 //! (`events`), the frame's input (`input`), the selftest's asks (`acts`), the
-//! pictures (`pictures`), the hands and rays (`spheres`) and the layers (`compose`).
+//! pictures (`pictures`), the hands and rays (`spheres`) and the layers (`compose`,
+//! as the core's `layers::plan` orders them and keeps them within what the
+//! compositor takes).
 
 #![expect(
     clippy::disallowed_methods,

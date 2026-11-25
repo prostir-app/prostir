@@ -148,6 +148,8 @@ const OTHER_CODE: &[(&str, &str)] = &[
     ("layout/stick.rs", include_str!("../src/layout/stick.rs")),
     ("layout/tests.rs", include_str!("../src/layout/tests.rs")),
     ("lib.rs", include_str!("../src/lib.rs")),
+    ("layers/mod.rs", include_str!("../src/layers/mod.rs")),
+    ("layers/tests.rs", include_str!("../src/layers/tests.rs")),
     (
         "platform/sound/mod.rs",
         include_str!("../src/platform/sound/mod.rs"),

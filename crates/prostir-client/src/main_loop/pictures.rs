@@ -14,6 +14,7 @@ use crate::background;
 use crate::ids::DisplayKey;
 use crate::interaction::{Hands, Menu, Menus};
 use crate::lang::Texts;
+use crate::layers::TOAST_PX;
 use crate::platform::openxr::ImageLayer;
 use crate::settings::Background;
 use crate::ui::{self, Action, Panel};
@@ -24,8 +25,6 @@ use log::{info, warn};
 
 pub const CURSOR_PX: u32 = 64;
 pub const BUTTON_PX: u32 = 128;
-/// Toast texture.
-pub const TOAST_PX: (u32, u32) = (1024, 132);
 /// Width of the placeholder's picture, in pixels (its height follows the monitor's
 /// shape).
 const PLACEHOLDER_PX: u32 = 1024;
