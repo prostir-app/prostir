@@ -38,7 +38,7 @@ impl Store for MetaStore {
 
     fn update_hint(&self) -> UpdateHint {
         UpdateHint {
-            how: "store-update-library",
+            how: "headset-store-update-library",
             place: NAME,
         }
     }

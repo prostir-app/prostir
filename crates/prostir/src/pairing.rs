@@ -57,11 +57,8 @@ fn attempt_failed() {
     let tell = LIMITER.lock().unwrap().failed();
     if tell {
         notify(
-            t("Неправильні коди сполучення", "Wrong pairing codes"),
-            t(
-                "Хтось кілька разів ввів неправильний код. Нові спроби тепер чекають.",
-                "Someone typed wrong codes several times. New attempts now have to wait.",
-            ),
+            t("pc-pairing-wrong-pairing-codes"),
+            t("pc-pairing-someone-typed-wrong-codes-several"),
         );
     }
 }
@@ -771,11 +768,8 @@ fn accept_within(
                             &mut conn,
                             &format!(
                                 "{} {minutes} {}",
-                                t(
-                                    "Забагато неправильних кодів. Спробуйте за",
-                                    "Too many wrong codes. Try again in",
-                                ),
-                                t("хв.", "min."),
+                                t("pc-pairing-too-many-wrong-codes-try-again"),
+                                t("pc-pairing-min"),
                             ),
                         )?;
                         bail!(
@@ -787,10 +781,7 @@ fn accept_within(
                         info!("another headset is pairing: this one is told to wait");
                         refuse(
                             &mut conn,
-                            t(
-                                "Інший шолом саме сполучається з цим ПК. Спробуйте за хвилину.",
-                                "Another headset is pairing with this PC right now. Try again in a minute.",
-                            ),
+                            t("pc-pairing-another-headset-is-pairing-with-this"),
                         )?;
                         // Its half of the exchange came with the request.
                         if headset_shows {
@@ -814,21 +805,12 @@ fn accept_within(
                         attempt_failed();
                         bail!("the headset hung up while its code was asked for");
                     }
-                    Err(NoCode::Cancelled) => refuse(
-                        &mut conn,
-                        t("На ПК код не введено", "No code was typed on the PC"),
-                    )
-                    .map(|_| None),
+                    Err(NoCode::Cancelled) => {
+                        refuse(&mut conn, t("pc-pairing-no-code-was-typed-on-the")).map(|_| None)
+                    }
                     Err(NoCode::NoDialog) => {
                         shown = false;
-                        refuse(
-                            &mut conn,
-                            t(
-                                "На ПК немає вікна для коду. Виберіть «Навпаки: код на ноутбуці, ввести тут».",
-                                "The PC has no dialog for the code. Choose \"The other way: code on the PC, type it here\".",
-                            ),
-                        )
-                        .map(|_| None)
+                        refuse(&mut conn, t("pc-pairing-the-pc-has-no-dialog-for")).map(|_| None)
                     }
                 };
                 conn.set_idle_limit(READ_TIME);
@@ -862,7 +844,7 @@ fn accept_within(
                         LIMITER.lock().unwrap().succeeded();
                         tell(crate::events::Event::Paired {
                             name: if name.is_empty() {
-                                t("Шолом", "Headset").into()
+                                t("pc-pairing-headset").into()
                             } else {
                                 name.clone()
                             },
@@ -877,11 +859,8 @@ fn accept_within(
                         security.trusted.lock().unwrap().add(peer.key, &label)?;
                         info!("paired with {label} ({})", secure::fingerprint(&peer.key));
                         notify(
-                            t("Шолом сполучено", "Headset paired"),
-                            &format!(
-                                "{label} {}",
-                                t("тепер може підключатися.", "can connect now.")
-                            ),
+                            t("pc-pairing-headset-paired"),
+                            &format!("{label} {}", t("pc-pairing-can-connect-now")),
                         );
                     }
                     Some(false) => {
@@ -913,7 +892,7 @@ fn obtain_code(
         // The settings window is open: the code is typed there.
         let (to, code) = std::sync::mpsc::channel();
         let name = if name.is_empty() {
-            t("Шолом", "Headset").to_owned()
+            t("pc-pairing-headset").to_owned()
         } else {
             name.to_owned()
         };
@@ -955,11 +934,8 @@ fn obtain_code(
     // Once per code: a peer asking again and again must not flood the desktop.
     if new {
         notify(
-            t("Сполучення шолома", "Pairing a headset"),
-            &format!(
-                "{} {shown}",
-                t("Введіть у шоломі код", "Type this code in the headset:")
-            ),
+            t("pc-pairing-pairing-a-headset"),
+            &format!("{} {shown}", t("pc-pairing-type-this-code-in-the-headset")),
         );
     }
     Ok(code)
@@ -1018,37 +994,34 @@ enum Update {
 fn incompatible(link: &mut Link, update: Update, headset_app: &str) -> Result<bool> {
     let ours = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
     let headset_app = if headset_app.is_empty() {
-        t("старіша", "older")
+        t("pc-pairing-older")
     } else {
         headset_app
     };
     let (title, body) = match update {
         Update::Pc => (
-            t("Оновіть Prostir на ПК", "Update Prostir on the PC"),
+            t("pc-pairing-update-prostir-on-the-pc"),
             format!(
                 "{} {headset_app}, {} {ours}. prostir.ishawyha.dev",
-                t("Застосунок у шоломі новіший:", "The headset app is newer:"),
-                t("а на ПК", "the PC has")
+                t("pc-pairing-the-headset-app-is-newer"),
+                t("pc-pairing-the-pc-has")
             ),
         ),
         Update::Headset => (
-            t("Оновіть Prostir у шоломі", "Update Prostir in the headset"),
+            t("pc-pairing-update-prostir-in-the-headset"),
             format!(
                 "{} {headset_app}, {} {ours}.",
-                t("Застосунок у шоломі старіший:", "The headset app is older:"),
-                t("а на ПК", "the PC has")
+                t("pc-pairing-the-headset-app-is-older"),
+                t("pc-pairing-the-pc-has")
             ),
         ),
         Update::Both => (
-            t(
-                "Збірки шолома й ПК з різних версій гілки",
-                "The headset and PC builds are from different versions of the branch",
-            ),
+            t("pc-pairing-the-headset-and-pc-builds-are"),
             format!(
                 "{} {headset_app}, {} {ours}. {}",
-                t("У шоломі", "The headset has"),
-                t("а на ПК", "the PC has"),
-                t("Оновіть обидві.", "Update both.")
+                t("pc-pairing-the-headset-has"),
+                t("pc-pairing-the-pc-has"),
+                t("pc-pairing-update-both")
             ),
         ),
     };

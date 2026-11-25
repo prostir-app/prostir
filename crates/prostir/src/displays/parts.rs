@@ -194,10 +194,7 @@ impl Displays {
                 let state = if streams_here && streams >= streams_max {
                     let why = format!(
                         "{} ({streams_max})",
-                        t(
-                            "більше потоків, ніж шолом бере",
-                            "more streams than the headset takes"
-                        )
+                        t("pc-displays-parts-more-streams-than-the-headset-takes")
                     );
                     DisplayState::Failed {
                         error: state::ErrorCode::LIMIT,

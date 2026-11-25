@@ -36,9 +36,9 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                                 );
                             });
                             let label = if b.charging {
-                                "ov-charging"
+                                "window-ov-charging"
                             } else {
-                                "ov-battery"
+                                "window-ov-battery"
                             };
                             text(ui, tk.t(label), tk.small(), p.text_muted);
                         },
@@ -47,7 +47,7 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
                     let name = || ("name", Arg::from(&h.name));
                     if let Some(d) = failed {
-                        hero(ui, tk, Some(p.danger), &tk.t("ov-failed-title"));
+                        hero(ui, tk, Some(p.danger), &tk.t("window-ov-failed-title"));
                         ui.add_space(6.0);
                         // A sentence of its own before "The other monitors work."
                         let reason = d
@@ -56,9 +56,9 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                             .map_or(String::new(), |f| sentence(&f.text));
                         let reason = reason.as_str();
                         let id = if reason.is_empty() {
-                            "ov-failed-no-reason"
+                            "window-ov-failed-no-reason"
                         } else {
-                            "ov-failed-body"
+                            "window-ov-failed-body"
                         };
                         let body = tk.f(
                             id,
@@ -70,30 +70,43 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                         text(ui, body, tk.body(), p.text_muted);
                         ui.add_space(tk.th.shape.padding);
                         ui.horizontal(|ui| {
-                            if w::button(ui, tk, &tk.t("ov-retry"), Kind::Primary, true).clicked() {
+                            if w::button(ui, tk, &tk.t("window-ov-retry"), Kind::Primary, true)
+                                .clicked()
+                            {
                                 v.out.push(Action::Send(Request::RetryMonitor { id: d.id }));
                             }
-                            if w::button(ui, tk, &tk.t("ov-open-monitors"), Kind::Secondary, true)
-                                .clicked()
+                            if w::button(
+                                ui,
+                                tk,
+                                &tk.t("window-ov-open-monitors"),
+                                Kind::Secondary,
+                                true,
+                            )
+                            .clicked()
                             {
                                 v.out.push(Action::Go(Page::Monitors));
                             }
                         });
                     } else if !session.worn {
-                        hero(ui, tk, Some(p.text_muted), &tk.t("ov-taken-off-title"));
+                        hero(
+                            ui,
+                            tk,
+                            Some(p.text_muted),
+                            &tk.t("window-ov-taken-off-title"),
+                        );
                         ui.add_space(6.0);
                         text(
                             ui,
-                            tk.f("ov-taken-off-body", &[name()]),
+                            tk.f("window-ov-taken-off-body", &[name()]),
                             tk.body(),
                             p.text_muted,
                         );
                     } else {
-                        hero(ui, tk, Some(p.ok), &tk.t("ov-connected-title"));
+                        hero(ui, tk, Some(p.ok), &tk.t("window-ov-connected-title"));
                         ui.add_space(6.0);
                         let id = match session.via {
-                            Via::Usb => "ov-connected-usb",
-                            _ => "ov-connected-wifi",
+                            Via::Usb => "window-ov-connected-usb",
+                            _ => "window-ov-connected-wifi",
                         };
                         let body = tk.f(id, &[name(), ("count", virtual_count.into())]);
                         text(ui, body, tk.body(), p.text_muted);
@@ -102,7 +115,7 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                         {
                             ui.add_space(6.0);
                             let hint = tk.f(
-                                "ov-wifi-power-save",
+                                "window-ov-wifi-power-save",
                                 &[("interface", wifi.interface.clone().into())],
                             );
                             w::status(ui, tk, p.warning, &hint);
@@ -112,26 +125,26 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
             });
             w::divider(ui, tk);
             let mic = if !s.sound.mic_on {
-                tk.t("off")
+                tk.t("window-off")
             } else {
-                tk.t("on")
+                tk.t("window-on")
             };
             let facts = [
                 (
-                    tk.t("ov-fact-sound"),
+                    tk.t("window-ov-fact-sound"),
                     tk.t(if s.sound.to_headset {
-                        "sound-in-headset"
+                        "window-sound-in-headset"
                     } else {
-                        "sound-on-pc"
+                        "window-sound-on-pc"
                     }),
                 ),
-                (tk.t("ov-fact-mic"), mic),
+                (tk.t("window-ov-fact-mic"), mic),
                 (
-                    tk.t("ov-fact-profile"),
+                    tk.t("window-ov-fact-profile"),
                     session
                         .profile
                         .clone()
-                        .unwrap_or_else(|| tk.t("ov-profile-none")),
+                        .unwrap_or_else(|| tk.t("window-ov-profile-none")),
                 ),
             ];
             ui.columns(3, |c| {
@@ -146,27 +159,45 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                 ui.add_space(4.0);
                 text(
                     ui,
-                    tk.f("ov-connecting-title", &[("name", name.into())]),
+                    tk.f("window-ov-connecting-title", &[("name", name.into())]),
                     tk.font(tk.th.type_.size_display, true),
                     p.text,
                 );
             });
             ui.add_space(6.0);
-            text(ui, tk.t("ov-connecting-body"), tk.body(), p.text_muted);
+            text(
+                ui,
+                tk.t("window-ov-connecting-body"),
+                tk.body(),
+                p.text_muted,
+            );
         } else if s.headsets.is_empty() {
-            hero(ui, tk, None, &tk.t("ov-no-headsets-title"));
+            hero(ui, tk, None, &tk.t("window-ov-no-headsets-title"));
             ui.add_space(6.0);
-            text(ui, tk.t("ov-no-headsets-body"), tk.body(), p.text_muted);
+            text(
+                ui,
+                tk.t("window-ov-no-headsets-body"),
+                tk.body(),
+                p.text_muted,
+            );
             ui.add_space(tk.th.shape.padding);
-            if w::button(ui, tk, &tk.t("ov-no-headsets-go"), Kind::Primary, true).clicked() {
+            if w::button(
+                ui,
+                tk,
+                &tk.t("window-ov-no-headsets-go"),
+                Kind::Primary,
+                true,
+            )
+            .clicked()
+            {
                 v.out.push(Action::Go(Page::FirstRun));
             }
         } else {
-            hero(ui, tk, Some(p.text_muted), &tk.t("ov-waiting-title"));
+            hero(ui, tk, Some(p.text_muted), &tk.t("window-ov-waiting-title"));
             ui.add_space(6.0);
-            text(ui, tk.t("ov-waiting-body"), tk.body(), p.text_muted);
+            text(ui, tk.t("window-ov-waiting-body"), tk.body(), p.text_muted);
             ui.add_space(tk.th.shape.padding);
-            if w::button(ui, tk, &tk.t("ov-pair-new"), Kind::Secondary, true).clicked() {
+            if w::button(ui, tk, &tk.t("window-ov-pair-new"), Kind::Secondary, true).clicked() {
                 if s.pairing.is_none() {
                     v.out.push(Action::Send(Request::PairNewHeadset));
                 }
@@ -177,7 +208,7 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
 
     if !s.problems.is_empty() {
         ui.add_space(gap);
-        w::section_title(ui, tk, &tk.t("ov-problems"));
+        w::section_title(ui, tk, &tk.t("window-ov-problems"));
         w::card(ui, tk, |ui| {
             for pr in &s.problems {
                 w::status(ui, tk, p.warning, &pr.text);
@@ -186,22 +217,27 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     }
 
     ui.add_space(gap);
-    w::section_title(ui, tk, &tk.t("ov-monitors"));
+    w::section_title(ui, tk, &tk.t("window-ov-monitors"));
     w::card(ui, tk, |ui| {
         if s.displays.is_empty() {
-            text(ui, tk.t("ov-monitors-empty"), tk.body(), p.text_muted);
+            text(
+                ui,
+                tk.t("window-ov-monitors-empty"),
+                tk.body(),
+                p.text_muted,
+            );
             return;
         }
         let n = s.displays.len();
         for (i, d) in s.displays.iter().enumerate() {
             let (c, state) = match (d.state, d.kind) {
-                (DisplayState::Failed, _) => (p.danger, "state-failed"),
-                (DisplayState::Starting, _) => (p.accent_ink, "state-starting"),
-                (DisplayState::Absent, _) => (p.text_muted, "state-absent"),
-                (DisplayState::Kept, _) => (p.text_muted, "state-kept"),
-                (_, DisplayKind::Physical) if !d.shown => (p.text_muted, "state-hidden"),
-                (_, DisplayKind::Physical) => (p.ok, "state-shown"),
-                _ => (p.ok, "state-streaming"),
+                (DisplayState::Failed, _) => (p.danger, "window-state-failed"),
+                (DisplayState::Starting, _) => (p.accent_ink, "window-state-starting"),
+                (DisplayState::Absent, _) => (p.text_muted, "window-state-absent"),
+                (DisplayState::Kept, _) => (p.text_muted, "window-state-kept"),
+                (_, DisplayKind::Physical) if !d.shown => (p.text_muted, "window-state-hidden"),
+                (_, DisplayKind::Physical) => (p.ok, "window-state-shown"),
+                _ => (p.ok, "window-state-streaming"),
             };
             let desc = size(tk, &d.mode);
             let desc = (!desc.is_empty()).then_some(desc);
@@ -217,25 +253,25 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     });
 
     ui.add_space(gap);
-    w::section_title(ui, tk, &tk.t("ov-pc"));
+    w::section_title(ui, tk, &tk.t("window-ov-pc"));
     w::card(ui, tk, |ui| {
-        w::row(ui, tk, &tk.t("ov-pc-name"), None, |ui| {
+        w::row(ui, tk, &tk.t("window-ov-pc-name"), None, |ui| {
             text(ui, &s.pc.name, tk.body(), p.text);
         });
         if !s.pc.desktop.is_empty() {
             w::divider(ui, tk);
-            w::row(ui, tk, &tk.t("ov-pc-desktop"), None, |ui| {
+            w::row(ui, tk, &tk.t("window-ov-pc-desktop"), None, |ui| {
                 text(ui, &s.pc.desktop, tk.body(), p.text);
             });
         }
         if let Some(on) = s.autostart {
             w::divider(ui, tk);
-            let label = tk.t("ov-autostart");
+            let label = tk.t("window-ov-autostart");
             let can = !v.ui.unsupported.contains("autostart");
             let desc = if can {
-                tk.t("ov-autostart-desc")
+                tk.t("window-ov-autostart-desc")
             } else {
-                tk.t("ov-autostart-here-not")
+                tk.t("window-ov-autostart-here-not")
             };
             w::row(ui, tk, &label, Some(&desc), |ui| {
                 if let Some(on) = w::switch(ui, tk, &label, on, can) {
@@ -251,14 +287,20 @@ pub(super) fn overview(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
             .filter(|c| matches!(c, Counting::Yes | Counting::No))
         {
             w::divider(ui, tk);
-            let label = tk.t("ov-counting");
+            let label = tk.t("window-ov-counting");
             let can = !v.ui.unsupported.contains("set_counting");
-            w::row(ui, tk, &label, Some(&tk.t("ov-counting-desc")), |ui| {
-                if let Some(on) = w::switch(ui, tk, &label, c == Counting::Yes, can) {
-                    let counting = if on { Counting::Yes } else { Counting::No };
-                    v.out.push(Action::Send(Request::SetCounting { counting }));
-                }
-            });
+            w::row(
+                ui,
+                tk,
+                &label,
+                Some(&tk.t("window-ov-counting-desc")),
+                |ui| {
+                    if let Some(on) = w::switch(ui, tk, &label, c == Counting::Yes, can) {
+                        let counting = if on { Counting::Yes } else { Counting::No };
+                        v.out.push(Action::Send(Request::SetCounting { counting }));
+                    }
+                },
+            );
         }
     });
 }

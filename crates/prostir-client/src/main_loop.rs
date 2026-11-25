@@ -1331,7 +1331,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 .as_ref()
                 .is_none_or(|(t, l)| t != model.texts() || *l != lit)
             {
-                let label = model.texts().t("attach");
+                let label = model.texts().t("headset-attach");
                 attach_layer.upload(
                     &gl,
                     &panels.main.pill_image(label, ATTACH_PX.0, ATTACH_PX.1, lit),
@@ -1347,7 +1347,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             let (w, h) = a.size;
             let px_h = (PLACEHOLDER_PX * h / w.max(1)).clamp(64, 4 * PLACEHOLDER_PX);
             let mut layer = ImageLayer::new(&session, format, PLACEHOLDER_PX, px_h, true)?;
-            let label = model.texts().t("adding-monitor");
+            let label = model.texts().t("headset-adding-monitor");
             layer.upload(
                 &gl,
                 &panels.main.placeholder_image(label, PLACEHOLDER_PX, px_h),

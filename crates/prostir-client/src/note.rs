@@ -63,7 +63,7 @@ impl Note {
     pub fn waiting(on: Option<Action>, texts: &Texts) -> Self {
         Self {
             kind: Kind::Waiting,
-            ..Self::done(on, texts.t("ask-waiting"))
+            ..Self::done(on, texts.t("headset-ask-waiting"))
         }
     }
 
@@ -89,7 +89,7 @@ impl Note {
     pub fn failure(on: Option<Action>, why: Failure, detail: &str, texts: &Texts) -> Self {
         let (text, detail) = match why.text() {
             Some(id) => (texts.t(id), (!detail.is_empty()).then(|| detail.into())),
-            None if detail.is_empty() => (texts.t("failure-other"), None),
+            None if detail.is_empty() => (texts.t("headset-failure-other"), None),
             None => (detail, None),
         };
         Self {
@@ -264,23 +264,23 @@ impl Notes {
 /// a choice, which shows how it stands on its own.
 pub fn done_text(action: Action) -> Option<&'static str> {
     Some(match action {
-        Action::Add { .. } => "note-monitor-added",
-        Action::Remove(_) => "note-monitor-removed",
-        Action::CloseWindow(_) => "note-window-closed",
-        Action::MakePrimary(_) => "note-primary",
-        Action::ShowPhysical(_, true) => "note-display-shown",
-        Action::ShowPhysical(_, false) => "note-display-hidden",
-        Action::SetScale(..) => "note-scale",
-        Action::NoLimits(true) => "note-no-limits-on",
-        Action::NoLimits(false) => "note-no-limits-off",
-        Action::SetAudio(true) => "note-sound-headset",
-        Action::SetAudio(false) => "note-sound-pc",
-        Action::SetEncoding(_) => "note-encoding",
-        Action::DetachWindow => "note-window-detached",
-        Action::WindowHere => "note-window-here",
-        Action::Preset(_) => "note-layout",
-        Action::Tidy => "note-lined-up",
-        Action::Recenter => "note-in-front",
+        Action::Add { .. } => "headset-note-monitor-added",
+        Action::Remove(_) => "headset-note-monitor-removed",
+        Action::CloseWindow(_) => "headset-note-window-closed",
+        Action::MakePrimary(_) => "headset-note-primary",
+        Action::ShowPhysical(_, true) => "headset-note-display-shown",
+        Action::ShowPhysical(_, false) => "headset-note-display-hidden",
+        Action::SetScale(..) => "headset-note-scale",
+        Action::NoLimits(true) => "headset-note-no-limits-on",
+        Action::NoLimits(false) => "headset-note-no-limits-off",
+        Action::SetAudio(true) => "headset-note-sound-headset",
+        Action::SetAudio(false) => "headset-note-sound-pc",
+        Action::SetEncoding(_) => "headset-note-encoding",
+        Action::DetachWindow => "headset-note-window-detached",
+        Action::WindowHere => "headset-note-window-here",
+        Action::Preset(_) => "headset-note-layout",
+        Action::Tidy => "headset-note-lined-up",
+        Action::Recenter => "headset-note-in-front",
         _ => return None,
     })
 }
@@ -298,7 +298,7 @@ pub fn answer(what: Asked, asker: Asker, outcome: &Outcome, texts: &Texts) -> Op
         Outcome::Saved { path } => Told {
             note: Note::done(
                 on,
-                &texts.f("toast-screenshot-saved", &[("path", path.into())]),
+                &texts.f("headset-toast-screenshot-saved", &[("path", path.into())]),
             ),
             toast: true,
         },
@@ -323,12 +323,12 @@ pub fn mic_note(on: bool, permission: u8, texts: &Texts) -> Note {
     use prostir_proto::state::permission;
     let button = Some(Action::SetMic(on));
     if !on {
-        return Note::done(button, texts.t("note-mic-pc"));
+        return Note::done(button, texts.t("headset-note-mic-pc"));
     }
     match permission {
-        permission::GRANTED => Note::done(button, texts.t("note-mic-headset")),
-        permission::DENIED => Note::failed(button, texts.t("note-mic-denied")),
-        _ => Note::done(button, texts.t("note-mic-ask")),
+        permission::GRANTED => Note::done(button, texts.t("headset-note-mic-headset")),
+        permission::DENIED => Note::failed(button, texts.t("headset-note-mic-denied")),
+        _ => Note::done(button, texts.t("headset-note-mic-ask")),
     }
 }
 
@@ -339,11 +339,11 @@ pub fn permission_note(permission: u8, texts: &Texts) -> Option<Told> {
     let button = Some(Action::SetMic(true));
     match permission {
         permission::GRANTED => Some(Told {
-            note: Note::done(button, texts.t("note-mic-allowed")),
+            note: Note::done(button, texts.t("headset-note-mic-allowed")),
             toast: false,
         }),
         permission::DENIED => Some(Told {
-            note: Note::failed(button, texts.t("note-mic-denied")),
+            note: Note::failed(button, texts.t("headset-note-mic-denied")),
             toast: true,
         }),
         _ => None,
@@ -367,7 +367,7 @@ pub fn language_note(
             toast: true,
         }),
         None if asked => Some(Told {
-            note: Note::done(on, texts.t("note-language")),
+            note: Note::done(on, texts.t("headset-note-language")),
             toast: false,
         }),
         None => None,
@@ -655,9 +655,15 @@ mod tests {
     /// The menu's own actions: a new layout and lining up say so; a switch does not.
     #[test]
     fn what_needs_saying() {
-        assert_eq!(done_text(Action::Preset(Preset::Wall)), Some("note-layout"));
-        assert_eq!(done_text(Action::Tidy), Some("note-lined-up"));
-        assert_eq!(done_text(Action::SetAudio(false)), Some("note-sound-pc"));
+        assert_eq!(
+            done_text(Action::Preset(Preset::Wall)),
+            Some("headset-note-layout")
+        );
+        assert_eq!(done_text(Action::Tidy), Some("headset-note-lined-up"));
+        assert_eq!(
+            done_text(Action::SetAudio(false)),
+            Some("headset-note-sound-pc")
+        );
         for quiet in [
             Action::Focus(true),
             Action::Follow(false),

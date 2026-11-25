@@ -18,18 +18,18 @@ fn note(kind: &str, s: &UiState) -> Option<Note> {
     let l = &s.texts;
     let (on, done, failed, detail) = match (s.tab, kind) {
         (Tab::Profiles, "saved") => {
-            let text = l.f("toast-profile-saved", &[("name", "Робота".into())]);
+            let text = l.f("headset-toast-profile-saved", &[("name", "Робота".into())]);
             return Some(Note::done(Some(Action::SaveProfile(1)), &text));
         }
         (Tab::Profiles, _) => (
             Action::NewProfile,
-            l.t("note-profile-deleted"),
-            l.t("failure-not-connected"),
+            l.t("headset-note-profile-deleted"),
+            l.t("headset-failure-not-connected"),
             None,
         ),
         (Tab::Monitors, "physical") => {
             let on = Some(Action::ShowPhysical(k(117), false));
-            return Some(Note::done(on, l.t("note-display-hidden")));
+            return Some(Note::done(on, l.t("headset-note-display-hidden")));
         }
         (Tab::Monitors, "scale") => {
             let on = Some(Action::SetScale(k(1), 125));
@@ -37,8 +37,8 @@ fn note(kind: &str, s: &UiState) -> Option<Note> {
         }
         (Tab::Quick, _) => (
             Action::SetAudio(false),
-            l.t("note-sound-pc"),
-            l.t("failure-sound"),
+            l.t("headset-note-sound-pc"),
+            l.t("headset-failure-sound"),
             None,
         ),
         (Tab::Monitors, _) => (
@@ -46,30 +46,30 @@ fn note(kind: &str, s: &UiState) -> Option<Note> {
                 width: 2560,
                 height: 1440,
             },
-            l.t("note-monitor-added"),
-            l.t("failure-limit"),
+            l.t("headset-note-monitor-added"),
+            l.t("headset-failure-limit"),
             Some("at most 6 virtual displays"),
         ),
         (Tab::Settings(Section::Sound), _) => (
             Action::SetMic(true),
-            l.t("note-mic-headset"),
-            l.t("note-mic-denied"),
+            l.t("headset-note-mic-headset"),
+            l.t("headset-note-mic-denied"),
             None,
         ),
         (Tab::Settings(Section::Language), _) => (
             Action::Language(Language::LikeSystem),
-            l.t("note-language"),
-            l.t("failure-not-connected"),
+            l.t("headset-note-language"),
+            l.t("headset-failure-not-connected"),
             None,
         ),
         (Tab::Settings(Section::Pc), _) => {
             return Some(Note::done(
                 Some(Action::NoLimits(true)),
-                l.t("note-no-limits-on"),
+                l.t("headset-note-no-limits-on"),
             ));
         }
         (Tab::Settings(Section::Paired), _) => {
-            let text = l.f("note-pc-forgotten", &[("pc", "laptop".into())]);
+            let text = l.f("headset-note-pc-forgotten", &[("pc", "laptop".into())]);
             return Some(Note::done(Some(Action::ForgetPc(1)), &text));
         }
         _ => return None,
@@ -95,7 +95,7 @@ fn physical(texts: &Texts) -> Vec<PhysicalEntry> {
     let all = [
         (
             100,
-            texts.t("laptop-screen").to_owned(),
+            texts.t("headset-laptop-screen").to_owned(),
             "eDP-1",
             false,
             false,
@@ -105,7 +105,7 @@ fn physical(texts: &Texts) -> Vec<PhysicalEntry> {
         (119, "Samsung Odyssey G9".to_owned(), "DP-3", false, true),
         (
             120,
-            texts.f("pc-display-named", &[("name", "DP-4".into())]),
+            texts.f("headset-pc-display-named", &[("name", "DP-4".into())]),
             "DP-4",
             false,
             true,
@@ -133,7 +133,7 @@ fn profiles(texts: &Texts) -> Vec<String> {
         .map(|i| match i {
             1 => "Робота".to_owned(),
             4 => "Ігри й кіно вечорами".to_owned(),
-            _ => texts.f("profile-n", &[("n", (i + 1).into())]),
+            _ => texts.f("headset-profile-n", &[("n", (i + 1).into())]),
         })
         .collect()
 }
@@ -309,7 +309,10 @@ fn main() {
         selected: std::env::var("SELECTED").is_ok().then_some(k(1)),
         physical_seen: vec![
             ([-0.35, -0.55, 0.2, 0.13], "DELL U2720Q".into()),
-            ([0.15, -0.58, 0.3, 0.17], texts.t("laptop-screen").into()),
+            (
+                [0.15, -0.58, 0.3, 0.17],
+                texts.t("headset-laptop-screen").into(),
+            ),
         ],
         physical_page: std::env::var("PHYSICAL_PAGE")
             .ok()

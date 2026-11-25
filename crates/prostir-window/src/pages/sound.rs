@@ -8,13 +8,13 @@ pub(super) fn sound(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     header(ui, v, Page::Sound);
     let connected = s.connected();
     w::card(ui, tk, |ui| {
-        let opts = [tk.t("sound-in-headset"), tk.t("sound-on-pc")];
+        let opts = [tk.t("window-sound-in-headset"), tk.t("window-sound-on-pc")];
         let opts: Vec<&str> = opts.iter().map(String::as_str).collect();
         w::row(
             ui,
             tk,
-            &tk.t("snd-where"),
-            Some(&tk.t("snd-where-desc")),
+            &tk.t("window-snd-where"),
+            Some(&tk.t("window-snd-where-desc")),
             |ui| {
                 if let Some(i) = w::segmented(ui, tk, &opts, (!s.sound.to_headset) as usize, true) {
                     v.out
@@ -28,13 +28,13 @@ pub(super) fn sound(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
             .volume
             .filter(|_| !v.ui.unsupported.contains("volume"));
         let desc = if vol.is_some() {
-            tk.t("snd-volume-desc")
+            tk.t("window-snd-volume-desc")
         } else if connected.is_some() {
-            tk.t("snd-volume-headset")
+            tk.t("window-snd-volume-headset")
         } else {
-            tk.t("snd-volume-off")
+            tk.t("window-snd-volume-off")
         };
-        let label = tk.t("snd-volume");
+        let label = tk.t("window-snd-volume");
         w::row(ui, tk, &label, Some(&desc), |ui| {
             let level =
                 v.ui.volume_drag
@@ -65,32 +65,42 @@ pub(super) fn sound(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
         w::row(
             ui,
             tk,
-            &tk.t("snd-mic"),
-            Some(&tk.t("snd-mic-desc")),
+            &tk.t("window-snd-mic"),
+            Some(&tk.t("window-snd-mic-desc")),
             |ui| {
-                text(ui, tk.t(if on { "on" } else { "off" }), tk.body_m(), p.text);
+                text(
+                    ui,
+                    tk.t(if on { "window-on" } else { "window-off" }),
+                    tk.body_m(),
+                    p.text,
+                );
             },
         );
-        text(ui, tk.t("snd-mic-in-headset"), tk.small(), p.text_muted);
+        text(
+            ui,
+            tk.t("window-snd-mic-in-headset"),
+            tk.small(),
+            p.text_muted,
+        );
         w::divider(ui, tk);
         match connected {
-            None if on => w::status(ui, tk, p.text_muted, &tk.t("snd-mic-waiting")),
+            None if on => w::status(ui, tk, p.text_muted, &tk.t("window-snd-mic-waiting")),
             Some((_, session)) if on && session.mic_allowed == Some(false) => {
-                w::status(ui, tk, p.warning, &tk.t("snd-mic-not-allowed"));
+                w::status(ui, tk, p.warning, &tk.t("window-snd-mic-not-allowed"));
             }
             _ => match (on, s.sound.mic) {
-                (false, _) => w::status(ui, tk, p.text_muted, &tk.t("snd-mic-off")),
+                (false, _) => w::status(ui, tk, p.text_muted, &tk.t("window-snd-mic-off")),
                 (true, MicState::Failed) => {
                     let why = s.sound.mic_failure.as_ref().map_or("", |f| f.text.as_str());
                     w::status(
                         ui,
                         tk,
                         p.danger,
-                        &tk.f("snd-mic-failed", &[("reason", why.into())]),
+                        &tk.f("window-snd-mic-failed", &[("reason", why.into())]),
                     );
                 }
-                (true, MicState::Ready) => w::status(ui, tk, p.ok, &tk.t("snd-mic-ready")),
-                (true, _) => w::status(ui, tk, p.text_muted, &tk.t("snd-mic-waiting")),
+                (true, MicState::Ready) => w::status(ui, tk, p.ok, &tk.t("window-snd-mic-ready")),
+                (true, _) => w::status(ui, tk, p.text_muted, &tk.t("window-snd-mic-waiting")),
             },
         }
     });
@@ -108,25 +118,25 @@ pub(super) fn quality(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     w::card(ui, tk, |ui| {
         let labels: Vec<String> = BITRATES
             .iter()
-            .map(|b| tk.f("q-mbit", &[("n", (*b).into())]))
+            .map(|b| tk.f("window-q-mbit", &[("n", (*b).into())]))
             .collect();
         let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
         let sel = BITRATES
             .iter()
             .position(|b| *b == e.bitrate)
             .unwrap_or(usize::MAX);
-        let desc = tk.f("q-bitrate-desc", &[("n", e.bitrate.into())]);
+        let desc = tk.f("window-q-bitrate-desc", &[("n", e.bitrate.into())]);
         let ok = can(v, "set_quality");
-        w::row(ui, tk, &tk.t("q-bitrate"), Some(&desc), |ui| {
+        w::row(ui, tk, &tk.t("window-q-bitrate"), Some(&desc), |ui| {
             if let Some(i) = w::segmented(ui, tk, &labels, sel, ok) {
                 v.out
                     .push(Action::Send(Request::SetQuality { mbit: BITRATES[i] }));
             }
         });
         w::divider(ui, tk);
-        let label = tk.t("q-sharp");
+        let label = tk.t("window-q-sharp");
         let ok = can(v, "set_sharp");
-        w::row(ui, tk, &label, Some(&tk.t("q-sharp-desc")), |ui| {
+        w::row(ui, tk, &label, Some(&tk.t("window-q-sharp-desc")), |ui| {
             if let Some(on) = w::switch(ui, tk, &label, e.sharp, ok) {
                 v.out.push(Action::Send(Request::SetSharp { on }));
             }
@@ -145,8 +155,8 @@ pub(super) fn quality(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
         w::row(
             ui,
             tk,
-            &tk.t("q-codec"),
-            Some(&tk.t("q-codec-desc")),
+            &tk.t("window-q-codec"),
+            Some(&tk.t("window-q-codec-desc")),
             |ui| {
                 if let Some(i) = w::segmented(ui, tk, &labels, sel, ok) {
                     v.out.push(Action::Send(Request::SetCodec {
@@ -157,8 +167,8 @@ pub(super) fn quality(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
             },
         );
         w::divider(ui, tk);
-        let label = tk.t("q-cpu");
-        w::row(ui, tk, &label, Some(&tk.t("q-cpu-desc")), |ui| {
+        let label = tk.t("window-q-cpu");
+        w::row(ui, tk, &label, Some(&tk.t("window-q-cpu-desc")), |ui| {
             if let Some(cpu) = w::switch(ui, tk, &label, e.cpu, ok) {
                 let codec = match e.codec {
                     Codec::H264 => CodecChoice::H264,
@@ -177,13 +187,13 @@ pub(super) fn quality(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                     Codec::Other => "?",
                 };
                 let id = if u.hardware {
-                    "q-using-gpu"
+                    "window-q-using-gpu"
                 } else {
-                    "q-using-cpu"
+                    "window-q-using-cpu"
                 };
                 w::status(ui, tk, p.ok, &tk.f(id, &[("codec", codec.into())]));
             }
-            None => w::status(ui, tk, p.text_muted, &tk.t("q-using-none")),
+            None => w::status(ui, tk, p.text_muted, &tk.t("window-q-using-none")),
         }
     });
 }

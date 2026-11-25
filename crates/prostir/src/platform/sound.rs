@@ -45,8 +45,6 @@ use std::time::Instant;
 
 use prostir_proto::state::{self, ErrorCode, MicDevice};
 
-use crate::i18n::t;
-
 /// Where the PC's sound plays while it goes to the headset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
@@ -84,18 +82,14 @@ impl NeedsDriver {
 
 impl fmt::Display for NeedsDriver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let text = t(
-            "Потрібен драйвер {name}: {url}. Після встановлення оберіть у програмах \
-             мікрофон «{device}».",
-            "Needs the {name} driver: {url}. Once it is installed, choose “{device}” as \
-             the microphone in programs.",
-        );
-        f.write_str(
-            &text
-                .replace("{name}", self.name)
-                .replace("{url}", self.url)
-                .replace("{device}", self.device),
-        )
+        f.write_str(&crate::i18n::f(
+            "pc-sound-needs-driver",
+            &[
+                ("name", self.name.into()),
+                ("url", self.url.into()),
+                ("device", self.device.into()),
+            ],
+        ))
     }
 }
 

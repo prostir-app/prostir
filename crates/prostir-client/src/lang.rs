@@ -1,7 +1,9 @@
 //! The headset's texts as data: Fluent files, one per language, read with
 //! `prostir-lang` as on the PC (domain `headset`). English and Ukrainian are built
-//! in (`lang/en.ftl`, `lang/uk.ftl`); English is complete and stands behind every
-//! other language message by message. Another language is a file `<code>.ftl` in
+//! in (`lang/en.ftl`, `lang/uk.ftl` at the root of the repository, one file per language
+//! for the PC app, the settings window and this app; the headset's messages start with
+//! `headset-`); English is complete and stands behind every other language message by
+//! message. Another language is a file `<code>.ftl` in
 //! `lang/` of the app's external folder (`Android/data/dev.prostir.client/files/lang/`);
 //! one for a built-in code replaces that language's messages one by one.
 //!
@@ -33,12 +35,12 @@ use crate::settings::DateStyle;
 /// The domain of the headset's files among Prostir's translations.
 pub const DOMAIN: &str = "headset";
 
+/// What the ids of the headset's messages start with in the shared language files.
+pub const PREFIX: &str = "headset-";
+
 /// The files built into the app: English (complete, behind every other one) and
 /// Ukrainian.
-pub const BUILTIN: &[(&str, &str)] = &[
-    ("en", include_str!("../lang/en.ftl")),
-    ("uk", include_str!("../lang/uk.ftl")),
-];
+pub const BUILTIN: &[(&str, &str)] = prostir_lang::BUILTIN;
 
 /// A language's code (`uk`, `en`, `pt-BR`): what `settings.txt` keeps, a file is named
 /// by, and the PC and the system say. Short and kept inline, so the settings stay a
@@ -215,21 +217,21 @@ impl Calendar {
         let mark = |c: char| Arg::Text(c.to_string());
         let half = |half: &str| {
             strings.f(
-                "time-12h",
+                "headset-time-12h",
                 &[("time", mark(MARK_TIME)), ("half", half.into())],
             )
         };
         Self {
             date: strings.f(
-                "date-format",
+                "headset-date-format",
                 &[
                     ("weekday", mark(MARK_WEEKDAY)),
                     ("day", mark(MARK_DAY)),
                     ("month", mark(MARK_MONTH)),
                 ],
             ),
-            weekdays: std::array::from_fn(|i| strings.t(&format!("weekday-{i}"))),
-            months: std::array::from_fn(|i| strings.t(&format!("month-{i}"))),
+            weekdays: std::array::from_fn(|i| strings.t(&format!("headset-weekday-{i}"))),
+            months: std::array::from_fn(|i| strings.t(&format!("headset-month-{i}"))),
             am: half("am"),
             pm: half("pm"),
         }
@@ -313,8 +315,10 @@ impl std::fmt::Debug for Texts {
 impl Texts {
     fn new(lang: Lang, strings: prostir_lang::Strings, fixed: Arc<Fixed>) -> Self {
         let (ids, _) = prostir_lang::messages(english());
+        // The headset's own messages: the file is shared with the PC app and the window.
         let plain = ids
             .into_keys()
+            .filter(|id| id.starts_with(PREFIX) || id == prostir_lang::NAME_ID)
             .map(|id| {
                 let text = strings.t(&id);
                 (id, text)
@@ -323,9 +327,9 @@ impl Texts {
         let calendar = Calendar::of(&strings);
         let language = || [("language", Arg::from(lang.as_str()))];
         let warning = if strings.code() != lang.as_str() && lang != Lang::FALLBACK {
-            Some(strings.f("language-missing", &language()))
+            Some(strings.f("headset-language-missing", &language()))
         } else if !strings.problems().is_empty() {
-            Some(strings.f("language-problems", &language()))
+            Some(strings.f("headset-language-problems", &language()))
         } else {
             None
         };
@@ -714,8 +718,8 @@ fn longer(text: &str) -> String {
 mod tests {
     use super::*;
 
-    const EN: &str = include_str!("../lang/en.ftl");
-    const UK: &str = include_str!("../lang/uk.ftl");
+    const EN: &str = BUILTIN[0].1;
+    const UK: &str = BUILTIN[1].1;
 
     #[test]
     fn codes() {
@@ -793,7 +797,7 @@ mod tests {
     #[test]
     fn plurals() {
         let uk = builtin("uk");
-        let at_most = |t: &Texts, n: u32| t.f("monitors-at-most", &[("count", n.into())]);
+        let at_most = |t: &Texts, n: u32| t.f("headset-monitors-at-most", &[("count", n.into())]);
         assert_eq!(at_most(&uk, 1), "Максимум 1 монітор");
         assert_eq!(at_most(&uk, 3), "Максимум 3 монітори");
         assert_eq!(at_most(&uk, 6), "Максимум 6 моніторів");
@@ -839,13 +843,17 @@ mod tests {
     fn missing_messages() {
         let dir = std::env::temp_dir().join(format!("prostir-headset-lang-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("de.ftl"), "language-name = Deutsch\nmenu = Menü\n").unwrap();
+        std::fs::write(
+            dir.join("de.ftl"),
+            "language-name = Deutsch\nheadset-menu = Menü\n",
+        )
+        .unwrap();
         let mut loader = Loader::new(Some(dir.clone()));
         let names: Vec<_> = loader.languages().into_iter().map(|k| k.name).collect();
         assert_eq!(names, ["Deutsch", "English", "Українська"]);
         let de = loader.load(Lang::new("de").unwrap());
-        assert_eq!(de.t("menu"), "Menü");
-        assert_eq!(de.t("tab-settings"), "Settings");
+        assert_eq!(de.t("headset-menu"), "Menü");
+        assert_eq!(de.t("headset-tab-settings"), "Settings");
         assert_eq!(de.t("no-such-message"), "no-such-message");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -858,7 +866,11 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("prostir-headset-switch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("de.ftl"), "language-name = Deutsch\nmenu = Menü\n").unwrap();
+        std::fs::write(
+            dir.join("de.ftl"),
+            "language-name = Deutsch\nheadset-menu = Menü\n",
+        )
+        .unwrap();
         // The start: the list and the first language.
         let mut loader = Loader::new(Some(dir.clone()));
         let mut state = LangState::new(loader.load(Lang::FALLBACK), loader.languages());
@@ -868,20 +880,28 @@ mod tests {
         let choice = Language::Fixed(de);
         assert_eq!(state.wanted(choice, None, None), Some(de), "asked once");
         assert_eq!(state.wanted(choice, None, None), None, "not again");
-        assert_eq!(state.texts().t("menu"), "Menu", "the language it has");
+        assert_eq!(
+            state.texts().t("headset-menu"),
+            "Menu",
+            "the language it has"
+        );
         // What the system thread loaded (from the file it read back then).
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("de.ftl"), "language-name = Deutsch\nmenu = Menü\n").unwrap();
+        std::fs::write(
+            dir.join("de.ftl"),
+            "language-name = Deutsch\nheadset-menu = Menü\n",
+        )
+        .unwrap();
         let loaded = loader.load(de);
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(state.loaded(loaded));
-        assert_eq!(state.texts().t("menu"), "Menü");
+        assert_eq!(state.texts().t("headset-menu"), "Menü");
         assert_eq!(state.wanted(choice, None, None), None, "shown");
         // Back to English: asked again; German, loaded late, is not shown.
         let en = Language::Fixed(Lang::FALLBACK);
         assert_eq!(state.wanted(en, None, None), Some(Lang::FALLBACK));
         assert!(!state.loaded(builtin("de")));
-        assert_eq!(state.texts().t("menu"), "Menü");
+        assert_eq!(state.texts().t("headset-menu"), "Menü");
     }
 
     /// The list is made again only when a file was added, removed or changed; a file
@@ -909,7 +929,11 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("prostir-headset-broken-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("de.ftl"), "language-name = Deutsch\nmenu = {\n").unwrap();
+        std::fs::write(
+            dir.join("de.ftl"),
+            "language-name = Deutsch\nheadset-menu = {\n",
+        )
+        .unwrap();
         let mut loader = Loader::new(Some(dir.clone()));
         let de = loader.load(Lang::new("de").unwrap());
         assert!(
@@ -946,7 +970,7 @@ mod tests {
                 })
                 .count()
         };
-        for (id, text) in &en {
+        for (id, text) in en.iter().filter(|(id, _)| id.starts_with(PREFIX)) {
             let n = words(text);
             let m = words(&long[id]);
             assert!(

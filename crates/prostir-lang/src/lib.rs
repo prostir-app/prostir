@@ -1,8 +1,10 @@
 //! Translations as data: Fluent (`.ftl`) files, one per language.
 //!
-//! Every program of Prostir that shows text on the PC (the settings window now, the
-//! tray, notifications and `ctl` later) uses the same loader with its own *domain*:
-//! the files built into the program, and more files dropped into a folder:
+//! The texts of all three programs (the PC app, the settings window, the headset app) are
+//! one file per language in `lang/` at the root of the repository, built into every
+//! program as [`BUILTIN`]; each program names its messages with its own prefix (`pc-`,
+//! `window-`, `headset-`). Every program that shows text uses the same loader with its
+//! own *domain*: the files built into the program, and more files dropped into a folder:
 //!
 //! - `$XDG_DATA_HOME/prostir/lang/<domain>/<code>.ftl` (`~/.local/share/...`),
 //! - `<dir>/prostir/lang/<domain>/<code>.ftl` for each of `$XDG_DATA_DIRS`.
@@ -21,6 +23,15 @@ use fluent_bundle::{FluentArgs, FluentResource, FluentValue};
 use fluent_syntax::ast::Entry;
 use unic_langid::LanguageIdentifier;
 use unicode_segmentation::UnicodeSegmentation;
+
+/// The files built into every program: `lang/<code>.ftl` at the root of the repository,
+/// one per language, English (complete, behind every other one) and Ukrainian. The PC
+/// app, the settings window and the headset app share them; each uses the messages
+/// whose ids start with its own name (`pc-`, `window-`, `headset-`).
+pub const BUILTIN: &[(&str, &str)] = &[
+    ("en", include_str!("../../../lang/en.ftl")),
+    ("uk", include_str!("../../../lang/uk.ftl")),
+];
 
 /// The language every other one falls back to; always built in.
 pub const FALLBACK: &str = "en";

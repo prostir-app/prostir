@@ -188,7 +188,9 @@ impl Model {
                         self.menu.ip_input = None;
                     }
                     None => {
-                        let text = self.texts().f("error-not-ip", &[("typed", typed.into())]);
+                        let text = self
+                            .texts()
+                            .f("headset-error-not-ip", &[("typed", typed.into())]);
                         self.tell_press(Note::failed(Some(action), &text), true);
                     }
                 }

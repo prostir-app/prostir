@@ -14,7 +14,8 @@
 //! - [`instance`]: one window per person.
 //! - [`run()`]: the window as a program.
 //!
-//! Texts are Fluent files in `lang/`, loaded by `prostir-lang`.
+//! Texts are Fluent files in `lang/` at the root of the repository (the window's messages
+//! start with `window-`), loaded by `prostir-lang`.
 
 pub mod api;
 pub mod app;
