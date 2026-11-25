@@ -320,8 +320,8 @@ fn beside(e: &Placement, eh: f32, width: f32, side: f32, one: f32) -> Option<Pla
 }
 
 /// Over (`up` 1) or under (`up` -1) `e`, centred on it, on its surface; on a cylinder
-/// (see [`circle_for`] for `one`) resting on it as seen (see [`clear_of`]: a flat monitor's edge bulges towards the
-/// eye in its middle).
+/// (see [`circle_for`] for `one`) resting on it as seen (see [`clear_of`]: a flat
+/// monitor's edge bulges towards the eye in its middle).
 fn over(e: &Placement, eh: f32, width: f32, height: f32, up: f32, one: f32) -> Option<Placement> {
     if on_a_cylinder(e) {
         let corners = e.corners(eh);

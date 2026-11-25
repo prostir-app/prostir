@@ -1664,3 +1664,188 @@ fn a_wide_monitor_is_always_brought_into_view() {
     again.settled();
     all_in_view(&again, &[1, 2, 3, 4], "the preset");
 }
+
+/// A 5120x1440 monitor added to three goes into the row, whose monitors make room only
+/// once its picture comes: till then its placeholder waits where it covers none of
+/// them and goes through none (not on the seam it will take, over two of them).
+#[test]
+fn a_wide_monitor_waits_where_it_covers_nothing() {
+    const WIDE: (u32, u32) = (5120, 1440);
+    let mut sim = Sim::at_desk();
+    sim.world
+        .adding_started(Some(ReqId(1)), WIDE, sim.head.1, sim.now);
+    let waiting = *sim.world.adding().expect("a placeholder");
+    assert!(waiting.into_row, "into the row once it comes");
+    let at = (sim.world.center, sim.world.tilt);
+    let sizes: Vec<(DisplayKey, u32, u32)> = (1..=3).map(|n| (k(n), QHD.0, QHD.1)).collect();
+    assert!(
+        !layout::covers_any(
+            &sim.world.placements,
+            &sizes,
+            k(4),
+            WIDE,
+            &waiting.place,
+            at
+        ),
+        "the placeholder covers none of the three"
+    );
+    sim.world.adding_made(PC, ReqId(1), Some(k(4)));
+    let mut list = three();
+    list.push(monitor(4, WIDE));
+    sim.list(list);
+    sim.stream(4, WIDE);
+    sim.settled();
+    all_in_view(&sim, &[1, 2, 3, 4], "added");
+    let rows = row_ids(sim.arranged.last().expect("told"));
+    assert_eq!(rows.len(), 1, "into the row: {rows:?}");
+}
+
+/// Monitors 1 and 2 of `lower` (sizes) and 3 and 4 of `upper` laid out by `preset` as
+/// it stacked rows before 2026-11-25: on the circle of 1.1 m, each row centred ahead,
+/// the upper one standing on the lower one as seen; in the preset's frame.
+fn stacked_before(sim: &mut Sim, preset: Preset, lower: [(u32, u32); 2], upper: [(u32, u32); 2]) {
+    use prostir_layout::circle::{angular_width, clear_of, on_cylinder};
+    let sizes: Vec<(u32, (u32, u32))> = (1..).zip(lower.into_iter().chain(upper)).collect();
+    sim.connect(PC);
+    sim.list(sizes.iter().map(|&(n, size)| monitor(n, size)).collect());
+    for &(n, size) in &sizes {
+        sim.stream(n, size);
+    }
+    sim.settled();
+    sim.s.preset = preset;
+    sim.world.preset_chosen(&sim.s, sim.now);
+    sim.settled();
+    let metres = |(w, h): (u32, u32)| {
+        (
+            w as f32 * layout::METRES_PER_PIXEL,
+            h as f32 * layout::METRES_PER_PIXEL,
+        )
+    };
+    let radius = layout::RADIUS;
+    let y = if preset == Preset::Overhead {
+        0.0
+    } else {
+        -0.08
+    };
+    let row = |sizes: [(u32, u32); 2], bottom: f32| {
+        let a = sizes.map(|s| angular_width(metres(s).0, radius));
+        let start = -(a[0] + a[1]) / 2.0;
+        [start + a[0] / 2.0, start + a[0] + a[1] / 2.0]
+            .into_iter()
+            .zip(sizes)
+            .map(|(yaw, s)| {
+                let (w, h) = metres(s);
+                (on_cylinder(yaw, bottom + h / 2.0, w, radius), h)
+            })
+            .collect::<Vec<_>>()
+    };
+    // The lower row's tops on one line, the primary's (none: the tallest) at `y`.
+    let tallest = lower.map(|s| metres(s).1).into_iter().fold(0.0, f32::max);
+    let low: Vec<(Placement, f32)> = row(lower, y - tallest / 2.0)
+        .into_iter()
+        .map(|(p, h)| {
+            let top = y + tallest / 2.0;
+            let mut p = p;
+            p.position.y = top - h / 2.0;
+            (p, h)
+        })
+        .collect();
+    let shelf = y + tallest / 2.0;
+    let high = row(upper, shelf);
+    let bottom = clear_of(&high, &low).map_or(shelf, |c| c.max(shelf));
+    let high = row(upper, bottom);
+    let frame = layout::frame(sim.world.center, sim.world.tilt);
+    for (n, (p, _)) in (1..).zip(low.into_iter().chain(high)) {
+        sim.world.placements.insert(k(n), frame.place(p));
+    }
+    sim.world.save_layout();
+    sim.settled();
+}
+
+/// The owner's report of 2026-11-25: two rows of two as the preset stacked them before,
+/// the upper one standing on the lower one as seen, its middle out of view: four
+/// 3440x1440 on an arc; three 3440x1440 and a 2560x1440 on an arc; three 3440x1440 and a
+/// 1920x1080 overhead. "Line up" takes the whole arrangement a little further away:
+/// every monitor in view, the same two rows, every seam closed as seen still closed,
+/// nothing going through anything.
+#[test]
+fn line_up_brings_a_row_over_the_head_into_view() {
+    const ULTRA: (u32, u32) = (3440, 1440);
+    for (preset, top) in [
+        (Preset::Arc, ULTRA),
+        (Preset::Arc, QHD),
+        (Preset::Overhead, (1920, 1080)),
+    ] {
+        let case = format!("{preset:?} with {top:?}");
+        let mut sim = Sim::new(None);
+        stacked_before(&mut sim, preset, [ULTRA; 2], [ULTRA, top]);
+        let at = (sim.world.center, sim.world.tilt);
+        assert!(
+            !layout::in_view(&sim.place(k(3)), at),
+            "{case}: the upper row out of view"
+        );
+        let rows = row_ids(sim.arranged.last().expect("told"));
+        assert_eq!(rows, [vec![3, 4], vec![1, 2]], "{case}");
+        let glued = sim.world.glued_now();
+        assert!(!glued.is_empty(), "{case}: glued {glued:?}");
+        let laid = sim.world.sizes.clone();
+        let before = layout::seam_gaps(&sim.world.placements, &laid, at, &glued);
+        sim.world.tidy_up(&sim.s, sim.now);
+        sim.settled();
+        all_in_view(&sim, &[1, 2, 3, 4], &case);
+        let rows = row_ids(sim.arranged.last().expect("told"));
+        assert_eq!(rows, [vec![3, 4], vec![1, 2]], "{case}: the same rows");
+        assert!(sim.world.radius > layout::RADIUS, "{case}: further away");
+        let after = layout::seam_gaps(&sim.world.placements, &laid, at, &glued);
+        for ((pair, was), now) in glued.iter().zip(&before).zip(&after) {
+            let (p, u) = (pair.0.id.0, pair.1.id.0);
+            assert!(
+                now - was < 5e-4,
+                "{case}: the seam of {u} over {p} opens: {was} to {now}"
+            );
+        }
+    }
+}
+
+/// A 3840x2160 added to a 3440x1440, beside which it has no room: over it on its circle
+/// it would stand out of view (the middle of a flat ultrawide comes close to the eye,
+/// and a tall monitor resting on it stands high). It goes over it further away, in
+/// view, resting on it as seen; its placeholder waits there too. Nothing cuts.
+#[test]
+fn a_monitor_added_over_a_row_is_in_view() {
+    const ULTRA: (u32, u32) = (3440, 1440);
+    let mut sim = Sim::new(None);
+    sim.connect(PC);
+    const UHD: (u32, u32) = (3840, 2160);
+    let mut list = vec![monitor(1, ULTRA)];
+    sim.list(list.clone());
+    sim.stream(1, ULTRA);
+    sim.settled();
+    sim.world
+        .adding_started(Some(ReqId(1)), UHD, sim.head.1, sim.now);
+    let waiting = *sim.world.adding().expect("a placeholder");
+    let at = (sim.world.center, sim.world.tilt);
+    assert!(
+        layout::in_view(&waiting.place, at),
+        "the placeholder in view"
+    );
+    sim.world.adding_made(PC, ReqId(1), Some(k(2)));
+    list.push(monitor(2, UHD));
+    sim.list(list);
+    sim.stream(2, UHD);
+    sim.settled();
+    all_in_view(&sim, &[1, 2], "added");
+    let rows = row_ids(sim.arranged.last().expect("told"));
+    assert_eq!(rows.len(), 2, "over the row: {rows:?}");
+    assert!(
+        layout::seam_gaps(
+            &sim.world.placements,
+            &sim.world.sizes,
+            at,
+            &sim.world.glued_now()
+        )
+        .iter()
+        .all(|g| g.abs() < 1e-3),
+        "resting on the row as seen"
+    );
+}
