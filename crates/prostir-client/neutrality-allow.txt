@@ -18,6 +18,8 @@ src/platform/store/meta.rs horizon: the store's own name
 src/platform/controllers.rs oculus: an interaction profile's path, as OpenXR names it
 src/platform/controllers.rs htc: an interaction profile's path, as OpenXR names it
 src/platform/controllers.rs bytedance: an interaction profile's path, as OpenXR names it
+src/platform/pixels.rs quest: the table of displays, by the models as the system names them
+src/platform/pixels.rs oculus: the models as the system names them, maker first, in its tests
 tests/neutrality.rs *: the list of names the check looks for
 tests/texts.rs kde: the list of names the texts must not use
 tests/texts.rs plasma: the list of names the texts must not use

@@ -28,6 +28,7 @@ use glam::{Quat, Vec2, Vec3};
 use log::info;
 use prostir_proto::state::{DisplayId, DisplayKind, DisplayState, Displays, Mode, ReqId, Row};
 
+use crate::clarity::{self, Dev, Quality};
 use crate::ids::{DisplayKey, PcId, Target, Thing};
 use crate::layout::{self, Desk, Desktop, DesktopMemo, Hit, PixelSize, Placement, Ray};
 use crate::pending::{Made, ProfileSwitch};
@@ -175,6 +176,29 @@ struct Seen {
     curve: Option<f32>,
 }
 
+/// How sharp a monitor's layer is shown (see [`World::layer_quality`]): worked out
+/// again only when its place, its stream's width, the eye, its curve or the choices of
+/// "For development" change.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Clear {
+    /// What it was worked out for.
+    made_for: (Placement, u32, Vec3, Option<f32>, Dev),
+    /// Headset pixels per stream pixel at its middle (`None`: not known).
+    scale: Option<f32>,
+    quality: Quality,
+}
+
+/// The arrangement before a size of "For development" laid the monitors out again,
+/// put back by its "Reset".
+#[cfg(feature = "preview")]
+#[derive(Debug, Clone)]
+struct BeforeDev {
+    placements: HashMap<DisplayKey, Placement>,
+    radius: f32,
+    tilt: f32,
+    sized: layout::Sizes,
+}
+
 /// What a ray may point at besides what always stands: the menu while it is open, and
 /// the "Attach" button of a detached window while it shows.
 #[derive(Debug, Clone, Copy, Default)]
@@ -218,6 +242,20 @@ pub struct World {
     /// The circle around the head the arrangement stands on (it grows for many
     /// monitors, see `layout::preset_radius`).
     radius: f32,
+    /// The headset's pixels per degree, where its model is known (see
+    /// `clarity::pixels_per_degree`): monitors are made "1:1" by them.
+    ppd: Option<f32>,
+    /// How large new monitors are made: as the last preset made them (see
+    /// `clarity::preset_sizes`), or as those standing are when the arrangement came
+    /// from the file or a profile (see `World::sized_from_places`).
+    sized: layout::Sizes,
+    /// The choices of "For development" (see `clarity::Dev`).
+    dev: Dev,
+    /// The arrangement before a size of "For development" laid it out again.
+    #[cfg(feature = "preview")]
+    before_dev: Option<BeforeDev>,
+    /// How sharp each monitor's layer is (see [`World::layer_quality`]).
+    clear: HashMap<DisplayKey, Clear>,
     /// How far up the arrangement's frame is tilted (see `layout::frame`): lying down,
     /// a band overhead seen from below. The arrangement's own, as a profile keeps it:
     /// a preset sets it when it lays the monitors out.
@@ -283,13 +321,15 @@ impl World {
     /// The room at the start: the desk arrangement and the keyboard window's place as
     /// the files kept them. In cinema the view is built once the PC's monitors are here
     /// (see `build_cinema_view_if_due`) and the desk arrangement waits until cinema
-    /// ends.
+    /// ends. `ppd`: the headset's pixels per degree, where its model is known.
     pub fn new(
         desk: Desk,
         keyboard: Option<Placement>,
         curve_supported: bool,
+        ppd: Option<f32>,
         s: &Settings,
     ) -> Self {
+        let dev = Dev::default();
         let mut world = Self {
             pcs: BTreeMap::new(),
             last: None,
@@ -305,6 +345,12 @@ impl World {
             brightness: HashMap::new(),
             center: (Vec3::ZERO, 0.0),
             radius: layout::RADIUS,
+            ppd,
+            sized: clarity::start_sizes(ppd, dev.size),
+            dev,
+            #[cfg(feature = "preview")]
+            before_dev: None,
+            clear: HashMap::new(),
             tilt: layout::tilt(s.preset),
             placed_for: HashMap::new(),
             desk,
@@ -982,12 +1028,13 @@ impl World {
     /// monitor (see `layout::arrange`).
     fn physical_laid(&self, s: &Settings) -> Vec<(DisplayKey, Placement)> {
         let physical = self.physical_sizes();
-        let laid = self.around_user(layout::arrange(
+        let laid = self.around_user(layout::arrange_sized(
             s.preset,
             &self.lineup,
             self.primary(),
             &physical,
             self.curve_factor(s),
+            self.sized,
         ));
         physical
             .iter()
@@ -1082,14 +1129,20 @@ impl World {
         if self.lineup.is_empty() {
             return;
         }
-        self.radius = layout::preset_radius(s.preset, &self.lineup, self.primary());
+        let physical = self.physical_sizes();
+        let (primary, curve) = (self.primary(), self.curve_factor(s));
+        self.sized = clarity::preset_sizes(self.ppd, self.dev.size, |sized| {
+            layout::largest_scale(s.preset, &self.lineup, primary, &physical, curve, sized)
+        });
+        self.radius = layout::preset_radius_sized(s.preset, &self.lineup, primary, self.sized);
         self.tilt = layout::tilt(s.preset);
-        let laid = self.around_user(layout::arrange(
+        let laid = self.around_user(layout::arrange_sized(
             s.preset,
             &self.lineup,
-            self.primary(),
-            &self.physical_sizes(),
-            self.curve_factor(s),
+            primary,
+            &physical,
+            curve,
+            self.sized,
         ));
         self.placements.extend(laid);
         self.held = [None, None];
@@ -1217,7 +1270,7 @@ impl World {
             self.tilt,
             gaze,
             self.sent_rows(),
-            self.radius,
+            self.circle(),
             place,
         );
         (waits, true)
@@ -1234,9 +1287,17 @@ impl World {
             self.tilt,
             gaze,
             self.sent_rows(),
-            self.radius,
+            self.circle(),
             any,
         )
+    }
+
+    /// The circle new monitors go on, and how large they are made.
+    fn circle(&self) -> layout::Circle {
+        layout::Circle {
+            radius: self.radius,
+            sizes: self.sized,
+        }
     }
 
     /// The monitors beside `id` in its row that it covers are pushed aside along the
@@ -1267,8 +1328,8 @@ impl World {
             .keys()
             .filter(|k| self.is_window(**k) && **k != id)
             .count();
-        let width =
-            (width_px as f32 * layout::METRES_PER_PIXEL * DISTANCE / self.radius).clamp(0.2, 1.2);
+        let per_pixel = self.sized.others.metres_per_pixel(width_px, self.radius);
+        let width = (width_px as f32 * per_pixel * DISTANCE / self.radius).clamp(0.2, 1.2);
         let position = head + flat * DISTANCE - Vec3::Y * 0.12 + right * (0.15 * others as f32);
         self.placements.insert(
             id,
@@ -1338,6 +1399,52 @@ impl World {
                 layout::facing_yaw(&desk, Vec3::ZERO).unwrap_or(0.0),
             )
         });
+        self.sized = self.sized_from_places();
+    }
+
+    /// How large new monitors are made beside an arrangement that came from elsewhere
+    /// (the file, a profile): the standard size where every monitor standing has it
+    /// (or the headset's pixels are not known, or the standard size is chosen); else
+    /// seen at the scale the middle one of them (by scale) is shown at, for all. With
+    /// nothing standing, as at the start (1:1).
+    fn sized_from_places(&self) -> layout::Sizes {
+        let Some(ppd) = self
+            .ppd
+            .filter(|_| self.dev.size != clarity::MonitorSize::Standard)
+        else {
+            return layout::Sizes::default();
+        };
+        let eye = self.center.0;
+        let standing: Vec<(f32, f32)> = self
+            .placements
+            .iter()
+            .filter(|(id, _)| !self.is_window(**id))
+            .filter_map(|(id, p)| {
+                let (w, _) = self
+                    .streams
+                    .get(id)
+                    .or_else(|| self.placed_for.get(id))
+                    .copied()?;
+                let per_pixel = p.width / w.max(1) as f32;
+                Some((per_pixel, clarity::shown(p, w, eye, None, ppd)))
+            })
+            .collect();
+        if standing.is_empty() {
+            return clarity::start_sizes(self.ppd, self.dev.size);
+        }
+        let standard = layout::METRES_PER_PIXEL;
+        if standing
+            .iter()
+            .all(|(m, _)| (m / standard - 1.0).abs() < 0.005)
+        {
+            return layout::Sizes::default();
+        }
+        let mut scales: Vec<f32> = standing.iter().map(|(_, s)| *s).collect();
+        scales.sort_by(f32::total_cmp);
+        layout::Sizes::all(layout::Size::Seen {
+            ppd,
+            scale: scales[scales.len() / 2],
+        })
     }
 
     /// The desk placement of monitor `id` follows its stream, now `size` pixels: the
@@ -1527,6 +1634,7 @@ impl World {
                 if let Some(f) = frame {
                     self.tilt = f.tilt;
                 }
+                self.sized = self.sized_from_places();
                 self.switch = None;
                 self.rows_from(rows);
                 self.save_layout();
@@ -2632,6 +2740,161 @@ impl World {
         }
         let streams = &self.streams;
         self.appear.retain(|id, _| streams.contains_key(id));
+        self.clarify(s);
+    }
+
+    /// How sharp each monitor's layer is shown, worked out again for those whose place
+    /// (where it goes, not where it is drawn on its way), stream width, curve, the eye
+    /// or the choices of "For development" changed since (see [`Clear`]). Nothing is
+    /// allocated once each monitor has its entry.
+    fn clarify(&mut self, s: &Settings) {
+        let curve = self.curve_radius(s);
+        let (eye, ppd, dev) = (self.center.0, self.ppd, self.dev);
+        let Self {
+            placements,
+            streams,
+            listed,
+            clear,
+            ..
+        } = self;
+        for (id, at) in placements.iter() {
+            let Some(&(width, _)) = streams.get(id) else {
+                continue;
+            };
+            let curve = curve.filter(|_| !window(listed, *id));
+            let made_for = (*at, width, eye, curve, dev);
+            if clear.get(id).is_some_and(|c| c.made_for == made_for) {
+                continue;
+            }
+            let scale = ppd.map(|ppd| clarity::shown(at, width, eye, curve, ppd));
+            // Supersampled before by the scale, or not: it changes only well past the
+            // line (see `clarity::quality`).
+            let was = clear
+                .get(id)
+                .filter(|c| c.made_for.4.super_sampling == clarity::Filter::Auto)
+                .map(|c| c.quality.super_sampling);
+            let c = Clear {
+                made_for,
+                scale,
+                quality: clarity::quality(scale, &dev, was),
+            };
+            match clear.get_mut(id) {
+                Some(kept) => *kept = c,
+                None => {
+                    clear.insert(*id, c);
+                }
+            }
+        }
+        clear.retain(|id, _| placements.contains_key(id) && streams.contains_key(id));
+    }
+
+    /// The compositor's filters for monitor `id`'s layer, by the scale it is shown at
+    /// (see `clarity::quality`); both until its place is known.
+    pub fn layer_quality(&self, id: DisplayKey) -> Quality {
+        self.clear.get(&id).map_or(Quality::BOTH, |c| c.quality)
+    }
+
+    /// How many of the headset's pixels a pixel of monitor `id`'s stream takes at its
+    /// middle, where it goes, seen from the arrangement's eye (where the head was when
+    /// it was laid out or brought in front, not where it is now); `None`: not known.
+    pub fn shown_scale(&self, id: DisplayKey) -> Option<f32> {
+        self.clear.get(&id).and_then(|c| c.scale)
+    }
+
+    // ---- For development ----
+
+    /// Whether a display other than `except`, as drawn, stands where a rectangle of
+    /// `size` would, centred at `at` in the plane of `p` (x right, y up from its middle),
+    /// seen square to that plane. Nothing is allocated.
+    #[cfg(feature = "preview")]
+    pub fn stands_at(&self, p: &Placement, at: Vec2, size: Vec2, except: DisplayKey) -> bool {
+        let turn = p.rotation.inverse();
+        let (lo, hi) = (at - size / 2.0, at + size / 2.0);
+        self.streams
+            .iter()
+            .filter(|(id, _)| **id != except)
+            .any(|(id, &(w, h))| {
+                let Some(q) = self.shown.get(id) else {
+                    return false;
+                };
+                let corners = q.corners(q.width * h as f32 / w.max(1) as f32);
+                let (mut qlo, mut qhi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+                for c in corners {
+                    let l = (turn * (c - p.position)).truncate();
+                    qlo = qlo.min(l);
+                    qhi = qhi.max(l);
+                }
+                qlo.x < hi.x && lo.x < qhi.x && qlo.y < hi.y && lo.y < qhi.y
+            })
+    }
+
+    /// The choices of "For development".
+    pub fn dev(&self) -> &Dev {
+        &self.dev
+    }
+
+    /// The headset's pixels per degree, where its model is known.
+    pub fn pixels_per_degree(&self) -> Option<f32> {
+        self.ppd
+    }
+
+    /// The choices of "For development" are `dev` from now on. Another size of the
+    /// monitors lays them out again by the preset at once (as choosing a preset does);
+    /// the arrangement before the first such change is kept for "Reset" (see
+    /// [`Self::reset_size`]). The filters take effect with the next frame.
+    #[cfg(feature = "preview")]
+    pub fn set_dev(&mut self, s: &Settings, dev: Dev, now: Instant) {
+        let resized = dev.size != self.dev.size;
+        self.dev = dev;
+        if !resized {
+            return;
+        }
+        if self.cinema || self.lineup.is_empty() {
+            self.sized = clarity::start_sizes(self.ppd, dev.size);
+            return;
+        }
+        if self.before_dev.is_none() {
+            self.before_dev = Some(BeforeDev {
+                placements: self.placements.clone(),
+                radius: self.radius,
+                tilt: self.tilt,
+                sized: self.sized,
+            });
+        }
+        self.rearranged = true;
+        self.arrange_all(s, now);
+    }
+
+    /// Whether "Reset" of the monitors' size has something to put back.
+    #[cfg(feature = "preview")]
+    pub fn can_reset_size(&self) -> bool {
+        self.before_dev.is_some() || self.dev.size != clarity::MonitorSize::default()
+    }
+
+    /// "Reset": the size of new monitors as by default, and the monitors back where
+    /// they stood before the first size of "For development" laid them out again: those
+    /// still here. A monitor added in between stays where it was put, and nothing else
+    /// moves.
+    #[cfg(feature = "preview")]
+    pub fn reset_size(&mut self, now: Instant) {
+        self.dev.size = clarity::MonitorSize::default();
+        // Cinema shows its own view: the desk arrangement is not the one to put back.
+        let Some(before) = self.before_dev.take().filter(|_| !self.cinema) else {
+            self.sized = clarity::start_sizes(self.ppd, self.dev.size);
+            return;
+        };
+        for (id, p) in before.placements {
+            if let Some(at) = self.placements.get_mut(&id) {
+                *at = p;
+            }
+        }
+        self.radius = before.radius;
+        self.tilt = before.tilt;
+        self.sized = before.sized;
+        self.held = [None, None];
+        self.rearranged = true;
+        self.save_layout();
+        self.send_layout(now);
     }
 
     /// The monitors in the order to draw them, far from `head` to near, two at about

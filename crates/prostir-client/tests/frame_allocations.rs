@@ -156,6 +156,10 @@ impl Ready for Drawn {
     fn attach(&self) -> bool {
         true
     }
+    #[cfg(feature = "preview")]
+    fn metrics(&self) -> bool {
+        true
+    }
     fn hands(&self) -> bool {
         true
     }

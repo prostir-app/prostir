@@ -31,9 +31,32 @@ use unicode_segmentation::UnicodeSegmentation;
 /// one per language, English (complete, behind every other one) and Ukrainian. The PC
 /// app, the settings window and the headset app share them; each uses the messages
 /// whose ids start with its own name (`pc-`, `window-`, `headset-`).
+#[cfg(not(feature = "preview"))]
 pub const BUILTIN: &[(&str, &str)] = &[
     ("en", include_str!("../../../lang/en.ftl")),
     ("uk", include_str!("../../../lang/uk.ftl")),
+];
+
+/// [`BUILTIN`] in the headset's preview build: with the texts of its "For development"
+/// part (`lang/dev/<code>.ftl`, one per language as well).
+#[cfg(feature = "preview")]
+pub const BUILTIN: &[(&str, &str)] = &[
+    (
+        "en",
+        concat!(
+            include_str!("../../../lang/en.ftl"),
+            "\n",
+            include_str!("../../../lang/dev/en.ftl")
+        ),
+    ),
+    (
+        "uk",
+        concat!(
+            include_str!("../../../lang/uk.ftl"),
+            "\n",
+            include_str!("../../../lang/dev/uk.ftl")
+        ),
+    ),
 ];
 
 /// The language every other one falls back to; always built in.

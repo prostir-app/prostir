@@ -1,7 +1,9 @@
 //! The language files in `lang/` at the root of the repository, one per language, shared
 //! by the PC app, the settings window and the headset app: each file is readable, has
 //! the messages of English and nothing else, with the same placeholders; every message
-//! a program names exists, and every message of a program is named by it.
+//! a program names exists, and every message of a program is named by it. The texts of
+//! the headset's "For development" part, built in only for its preview build, are
+//! `lang/dev/<code>.ftl`, one for each language, and count with their language here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -33,16 +35,37 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Every `lang/<code>.ftl`: (code, text).
+/// Every `lang/<code>.ftl` with its `lang/dev/<code>.ftl` after it: (code, text), as the
+/// preview build has them.
 fn files() -> Vec<(String, String)> {
+    let dev = in_folder("lang/dev");
+    let base = in_folder("lang");
+    let codes = |f: &[(String, String)]| f.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>();
+    assert_eq!(
+        codes(&dev),
+        codes(&base),
+        "lang/dev/ has a file for each language"
+    );
+    base.into_iter()
+        .zip(dev)
+        .map(|((code, text), (_, dev))| (code, format!("{text}\n{dev}")))
+        .collect()
+}
+
+/// Every `<code>.ftl` of `folder` (from the root): (code, text). `lang/dev/` is not one.
+fn in_folder(folder: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(root().join("lang")).expect("lang/ at the root") {
+    for entry in std::fs::read_dir(root().join(folder)).expect("the folder at the root") {
         let path = entry.expect("a directory entry").path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if folder == "lang" && name == "dev" && path.is_dir() {
+            continue;
+        }
         let Some(code) = name.strip_suffix(".ftl") else {
-            panic!("lang/{name}: only <code>.ftl files belong in lang/");
+            panic!("{folder}/{name}: only <code>.ftl files belong in {folder}/");
         };
-        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("lang/{name}: {e}"));
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{folder}/{name}: {e}"));
         out.push((code.to_owned(), text));
     }
     out.sort();
@@ -138,9 +161,30 @@ fn every_file_is_a_language_built_into_the_programs() {
         on_disk, built_in,
         "lang/ and prostir_lang::BUILTIN list different languages: a new file is added to both"
     );
-    for (code, text) in files() {
+    // Built in: lang/<code>.ftl, and in the preview build lang/dev/<code>.ftl after it.
+    let built = if cfg!(feature = "preview") {
+        files()
+    } else {
+        in_folder("lang")
+    };
+    for (code, text) in built {
         let embedded = prostir_lang::BUILTIN.iter().find(|(c, _)| *c == code);
         assert_eq!(embedded.map(|(_, t)| *t), Some(text.as_str()), "{code}");
+    }
+}
+
+/// `lang/dev/` holds only the headset's messages, none of them in `lang/` as well.
+#[test]
+fn the_development_texts_are_the_headsets_own() {
+    for ((code, base), (_, dev)) in in_folder("lang").into_iter().zip(in_folder("lang/dev")) {
+        let base = variables(&base);
+        for id in variables(&dev).keys() {
+            assert!(id.starts_with("headset-"), "dev/{code}.ftl: {id}");
+            assert!(
+                !base.contains_key(id),
+                "{id} is in {code}.ftl and dev/{code}.ftl"
+            );
+        }
     }
 }
 

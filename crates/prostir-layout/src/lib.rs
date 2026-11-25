@@ -23,6 +23,9 @@
 //!   [`place::into_row`], into the main row, for one far wider than its circle that
 //!   would otherwise be out of view ([`space::in_view`]).
 //! - [`tidy::line_up`]: every row straightened on its own surface, rows never merged.
+//! - [`size::Size`]: how large a new monitor is made for its pixels (the same metres per
+//!   pixel for all, or as the headset shows it, "1:1"), and [`circle::largest_scale`]:
+//!   the largest scale at which a preset keeps its circle and every monitor in view.
 //!
 //! Every function is generic over the key that names a monitor (`K: Copy + Ord`), so
 //! the numbers each side uses can change without changing the rules.
@@ -31,6 +34,7 @@ pub mod circle;
 pub mod desk;
 pub mod place;
 pub mod rows;
+pub mod size;
 pub mod space;
 pub mod tidy;
 pub mod view;

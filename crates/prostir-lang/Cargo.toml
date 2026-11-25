@@ -10,6 +10,11 @@ rust-version.workspace = true
 description = "Prostir's translations as data: Fluent files built in, more dropped into a folder"
 publish = false
 
+[features]
+# The texts of the headset's "For development" part (`lang/dev/`), built in only for its
+# preview build.
+preview = []
+
 [dependencies]
 fluent-bundle = "0.16"
 fluent-syntax = "0.12"

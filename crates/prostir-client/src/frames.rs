@@ -5,6 +5,8 @@
 #![forbid(unsafe_code)]
 
 use std::collections::VecDeque;
+#[cfg(feature = "preview")]
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::Thread;
 use std::time::{Duration, Instant};
@@ -37,6 +39,38 @@ pub const QUEUE_ROOM: usize = 16;
 /// `Arc` and pushes; the decoder takes through [`Frames`].
 pub struct FrameQueue {
     queued: Mutex<Queued>,
+    /// What came for it, for the numbers shown while developing (see [`Received`]).
+    #[cfg(feature = "preview")]
+    received: Arc<Received>,
+}
+
+/// What came of a stream so far: atomics the network side counts in and anyone may
+/// read, never a lock in the way of the frames. The preview build's only.
+#[cfg(feature = "preview")]
+#[derive(Debug, Default)]
+pub struct Received {
+    /// The bytes of every frame that came.
+    bytes: AtomicU64,
+    /// The bytes of the last keyframe; 0 before one came.
+    keyframe: AtomicU32,
+}
+
+#[cfg(feature = "preview")]
+impl Received {
+    /// The bytes of every frame so far, and of the last keyframe (`None` before one).
+    pub fn get(&self) -> (u64, Option<u32>) {
+        let key = self.keyframe.load(Ordering::Relaxed);
+        (self.bytes.load(Ordering::Relaxed), (key > 0).then_some(key))
+    }
+
+    fn count(&self, frame: &Frame) {
+        let len = frame.data.len();
+        self.bytes.fetch_add(len as u64, Ordering::Relaxed);
+        if frame.keyframe {
+            let len = u32::try_from(len).unwrap_or(u32::MAX).max(1);
+            self.keyframe.store(len, Ordering::Relaxed);
+        }
+    }
 }
 
 struct Queued {
@@ -77,6 +111,8 @@ impl Default for FrameQueue {
                 closed: false,
                 decoder: None,
             }),
+            #[cfg(feature = "preview")]
+            received: Arc::default(),
         }
     }
 }
@@ -108,6 +144,8 @@ impl FrameQueue {
     /// is behind. A keyframe always goes in, in place of the frames still waiting:
     /// they came before it and are of no use once it is decoded.
     pub fn push(&self, frame: Frame, now: Instant) -> Pushed {
+        #[cfg(feature = "preview")]
+        self.received.count(&frame);
         let decoder = {
             let mut q = self.lock();
             if frame.keyframe {
@@ -162,6 +200,12 @@ impl Frames {
             None if q.closed => Taken::Ended,
             None => Taken::Nothing,
         }
+    }
+
+    /// What came of the stream so far (see [`Received`]), to read from elsewhere.
+    #[cfg(feature = "preview")]
+    pub fn received(&self) -> Arc<Received> {
+        self.0.received.clone()
     }
 
     /// Frames received from the network that the decoder has not taken yet.
@@ -378,6 +422,26 @@ mod tests {
             queue.push(frame(29, false, burst), burst + ms(60)),
             Pushed::Behind
         );
+    }
+
+    /// Every frame's bytes are counted, and the last keyframe's size is kept, also
+    /// for a frame the decoder is too far behind to take.
+    #[cfg(feature = "preview")]
+    #[test]
+    fn what_came_is_counted() {
+        let t = Instant::now();
+        let queue = Arc::new(FrameQueue::default());
+        let received = queue.frames().received();
+        assert_eq!(received.get(), (0, None));
+        let sized = |seq, keyframe, len| Frame {
+            data: vec![0; len],
+            ..frame(seq, keyframe, t)
+        };
+        queue.push(sized(0, true, 900), t);
+        queue.push(sized(1, false, 50), t);
+        assert_eq!(received.get(), (950, Some(900)));
+        queue.push(sized(2, true, 700), t);
+        assert_eq!(received.get(), (1650, Some(700)));
     }
 
     /// A keyframe never waits behind frames it makes useless.

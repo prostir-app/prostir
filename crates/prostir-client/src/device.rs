@@ -1,6 +1,7 @@
-//! What the headset is called, as the system says it: only shown and logged (the PC's
-//! list of headsets, pairing), never used to decide anything. What it can do is
-//! [`crate::caps::Caps`].
+//! What the headset is called, as the system says it: shown and logged (the PC's list
+//! of headsets, pairing), and looked up in one table, the pixels per degree of known
+//! displays (`platform::pixels`, for how large monitors are made); never used to decide
+//! what the headset can do, which is [`crate::caps::Caps`].
 
 #![forbid(unsafe_code)]
 

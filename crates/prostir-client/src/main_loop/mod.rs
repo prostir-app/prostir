@@ -273,6 +273,11 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             stage
                 .pictures
                 .draw(gpu, &shell.model, &kept.hands, &mut kept.view_cache, timed)?;
+        // The numbers of "For development" (the preview build, while chosen).
+        #[cfg(feature = "preview")]
+        stage
+            .pictures
+            .metrics(&xr.gl, &shell.model, &shell.video, now)?;
         // Hands and rays: only rendered when there is something to show.
         spheres::fill(
             &mut kept.buffers.spheres,

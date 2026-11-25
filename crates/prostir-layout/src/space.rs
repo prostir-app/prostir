@@ -571,6 +571,10 @@ pub fn overlaps<K, L>(a: &Seen<K>, b: &Seen<L>, slack: f64) -> bool {
 /// millimetre): edges that meet, glued, and the last bits of a float do not.
 pub const CUT_SLACK: f32 = 0.0005;
 
+/// Two faces whose normals' cross product is shorter than this, squared, are nearly
+/// one plane (3 degrees: sin² 3° = 0.00274).
+const NEARLY_ONE_PLANE: f32 = 0.00274;
+
 /// A flat face: where, how turned, half its width and height.
 #[derive(Debug, Clone, Copy)]
 struct Face {
@@ -632,6 +636,21 @@ impl Face {
         (t0 < t1).then_some((t0, t1))
     }
 
+    /// Whether `other`, lying in this face's plane, overlaps this face by more than
+    /// [`CUT_SLACK`]: an edge of either goes inside the other, or the two are one (each
+    /// edge on the other's, none inside).
+    fn over_in_plane(&self, other: &Face) -> bool {
+        let inside = |f: &Face, at: Vec3| {
+            let l = f.local(at).truncate();
+            f.inner()
+                .is_some_and(|half| l.x.abs() < half.x && l.y.abs() < half.y)
+        };
+        self.entered_in_plane(other)
+            || other.entered_in_plane(self)
+            || inside(self, other.p.position)
+            || inside(other, self.p.position)
+    }
+
     /// Whether an edge of `other`, lying in this face's plane, goes inside this face.
     fn entered_in_plane(&self, other: &Face) -> bool {
         let c = other.corners().map(|c| self.local(c).truncate());
@@ -650,12 +669,21 @@ pub fn cuts(a: &Placement, ah: f32, b: &Placement, bh: f32) -> bool {
     let (fa, fb) = (Face::new(a, ah), Face::new(b, bh));
     let (na, nb) = (a.normal(), b.normal());
     let across = na.cross(nb);
+    // Nearly one plane (within 3 degrees) and touching or all but (a centimetre): over
+    // each other there they cut, though the line the planes meet on may be only an edge
+    // they share (two hinged on one edge to the same side).
+    if across.length_squared() < NEARLY_ONE_PLANE {
+        let near = |f: &Face, o: &Face| o.corners().iter().any(|c| f.local(*c).z.abs() < 0.01);
+        if (near(&fa, &fb) || near(&fb, &fa)) && fa.over_in_plane(&fb) {
+            return true;
+        }
+    }
     if across.length_squared() < 1e-8 {
         // Facing the same way (or opposite): only in one plane can they meet.
         if (b.position - a.position).dot(na).abs() >= CUT_SLACK {
             return false;
         }
-        return fa.entered_in_plane(&fb) || fb.entered_in_plane(&fa);
+        return fa.over_in_plane(&fb);
     }
     // The line both planes hold: a point of it, and its way.
     let (ha, hb) = (na.dot(a.position), nb.dot(b.position));
@@ -710,5 +738,29 @@ mod tests {
         assert!(!cuts(&a, 0.5, &upright(0.0, -0.8, 0.0, 0.4), 0.3));
         // Smaller, inside it in its plane.
         assert!(cuts(&a, 0.5, &upright(0.1, -1.0, 0.0, 0.3), 0.2));
+        // Two in one place, and one a hair behind the other: each on the other.
+        assert!(cuts(&a, 0.5, &a, 0.5));
+        assert!(cuts(&a, 0.5, &upright(0.0, -1.0001, 0.0, 1.0), 0.5));
+        // Hinged on its top edge, turned half a degree: lying over it, not beside it.
+        let lid = |turn: f32, h: f32| {
+            let r = Quat::from_rotation_x(turn);
+            Placement {
+                position: Vec3::new(0.0, 0.25, -1.0) + r * Vec3::new(0.0, -h / 2.0, 0.0),
+                rotation: r,
+                width: 1.0,
+            }
+        };
+        assert!(cuts(&a, 0.5, &lid(0.5f32.to_radians(), 0.4), 0.4));
+        // Hinged on it upwards (above it, a little tilted), and 5 degrees over it: apart.
+        let above = |turn: f32| {
+            let r = Quat::from_rotation_x(turn);
+            Placement {
+                position: Vec3::new(0.0, 0.25, -1.0) + r * Vec3::new(0.0, 0.2, 0.0),
+                rotation: r,
+                width: 1.0,
+            }
+        };
+        assert!(!cuts(&a, 0.5, &above(0.5f32.to_radians()), 0.4));
+        assert!(!cuts(&a, 0.5, &above(-3.0f32.to_radians()), 0.4));
     }
 }
