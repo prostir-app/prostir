@@ -92,7 +92,12 @@ pub fn show(ui: &mut Ui, v: &mut View<'_, '_>) {
             w::card(ui, v.tk, |ui| {
                 ui.horizontal(|ui| {
                     w::spinner(ui, v.tk, v.tk.th.type_.size_title);
-                    text(ui, v.tk.t("loading-title"), v.tk.heading(), v.tk.p.text);
+                    text(
+                        ui,
+                        v.tk.t("window-loading-title"),
+                        v.tk.heading(),
+                        v.tk.p.text,
+                    );
                 });
             });
         }
@@ -105,13 +110,13 @@ pub fn show(ui: &mut Ui, v: &mut View<'_, '_>) {
 
 fn header(ui: &mut Ui, v: &View<'_, '_>, page: Page) {
     let (title, sub) = match page {
-        Page::Overview => ("ov-title", None),
-        Page::Monitors => ("mon-title", Some("mon-sub")),
-        Page::Headsets => ("hs-title", Some("hs-sub")),
-        Page::Sound => ("snd-title", Some("snd-sub")),
-        Page::Quality => ("q-title", Some("q-sub")),
-        Page::Look => ("look-title", Some("look-sub")),
-        Page::FirstRun => ("fr-title", None),
+        Page::Overview => ("window-ov-title", None),
+        Page::Monitors => ("window-mon-title", Some("window-mon-sub")),
+        Page::Headsets => ("window-hs-title", Some("window-hs-sub")),
+        Page::Sound => ("window-snd-title", Some("window-snd-sub")),
+        Page::Quality => ("window-q-title", Some("window-q-sub")),
+        Page::Look => ("window-look-title", Some("window-look-sub")),
+        Page::FirstRun => ("window-fr-title", None),
     };
     let sub = sub.map(|s| v.tk.t(s));
     w::page_header(ui, v.tk, &v.tk.t(title), sub.as_deref());
@@ -131,20 +136,23 @@ fn counting_question(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
         ui.horizontal(|ui| {
             w::count_icon(ui, tk, tk.th.type_.size_heading);
             ui.add_space(tk.th.shape.spacing);
-            text(ui, tk.t("count-ask-title"), tk.heading(), p.text);
+            text(ui, tk.t("window-count-ask-title"), tk.heading(), p.text);
         });
         ui.add_space(tk.th.shape.spacing);
-        text(ui, tk.t("count-ask-body"), tk.body(), p.text);
+        text(ui, tk.t("window-count-ask-body"), tk.body(), p.text);
         ui.add_space(tk.th.shape.spacing * 0.5);
-        text(ui, tk.t("count-ask-later"), tk.small(), p.text_muted);
+        text(ui, tk.t("window-count-ask-later"), tk.small(), p.text_muted);
         ui.add_space(tk.th.shape.padding);
         let full = ui.available_width();
         ui.allocate_ui_with_layout(
             vec2(full, tk.th.shape.control_height),
             Layout::left_to_right(Align::Center),
             |ui| {
-                let (yes, no) = (tk.t("count-ask-yes"), tk.t("count-ask-no"));
-                let names = (tk.t("count-ask-yes-name"), tk.t("count-ask-no-name"));
+                let (yes, no) = (tk.t("window-count-ask-yes"), tk.t("window-count-ask-no"));
+                let names = (
+                    tk.t("window-count-ask-yes-name"),
+                    tk.t("window-count-ask-no-name"),
+                );
                 let answers = [(yes.as_str(), names.0.as_str()), (&no, &names.1)];
                 let counting = match w::equal_buttons(ui, tk, &answers, Kind::Primary) {
                     Some(0) => Some(Counting::Yes),
@@ -155,8 +163,9 @@ fn counting_question(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                     v.out.push(Action::Send(Request::SetCounting { counting }));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if w::link(ui, tk, &tk.t("count-ask-privacy")).clicked() {
-                        v.out.push(Action::OpenUrl(tk.t("count-ask-privacy-url")));
+                    if w::link(ui, tk, &tk.t("window-count-ask-privacy")).clicked() {
+                        v.out
+                            .push(Action::OpenUrl(tk.t("window-count-ask-privacy-url")));
                     }
                 });
             },
@@ -189,27 +198,27 @@ fn not_running(ui: &mut Ui, v: &mut View<'_, '_>, why: &ClientError, start: &Sta
     let p = tk.p;
     w::card(ui, tk, |ui| {
         if let ClientError::NoBus(_) = why {
-            hero(ui, tk, Some(p.danger), &tk.t("nr-title"));
+            hero(ui, tk, Some(p.danger), &tk.t("window-nr-title"));
             ui.add_space(6.0);
-            text(ui, tk.t("nr-no-bus"), tk.body(), p.text_muted);
+            text(ui, tk.t("window-nr-no-bus"), tk.body(), p.text_muted);
             return;
         }
         if *why == ClientError::TooOld {
-            hero(ui, tk, Some(p.warning), &tk.t("nr-old-title"));
+            hero(ui, tk, Some(p.warning), &tk.t("window-nr-old-title"));
             ui.add_space(6.0);
-            text(ui, tk.t("nr-old-body"), tk.body(), p.text_muted);
+            text(ui, tk.t("window-nr-old-body"), tk.body(), p.text_muted);
             ui.add_space(tk.th.shape.padding);
-            if w::button(ui, tk, &tk.t("nr-retry"), Kind::Secondary, true).clicked() {
+            if w::button(ui, tk, &tk.t("window-nr-retry"), Kind::Secondary, true).clicked() {
                 v.out.push(Action::Refresh);
             }
             return;
         }
         if silent(why) {
-            hero(ui, tk, Some(p.warning), &tk.t("nr-silent-title"));
+            hero(ui, tk, Some(p.warning), &tk.t("window-nr-silent-title"));
             ui.add_space(6.0);
-            text(ui, tk.t("nr-silent-body"), tk.body(), p.text_muted);
+            text(ui, tk.t("window-nr-silent-body"), tk.body(), p.text_muted);
             ui.add_space(tk.th.shape.padding);
-            if w::button(ui, tk, &tk.t("nr-retry"), Kind::Secondary, true).clicked() {
+            if w::button(ui, tk, &tk.t("window-nr-retry"), Kind::Secondary, true).clicked() {
                 v.out.push(Action::Refresh);
             }
             return;
@@ -221,29 +230,29 @@ fn not_running(ui: &mut Ui, v: &mut View<'_, '_>, why: &ClientError, start: &Sta
                     ui.add_space(4.0);
                     text(
                         ui,
-                        tk.t("nr-starting"),
+                        tk.t("window-nr-starting"),
                         tk.font(tk.th.type_.size_display, true),
                         p.text,
                     );
                 });
                 ui.add_space(6.0);
-                text(ui, tk.t("nr-body"), tk.body(), p.text_muted);
+                text(ui, tk.t("window-nr-body"), tk.body(), p.text_muted);
             }
             Start::AlreadyRunning => {
-                hero(ui, tk, Some(p.warning), &tk.t("nr-old-title"));
+                hero(ui, tk, Some(p.warning), &tk.t("window-nr-old-title"));
                 ui.add_space(6.0);
-                text(ui, tk.t("nr-old-body"), tk.body(), p.text_muted);
+                text(ui, tk.t("window-nr-old-body"), tk.body(), p.text_muted);
                 ui.add_space(tk.th.shape.padding);
-                if w::button(ui, tk, &tk.t("nr-retry"), Kind::Secondary, true).clicked() {
+                if w::button(ui, tk, &tk.t("window-nr-retry"), Kind::Secondary, true).clicked() {
                     v.out.push(Action::Refresh);
                 }
             }
             Start::Idle | Start::NoProgram | Start::TimedOut => {
                 let failed = *start != Start::Idle;
                 let title = if failed {
-                    "nr-failed-title"
+                    "window-nr-failed-title"
                 } else {
-                    "nr-title"
+                    "window-nr-title"
                 };
                 hero(
                     ui,
@@ -253,13 +262,13 @@ fn not_running(ui: &mut Ui, v: &mut View<'_, '_>, why: &ClientError, start: &Sta
                 );
                 ui.add_space(6.0);
                 let body = match start {
-                    Start::NoProgram => "nr-no-program",
-                    Start::TimedOut => "nr-failed-body",
-                    _ => "nr-body",
+                    Start::NoProgram => "window-nr-no-program",
+                    Start::TimedOut => "window-nr-failed-body",
+                    _ => "window-nr-body",
                 };
                 text(ui, tk.t(body), tk.body(), p.text_muted);
                 ui.add_space(tk.th.shape.padding);
-                if w::button(ui, tk, &tk.t("nr-start"), Kind::Primary, true).clicked() {
+                if w::button(ui, tk, &tk.t("window-nr-start"), Kind::Primary, true).clicked() {
                     v.out.push(Action::Start);
                 }
             }
@@ -276,7 +285,7 @@ pub fn silent(why: &ClientError) -> bool {
 }
 
 fn percent(tk: &Tk<'_>, n: impl Into<Arg>) -> String {
-    tk.f("percent", &[("n", n.into())])
+    tk.f("window-percent", &[("n", n.into())])
 }
 
 /// `1920 × 1080`; nothing for a size not known (a display of the PC not seen yet).
@@ -284,7 +293,7 @@ fn size(tk: &Tk<'_>, m: &Mode) -> String {
     if m.w == 0 || m.h == 0 {
         return String::new();
     }
-    tk.f("mon-size", &[("w", m.w.into()), ("h", m.h.into())])
+    tk.f("window-mon-size", &[("w", m.w.into()), ("h", m.h.into())])
 }
 
 /// On a tile of the map: `2560 × 1440`, and `2560 × 1440 · 125 %` with a scale (the
@@ -294,7 +303,7 @@ fn tile_size(tk: &Tk<'_>, m: &Mode) -> String {
         return size(tk, m);
     }
     tk.f(
-        "mon-size-at-scale",
+        "window-mon-size-at-scale",
         &[
             ("w", m.w.into()),
             ("h", m.h.into()),
@@ -309,7 +318,7 @@ fn size_scaled(tk: &Tk<'_>, m: &Mode) -> String {
         return String::new();
     }
     tk.f(
-        "mon-size-scaled",
+        "window-mon-size-scaled",
         &[
             ("w", m.w.into()),
             ("h", m.h.into()),
@@ -331,8 +340,8 @@ fn sentence(text: &str) -> String {
 /// How a display is named to a person.
 fn display_name(tk: &Tk<'_>, d: &Display) -> String {
     match (d.kind, d.builtin) {
-        (DisplayKind::Physical, true) => tk.t("mon-laptop"),
-        (DisplayKind::Physical, false) if d.name.is_empty() => tk.t("mon-pc-screen"),
+        (DisplayKind::Physical, true) => tk.t("window-mon-laptop"),
+        (DisplayKind::Physical, false) if d.name.is_empty() => tk.t("window-mon-pc-screen"),
         _ => d.name.clone(),
     }
 }
@@ -340,16 +349,16 @@ fn display_name(tk: &Tk<'_>, d: &Display) -> String {
 fn ago(tk: &Tk<'_>, now: u64, then: u64) -> String {
     let s = now.saturating_sub(then);
     match s {
-        0..60 => tk.t("ago-now"),
-        60..3600 => tk.f("ago-minutes", &[("n", (s / 60).into())]),
-        3600..86400 => tk.f("ago-hours", &[("n", (s / 3600).into())]),
-        _ => tk.f("ago-days", &[("n", (s / 86400).into())]),
+        0..60 => tk.t("window-ago-now"),
+        60..3600 => tk.f("window-ago-minutes", &[("n", (s / 60).into())]),
+        3600..86400 => tk.f("window-ago-hours", &[("n", (s / 3600).into())]),
+        _ => tk.f("window-ago-days", &[("n", (s / 86400).into())]),
     }
 }
 
 /// A number written with a point, with the language's decimal separator.
 fn decimal(tk: &Tk<'_>, n: &str) -> String {
-    n.replace('.', &tk.t("decimal-separator"))
+    n.replace('.', &tk.t("window-decimal-separator"))
 }
 
 fn indented(ui: &mut Ui, tk: &Tk<'_>, line: String) {

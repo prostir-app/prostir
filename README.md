@@ -821,11 +821,12 @@ The code is split into Rust crates, all in `crates/`:
 crates/prostir-proto/    the wire protocol and encryption, shared by the PC and the headset
 crates/prostir-layout/   where the monitors go: layout rules shared by the PC and the headset
 crates/prostir-api/      the local API's types, shared by the PC program and its clients
-crates/prostir-lang/     translations as data (Fluent)
+crates/prostir-lang/     the translation engine (Fluent) and the built-in language files
 crates/prostir/          the PC program: virtual outputs, encoders, sound, tray, discovery
 crates/prostir-window/   the PC settings window (a library of prostir: prostir window)
 crates/prostir-client/   the Quest app: OpenXR loop (app.rs), menu (ui.rs), layouts (layout.rs), …
 crates/prostir-testkit/  a fake headset and a fake PC, for tests and for checking the programs by hand
+lang/     the texts of all three programs: one Fluent file per language (en.ftl, uk.ftl)
 scripts/  build-apk.sh, install.sh, package-release.sh, third-party-licenses.py,
           selftest-headset.sh, selftest-clips.sh
 docs/     the website (prostir.ishawyha.dev) and the pictures for this README
@@ -855,6 +856,32 @@ without a headset.
 `cargo run -p prostir-client --example panel_preview -- menu.png` renders the headset
 menu to a PNG (`TAB=monitors|look|controls|sound|language|pc|help`, `LANG_UI=en`, `WRIST=1`), and
 `--example sky_preview -- DIR` renders the panoramas.
+
+## Translations
+
+Every text of the PC app, the settings window and the headset app is in one file per
+language in [`lang/`](lang/): `en.ftl` (English, complete, the language every other one
+falls back to) and `uk.ftl` (Ukrainian). They are [Fluent](https://projectfluent.org/)
+files, which handle plural forms and cases. An id starts with the program that shows the
+message: `pc-` (the PC app), `window-` (the settings window), `headset-` (the headset
+app); `language-name` names the language itself.
+
+To add a language:
+
+1. Copy `lang/en.ftl` to `lang/<code>.ftl` (`de.ftl`, `pt-BR.ftl`) and translate the
+   text after each `=`. Keep the ids and the `{ $placeholders }`; a message you leave out
+   is shown in English. Set `language-name` to what the language calls itself.
+2. To try it without building, put the file in the program's folder: the settings window
+   reads `~/.local/share/prostir/lang/settings/<code>.ftl` (also under the folders of
+   `$XDG_DATA_DIRS`), the headset reads `Android/data/dev.prostir.client/files/lang/<code>.ftl`.
+   A file for a language that is already built in replaces its messages one by one.
+3. To ship it, add the file to `lang/` and to `BUILTIN` in `crates/prostir-lang/src/lib.rs`.
+
+`cargo test -p prostir-lang` checks the files: each parses, has only ids of English
+(Ukrainian has all of them) with the same placeholders, every id starts with a program's
+prefix, and each program's code names exactly the messages with its prefix (none missing
+from the file, none in the file that is never shown). The tests of the programs check
+that no text uses a long dash.
 
 ## Similar projects
 

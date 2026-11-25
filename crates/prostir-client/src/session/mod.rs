@@ -763,11 +763,15 @@ impl Session {
     /// one is connected to at once while the round waits for answers.
     pub fn heard(&mut self, mut host: FoundHost, now: Instant, texts: &Texts) {
         host.label = if host.pairing {
-            format!("{} · {}", host.name, texts.t("connect-pairing-open"))
+            format!(
+                "{} · {}",
+                host.name,
+                texts.t("headset-connect-pairing-open")
+            )
         } else {
             host.name.clone()
         };
-        let cable = texts.t("found-cable");
+        let cable = texts.t("headset-found-cable");
         if self.search.cable != cable {
             cable.clone_into(&mut self.search.cable);
         }
@@ -1546,7 +1550,7 @@ impl Session {
             return h.name.clone();
         }
         if addr.ip().is_loopback() {
-            texts.t("pc-usb").to_owned()
+            texts.t("headset-pc-usb").to_owned()
         } else {
             addr.ip().to_string()
         }
@@ -1599,10 +1603,10 @@ fn offer_label(host: &str, addr: SocketAddr) -> String {
 /// (the headset was off the head, or the PC already said why).
 pub fn disconnect_text(why: Disconnect) -> Option<&'static str> {
     Some(match why {
-        Disconnect::Goodbye(PcGoodbye::Quit) => "bye-pc-quit",
-        Disconnect::Goodbye(PcGoodbye::Forgotten) => "bye-forgotten",
-        Disconnect::Goodbye(PcGoodbye::Other) => "bye-pc-ended",
-        Disconnect::Silence => "bye-silence",
+        Disconnect::Goodbye(PcGoodbye::Quit) => "headset-bye-pc-quit",
+        Disconnect::Goodbye(PcGoodbye::Forgotten) => "headset-bye-forgotten",
+        Disconnect::Goodbye(PcGoodbye::Other) => "headset-bye-pc-ended",
+        Disconnect::Silence => "headset-bye-silence",
         Disconnect::Goodbye(PcGoodbye::TakenOff | PcGoodbye::Replaced | PcGoodbye::Failed)
         | Disconnect::Closed => return None,
     })

@@ -466,7 +466,7 @@ pub fn arc(
         ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
     let p = tk.p;
     ui.painter().rect_filled(rect, tk.r_large(), p.well);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, tk.t("mon-arc")));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, tk.t("window-mon-arc")));
     if resp.dragged() {
         let d = resp.drag_delta();
         st.yaw = (st.yaw - d.x * 0.006).clamp(-1.2, 1.2);

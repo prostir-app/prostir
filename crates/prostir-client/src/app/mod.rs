@@ -644,7 +644,9 @@ impl Model {
     pub fn profile_name(&self, i: usize) -> String {
         match self.profiles.get(i).and_then(|p| p.name.as_ref()) {
             Some(name) => name.clone(),
-            None => self.texts().f("profile-n", &[("n", (i + 1).into())]),
+            None => self
+                .texts()
+                .f("headset-profile-n", &[("n", (i + 1).into())]),
         }
     }
 
@@ -755,8 +757,8 @@ impl Model {
             Event::StreamFailed(id) => self.world.stream_ended(id),
             Event::SendFailed { pc, why } => {
                 let text = match why {
-                    Some(e) => self.texts().f("error-send", &[("error", e.into())]),
-                    None => self.texts().t("error-not-connected").to_owned(),
+                    Some(e) => self.texts().f("headset-error-send", &[("error", e.into())]),
+                    None => self.texts().t("headset-error-not-connected").to_owned(),
                 };
                 warn!("to PC {pc}: {text}");
                 self.put_error(text);
@@ -1050,7 +1052,9 @@ impl Model {
             }
             PlatformEvent::NotOwned { store } => self.not_owned(store),
             PlatformEvent::CamerasFailed(error) => {
-                let text = self.texts().f("error-cameras", &[("error", error.into())]);
+                let text = self
+                    .texts()
+                    .f("headset-error-cameras", &[("error", error.into())]);
                 self.show_error(text);
             }
             // Not offered for the rest of this run, and said; the setting stays as
@@ -1060,7 +1064,7 @@ impl Model {
                     room.keyboard_window = false;
                 }
                 self.keyboard_window = None;
-                let text = self.texts().t("error-keyboard-window").to_owned();
+                let text = self.texts().t("headset-error-keyboard-window").to_owned();
                 self.show_error(text);
             }
             PlatformEvent::CustomPanorama(there) => self.headset.custom_panorama = there,
@@ -1075,7 +1079,7 @@ impl Model {
             return;
         }
         self.keyboard_window = None;
-        let text = self.texts().t("error-cameras-lost").to_owned();
+        let text = self.texts().t("headset-error-cameras-lost").to_owned();
         self.show_error(text);
     }
 
@@ -1101,7 +1105,7 @@ impl Model {
         {
             let text = self
                 .texts()
-                .f("store-not-confirmed", &[("store", store.into())]);
+                .f("headset-store-not-confirmed", &[("store", store.into())]);
             n.text = Some((self.texts().clone(), text));
         }
         let what = n.text.as_ref().map_or("", |(_, text)| text.as_str());
@@ -1167,13 +1171,13 @@ impl Model {
             several += 1;
         }
         let id = if several > 1 {
-            "error-save-files"
+            "headset-error-save-files"
         } else {
             match file {
-                persist::File::Settings => "error-save-settings",
-                persist::File::Desk => "error-save-desk",
-                persist::File::Profiles => "error-save-profiles",
-                persist::File::Keyboard => "error-save-keyboard",
+                persist::File::Settings => "headset-error-save-settings",
+                persist::File::Desk => "headset-error-save-desk",
+                persist::File::Profiles => "headset-error-save-profiles",
+                persist::File::Keyboard => "headset-error-save-keyboard",
             }
         };
         let text = self.texts().f(id, &[("error", error.into())]);
@@ -1270,9 +1274,9 @@ impl Model {
         }
         self.worn_for = Duration::ZERO;
         let id = if every <= 20 * 60 {
-            "rest-eyes"
+            "headset-rest-eyes"
         } else {
-            "rest-hour"
+            "headset-rest-hour"
         };
         self.show_toast(self.texts().t(id).to_owned());
     }
@@ -1623,7 +1627,10 @@ impl Model {
 
     /// `action` needs a monitor in front of the user, and there is none.
     fn no_monitor_in_front(&mut self, action: Action) {
-        let note = Note::failed(Some(action), self.texts().t("note-no-monitor-in-front"));
+        let note = Note::failed(
+            Some(action),
+            self.texts().t("headset-note-no-monitor-in-front"),
+        );
         self.tell_press(note, true);
     }
 

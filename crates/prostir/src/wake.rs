@@ -84,13 +84,10 @@ pub enum Wake {
 /// The notice of a new headset nearby, with its button (see `crate::door`).
 pub fn new_headset_notice() -> Option<Notice> {
     dialogs::notice(
-        t("Новий шолом поруч", "New headset nearby"),
-        t("Сполучити?", "Pair it?"),
-        t("Сполучити", "Pair"),
-        t(
-            "Щоб сполучити, виберіть «Сполучити новий шолом» у меню Prostir.",
-            "To pair it, choose \"Pair a new headset\" in the Prostir menu.",
-        ),
+        t("pc-wake-new-headset-nearby"),
+        t("pc-wake-pair-it"),
+        t("pc-wake-pair"),
+        t("pc-wake-to-pair-it-choose-pair-a"),
     )
 }
 

@@ -279,13 +279,12 @@ impl Skip {
         match self {
             Self::Limit { max } => format!(
                 "{} {max} {}",
-                t("уже відкрито", "already has"),
-                t(
-                    "сеансів, більше не відкривається",
-                    "sessions open, the most it opens"
-                )
+                t("pc-encoder-choice-already-has"),
+                t("pc-encoder-choice-sessions-open-the-most-it-opens")
             ),
-            Self::Failed { why } => format!("{}: {why}", t("не запустився", "did not start")),
+            Self::Failed { why } => {
+                format!("{}: {why}", t("pc-encoder-choice-did-not-start"))
+            }
         }
     }
 }
@@ -366,7 +365,7 @@ pub fn note(
             format!(
                 "{}: {}: {why}",
                 c.label(),
-                t("не запустився", "did not start")
+                t("pc-encoder-choice-did-not-start")
             )
         }))
         .collect();
@@ -377,17 +376,13 @@ pub fn note(
     }
     let mut text = chosen.label();
     if cpu {
-        let _ = write!(
-            text,
-            ", {}",
-            t("кодування процесором", "encoding on the CPU")
-        );
+        let _ = write!(text, ", {}", t("pc-encoder-choice-encoding-on-the-cpu"));
     }
     if copies {
         let _ = write!(
             text,
             ", {}",
-            t("кадри йдуть через процесор", "frames go through the CPU")
+            t("pc-encoder-choice-frames-go-through-the-cpu")
         );
     }
     if !why.is_empty() {
@@ -540,11 +535,11 @@ mod tests {
         assert_eq!((first.backend, first.codec), (Backend::Nvenc, Codec::H264));
         assert!(first.copies());
         let said = note(&first, wanted, &ranked.skipped, &[]).unwrap();
-        let through = t("кадри йдуть через процесор", "frames go through the CPU");
+        let through = t("pc-encoder-choice-frames-go-through-the-cpu");
         assert!(said.contains("NVENC") && said.contains(through), "{said}");
         let cpu = rank_for(&nvidia[1..], Memory::DmaBuf, wanted, &none, &[]);
         let said = note(&cpu.choices[0], wanted, &cpu.skipped, &[]).unwrap();
-        let on_cpu = t("кодування процесором", "encoding on the CPU");
+        let on_cpu = t("pc-encoder-choice-encoding-on-the-cpu");
         assert!(said.contains(on_cpu), "{said}");
     }
 

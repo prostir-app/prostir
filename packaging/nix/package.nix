@@ -92,6 +92,8 @@ rustPlatform.buildRustPackage {
       # Every workspace member, the headset app and the fake headset for tests too:
       # cargo needs them present.
       (root + "/crates")
+      # The texts of every program, one file per language, built into the binaries.
+      (root + "/lang")
       (root + "/packaging/io.github.prostir_app.Prostir.desktop")
       (root + "/packaging/prostir.svg")
       (root + "/packaging/systemd")
