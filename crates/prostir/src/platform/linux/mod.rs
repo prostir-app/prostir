@@ -20,7 +20,7 @@ pub use system::{
     clean_up_after_crash, config_home, give_memory_back, hostname, import_session_environment,
     local_addresses, notice_mark, run, run_until, serving, single_instance, watcher,
 };
-pub use usb::{keep_adb_reverse, usb_waiting};
+pub use usb::{drop_adb_reverse, keep_adb_reverse, usb_waiting};
 
 /// Whether a connector is a laptop's own panel.
 fn is_panel(connector: &str) -> bool {

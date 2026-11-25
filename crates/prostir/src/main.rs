@@ -811,7 +811,10 @@ fn serve(args: Args, why: Why, moved: bool) -> Result<i32> {
             if !args.no_adb {
                 platform::keep_adb_reverse(sockets.port());
             }
-            wake::watch(sockets, wake::Start::this_program()?, args.open_settings)
+            let code = wake::watch(sockets, wake::Start::this_program()?, args.open_settings);
+            // Nothing listens on the port any more.
+            platform::drop_adb_reverse();
+            code
         }
     }
 }
@@ -1084,6 +1087,12 @@ fn full_with(
     let (end_now, quit_asked) = brain.run(&received);
     if let Some(api) = api {
         api.finish();
+    }
+    // Nothing listens on the port any more, but where systemd's socket keeps waiting
+    // for the headset (it wakes this program again); under the watcher, the watcher
+    // keeps the reverse.
+    if origin == Origin::Own || (origin == Origin::Systemd && quit_asked) {
+        platform::drop_adb_reverse();
     }
     let code = match origin {
         Origin::Watcher if quit_asked => wake::QUIT_ALL,

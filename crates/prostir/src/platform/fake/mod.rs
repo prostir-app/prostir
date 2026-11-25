@@ -290,6 +290,9 @@ fn watch_file(name: &'static str, on_text: impl Fn(String) -> bool + Send + 'sta
 /// No headset is ever plugged in by USB.
 pub fn keep_adb_reverse(_port: u16) {}
 
+/// Nothing was reversed.
+pub fn drop_adb_reverse() {}
+
 /// No headset waits on USB.
 pub fn usb_waiting() -> bool {
     false

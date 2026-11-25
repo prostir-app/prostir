@@ -20,6 +20,9 @@
 //!   again as above all the while, in a Prostir that stays too.
 //! - Without the kernel's events (no netlink), `/sys` is looked at every 10 s instead.
 //!   Without adb, nothing runs at all.
+//! - Quitting with nothing left to listen on the port, the program removes the
+//!   reverses it set up ([`drop_adb_reverse`]): a headset would otherwise reach a port
+//!   nobody answers on over the cable, again and again.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -28,9 +31,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use super::system::run;
 
@@ -50,6 +54,43 @@ const PATIENCE: Duration = Duration::from_secs(60);
 /// Whether a Quest on USB waits for its `adb reverse` now.
 pub fn usb_waiting() -> bool {
     WAITING.load(Ordering::Relaxed)
+}
+
+/// The headsets this program set `adb reverse` up for (their serials); `None` once
+/// the reverses were removed as it quits, and none is set up again.
+type SetUp = Mutex<Option<BTreeSet<String>>>;
+static SET_UP: SetUp = Mutex::new(Some(BTreeSet::new()));
+/// The port's spec (`tcp:47830`), once the reverses are kept.
+static SPEC: OnceLock<String> = OnceLock::new();
+
+/// Removes the `adb reverse` this program set up, as it quits with nothing left to
+/// listen on its port (a socket of systemd's keeps listening, and keeps them): a
+/// headset dialing over the cable then finds nothing there and looks on Wi-Fi.
+pub fn drop_adb_reverse() {
+    if let Some(spec) = SPEC.get() {
+        remove_reverses(Path::new("adb"), spec, &SET_UP);
+    }
+}
+
+/// Removes the reverses of `spec` listed in `set_up`, and none is set up after.
+fn remove_reverses(adb: &Path, spec: &str, set_up: &SetUp) {
+    let serials = set_up
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+        .unwrap_or_default();
+    for serial in serials {
+        let removed = run(
+            Command::new(adb).args(["-s", &serial, "reverse", "--remove", spec]),
+            Duration::from_secs(2),
+        )
+        .is_ok_and(|out| out.status.success());
+        if removed {
+            info!("USB headset {serial}: adb reverse {spec} removed");
+        } else {
+            debug!("USB headset {serial}: adb reverse {spec} not removed (gone already)");
+        }
+    }
 }
 
 /// The kernel's own uevents (udev passes them on in group 2, which needs udev).
@@ -317,6 +358,8 @@ struct Follow {
     patience: Duration,
     /// Where it says whether one is waited for now ([`WAITING`], or a test's).
     waiting: &'static AtomicBool,
+    /// Where it keeps the reverses it set up ([`SET_UP`], or a test's).
+    set_up: &'static SetUp,
 }
 
 /// `adb track-devices` running, number `n`.
@@ -421,9 +464,16 @@ impl Follow {
                     .cloned()
                     .collect();
                 for serial in &waiting {
+                    // Held while adb sets it up, so quitting meanwhile removes it.
+                    let mut set_up = self.set_up.lock().unwrap_or_else(PoisonError::into_inner);
+                    // Quitting: removed already, and none is set up again.
+                    let Some(set_up) = set_up.as_mut() else {
+                        break;
+                    };
                     if self.reverse(serial) {
                         info!("USB headset {serial}: adb reverse {} active", self.spec);
                         reversed.insert(serial.clone());
+                        set_up.insert(serial.clone());
                     } else {
                         failed = true;
                     }
@@ -433,6 +483,15 @@ impl Follow {
                         retry.map_or(Duration::from_secs(5), |(_, w)| longer(w, LONGEST_RETRY));
                     (Instant::now() + wait, wait)
                 });
+            }
+            // Gone with its device or its adb server: nothing to remove.
+            if let Some(set_up) = self
+                .set_up
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_mut()
+            {
+                set_up.retain(|s| reversed.contains(s));
             }
             let patient = patient_until.is_some_and(|until| Instant::now() < until);
             self.waiting
@@ -507,13 +566,16 @@ pub fn keep_adb_reverse(port: u16) {
             false
         }
     };
+    let spec = format!("tcp:{port}");
+    let _ = SPEC.set(spec.clone());
     let follow = Follow {
         adb: "adb".into(),
         devices: "/sys/bus/usb/devices".into(),
-        spec: format!("tcp:{port}"),
+        spec,
         events,
         patience: PATIENCE,
         waiting: &WAITING,
+        set_up: &SET_UP,
     };
     let spawned = std::thread::Builder::new()
         .name("adb-reverse".into())
@@ -660,6 +722,7 @@ if [ "$1" = track-devices ]; then
     n=$(($(cat $D/starts 2>/dev/null || echo 0) + 1)); echo $n > $D/starts
     exec sh $D/track-$n
 fi
+if [ "$3" = reverse ] && [ "$4" = --remove ]; then echo "$2" >> $D/removed; exit 0; fi
 if [ "$3" = reverse ]; then echo "$2" >> $D/reversed; exit 0; fi
 exit 1
 "#,
@@ -714,6 +777,7 @@ exit 1
         )
         .unwrap();
         static WAITING: AtomicBool = AtomicBool::new(false);
+        static SET_UP: SetUp = Mutex::new(Some(BTreeSet::new()));
         let waiting = || WAITING.load(Ordering::Relaxed);
         let follow = Follow {
             adb: fake_adb(&dir),
@@ -722,6 +786,7 @@ exit 1
             events: true,
             patience: PATIENCE,
             waiting: &WAITING,
+            set_up: &SET_UP,
         };
         let (sender, notes) = mpsc::channel();
         let stopper = sender.clone();
@@ -790,6 +855,7 @@ exit 1
         )
         .unwrap();
         static WAITING: AtomicBool = AtomicBool::new(false);
+        static SET_UP: SetUp = Mutex::new(Some(BTreeSet::new()));
         let waiting = || WAITING.load(Ordering::Relaxed);
         let follow = Follow {
             adb: fake_adb(&dir),
@@ -798,6 +864,7 @@ exit 1
             events: true,
             patience: Duration::from_millis(400),
             waiting: &WAITING,
+            set_up: &SET_UP,
         };
         let (sender, notes) = mpsc::channel();
         let stopper = sender.clone();
@@ -823,6 +890,68 @@ exit 1
             });
         });
         assert!(!dir.join("reversed").exists(), "nothing reversed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Quitting removes the reverse this program set up, and none is set up after: a
+    /// headset on the cable then finds no port that nobody answers on.
+    #[test]
+    fn quitting_removes_the_reverse_it_set_up() {
+        let dir = std::env::temp_dir().join(format!("prostir-adb-quit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let usb = dir.join("usb");
+        std::fs::create_dir_all(usb.join("1-2")).unwrap();
+        std::fs::write(usb.join("1-2/idVendor"), "2833\n").unwrap();
+        // Ready at once, then ready again (another list) after the quit.
+        std::fs::write(
+            dir.join("track-1"),
+            format!(
+                "{}; sleep 0.8; {}; exec sleep 30\n",
+                list("R3Q\tdevice\n"),
+                list("R3Q\tdevice\nR4Q\tdevice\n")
+            ),
+        )
+        .unwrap();
+        static WAITING: AtomicBool = AtomicBool::new(false);
+        static SET_UP: SetUp = Mutex::new(Some(BTreeSet::new()));
+        let adb = fake_adb(&dir);
+        let follow = Follow {
+            adb: adb.clone(),
+            devices: usb,
+            spec: "tcp:47830".into(),
+            events: true,
+            patience: PATIENCE,
+            waiting: &WAITING,
+            set_up: &SET_UP,
+        };
+        let lines = |name: &str| {
+            std::fs::read_to_string(dir.join(name))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let (sender, notes) = mpsc::channel();
+        let stopper = sender.clone();
+        /// Stops the follower however the test ends, so a failure does not hang it.
+        struct Stop(Sender<Note>);
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                let _ = self.0.send(Note::Stop);
+            }
+        }
+        std::thread::scope(|s| {
+            s.spawn(move || follow.run(&notes, &sender));
+            let _stop = Stop(stopper);
+            wait_for("the reverse", Duration::from_secs(5), || {
+                lines("reversed") == ["R3Q"]
+            });
+            remove_reverses(&adb, "tcp:47830", &SET_UP);
+            assert_eq!(lines("removed"), ["R3Q"]);
+            // The next list (a second headset ready) sets nothing up.
+            std::thread::sleep(Duration::from_millis(1500));
+            assert_eq!(lines("reversed"), ["R3Q"], "none after the quit");
+        });
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
