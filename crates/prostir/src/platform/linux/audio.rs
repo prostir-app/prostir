@@ -1,4 +1,4 @@
-//! PC sound to the headset: a virtual output device ("Prostir — шолом") that is the
+//! PC sound to the headset: a virtual output device ("Prostir: шолом") that is the
 //! default while the headset is connected; whatever plays into it is captured as raw
 //! PCM and sent over the (encrypted) connection. And back: the headset's microphone
 //! as the PC's default input ([`MicIn`]). The level of that output device is the
@@ -334,7 +334,7 @@ const FEED_PIPE: usize = 4096;
 /// empty pipe always goes, whatever its size.)
 const FEED_QUEUED: usize = 3 * 960;
 
-/// The headset microphone as a PC microphone ("Prostir — мікрофон шолома"), the
+/// The headset microphone as a PC microphone ("Prostir: мікрофон шолома"), the
 /// default input while the headset streams. A `pw-loopback` pairs an internal input
 /// with the microphone apps record from; while an app records, a `pacat` plays the
 /// headset's sound into that input.
