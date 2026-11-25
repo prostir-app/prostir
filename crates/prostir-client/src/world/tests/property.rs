@@ -403,7 +403,9 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
         let mut done = vec!["laid out".to_owned()];
         let at_first = desk.cutting();
         if !at_first.is_empty() {
-            failures.push(format!("case {case} {first:?}: laid out: cut {at_first:?}"));
+            failures.push(format!(
+                "{ppd:?} case {case} {first:?}: laid out: cut {at_first:?}"
+            ));
             continue;
         }
         for _ in 0..6 {
@@ -422,8 +424,14 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
             let (cutting, unglued) = (desk.cutting(), desk.unglued());
             if !cutting.is_empty() || !unglued.is_empty() {
                 failures.push(format!(
-                    "case {case} {first:?}: {done:?}: cut {cutting:?}, glued apart {unglued:?}"
+                    "{ppd:?} case {case} {first:?}: {done:?}: cut {cutting:?}, glued apart \
+                     {unglued:?}"
                 ));
+                if std::env::var_os("PROSTIR_CUT_DEBUG").is_some() {
+                    for (n, p) in &desk.sim.world.placements {
+                        eprintln!("{n} {p:?} h {}", desk.height(n.id.0, p));
+                    }
+                }
                 break;
             }
         }
@@ -467,15 +475,12 @@ fn each_arrangement_step_cuts_into_nothing() {
 }
 
 /// [`each_arrangement_step_cuts_into_nothing`] and with wide monitors, on a headset of
-/// 25 pixels a degree:
-/// the monitors made 1:1 or as large as fits, new ones beside them at their own size.
-/// The magnet's drops are left out: on a few of these desks (and of the standard size,
-/// about one in 1500) a monitor stuck over a nearly parallel one, overhead or low, is
-/// found reaching into it by a millimetre at the edge they share, as close as this
-/// check can tell an edge that meets from one that goes in.
+/// 25 pixels a degree: the monitors made 1:1 or as large as fits, new ones beside them
+/// at their own size.
 #[test]
 fn each_step_at_one_to_one_cuts_into_nothing() {
     for step in [
+        Step::Drop,
         Step::Add,
         Step::AddTwice,
         Step::Swap,
@@ -485,6 +490,17 @@ fn each_step_at_one_to_one_cuts_into_nothing() {
     ] {
         holds_through_on(Some(25.0), &SIZES, &[step], 150);
         holds_through_on(Some(25.0), &WIDE, &[step], 100);
+    }
+}
+
+/// The magnet on many more desks, of the standard size and made 1:1 on headsets of 25
+/// and 20 pixels a degree: never a monitor stuck over another nearly in its plane (two
+/// hinged on one edge to the same side), nor through one.
+#[test]
+fn the_magnet_cuts_into_nothing_on_many_desks() {
+    for ppd in [None, Some(25.0), Some(20.0)] {
+        holds_through_on(ppd, &SIZES, &[Step::Drop], 1500);
+        holds_through_on(ppd, &WIDE, &[Step::Drop], 600);
     }
 }
 
