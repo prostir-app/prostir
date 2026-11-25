@@ -36,18 +36,22 @@ use crate::{net, persist};
 
 /// OpenXR as this run has it: the instance and its session, the extensions turned
 /// on, and the GL the pictures are uploaded with.
+///
+/// The order of the fields matters: they go in this order, so the session is
+/// destroyed while its EGL context still is there, the EGL context before the
+/// instance, and the loader last.
 pub struct Xr {
-    /// The loader, kept for as long as the instance.
-    pub _entry: xr::Entry,
-    pub exts: xr::ExtensionSet,
-    pub instance: xr::Instance,
-    pub system: xr::SystemId,
-    /// The EGL context the session draws with, kept for the whole session.
-    pub _egl: egl::EglContext,
     pub session: xr::Session<Gfx>,
     pub gl: glow::Context,
+    /// The EGL context the session draws with, kept for the whole session.
+    pub _egl: egl::EglContext,
+    pub instance: xr::Instance,
+    pub exts: xr::ExtensionSet,
+    pub system: xr::SystemId,
     /// The headset as the system names it.
     pub device: String,
+    /// The loader, kept for as long as the instance.
+    pub _entry: xr::Entry,
 }
 
 impl Xr {
@@ -126,14 +130,14 @@ impl Xr {
         xrutil::mark_main_thread(&instance, &session);
         let gl = xrutil::load_gl(&egl.egl);
         let xr = Self {
-            _entry: entry,
-            exts,
-            instance,
-            system,
-            _egl: egl,
             session,
             gl,
+            _egl: egl,
+            instance,
+            exts,
+            system,
             device,
+            _entry: entry,
         };
         Ok((xr, frame_waiter, frame_stream))
     }
