@@ -431,7 +431,9 @@ pub fn place_new<K: Key>(
 /// [`make_room`]). Another where it was, further away (see [`back_into_view`]), where
 /// that is in view; else, with `any`, into the main row as well. With no room in the
 /// row (it would go all the way around), a monitor too wide for the circle goes over or
-/// under a row on a wider circle (see [`FAR_ONE`]) where that is in view.
+/// under a row on a wider circle (see [`FAR_ONE`]) where that is in view. In view
+/// nowhere clear of every other: in view where it is seen over or behind another by
+/// [`SLIVER`] at most; only with no such place either, where [`place_new`] put it.
 #[allow(clippy::too_many_arguments)]
 pub fn place_in_view<K: Key>(
     placements: &HashMap<K, Placement>,
@@ -468,15 +470,23 @@ pub fn place_in_view<K: Key>(
     // No room in the row: over or under one, further away, so seen lower.
     let limits = circle.limits();
     let far = place::place_within(&all, &frame, gaze, px, Some(&rows), &limits, FAR_ONE);
-    (
-        if in_view(&far, (center, tilt)) {
-            far
-        } else {
-            at
-        },
-        false,
-    )
+    if in_view(&far, (center, tilt)) {
+        return (far, false);
+    }
+    // Nowhere in view clear of every other: in view, seen over or behind another by a
+    // sliver of either at most.
+    let sliver = |one: f32| {
+        place::place_in_view_within(&all, &frame, gaze, px, Some(&rows), &limits, one, SLIVER)
+    };
+    if let Some(p) = sliver(circle::MAX_ONE).or_else(|| sliver(FAR_ONE)) {
+        return (p, false);
+    }
+    (at, false)
 }
+
+/// How much of either's face a new monitor may be seen over or behind another where
+/// it has no place in view clear of every other (3 %).
+const SLIVER: f64 = 0.03;
 
 /// `at`, a place over (or under) a row out of view for a monitor of stream size `px`,
 /// carried away from the eye as if its circle were larger (see [`further`]), its
@@ -678,6 +688,34 @@ pub fn covers_any<K: Key>(
         })
 }
 
+/// Every pair of the placed ones of `monitors` where the first is hidden from `eye` by
+/// the second, in front of it, by more than `share` of its face.
+pub fn hidden_pairs<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    eye: Vec3,
+    share: f64,
+) -> Vec<(K, K)> {
+    let all = placed(placements, monitors);
+    let mut out = Vec::new();
+    for a in &all {
+        for b in &all {
+            if a.id != b.id
+                && prostir_layout::space::hidden_by(
+                    &a.placement,
+                    a.height(),
+                    &b.placement,
+                    b.height(),
+                    eye,
+                ) > share
+            {
+                out.push((a.id, b.id));
+            }
+        }
+    }
+    out
+}
+
 /// Whether two of the placed ones of `monitors` go through each other in the room.
 pub fn cut_any<K: Key>(placements: &HashMap<K, Placement>, monitors: &[(K, u32, u32)]) -> bool {
     let all = placed(placements, monitors);
@@ -845,8 +883,10 @@ const SEAM: f64 = 1e-5;
 /// along the row, just as far as it reaches into it (they meet edge to edge), and so on
 /// for what that one then covers: only the chain that touches moves, not monitors
 /// further along or behind the user. Around the eye; on a wall (`wall`) along its
-/// plane. Then what any of them goes through over or under it moves up or down out of
-/// its way (see [`clear_above_and_below`]). The displays of `group` (the PC's own,
+/// plane. Then what any of them goes through over or under it, or is seen behind or
+/// over where it was not (the new monitor `id` was nowhere: a large one near the eye
+/// under a row over it), moves up or down out of its way (see
+/// [`clear_above_and_below`]). The displays of `group` (the PC's own,
 /// shown as one group) move as one piece, all the same way.
 pub fn make_room<K: Key>(
     placements: &mut HashMap<K, Placement>,
@@ -928,7 +968,10 @@ pub fn make_room<K: Key>(
             }
         }
     }
-    clear_above_and_below(placements, monitors, &frame, group, moved);
+    // The new one stood nowhere: whatever it is seen over or behind is new.
+    let mut stood = before;
+    stood.remove(&id);
+    clear_above_and_below(placements, monitors, &frame, group, moved, &stood);
 }
 
 /// Monitor `k` of `monitors` where it stands, if it has a place.
@@ -963,10 +1006,32 @@ pub fn clear_along_up(
     frame: &Frame,
     dir: f32,
 ) -> f32 {
+    clear_up_of(p, ph, others, frame, dir, false)
+}
+
+/// [`clear_along_up`]; with `seen`, seen over or behind none of `others` from the
+/// frame's eye either, and [`SEEN_CLEAR`] further: lifted only that far, the two would
+/// be seen meeting, and a later carry and lining up would keep that seam closed as a
+/// glued one, a little over each other.
+fn clear_up_of(
+    p: Placement,
+    ph: f32,
+    others: &[(Placement, f32)],
+    frame: &Frame,
+    dir: f32,
+    seen: bool,
+) -> f32 {
+    use prostir_layout::space::seen_over;
     let cut_any = |t: f32| {
         let at = lifted(p, frame, dir * t);
-        others.iter().any(|(o, oh)| cuts(&at, ph, o, *oh))
+        others.iter().any(|(o, oh)| {
+            cuts(&at, ph, o, *oh)
+                || (seen
+                    && (seen_over(&at, ph, o, *oh, frame.eye) > 0.0
+                        || seen_over(o, *oh, &at, ph, frame.eye) > 0.0))
+        })
     };
+    let more = if seen { SEEN_CLEAR } else { 0.0 };
     if !cut_any(0.0) {
         return 0.0;
     }
@@ -983,21 +1048,57 @@ pub fn clear_along_up(
             hi = mid;
         }
     }
-    hi
+    hi + more
+}
+
+/// The first of `at(k)` that is some, `p` carried `k` times as far (see [`further`])
+/// for `k` from 1 up to where its edges reach `circle::VIEW_RADIUS` from the eye, in
+/// forty steps.
+fn further_in_view(
+    p: Placement,
+    frame: &Frame,
+    at: impl Fn(f32) -> Option<Placement>,
+) -> Option<Placement> {
+    let local = frame.unplace(p);
+    let along = Vec3::new(local.position.x, 0.0, local.position.z).length();
+    let reach = (along * along + local.width * local.width / 4.0).sqrt();
+    if along < 1e-6 || reach >= circle::VIEW_RADIUS {
+        return None;
+    }
+    let most = circle::VIEW_RADIUS / reach;
+    (1..=40)
+        .map(|i| 1.0 + (most - 1.0) * i as f32 / 40.0)
+        .find_map(at)
+}
+
+/// How much further a monitor lifted out from behind another goes (a centimetre): seen
+/// apart, not meeting.
+const SEEN_CLEAR: f32 = 0.01;
+
+/// A share of a monitor's face another may be seen over or behind from the eye that is
+/// no more than a seam seen at a slant (1 %).
+const HIDES: f64 = 0.01;
+
+/// Whether `a` (`ah` high) and `b` (`bh` high) are seen over or behind each other from
+/// the frame's eye by more than [`HIDES`] of either.
+fn seen_apart(a: &Placement, ah: f32, b: &Placement, bh: f32, frame: &Frame) -> bool {
+    use prostir_layout::space::seen_over;
+    seen_over(a, ah, b, bh, frame.eye) > HIDES || seen_over(b, bh, a, ah, frame.eye) > HIDES
 }
 
 /// The monitors those of `moved` go through now (over or under them, or beside them
-/// still) are carried up or down out of their way, just far enough, and so on for the
-/// monitors those then go through, until none goes through another (those moved are
-/// looked at again). The displays of `group` move as one piece. A row glued over a row
-/// may be seen over it a little, as "Line up" leaves it: only going through it is
-/// undone.
+/// still), or are seen over or behind now where they were not as they stood
+/// (`stood`), are carried up or down out of their way, just far enough, and so on for
+/// the monitors those then go through, until none goes through another (those moved
+/// are looked at again). The displays of `group` move as one piece. A row glued over a
+/// row may be seen over it a little, as "Line up" leaves it: that stays.
 fn clear_above_and_below<K: Key>(
     placements: &mut HashMap<K, Placement>,
     monitors: &[(K, u32, u32)],
     frame: &Frame,
     group: &[K],
     moved: Vec<K>,
+    stood: &HashMap<K, Placement>,
 ) {
     let height = |k: K, p: &Placement| {
         monitors
@@ -1037,18 +1138,53 @@ fn clear_above_and_below<K: Key>(
                 continue;
             };
             let Some(oh) = height(o, &op) else { continue };
-            if !cuts(&mp, mh, &op, oh) {
+            // Seen over or behind each other now, but not as they stood.
+            let newly_seen = seen_apart(&mp, mh, &op, oh, frame)
+                && !match (stood.get(&m), stood.get(&o)) {
+                    (Some(ms), Some(os)) => seen_apart(ms, mh, os, oh, frame),
+                    _ => false,
+                };
+            if !cuts(&mp, mh, &op, oh) && !newly_seen {
                 continue;
             }
             let up = frame.to_local(op.position).y >= frame.to_local(mp.position).y;
             let dir = if up { 1.0 } else { -1.0 };
+            // One monitor lifted out of view goes further away instead, where it is
+            // seen nearer eye level: as little further as it takes to be in view and
+            // clear of this one.
+            if !group.contains(&o) {
+                let clear_at = |p: Placement| {
+                    lifted(
+                        p,
+                        frame,
+                        dir * clear_up_of(p, oh, &[(mp, mh)], frame, dir, newly_seen),
+                    )
+                };
+                let seen = |p: &Placement| prostir_layout::space::in_view(&frame.unplace(*p));
+                if !seen(&clear_at(op))
+                    && let Some(p) = further_in_view(op, frame, |k| {
+                        Some(clear_at(further(op, frame, k, false))).filter(seen)
+                    })
+                {
+                    placements.insert(o, p);
+                    work.push(o);
+                    continue;
+                }
+            }
             // The whole piece, as far as the member that needs it most.
             let members = piece(o);
             let t = members
                 .iter()
                 .filter_map(|&k| {
                     let p = *placements.get(&k)?;
-                    Some(clear_along_up(p, height(k, &p)?, &[(mp, mh)], frame, dir))
+                    Some(clear_up_of(
+                        p,
+                        height(k, &p)?,
+                        &[(mp, mh)],
+                        frame,
+                        dir,
+                        newly_seen,
+                    ))
                 })
                 .fold(0.0f32, f32::max);
             for k in members {

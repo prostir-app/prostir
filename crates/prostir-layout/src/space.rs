@@ -445,81 +445,145 @@ pub fn seen_local(p: &Placement, px: PixelSize, around: f64) -> Seen<()> {
 }
 
 /// Whether one monitor covers another as seen from the eye at the origin of their
-/// coordinates (the frame's), by more than `slack` of the smaller one's seen area.
-///
-/// Exact for flat faces: both are projected through the eye onto the plane facing the
-/// direction between them (a flat face stays a four-sided figure there), and the two
-/// figures are clipped against each other. A curved monitor lies behind its flat chord,
-/// so for it this errs on the side of covering. Two monitors too far apart around the
-/// eye to be projected together (a corner 85° or more from the direction between them)
-/// fall back to [`overlaps`] of their angular rectangles.
+/// coordinates (the frame's): the one seen over or behind the other by more than
+/// `slack` of either's face (see [`seen_over`]). Exact for flat faces wherever they are
+/// around the eye, however wide and near; a curved monitor lies behind its flat chord,
+/// so for it this errs on the side of covering. Allocates nothing.
 pub fn covers(a: &[Vec3; 4], b: &[Vec3; 4], slack: f64) -> bool {
-    use glam::DVec2;
-    let dir = |c: &[Vec3; 4]| {
-        c.iter()
-            .map(|p| p.as_dvec3().normalize_or_zero())
-            .sum::<DVec3>()
-            .normalize_or_zero()
-    };
-    let d = (dir(a) + dir(b)).normalize_or(DVec3::NEG_Z);
-    let all = a.iter().chain(b.iter());
-    if all
-        .clone()
-        .any(|p| p.as_dvec3().normalize_or_zero().dot(d) < 85f64.to_radians().cos())
-    {
-        // Each around its own middle, then the second moved by whole turns to lie
-        // around the first: two seen nearly opposite each other have no direction
-        // between them worth the name (their sum points up or down), and around such
-        // a one a monitor's corners would fall on both sides of the cut.
-        let rect = |c: &[Vec3; 4]| {
-            let middle = azimuth(dir(c));
-            let az: Vec<f64> = c
-                .iter()
-                .map(|p| unwrap(azimuth(p.as_dvec3()), middle))
-                .collect();
-            let el: Vec<f64> = c.iter().map(|p| elevation(p.as_dvec3())).collect();
-            let mut az2 = az;
-            let mut el2 = el;
-            az2.sort_by(f64::total_cmp);
-            el2.sort_by(f64::total_cmp);
-            Seen {
-                id: (),
-                left: (az2[0] + az2[1]) / 2.0,
-                right: (az2[2] + az2[3]) / 2.0,
-                bottom: (el2[0] + el2[1]) / 2.0,
-                top: (el2[2] + el2[3]) / 2.0,
-            }
-        };
-        let (ra, rb) = (rect(a), rect(b));
-        let shift = unwrap(rb.center_x(), ra.center_x()) - rb.center_x();
-        let rb = Seen {
-            left: rb.left + shift,
-            right: rb.right + shift,
-            ..rb
-        };
-        return overlaps(&ra, &rb, slack);
+    let (a, b) = (a.map(|p| p.as_dvec3()), b.map(|p| p.as_dvec3()));
+    seen_quads(&a, &b, DVec3::ZERO).0 > slack || seen_quads(&b, &a, DVec3::ZERO).0 > slack
+}
+
+/// How much of monitor `a` (`ah` high) monitor `b` (`bh` high) is seen over or behind
+/// from `eye`, as a share of `a`'s face: the part of `a` that lines of sight through
+/// `b` reach. Exact for flat faces wherever they are around the eye: `b` is cut to
+/// what lies on `a`'s side of the eye, and that is projected through the eye onto
+/// `a`'s plane. Allocates nothing (the magnet asks it every frame of a drag).
+pub fn seen_over(a: &Placement, ah: f32, b: &Placement, bh: f32, eye: Vec3) -> f64 {
+    seen_against(a, ah, b, bh, eye).0
+}
+
+/// How much of monitor `a` (`ah` high) monitor `b` (`bh` high) hides from `eye`, as a
+/// share of `a`'s face: [`seen_over`] where `b` is the nearer. Two that do not cut
+/// into each other (see [`cuts`]) stand in one order wherever they are seen over each
+/// other, so one point of that part tells which is in front. Allocates nothing.
+pub fn hidden_by(a: &Placement, ah: f32, b: &Placement, bh: f32, eye: Vec3) -> f64 {
+    match seen_against(a, ah, b, bh, eye) {
+        (share, true) => share,
+        (_, false) => 0.0,
     }
-    let u = d.cross(DVec3::Y).normalize_or(DVec3::X);
-    let v = u.cross(d);
-    let flat = |c: &[Vec3; 4]| -> Vec<DVec2> {
-        let mut poly: Vec<DVec2> = c
-            .iter()
-            .map(|p| {
-                let p = p.as_dvec3();
-                let q = p / p.dot(d);
-                DVec2::new(q.dot(u), q.dot(v))
-            })
-            .collect();
-        // Counter-clockwise.
-        if area(&poly) < 0.0 {
-            poly.reverse();
-        }
-        poly
+}
+
+/// [`seen_over`], and whether `b` is in front of `a` there.
+fn seen_against(a: &Placement, ah: f32, b: &Placement, bh: f32, eye: Vec3) -> (f64, bool) {
+    let corners = |p: &Placement, h: f32| p.corners(h).map(|c| c.as_dvec3());
+    seen_quads(&corners(a, ah), &corners(b, bh), eye.as_dvec3())
+}
+
+/// How much of the flat four-sided face `a` (its corners in order round it) the face
+/// `b` is seen over or behind from `eye`, as a share of `a`, and whether `b` is in front
+/// there: `b` cut to what lies on `a`'s side of the eye, projected through the eye onto
+/// `a`'s plane, clipped to `a`.
+fn seen_quads(a: &[DVec3; 4], b: &[DVec3; 4], eye: DVec3) -> (f64, bool) {
+    use glam::DVec2;
+    // `a`'s own frame: the middle, along its first edge, across it, and out of it.
+    let middle = a.iter().sum::<DVec3>() / 4.0;
+    let along = (a[1] - a[0]).normalize_or_zero();
+    let out = (a[1] - a[0]).cross(a[3] - a[0]).normalize_or_zero();
+    if along == DVec3::ZERO || out == DVec3::ZERO {
+        return (0.0, false);
+    }
+    let across = out.cross(along);
+    let local = |p: DVec3| {
+        let d = p - middle;
+        DVec3::new(d.dot(along), d.dot(across), d.dot(out))
     };
-    let (pa, pb) = (flat(a), flat(b));
-    let smaller = area(&pa).abs().min(area(&pb).abs());
-    let shared = clip(&pa, &pb);
-    smaller > 0.0 && area(&shared).abs() > slack * smaller
+    let e = local(eye);
+    if e.z.abs() < 1e-9 {
+        return (0.0, false);
+    }
+    let mut face = Poly::default();
+    for c in a {
+        let l = local(*c);
+        face.push(DVec2::new(l.x, l.y));
+    }
+    let whole = area(face.corners());
+    if whole.abs() < 1e-12 {
+        return (0.0, false);
+    }
+    if whole < 0.0 {
+        face.corners_mut().reverse();
+    }
+    // How far towards `a`'s plane from the eye, as a share of the eye's distance from
+    // it: a point of `b` with none (level with the eye or behind it) is not seen
+    // against `a`.
+    let towards = |q: DVec3| (e.z - q.z) / e.z;
+    const NEAR: f64 = 1e-6;
+    let corners = b.map(local);
+    let project = |r: DVec3| {
+        let at = e + (r - e) / towards(r);
+        DVec2::new(at.x, at.y)
+    };
+    let mut onto = Poly::default();
+    for i in 0..4 {
+        let (p, q) = (corners[i], corners[(i + 1) % 4]);
+        let (tp, tq) = (towards(p), towards(q));
+        if tp >= NEAR {
+            onto.push(project(p));
+        }
+        if (tp >= NEAR) != (tq >= NEAR) {
+            onto.push(project(p + (q - p) * ((NEAR - tp) / (tq - tp))));
+        }
+    }
+    if onto.n < 3 {
+        return (0.0, false);
+    }
+    let shared = clip(&onto, face.corners());
+    let share = area(shared.corners()).abs() / whole.abs();
+    if shared.n == 0 {
+        return (share, false);
+    }
+    // A point of `a` seen behind `b` or over it, the middle of that part, and where the
+    // line of sight to it meets `b`'s plane: before it, `b` is in front.
+    let mid = shared.corners().iter().copied().sum::<DVec2>() / shared.n as f64;
+    let at = DVec3::new(mid.x, mid.y, 0.0);
+    let b_out = (corners[1] - corners[0]).cross(corners[3] - corners[0]);
+    let toward = (at - e).dot(b_out);
+    let front = toward.abs() > 1e-15 && {
+        let t = (corners[0] - e).dot(b_out) / toward;
+        t > 0.0 && t < 1.0
+    };
+    (share, front)
+}
+
+/// A convex polygon of up to twelve corners, kept on the stack: a four-sided figure
+/// clipped by another (each side it is clipped by adds one corner at most), or one cut
+/// by a plane first.
+#[derive(Debug, Clone, Copy, Default)]
+struct Poly {
+    at: [glam::DVec2; 12],
+    n: usize,
+}
+
+impl Poly {
+    fn push(&mut self, p: glam::DVec2) {
+        debug_assert!(
+            self.n < self.at.len(),
+            "a clipped quad has twelve corners at most"
+        );
+        if let Some(slot) = self.at.get_mut(self.n) {
+            *slot = p;
+            self.n += 1;
+        }
+    }
+
+    fn corners(&self) -> &[glam::DVec2] {
+        &self.at[..self.n]
+    }
+
+    fn corners_mut(&mut self) -> &mut [glam::DVec2] {
+        &mut self.at[..self.n]
+    }
 }
 
 /// Signed area of a polygon (positive counter-clockwise).
@@ -530,12 +594,13 @@ fn area(p: &[glam::DVec2]) -> f64 {
 
 /// `subject` clipped to the convex counter-clockwise polygon `by` (Sutherland and
 /// Hodgman).
-fn clip(subject: &[glam::DVec2], by: &[glam::DVec2]) -> Vec<glam::DVec2> {
-    let mut out = subject.to_vec();
+fn clip(subject: &Poly, by: &[glam::DVec2]) -> Poly {
+    let mut out = *subject;
     for i in 0..by.len() {
         let (a, b) = (by[i], by[(i + 1) % by.len()]);
         let inside = |p: glam::DVec2| (b - a).perp_dot(p - a) >= 0.0;
-        let input = std::mem::take(&mut out);
+        let taken = std::mem::take(&mut out);
+        let input = taken.corners();
         for j in 0..input.len() {
             let (p, q) = (input[j], input[(j + 1) % input.len()]);
             let cross = |p: glam::DVec2, q: glam::DVec2| {
@@ -552,7 +617,7 @@ fn clip(subject: &[glam::DVec2], by: &[glam::DVec2]) -> Vec<glam::DVec2> {
                 (false, false) => {}
             }
         }
-        if out.is_empty() {
+        if out.n == 0 {
             break;
         }
     }
@@ -571,9 +636,13 @@ pub fn overlaps<K, L>(a: &Seen<K>, b: &Seen<L>, slack: f64) -> bool {
 /// millimetre): edges that meet, glued, and the last bits of a float do not.
 pub const CUT_SLACK: f32 = 0.0005;
 
-/// Two faces whose normals' cross product is shorter than this, squared, are nearly
-/// one plane (3 degrees: sin² 3° = 0.00274).
-const NEARLY_ONE_PLANE: f32 = 0.00274;
+/// Two edges whose ends lie this close to one line (a centimetre) are on one line, as
+/// for a fold (see `Face::folded`).
+const FOLD_NEAR: f32 = 0.01;
+
+/// Two faces going the same way from an edge they share, the angle between them under
+/// 60 degrees (its cosine), are folded one over the other.
+const FOLD_COS: f32 = 0.5;
 
 /// A flat face: where, how turned, half its width and height.
 #[derive(Debug, Clone, Copy)]
@@ -651,6 +720,41 @@ impl Face {
             || inside(other, self.p.position)
     }
 
+    /// Whether this face and `other` are folded one over the other: an edge of each on
+    /// one line (within [`FOLD_NEAR`]), the two edges sharing more than [`CUT_SLACK`]
+    /// of it, and both faces going the same way from it, within 60 degrees of each
+    /// other. For two faces in two planes that line is the one the planes meet on; two
+    /// hung from it to the same side lie over each other however small the angle
+    /// between them, and that angle comes from their heights.
+    fn folded(&self, other: &Face) -> bool {
+        let edges = |f: &Face| {
+            let c = f.corners();
+            let middle = f.p.position;
+            [0, 1, 2, 3].map(|i| {
+                let (from, to) = (c[i], c[(i + 1) % 4]);
+                // Into the face from its edge, square to it.
+                let inward = (middle - (from + to) / 2.0).normalize_or_zero();
+                (from, to, inward)
+            })
+        };
+        let theirs = edges(other);
+        edges(self).iter().any(|&(from, to, inward)| {
+            let length = from.distance(to);
+            let Some(way) = (to - from).try_normalize() else {
+                return false;
+            };
+            theirs.iter().any(|&(f, t, other_inward)| {
+                let off = |p: Vec3| (p - from).reject_from_normalized(way).length();
+                let (s0, s1) = ((f - from).dot(way), (t - from).dot(way));
+                let shared = s0.max(s1).min(length) - s0.min(s1).max(0.0);
+                off(f) < FOLD_NEAR
+                    && off(t) < FOLD_NEAR
+                    && shared > CUT_SLACK
+                    && inward.dot(other_inward) > FOLD_COS
+            })
+        })
+    }
+
     /// Whether an edge of `other`, lying in this face's plane, goes inside this face.
     fn entered_in_plane(&self, other: &Face) -> bool {
         let c = other.corners().map(|c| self.local(c).truncate());
@@ -663,21 +767,17 @@ impl Face {
 
 /// Whether monitor `a` (`ah` high) and monitor `b` (`bh` high) cut into each other by
 /// more than [`CUT_SLACK`]: in two planes, the line where the planes meet runs through
-/// both of them; in one plane, they overlap. Edges that meet (glued, hinged) do not
-/// count.
+/// both of them; in one plane, they overlap; hung from one edge to the same side,
+/// whatever the angle between them up to 60 degrees, they are folded one over the
+/// other. Edges that meet otherwise (glued, hinged apart) do not count.
 pub fn cuts(a: &Placement, ah: f32, b: &Placement, bh: f32) -> bool {
     let (fa, fb) = (Face::new(a, ah), Face::new(b, bh));
+    // Hung from one edge to the same side: one lies over the other.
+    if fa.folded(&fb) {
+        return true;
+    }
     let (na, nb) = (a.normal(), b.normal());
     let across = na.cross(nb);
-    // Nearly one plane (within 3 degrees) and touching or all but (a centimetre): over
-    // each other there they cut, though the line the planes meet on may be only an edge
-    // they share (two hinged on one edge to the same side).
-    if across.length_squared() < NEARLY_ONE_PLANE {
-        let near = |f: &Face, o: &Face| o.corners().iter().any(|c| f.local(*c).z.abs() < 0.01);
-        if (near(&fa, &fb) || near(&fb, &fa)) && fa.over_in_plane(&fb) {
-            return true;
-        }
-    }
     if across.length_squared() < 1e-8 {
         // Facing the same way (or opposite): only in one plane can they meet.
         if (b.position - a.position).dot(na).abs() >= CUT_SLACK {
@@ -762,5 +862,82 @@ mod tests {
         };
         assert!(!cuts(&a, 0.5, &above(0.5f32.to_radians()), 0.4));
         assert!(!cuts(&a, 0.5, &above(-3.0f32.to_radians()), 0.4));
+    }
+
+    /// Two hung from one edge to the same side are folded one over the other whatever
+    /// the angle between them, up to 60 degrees: the magnet turns each to face the eye,
+    /// by an angle that depends on its height, so on a mixed desk they fan apart by
+    /// anything from nothing to 30 degrees. Square to each other, or each to its own
+    /// side, they only meet.
+    #[test]
+    fn hung_from_one_edge_to_one_side_is_a_fold() {
+        // Both hung down from the line y = 0.25, z = -1, turned about it by `turn`.
+        let hung = |turn: f32, x: f32, width: f32, h: f32| {
+            let r = Quat::from_rotation_x(turn.to_radians());
+            Placement {
+                position: Vec3::new(x, 0.25, -1.0) + r * Vec3::new(0.0, -h / 2.0, 0.0),
+                rotation: r,
+                width,
+            }
+        };
+        let a = hung(2.0, 0.0, 1.0, 0.5);
+        for turn in [2.0, 2.5, 5.77, 12.0, 32.0, 61.0, -27.0, -57.0] {
+            assert!(cuts(&a, 0.5, &hung(turn, 0.3, 1.0, 0.4), 0.4), "{turn}");
+            assert!(cuts(&hung(turn, 0.3, 1.0, 0.4), 0.4, &a, 0.5), "{turn}");
+        }
+        // Square to it, either way, and far apart along the edge: they only meet.
+        assert!(!cuts(&a, 0.5, &hung(92.0, 0.3, 1.0, 0.4), 0.4));
+        assert!(!cuts(&a, 0.5, &hung(-88.0, 0.3, 1.0, 0.4), 0.4));
+        assert!(!cuts(&a, 0.5, &hung(5.0, 1.0, 1.0, 0.4), 0.4));
+        // Hung up from the same line instead: one each side of it.
+        let up = |turn: f32| {
+            let r = Quat::from_rotation_x(turn.to_radians());
+            Placement {
+                position: Vec3::new(0.3, 0.25, -1.0) + r * Vec3::new(0.0, 0.2, 0.0),
+                rotation: r,
+                width: 1.0,
+            }
+        };
+        assert!(!cuts(&a, 0.5, &up(-10.0), 0.4));
+        assert!(!cuts(&a, 0.5, &up(2.0), 0.4));
+    }
+
+    /// How much of one monitor another is seen over or behind, and hides: a small one
+    /// halfway to the eye covers twice its size of the one behind, and all of itself is
+    /// seen against it; side by side, hinged, nothing; behind the eye, nothing.
+    #[test]
+    fn what_one_is_seen_over() {
+        let a = upright(0.0, -1.0, 0.0, 1.0);
+        let small = upright(0.0, -0.5, 0.0, 0.2);
+        let close = |x: f64, y: f64| (x - y).abs() < 1e-4;
+        assert!(close(
+            seen_over(&a, 0.5, &small, 0.1, Vec3::ZERO),
+            0.4 * 0.2 / 0.5
+        ));
+        assert!(close(seen_over(&small, 0.1, &a, 0.5, Vec3::ZERO), 1.0));
+        // The small one is in front: it hides that much of `a`, `a` none of it.
+        assert!(close(
+            hidden_by(&a, 0.5, &small, 0.1, Vec3::ZERO),
+            0.4 * 0.2 / 0.5
+        ));
+        assert_eq!(hidden_by(&small, 0.1, &a, 0.5, Vec3::ZERO), 0.0);
+        let turn = 0.5f32;
+        let hinged = upright(0.5 + 0.5 * turn.cos(), -1.0 + 0.5 * turn.sin(), -turn, 1.0);
+        assert!(seen_over(&a, 0.5, &hinged, 0.5, Vec3::ZERO) < 1e-6);
+        assert!(seen_over(&hinged, 0.5, &a, 0.5, Vec3::ZERO) < 1e-6);
+        let behind = upright(0.0, 1.0, std::f32::consts::PI, 1.0);
+        assert_eq!(seen_over(&a, 0.5, &behind, 0.5, Vec3::ZERO), 0.0);
+        // A wall a quarter of a metre left of the eye, from 2 m ahead to 2 m behind: only
+        // the part ahead is seen against `a`, a wedge of its left side narrowing to the
+        // wall's far end (0.172 of its 0.5 square metres).
+        let wall = Placement {
+            position: Vec3::new(-0.25, 0.0, 0.0),
+            rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            width: 4.0,
+        };
+        assert!(close(
+            seen_over(&a, 0.5, &wall, 0.5, Vec3::ZERO),
+            0.171875 / 0.5
+        ));
     }
 }

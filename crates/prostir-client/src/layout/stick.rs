@@ -5,7 +5,25 @@ use std::collections::HashMap;
 
 use glam::{Quat, Vec2, Vec3};
 
+use prostir_layout::space::{Frame, Monitor, PixelSize, Side, hidden_by, seen_over};
+use prostir_layout::view::relate_pair;
+
 use super::{Key, Placement, cuts};
+
+/// A share of a monitor's face another may be seen over or behind that is only an edge
+/// they share and the last bits of a float.
+const SEEN_SLACK: f64 = 0.001;
+
+/// Two monitors seen this close (a centimetre) are glued.
+const GLUED: f32 = 0.01;
+
+/// How much of a monitor hung over the seam between two glued ones, and turned there as
+/// "Line up" turns it, those two may hide where their row curves round the eye (3 %;
+/// the owner's 3840x2160 over two 2560x1440 on an arc: 1.3 %).
+pub const SEAM_TURNED: f64 = 0.03;
+
+/// ... and hung from the edge as it is, where it cannot be turned so (8 %).
+pub const SEAM_HUNG: f64 = 0.08;
 
 /// Lines `value` (half size `half`) up with a neighbour at `other` (half size
 /// `other_half`) only when it is all but lined up already: centres, or first or last
@@ -195,6 +213,161 @@ fn settle_along<K: Key>(b: &Beside, n: &Part<K>, mw: f32, mh: f32) -> f32 {
     align(b.along, half_m, 0.0, half_n).clamp(-(half_n + half_m - shared), half_n + half_m - shared)
 }
 
+/// The stream's size of `k` among `monitors`.
+fn px_of<K: Key>(monitors: &[(K, u32, u32)], k: K) -> PixelSize {
+    monitors
+        .iter()
+        .find(|x| x.0 == k)
+        .map_or(PixelSize::new(1, 1), |&(_, w, h)| PixelSize::new(w, h))
+}
+
+/// Whether `m`, hung from `n` as `b` says, reaches over the seam between `n` and `o`:
+/// `o` glued beside `n` across the edge `m` hangs from, a corner of `o` on the line of
+/// that edge (their corners meet there), and `m` past the end of that edge, on `o`'s
+/// side. A monitor over two glued ones.
+fn over_the_seam<K: Key>(m: &Part<K>, n: &Part<K>, b: &Beside, o: &Part<K>, eye: Vec3) -> bool {
+    if o.0 == n.0 || o.0 == m.0 {
+        return false;
+    }
+    let (half_m, half_n) = if b.across {
+        (m.2 / 2.0, n.2 / 2.0)
+    } else {
+        (m.1.width / 2.0, n.1.width / 2.0)
+    };
+    let (hinge, way) = if b.across {
+        (Vec3::new(b.side * n.1.width / 2.0, 0.0, 0.0), Vec3::Y)
+    } else {
+        (Vec3::new(0.0, b.side * n.2 / 2.0, 0.0), Vec3::X)
+    };
+    let on_hinge = |c: Vec3| {
+        let l = n.1.rotation.inverse() * (c - n.1.position) - hinge;
+        l.reject_from_normalized(way).length() < GLUED
+    };
+    beside(&n.1, n.2, &o.1, o.2, eye).is_some_and(|g| {
+        g.across != b.across && g.gap < GLUED && g.side * b.along + half_m > half_n
+    }) && corners(&o.1, o.2).into_iter().any(on_hinge)
+}
+
+/// `m` hung over or under `n` at `at`, turned as "Line up" turns a row glued to the row
+/// before it (see `prostir_layout::tidy`): about its own middle to face the axis of the
+/// frame without leaning, its tilt kept, then moved up or down until the middle of
+/// each seam it has with `n` and with what it reaches over beside `n` (`over`) closes as
+/// the eye sees it, as near as the seam that would open most needs. `None` where no
+/// seam can be closed so. Worked out in the frame's own coordinates; allocates nothing.
+fn seam_turn<K: Key>(
+    at: &Placement,
+    (m, n): (&Part<K>, &Part<K>),
+    b: &Beside,
+    over: &dyn Fn(&Part<K>) -> bool,
+    all: &[Part<K>],
+    frame: &Frame,
+    monitors: &[(K, u32, u32)],
+) -> Option<Placement> {
+    let local = frame.unplace(*at);
+    let c = local.position;
+    let pitch = local.normal().y.clamp(-1.0, 1.0).asin();
+    let rotation = Quat::from_rotation_y((-c.x).atan2(-c.z)) * Quat::from_rotation_x(-pitch);
+    let up = Vec3::Y * b.side;
+    let moved = |s: f32| Placement {
+        position: c + up * s,
+        rotation,
+        width: local.width,
+    };
+    let side = if b.side > 0.0 {
+        Side::Above
+    } else {
+        Side::Below
+    };
+    let monitor = |k: K, placement: Placement| Monitor {
+        id: k,
+        px: px_of(monitors, k),
+        placement,
+    };
+    // How far apart the two are across the seam in its middle, as seen, `m` moved by
+    // `s`: closed at 0.
+    let gap = |x: &Part<K>, s: f32| {
+        relate_pair(
+            &monitor(x.0, frame.unplace(x.1)),
+            &monitor(m.0, moved(s)),
+            side,
+        )
+        .filter(|r| r.shared > 0.0)
+        .map(|r| r.apart)
+    };
+    let close = |x: &Part<K>| -> Option<f32> {
+        let (mut lo, mut hi) = (-m.2 / 4.0, m.2 / 4.0);
+        if !(gap(x, lo)? < 0.0 && gap(x, hi)? > 0.0) {
+            return None;
+        }
+        for _ in 0..32 {
+            let mid = (lo + hi) / 2.0;
+            if gap(x, mid)? > 0.0 {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        Some(hi)
+    };
+    let target = std::iter::once(n)
+        .chain(all.iter().filter(|o| over(o)))
+        .filter_map(close)
+        .reduce(f32::min)?;
+    Some(frame.place(moved(target)))
+}
+
+/// Whether `m` at `p` stands clear of every other of `all`: facing the eye, through
+/// none, and seen over or behind none, but for `n` and what it reaches over beside it
+/// (`under`), which may hide `cap` of it (never it any of them).
+fn fits<K: Key>(
+    p: &Placement,
+    m: &Part<K>,
+    under: &dyn Fn(&Part<K>) -> bool,
+    all: &[Part<K>],
+    eye: Vec3,
+    cap: f64,
+) -> bool {
+    p.normal().dot(eye - p.position) > 0.0
+        && all.iter().filter(|o| o.0 != m.0).all(|o| {
+            !cuts(p, m.2, &o.1, o.2)
+                && if under(o) {
+                    hidden_by(&o.1, o.2, p, m.2, eye) <= SEEN_SLACK
+                        && hidden_by(p, m.2, &o.1, o.2, eye) <= cap
+                } else {
+                    seen_over(p, m.2, &o.1, o.2, eye) <= SEEN_SLACK
+                        && seen_over(&o.1, o.2, p, m.2, eye) <= SEEN_SLACK
+                }
+        })
+}
+
+/// Where `m`, hung from `n` at `at` as `b` says, goes: there when it stands clear of
+/// every other (see [`fits`]). Hung over the seam between `n` and one glued beside it,
+/// it reaches past their corner, and where their row curves round the eye the two hide
+/// a little of it: then turned as "Line up" would turn it ([`seam_turn`]), they may
+/// hide [`SEAM_TURNED`] of it, else as it hangs [`SEAM_HUNG`]. `None`: not there.
+fn settle<K: Key>(
+    at: Placement,
+    (m, n): (&Part<K>, &Part<K>),
+    b: &Beside,
+    all: &[Part<K>],
+    frame: &Frame,
+    monitors: &[(K, u32, u32)],
+) -> Option<Placement> {
+    let eye = frame.eye;
+    let over = |o: &Part<K>| over_the_seam(m, n, b, o, eye);
+    if !all.iter().any(over) {
+        return fits(&at, m, &|o| o.0 == n.0, all, eye, SEEN_SLACK).then_some(at);
+    }
+    let under = |o: &Part<K>| o.0 == n.0 || over(o);
+    if !b.across
+        && let Some(turned) = seam_turn(&at, (m, n), b, &over, all, frame, monitors)
+        && fits(&turned, m, &under, all, eye, SEAM_TURNED)
+    {
+        return Some(turned);
+    }
+    fits(&at, m, &under, all, eye, SEAM_HUNG).then_some(at)
+}
+
 /// Where a monitor being let go of would stick: the monitor it joins and the edge.
 #[derive(Debug, Clone, Copy)]
 pub struct Stick<K> {
@@ -210,16 +383,20 @@ pub struct Stick<K> {
 /// monitor, as seen from `eye`) and at about the same distance, where it would stick
 /// to it, edge to edge, where along the edge it is (see [`hinge`]); `None` otherwise.
 /// Joined to its nearest neighbour, a monitor that would go through another one (a
-/// hinge turns it towards the eye, into a third monitor beside or under it) is joined
-/// to the next nearest instead, and with none it stays where it was let go. Worked
-/// out in `scratch`.
+/// hinge turns it towards the eye, into a third monitor beside or under it), lie over
+/// or behind one as seen, or turn its back to the eye is joined to the next nearest
+/// instead, and with none it stays where it was let go (see [`settle`]). `center`: the
+/// eye and the way the arrangement faces (the headset's `center`; the magnet works
+/// only upright). Worked out in `scratch`.
 pub fn stick<K: Key>(
     placements: &HashMap<K, Placement>,
     monitors: &[(K, u32, u32)],
-    eye: Vec3,
+    center: (Vec3, f32),
     id: K,
     scratch: &mut StickScratch<K>,
 ) -> Option<Stick<K>> {
+    let frame = Frame::upright(center.0, center.1);
+    let eye = center.0;
     parts(placements, monitors, &mut scratch.parts);
     let all = &scratch.parts;
     let m = *all.iter().find(|m| m.0 == id)?;
@@ -243,12 +420,12 @@ pub fn stick<K: Key>(
             continue;
         }
         first = false;
-        if all
-            .iter()
-            .any(|o| o.0 != id && cuts(&placement, m.2, &o.1, o.2))
-        {
+        // Turned away from the eye, through another one, or seen over or behind
+        // another one (hung from an edge in front of a monitor further away, or folded
+        // back behind the one it hangs from): not there.
+        let Some(placement) = settle(placement, (&m, &n), &b, all, &frame, monitors) else {
             continue;
-        }
+        };
         return Some(Stick {
             placement,
             neighbour: n.0,

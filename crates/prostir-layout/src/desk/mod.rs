@@ -129,7 +129,9 @@ pub struct Relation {
 
 /// What the plan knows of how the monitors are seen.
 pub trait View<K> {
-    /// How `b` stands on `side` of `a` as seen, if they face each other there.
+    /// How `b` stands on `side` of `a` as seen, if they face each other there. They
+    /// share a stretch of edge (`shared` above 0) exactly when `a` and `b` asked the
+    /// other way round (`b`, `a`, the opposite side) do.
     fn relate(&self, a: K, b: K, side: Side) -> Option<Relation>;
     /// Whether another monitor is seen in the gap between `a` and `b` (`a` left of
     /// `b`), so they cannot be put side by side.
@@ -460,9 +462,15 @@ pub fn plan<K: Copy + Ord, V: View<K>>(
                 );
             }
         }
-        // A piece cut to be held from above is, but one the row above no longer spans
-        // as seen (a monitor let go beside it, a row turned) is not: it goes on in the
-        // main row on its own, held by nothing.
+        // A piece of the main row is cut off only where a row above spans the cut as
+        // seen, and that row is placed by now: what it faces of the piece holds it (two
+        // monitors share an edge as seen whichever of them is asked about first, see
+        // `View::relate`), so none is left. Were one left all the same, it would go on
+        // in the main row on its own, held by nothing.
+        debug_assert!(
+            waiting.is_empty(),
+            "main-row pieces no row above holds: {waiting:?}"
+        );
         for k in waiting {
             put(
                 &cut[main_row],

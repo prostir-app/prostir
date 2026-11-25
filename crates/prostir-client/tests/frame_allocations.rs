@@ -2,7 +2,8 @@
 //! the hands and the menu's view as the shell runs them each frame, with the network
 //! and the system quiet, counted by an allocator that counts this thread's
 //! allocations. A quiet frame, a ray on a monitor or on the menu, and a drag of a
-//! monitor with the menu closed or open allocate nothing; the menu's state is made
+//! monitor with the menu closed or open, or over the seam between two glued ones (the
+//! magnet turning it there), allocate nothing; the menu's state is made
 //! anew only when what it shows changed. Pointing about the menu's picture, once each
 //! button was pointed at, draws nothing and takes no memory.
 //!
@@ -26,7 +27,7 @@ use prostir::ids::{DisplayKey, PcId};
 use prostir::interaction::{Button, FrameInput, HandState, Hands, Head, Menu, Menus};
 use prostir::lang::{self, LangState};
 use prostir::layers::{self, Plan, Ready};
-use prostir::layout::{Desk, Ray};
+use prostir::layout::{Desk, Placement, Ray};
 use prostir::net::NetEvent;
 use prostir::platform::store::Store as _;
 use prostir::session::NetCmd;
@@ -617,4 +618,75 @@ fn the_allocator_counts() {
         let _ = l.panel.toast_image(&text, 1024, 88);
         assert!(allocations() - before > 5, "{}", allocations() - before);
     }
+}
+
+/// A third monitor dragged over the seam between the two glued ones: the magnet turns
+/// it there as "Line up" would, every frame, and that takes no memory either.
+#[test]
+fn a_drag_over_a_seam_takes_no_memory() {
+    let mut l = connected(16);
+    let part = Displays {
+        displays: vec![monitor(1), monitor(2), monitor(3)],
+        primary: Some(DisplayId(1)),
+    };
+    l.handle(Event::Net(NetEvent::Part(PC, HostMsg::Displays { part })));
+    l.handle(Event::StreamStarted {
+        id: DisplayKey::new(PC, DisplayId(3)),
+        generation: prostir_proto::state::Gen(1),
+        codec: prostir_proto::Codec::H264,
+        size: (2560, 1440),
+    });
+    for _ in 0..200 {
+        l.frame(HandState::default());
+    }
+    let key = |n: u32| DisplayKey::new(PC, DisplayId(n));
+    let world = l.m.world();
+    let (one, three) = (
+        *world.shown(key(1)).expect("drawn"),
+        *world.shown(key(3)).expect("drawn"),
+    );
+    // Over the seam between the first and the one left of it, a hand's 2 cm above.
+    let h = |p: &Placement| p.width * 1440.0 / 2560.0;
+    let corner = one.position + Vec3::new(-one.width / 2.0, h(&one) / 2.0, 0.0);
+    let over = corner + Vec3::new(0.1, h(&three) / 2.0 + 0.02, 0.0);
+    // The grip pressed on the third monitor, then held while the ray goes from it to
+    // over the seam, and stays there swaying a little. The hand halfway between, so
+    // the monitor, held at the distance it was taken at, goes there.
+    let hand = (three.position + over) / 2.0;
+    let drag = move |i: u32| {
+        let mut grab = Button::default();
+        grab.update(1.0);
+        if i > 0 {
+            grab.update(1.0);
+        }
+        let t = (i as f32 / 60.0).min(1.0);
+        let at = three.position.lerp(over, t) + Vec3::new((i as f32 * 0.05).sin() * 0.01, 0.0, 0.0);
+        HandState {
+            ray: Some(Ray {
+                origin: hand,
+                dir: (at - hand).normalize(),
+            }),
+            grab,
+            ..HandState::default()
+        }
+    };
+    for i in 0..90 {
+        l.frame(drag(i));
+    }
+    let held = l.hands.held().find_map(prostir::ids::Thing::display);
+    assert_eq!(held, Some(key(3)), "the drag holds the third monitor");
+    // Over the first, turned about its own middle to face the axis: no longer square
+    // to the edge it hangs from.
+    let stick = l.m.magnet(key(3)).expect("the magnet takes it");
+    assert_eq!((stick.neighbour, stick.across), (key(1), false));
+    let level = |p: &Placement| (p.rotation * Vec3::Z).with_y(0.0).normalize();
+    assert!(
+        level(&stick.placement).dot(level(&one)) < 0.99,
+        "turned: {stick:?}"
+    );
+    let before = allocations();
+    for i in 90..390 {
+        l.frame(drag(i));
+    }
+    assert_eq!(allocations() - before, 0, "a drag over a seam");
 }

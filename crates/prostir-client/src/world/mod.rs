@@ -59,6 +59,9 @@ pub const PLACEHOLDER_FOR: Duration = Duration::from_secs(15);
 pub const ARRANGE_AFTER: Duration = Duration::from_millis(800);
 /// Focus mode: how bright a monitor without the mouse is.
 const DIMMED: f32 = 0.4;
+/// A monitor with more than this share of it hidden behind another is hidden (1 %;
+/// a seam seen at a slant hides less).
+const HIDDEN: f64 = 0.01;
 
 /// The menu's width in the room, larger with the "Large" menu setting.
 pub fn panel_width(large: bool) -> f32 {
@@ -1216,8 +1219,8 @@ impl World {
             self.placements.insert(m.0, at);
             if push {
                 // Into the main row: its neighbours there make room along it. What
-                // that lifts out of its way out of view (a row over them), the whole
-                // further away brings back.
+                // that lifts out of its way out of view (a row over them, out from
+                // behind it), the whole further away brings back.
                 self.make_room_for(s, m.0);
                 self.further_into_view(s, &[]);
             }
@@ -1301,7 +1304,9 @@ impl World {
     }
 
     /// The monitors beside `id` in its row that it covers are pushed aside along the
-    /// row, the PC's own displays as one piece (see `layout::make_room`).
+    /// row, the PC's own displays as one piece, and those over or under the row that
+    /// then go through one of them or are seen behind one are lifted clear (see
+    /// `layout::make_room`).
     fn make_room_for(&mut self, s: &Settings, id: DisplayKey) {
         let group = self.placed_group();
         layout::make_room(
@@ -1894,8 +1899,9 @@ impl World {
     /// the PC's own displays carried as one piece, window panels left where they are.
     /// At the least radius at which everything carried is in view (found by halving:
     /// carrying is cheap) and 2 cm more, for rows lining up pushes apart, lined up
-    /// once: there if every monitor is in view, nothing goes through anything and no
-    /// seam seen closed before (to within a few pixels) is open; no further than
+    /// once: there if every monitor is in view, nothing goes through anything, none is
+    /// seen behind another where it was not (but for a seam kept closed) and no seam
+    /// seen closed before (to within a few pixels) is open; no further than
     /// `layout::VIEW_RADIUS`. Else everything stays as it was. `glued`: the pairs
     /// lining up kept glued as it stands now (see [`Self::line_up_rows`]), kept glued
     /// too.
@@ -1992,7 +1998,21 @@ impl World {
                 (None, Some(_)) => true,
                 _ => false,
             });
-        if !opened && !unseen(&self.placements) && !layout::cut_any(&self.placements, &laid) {
+        // Seen over or behind another where it was not, but for a seam kept closed (a
+        // row glued over a row may overlap it a little, as "Line up" leaves it).
+        let hidden_was = layout::hidden_pairs(&was, &laid, self.center.0, HIDDEN);
+        let hides = layout::hidden_pairs(&self.placements, &laid, self.center.0, HIDDEN)
+            .into_iter()
+            .any(|(a, b)| {
+                !hidden_was.contains(&(a, b))
+                    && !pairs.contains(&(a, b))
+                    && !pairs.contains(&(b, a))
+            });
+        if !opened
+            && !hides
+            && !unseen(&self.placements)
+            && !layout::cut_any(&self.placements, &laid)
+        {
             info!("out of view: the arrangement taken {radius:.2} m away");
             self.radius = radius;
             return;
@@ -2230,7 +2250,7 @@ impl World {
             layout::stick(
                 &self.placements,
                 &self.sizes,
-                self.center.0,
+                self.center,
                 id,
                 &mut self.stick,
             )

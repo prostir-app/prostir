@@ -18,7 +18,7 @@ use crate::circle::{EYE_DROP, Limits, MAX_ONE, RADIUS, clear_of, least_radius, o
 use crate::rows::rows_of;
 use crate::size::Size;
 use crate::space::{
-    Frame, Monitor, PixelSize, Placement, Seen, azimuth, covers, cuts, seen_local, unwrap,
+    Frame, Monitor, PixelSize, Placement, Seen, azimuth, covers, cuts, in_view, seen_local, unwrap,
 };
 use crate::view::Room;
 
@@ -59,14 +59,46 @@ pub fn place_within<K: Copy + Ord>(
     limits: &Limits,
     one: f32,
 ) -> Placement {
+    choose(monitors, frame, gaze, px, rows, limits, (one, SLACK, false))
+        .expect("with the fallback there is always a place")
+}
+
+/// [`place_within`], but only a place in view (see `space::in_view`), seen over or
+/// behind none of `monitors` by more than `slack` of either's face; `None` where there
+/// is none.
+#[allow(clippy::too_many_arguments)]
+pub fn place_in_view_within<K: Copy + Ord>(
+    monitors: &[Monitor<K>],
+    frame: &Frame,
+    gaze: Vec3,
+    px: PixelSize,
+    rows: Option<&[Vec<K>]>,
+    limits: &Limits,
+    one: f32,
+    slack: f64,
+) -> Option<Placement> {
+    choose(monitors, frame, gaze, px, rows, limits, (one, slack, true))
+}
+
+/// [`place_within`] with how much covering it takes (`slack`) and whether only a
+/// place in view will do (then `None` where there is none; else the fallback).
+fn choose<K: Copy + Ord>(
+    monitors: &[Monitor<K>],
+    frame: &Frame,
+    gaze: Vec3,
+    px: PixelSize,
+    rows: Option<&[Vec<K>]>,
+    limits: &Limits,
+    (one, slack, in_view_only): (f32, f64, bool),
+) -> Option<Placement> {
     if monitors.is_empty() {
         let w = limits.sizes.others.metres(px, limits.radius).0;
-        return frame.place(on_cylinder(
+        return Some(frame.place(on_cylinder(
             0.0,
             -EYE_DROP,
             w,
             circle_for(w, limits.radius, one),
-        ));
+        )));
     }
     let room = Room::new(frame, monitors);
     let seen = room.seen();
@@ -121,7 +153,8 @@ pub fn place_within<K: Copy + Ord>(
         // monitor seen next to it can still go through it in the room.
         if local
             .iter()
-            .any(|(_, o, oh)| covers(&o.corners(*oh), &mine, SLACK) || cuts(o, *oh, p, height))
+            .any(|(_, o, oh)| covers(&o.corners(*oh), &mine, slack) || cuts(o, *oh, p, height))
+            || (in_view_only && !in_view(p))
         {
             return false;
         }
@@ -157,8 +190,11 @@ pub fn place_within<K: Copy + Ord>(
                 .then_with(|| d(&a.0).total_cmp(&d(&b.0)))
         })
         .map(|c| c.0);
+    if in_view_only {
+        return best.map(|p| frame.place(p));
+    }
     let chosen = best.unwrap_or_else(|| fallback(&local, &seen, gaze_local, px, limits, one));
-    frame.place(chosen)
+    Some(frame.place(chosen))
 }
 
 /// Where a monitor of stream size `px` goes into the main row of `monitors` (the
