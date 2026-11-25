@@ -1347,6 +1347,62 @@ fn after_change_pc_and_usb_the_pc_is_found_on_wifi() {
     assert!(dialed, "the PC over Wi-Fi is dialed on its own");
 }
 
+/// "Change PC" lands between a Wi-Fi dial reaching its PC and the session opening: the
+/// queued session is not over the cable, so it does not end the picking. The PC does not
+/// become the preferred one, and the next round dials nothing on its own.
+#[test]
+fn a_wifi_session_queued_before_change_pc_keeps_picking() {
+    let mut sim = Sim::new(MAX_PCS);
+    sim.paired(&[1]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.missed(s);
+    let (_, _) = sim.asked(None);
+    sim.answer(Some(1), addr(7));
+    let (s, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
+    sim.s.dialed(s, addr(7));
+    sim.s.reached(s, pc(1), addr(7), sim.now);
+    sim.s.change_pc();
+    sim.s.connected_to(pc(1), addr(7), &sim.texts);
+    assert!(sim.s.search.picking, "the user still picks");
+    assert!(sim.s.search.preferred.is_empty(), "no PC became preferred");
+    let _ = sim.cmds();
+    sim.end(s, Some(1), &Ended::default(), Duration::from_secs(1));
+    sim.after(RETRY_PAUSE);
+    let dials: Vec<Dest> = miss_all(&mut sim)
+        .iter()
+        .filter(|c| matches!(c, NetCmd::Dial { .. }))
+        .map(dest)
+        .collect();
+    assert!(
+        dials.iter().all(|d| *d == Dest::Usb),
+        "only the cable is tried: {dials:?}"
+    );
+}
+
+/// Two PCs allowed, PC 1 linked over Wi-Fi and no PC preferred: the USB dial takes
+/// every PC but PC 1, so a cable to PC 1 gets no handshake each round (a let-go, then
+/// the rest).
+#[test]
+fn usb_does_not_take_a_pc_linked_over_wifi() {
+    let mut sim = Sim::new(2);
+    sim.paired(&[1, 2]);
+    sim.after(MS);
+    let (s, _) = sim.step();
+    sim.missed(s);
+    let (_, _) = sim.asked(None);
+    sim.answer(Some(1), addr(7));
+    let (s1, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Addr(addr(7)));
+    sim.reach(s1, 1, addr(7));
+    let _ = sim.cmds();
+    sim.after(RETRY_PAUSE);
+    let (_, cmd) = sim.step();
+    assert_eq!(dest(&cmd), Dest::Usb);
+    assert_eq!(takes(&cmd), Takes::AllBut(vec![pc(1)]));
+}
+
 /// A stale `adb reverse` (Prostir stopped on the PC, adbd still reversing): the USB
 /// dial opens and ends at once with no PC. The round goes on to the query and the
 /// last address instead of starting over at USB.
