@@ -129,6 +129,7 @@ pc-tray-quit = Вийти
 pc-tray-quality-economy = Економна: 15 Мбіт/с
 pc-tray-quality-normal = Звичайна: 30 Мбіт/с
 pc-tray-quality-high = Висока: 50 Мбіт/с
+pc-tray-quality-usb-large = По USB: { $n } Мбіт/с для моніторів 2560x1440 і більших
 
 ## src/platform/linux/dialogs.rs
 
@@ -527,6 +528,7 @@ window-q-title = Якість
 window-q-sub = Як монітори кодуються для шолома.
 window-q-bitrate = Бітрейт
 window-q-bitrate-desc = Зараз { $n } Мбіт/с на кожен монітор. Більше: чіткіше, але потрібна швидша мережа.
+window-q-bitrate-desc-large = Зараз { $n } Мбіт/с на кожен монітор, { $large } для моніторів 2560x1440 і більших по USB. Більше: чіткіше, але потрібна швидша мережа.
 window-q-mbit = { $n }
 window-q-sharp = Чіткіший текст
 window-q-sharp-desc = Повільніше кодування, з яким дрібний текст чіткіший.

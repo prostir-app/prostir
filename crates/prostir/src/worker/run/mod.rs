@@ -259,6 +259,10 @@ enum Out {
     Other(usize),
 }
 
+/// The bitrates (kbit/s, and for a large picture where another) and the text preset
+/// of the encoders (see `EncoderConfig`).
+type Tuning = ((u32, Option<u32>), Option<bool>);
+
 pub struct Worker {
     // Field order matters: the outputs go before the desktop connection.
     slots: BTreeMap<ScreenId, Slot>,
@@ -269,7 +273,7 @@ pub struct Worker {
     /// The wanted state worked on; none until the first comes.
     wanted: Option<Wanted>,
     /// The bitrate and the text preset the encoders have.
-    tuning: Option<(u32, Option<bool>)>,
+    tuning: Option<Tuning>,
     /// The primary output as last made primary.
     primary_made: Option<OutputKey>,
     /// A monitor or panel was made: the others' wallpaper goes to it.
@@ -419,7 +423,10 @@ impl Worker {
         if was.is_none_or(|w| w.layout != wanted.layout) {
             self.layout_due = true;
         }
-        let tuning = (wanted.encoding.bitrate_kbps, wanted.encoding.sharp);
+        let tuning = (
+            (wanted.encoding.bitrate_kbps, wanted.encoding.large_kbps),
+            wanted.encoding.sharp,
+        );
         if self.tuning.is_some_and(|t| t != tuning) {
             for (id, e) in self
                 .slots
@@ -427,8 +434,8 @@ impl Worker {
                 .filter_map(|(id, s)| Some((*id, s.encoder.as_ref()?)))
             {
                 if tuning.0 != self.tuning.unwrap_or_default().0 {
-                    e.set_bitrate(tuning.0);
-                    self.shared.router.set_bitrate(id, tuning.0);
+                    let kbps = e.set_bitrate(tuning.0.0, tuning.0.1);
+                    self.shared.router.set_bitrate(id, kbps);
                 }
                 if tuning.1 != self.tuning.unwrap_or_default().1 {
                     e.set_sharp(wanted.encoding.sharp);

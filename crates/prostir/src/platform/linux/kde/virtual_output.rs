@@ -922,6 +922,7 @@ mod tests {
         let cfg = EncoderConfig {
             codec,
             bitrate_kbps: 8000,
+            large_kbps: None,
             backend,
             sharp: Some(false),
             rows_up: false,
@@ -1029,6 +1030,7 @@ mod tests {
         let cfg = EncoderConfig {
             codec: prostir_proto::Codec::H264,
             bitrate_kbps: 4000,
+            large_kbps: None,
             backend: Backend::X264,
             sharp: Some(false),
             rows_up: false,

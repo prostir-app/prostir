@@ -204,6 +204,8 @@ pub struct Displays {
     streamed_at: Instant,
     pub router: Arc<Router>,
     cfg: EncoderConfig,
+    /// Every headset with a session is connected over USB (see [`Displays::set_usb`]).
+    usb: bool,
     primary: Option<ScreenId>,
     /// Whether to pick KDE's primary monitor ourselves.
     manage_primary: bool,
@@ -269,10 +271,12 @@ impl Displays {
             cfg: EncoderConfig {
                 codec: settings.codec,
                 bitrate_kbps: settings.bitrate * 1000,
+                large_kbps: None,
                 backend: Backend::X264,
                 sharp: settings.sharp,
                 rows_up: false,
             },
+            usb: false,
             primary: None,
             manage_primary,
             focus: None,
@@ -677,12 +681,48 @@ impl Displays {
     pub fn apply(&mut self, wanted: &Settings) {
         let was = std::mem::replace(&mut self.settings, wanted.clone());
         self.cfg.bitrate_kbps = wanted.bitrate * 1000;
+        self.cfg.large_kbps = self.large_kbps();
         self.cfg.sharp = wanted.sharp;
         // Switched on by hand: tried right away.
         if wanted.audio != was.audio {
             self.by_hand += 1;
         }
         self.sync_audio();
+    }
+
+    /// Every headset with a session is connected over USB (`usb`) or not: while the
+    /// quality is not chosen, monitors of 2560x1440 or more stream at
+    /// [`crate::store::USB_LARGE`] then.
+    pub fn set_usb(&mut self, usb: bool) {
+        if usb == self.usb {
+            return;
+        }
+        self.usb = usb;
+        self.cfg.large_kbps = self.large_kbps();
+        if let Some(kbps) = self.cfg.large_kbps {
+            info!(
+                "over USB: {} Mbit/s for each monitor of 2560x1440 or more",
+                kbps / 1000
+            );
+        }
+    }
+
+    /// The bitrate of a picture of 2560x1440 or more, where it is another: over USB,
+    /// while the quality is not chosen and is less.
+    fn large_kbps(&self) -> Option<u32> {
+        Self::large_kbps_for(self.usb, &self.settings)
+    }
+
+    /// The same for `settings`, over USB (`usb`) or not.
+    fn large_kbps_for(usb: bool, settings: &Settings) -> Option<u32> {
+        let large = crate::store::USB_LARGE;
+        (usb && !settings.bitrate_chosen && large > settings.bitrate).then_some(large * 1000)
+    }
+
+    /// Mbit/s for each monitor of 2560x1440 or more now, where another than the quality
+    /// (see [`Displays::set_usb`]).
+    pub fn large_mbit(&self) -> Option<u32> {
+        self.cfg.large_kbps.map(|k| k / 1000)
     }
 
     /// The desktop worker's number, which the sound thread's news carry too.

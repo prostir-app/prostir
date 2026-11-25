@@ -54,6 +54,7 @@ impl Control {
             encoding: displays.and_then(Displays::encoding_line),
             pairing,
             desktop_stuck: displays.is_some_and(Displays::desk_stuck),
+            usb_large: displays.and_then(Displays::large_mbit),
         };
         if self.shown.as_ref() != Some(&status) {
             tray::set_status(self.tray.as_ref(), status.clone());

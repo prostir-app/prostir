@@ -1030,6 +1030,10 @@ impl Brain {
             },
             encoding: api::Encoding {
                 bitrate: wanted.bitrate,
+                large: self
+                    .displays
+                    .as_ref()
+                    .and_then(crate::displays::Displays::large_mbit),
                 sharp: wanted.clear_text(),
                 sharp_by_size: wanted.sharp.is_none(),
                 codec: codec(wanted.codec),

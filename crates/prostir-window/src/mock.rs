@@ -159,6 +159,7 @@ fn base() -> State {
         },
         encoding: Encoding {
             bitrate: 30,
+            large: None,
             sharp: true,
             sharp_by_size: true,
             codec: Codec::H265,

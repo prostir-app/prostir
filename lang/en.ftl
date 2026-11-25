@@ -138,6 +138,7 @@ pc-tray-quit = Quit
 pc-tray-quality-economy = Economy: 15 Mbit/s
 pc-tray-quality-normal = Normal: 30 Mbit/s
 pc-tray-quality-high = High: 50 Mbit/s
+pc-tray-quality-usb-large = Over USB: { $n } Mbit/s for monitors of 2560x1440 and larger
 
 ## src/platform/linux/dialogs.rs
 
@@ -541,6 +542,7 @@ window-q-title = Quality
 window-q-sub = How the monitors are encoded for the headset.
 window-q-bitrate = Bitrate
 window-q-bitrate-desc = { $n } Mbit/s for each monitor now. More is sharper and needs a faster network.
+window-q-bitrate-desc-large = { $n } Mbit/s for each monitor now, { $large } for monitors of 2560x1440 and larger over USB. More is sharper and needs a faster network.
 window-q-mbit = { $n }
 window-q-sharp = Sharper text
 window-q-sharp-desc = A slower encoder setting that keeps small text clearer.

@@ -706,6 +706,7 @@ fn run_probe(backend: Backend, codec: Codec) -> Result<()> {
     let cfg = EncoderConfig {
         codec,
         bitrate_kbps: 2000,
+        large_kbps: None,
         backend,
         sharp: Some(false),
         rows_up: false,

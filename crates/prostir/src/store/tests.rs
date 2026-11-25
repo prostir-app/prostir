@@ -48,6 +48,7 @@ fn every_old_monitors_txt_moves_over() {
         s,
         Settings {
             bitrate: 40,
+            bitrate_chosen: true,
             sharp: Some(true),
             codec: Codec::H264,
             software: true,
@@ -126,6 +127,48 @@ fn clearer_text_by_default() {
     assert_eq!(s.sharp, Some(false));
     s.choose_clear_text(true);
     assert_eq!(s.sharp, Some(true));
+}
+
+/// The quality is a choice only once chosen: before version 3 `bitrate 30` was the
+/// default written for everyone, another quality was chosen; from version 3 on a
+/// `bitrate` line is a choice, written only then. Chosen here, from the command line,
+/// or by a headset that changes it (not one that sends what it shows).
+#[test]
+fn the_quality_is_chosen_only_once_chosen() {
+    assert!(!Settings::default().bitrate_chosen);
+    for (text, bitrate, chosen) in [
+        ("", 30, false),
+        ("version 2\nbitrate 30\n", 30, false),
+        ("version 2\nbitrate 50\n", 50, true),
+        ("bitrate 30\n", 30, false),
+        ("version 3\nbitrate 30\n", 30, true),
+        ("version 3\n", 30, false),
+    ] {
+        let (s, kept) = parse_settings(text);
+        assert_eq!((s.bitrate, s.bitrate_chosen), (bitrate, chosen), "{text}");
+        let again = settings_text(&s, &kept);
+        assert_eq!(again.contains("bitrate"), chosen, "{again}");
+        let (back, _) = parse_settings(&again);
+        assert_eq!((back.bitrate, back.bitrate_chosen), (bitrate, chosen));
+    }
+    let mut store = Store::open(None, Run::default());
+    assert!(!store.wanted().bitrate_chosen);
+    store.set_encoding(30, true, Codec::H265, false);
+    assert!(!store.wanted().bitrate_chosen, "what it showed");
+    store.set_encoding(50, true, Codec::H265, false);
+    assert!(store.wanted().bitrate_chosen);
+    let mut store = Store::open(None, Run::default());
+    store.set_bitrate(30);
+    assert!(store.wanted().bitrate_chosen);
+    let store = Store::open(
+        None,
+        Run {
+            bitrate: Some(30),
+            ..Run::default()
+        },
+    );
+    assert!(store.wanted().bitrate_chosen, "for this run");
+    assert!(!store.settings.bitrate_chosen);
 }
 
 /// The choice to start with the session is kept once made, and written only then:
@@ -236,6 +279,7 @@ fn the_six_monitors_move_over() {
 fn files_round_trip_and_keep_unknown_lines() {
     let settings = Settings {
         bitrate: 50,
+        bitrate_chosen: true,
         codec: Codec::H264,
         count: Counting::No,
         ..Settings::default()

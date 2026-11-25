@@ -159,6 +159,7 @@ fn wanted(specs: &[(u32, u32, u32)]) -> Wanted {
         encoding: EncoderConfig {
             codec: Codec::H264,
             bitrate_kbps: 8000,
+            large_kbps: None,
             backend: Backend::X264,
             sharp: Some(false),
             rows_up: false,

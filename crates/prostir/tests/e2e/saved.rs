@@ -208,7 +208,7 @@ fn a_tray_change_without_monitors_survives_quitting() {
     );
     // The options of that run were not saved.
     assert!(dir.saved("settings.txt").contains("software off\n"));
-    assert!(dir.saved("settings.txt").contains("bitrate 30\n"));
+    assert!(!dir.saved("settings.txt").contains("bitrate"), "not chosen");
 }
 
 /// Killed while the headset changes the layout over and over, the PC app leaves files

@@ -125,7 +125,13 @@ pub(super) fn quality(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
             .iter()
             .position(|b| *b == e.bitrate)
             .unwrap_or(usize::MAX);
-        let desc = tk.f("window-q-bitrate-desc", &[("n", e.bitrate.into())]);
+        let desc = match e.large {
+            Some(large) => tk.f(
+                "window-q-bitrate-desc-large",
+                &[("n", e.bitrate.into()), ("large", large.into())],
+            ),
+            None => tk.f("window-q-bitrate-desc", &[("n", e.bitrate.into())]),
+        };
         let ok = can(v, "set_quality");
         w::row(ui, tk, &tk.t("window-q-bitrate"), Some(&desc), |ui| {
             if let Some(i) = w::segmented(ui, tk, &labels, sel, ok) {

@@ -14,6 +14,10 @@
   once per pause. Typing and scrolling make no extra keyframes. On KDE a still screen
   now sends its picture again every 0.5 s instead of 2 s (a frame of a few KB), so the
   sharp picture comes at once.
+- Over USB, monitors of 2560×1440 and larger stream at 60 Mbit/s instead of 30 while
+  you have not chosen a quality yourself: the first frame after a big change is then
+  nearly as sharp as a still one. A quality you choose holds for every monitor. The
+  tray and the settings window say when this applies.
 
 ### Sound, menu and video while the picture changes a lot
 

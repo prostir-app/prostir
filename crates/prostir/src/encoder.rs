@@ -206,6 +206,9 @@ pub fn pick(prefer: Codec, software: bool) -> Result<(Backend, Codec)> {
 pub struct EncoderConfig {
     pub codec: Codec,
     pub bitrate_kbps: u32,
+    /// The bitrate of a picture of 2560x1440 or more, where it is another (over USB
+    /// while the quality is not chosen: see `store::USB_LARGE`).
+    pub large_kbps: Option<u32>,
     pub backend: Backend,
     /// The slower VA-API preset (`target-usage` 4): clearer small text at the same
     /// bitrate, for longer encoding. `Some(true)` for every picture, `Some(false)` for
@@ -411,28 +414,57 @@ pub struct Encoder {
 }
 
 /// What an encoder is tuned to for the size of its picture: the preset (see
-/// [`EncoderConfig::sharp`]), set again when the size is known or changes, before the
-/// encoder takes it; and its bitrate.
+/// [`EncoderConfig::sharp`]) and the bitrate (see [`EncoderConfig::large_kbps`]), set
+/// again when the size is known or changes, before the encoder takes it.
 #[derive(Debug)]
 struct Tuning {
-    /// kbit/s.
-    kbps: u32,
+    /// kbit/s, and for a picture of 2560x1440 or more where another.
+    small_kbps: u32,
+    large_kbps: Option<u32>,
     sharp: Option<bool>,
     size: Option<(u32, u32)>,
     /// What its encoder has now.
+    kbps: u32,
     target_usage: u32,
 }
 
 impl Tuning {
-    /// Tunes `enc` to what `self` says now: `true` when that changed it.
-    fn apply(&mut self, enc: &gst::Element) -> bool {
+    fn new(cfg: &EncoderConfig) -> Self {
+        Self {
+            small_kbps: cfg.bitrate_kbps,
+            large_kbps: cfg.large_kbps,
+            sharp: cfg.sharp,
+            size: None,
+            kbps: cfg.bitrate_kbps,
+            target_usage: cfg.target_usage(None),
+        }
+    }
+
+    /// The bitrate for the picture's size now.
+    fn kbps_for_size(&self) -> u32 {
+        match (self.large_kbps, self.size) {
+            (Some(large), Some(size)) if !slow_fits(size) => large,
+            _ => self.small_kbps,
+        }
+    }
+
+    /// Tunes `enc` to what `self` says now. Whether that changed the preset (a VA-API
+    /// encoder makes a keyframe of its own only for another bitrate), and the
+    /// bitrate.
+    fn apply(&mut self, enc: &gst::Element) -> (bool, Option<u32>) {
+        let kbps = self.kbps_for_size();
+        let rate = (kbps != self.kbps).then(|| {
+            self.kbps = kbps;
+            enc.set_property("bitrate", kbps);
+            kbps
+        });
         let target_usage = target_usage(self.sharp, self.size);
         if target_usage == self.target_usage || enc.find_property("target-usage").is_none() {
-            return false;
+            return (false, rate);
         }
         self.target_usage = target_usage;
         enc.set_property("target-usage", target_usage);
-        true
+        (true, rate)
     }
 }
 
@@ -756,12 +788,7 @@ impl Encoder {
         let encoded = Arc::new(AtomicBool::new(false));
         let resumed = Arc::new(AtomicBool::new(false));
         let last_size = Mutex::new((0u32, 0u32));
-        let tuning = Arc::new(Mutex::new(Tuning {
-            kbps: cfg.bitrate_kbps,
-            sharp: cfg.sharp,
-            size: None,
-            target_usage: cfg.target_usage(None),
-        }));
+        let tuning = Arc::new(Mutex::new(Tuning::new(cfg)));
         let probe = Arc::new(Mutex::new(Probe::default()));
         // Frames enter the encoder in order and (no B-frames) leave in order, so a FIFO
         // of arrival times pairs them up despite the encoder rewriting timestamps.
@@ -789,15 +816,15 @@ impl Encoder {
                     });
                     let mut tuning = tuning.lock().unwrap();
                     tuning.size = size;
-                    if let Some(enc) = enc.as_ref().and_then(gst::glib::WeakRef::upgrade)
-                        && tuning.apply(&enc)
-                    {
-                        info!(
-                            "{node}: target-usage {} for {}x{}",
-                            tuning.target_usage,
-                            size.unwrap_or_default().0,
-                            size.unwrap_or_default().1
-                        );
+                    if let Some(enc) = enc.as_ref().and_then(gst::glib::WeakRef::upgrade) {
+                        let (w, h) = size.unwrap_or_default();
+                        let (preset, rate) = tuning.apply(&enc);
+                        if preset {
+                            info!("{node}: target-usage {} for {w}x{h}", tuning.target_usage);
+                        }
+                        if let Some(kbps) = rate {
+                            info!("{node}: {} Mbit/s for {w}x{h}", kbps / 1000);
+                        }
                     }
                 }
                 gst::PadProbeReturn::Ok
@@ -1105,12 +1132,17 @@ impl Encoder {
         self.paused.clone()
     }
 
-    /// Changes the target bitrate while running.
-    pub fn set_bitrate(&self, kbps: u32) {
-        self.tuning.lock().unwrap().kbps = kbps;
+    /// Changes the target bitrate while running: `kbps`, and `large_kbps` for a
+    /// picture of 2560x1440 or more where another (see [`EncoderConfig::large_kbps`]).
+    /// Returns the one it encodes at now.
+    pub fn set_bitrate(&self, kbps: u32, large_kbps: Option<u32>) -> u32 {
+        let mut tuning = self.tuning.lock().unwrap();
+        tuning.small_kbps = kbps;
+        tuning.large_kbps = large_kbps;
         if let Some(enc) = self.pipeline.by_name("enc") {
-            enc.set_property("bitrate", kbps);
+            tuning.apply(&enc);
         }
+        tuning.kbps
     }
 
     /// Switches the VA-API speed/quality preset on the fly (no effect on x264), as
@@ -1121,7 +1153,7 @@ impl Encoder {
             tuning.sharp = sharp;
             self.pipeline
                 .by_name("enc")
-                .is_some_and(|enc| tuning.apply(&enc))
+                .is_some_and(|enc| tuning.apply(&enc).0)
         };
         if changed {
             self.force_keyframe();
@@ -1498,6 +1530,7 @@ mod tests {
         let cfg = EncoderConfig {
             codec: prostir_proto::Codec::H264,
             bitrate_kbps: 1000,
+            large_kbps: None,
             backend: Backend::X264,
             sharp: Some(false),
             rows_up: false,
@@ -1540,6 +1573,33 @@ mod tests {
         }
     }
 
+    /// The bitrate of a large picture where another, from when its size is known.
+    #[test]
+    fn the_bitrate_by_size() {
+        use super::{Backend, EncoderConfig, Tuning};
+        let cfg = EncoderConfig {
+            codec: prostir_proto::Codec::H265,
+            bitrate_kbps: 30_000,
+            large_kbps: Some(60_000),
+            backend: Backend::Va,
+            sharp: None,
+            rows_up: false,
+        };
+        let mut tuning = Tuning::new(&cfg);
+        assert_eq!(tuning.kbps_for_size(), 30_000, "size not known");
+        for (size, kbps) in [
+            ((1920, 1080), 30_000),
+            ((2560, 1440), 60_000),
+            ((1440, 2560), 60_000),
+            ((3440, 1440), 60_000),
+        ] {
+            tuning.size = Some(size);
+            assert_eq!(tuning.kbps_for_size(), kbps, "{size:?}");
+        }
+        tuning.large_kbps = None;
+        assert_eq!(tuning.kbps_for_size(), 30_000);
+    }
+
     /// For a headset that wants the rows bottom first, each encoder's way turns the
     /// picture over where it converts the colours (VA-API on the GPU, the others on the
     /// CPU after it), and only then; the CPU's way runs.
@@ -1556,6 +1616,7 @@ mod tests {
         let cfg = |backend, codec, rows_up| EncoderConfig {
             codec,
             bitrate_kbps: 1000,
+            large_kbps: None,
             backend,
             sharp: Some(false),
             rows_up,
@@ -1856,6 +1917,7 @@ mod live {
                     let cfg = EncoderConfig {
                         codec: prostir_proto::Codec::H265,
                         bitrate_kbps: mbit * 1000,
+                        large_kbps: None,
                         backend: Backend::Va,
                         sharp: Some(sharp),
                         rows_up: false,
