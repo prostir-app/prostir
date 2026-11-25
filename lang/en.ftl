@@ -970,6 +970,11 @@ headset-error-too-big = { $name }: { $size } ({ $codec }) is too large for this 
 headset-error-cameras = Cameras unavailable: { $error }
 headset-error-cameras-lost = The cameras stopped working: "Room" and "Dimmed" come back once the app starts again.
 headset-error-keyboard-window = The keyboard window cannot be shown now: it is tried again when the app starts next.
+# $count (Number): how many monitors are hidden, 1 or more
+headset-layers-hidden = { $count ->
+    [one] Too much to show at once: the farthest monitor is hidden for now
+   *[other] Too much to show at once: the { $count } farthest monitors are hidden for now
+}
 ## A monitor's picture, under its name in the menu
 headset-video-trouble = No picture, recovering…
 # $codec (String): the video's codec, H.264 or H.265
