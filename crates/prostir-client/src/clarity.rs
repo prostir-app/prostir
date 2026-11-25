@@ -31,7 +31,9 @@ pub const SUPER_SAMPLING_SLACK: f32 = 0.02;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MonitorSize {
     /// One pixel of the stream on one of the headset's, or the largest one scale for
-    /// all at which the preset keeps its circle and every monitor in view.
+    /// all at which the preset keeps its circle and every monitor in view; each monitor
+    /// never smaller than the standard size and no wider than 90 degrees, a row of them
+    /// at one scale (see `layout::Size::Bounded`).
     #[default]
     OneToOne,
     /// The size before 0.2.0 (2560 pixels are 1.25 m).
@@ -143,7 +145,8 @@ pub fn quality(scale: Option<f32>, dev: &Dev, was: Option<bool>) -> Quality {
 /// The sizes `size` makes the monitors of a preset on a headset of `ppd` pixels per
 /// degree (`None`: not known, the standard size). For 1:1 (all, or the main one) the
 /// largest scale up to 1 that `largest` finds for sizes made at a scale (see
-/// `layout::largest_scale`); none, the standard size.
+/// `layout::largest_scale`), for all within each one's limits (see
+/// `layout::Size::Bounded`); none, the standard size.
 pub fn preset_sizes(
     ppd: Option<f32>,
     size: MonitorSize,
@@ -157,7 +160,7 @@ pub fn preset_sizes(
         MonitorSize::Standard => Sizes::default(),
         MonitorSize::Scale85 => Sizes::all(seen(0.85)),
         MonitorSize::OneToOne => {
-            let at = move |k: f32| Sizes::all(seen(k));
+            let at = move |k: f32| Sizes::all(Size::Bounded { ppd, scale: k });
             largest(&at).map_or_else(Sizes::default, at)
         }
         MonitorSize::MainOnly => {
@@ -256,8 +259,8 @@ mod tests {
     }
 
     /// The sizes of each choice: the standard one where the headset is not known; the
-    /// largest scale found for 1:1, all or the main one; 0.85 as it is; the standard
-    /// one where no scale does.
+    /// largest scale found for 1:1, all (each within its limits) or the main one; 0.85
+    /// as it is; the standard one where no scale does.
     #[test]
     fn the_sizes_of_each_choice() {
         let seen = |scale| Size::Seen { ppd: 25.0, scale };
@@ -269,7 +272,10 @@ mod tests {
         );
         assert_eq!(
             preset_sizes(Some(25.0), MonitorSize::OneToOne, found),
-            Sizes::all(seen(0.8))
+            Sizes::all(Size::Bounded {
+                ppd: 25.0,
+                scale: 0.8
+            })
         );
         assert_eq!(
             preset_sizes(Some(25.0), MonitorSize::MainOnly, found),
@@ -292,7 +298,7 @@ mod tests {
         );
         assert_eq!(
             start_sizes(Some(20.0), MonitorSize::OneToOne),
-            Sizes::all(Size::Seen {
+            Sizes::all(Size::Bounded {
                 ppd: 20.0,
                 scale: 1.0
             })
