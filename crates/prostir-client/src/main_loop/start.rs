@@ -323,6 +323,8 @@ pub fn start<'s>(
         t.caps(&caps);
         t.set_perf(session);
     }
+    // The system's volume now, for the first `Open`; the system thread follows it.
+    let volume = caps.volume_steps.and_then(android::volume_now);
 
     let (net_tx, net_rx) = mpsc::channel();
     // A selftest connects to its fake PC and nothing else, never to a real PC.
@@ -338,7 +340,7 @@ pub fn start<'s>(
             mic: mic.clone(),
         }),
         // What the first `Open` says, before the core says more.
-        headset_state(&settings, true, battery, mic.permission(), &caps),
+        headset_state(&settings, true, battery, volume, mic.permission(), &caps),
     )?;
 
     // SAFETY: the VM pointer is valid for the life of the process.
@@ -362,6 +364,7 @@ pub fn start<'s>(
             lang,
             system_lang,
             battery,
+            volume,
             caps,
             refresh_hz: meta::display_rate(session),
             custom_panorama: custom_pano,

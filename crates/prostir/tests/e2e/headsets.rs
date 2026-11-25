@@ -609,8 +609,10 @@ fn a_headset_coming_starts_no_stream_over_for_the_other() {
 #[test]
 fn a_new_main_headset_takes_the_pc_volume() {
     let (_dir, mut pc, mut a, mut b) = two_headsets("volume-stays", Options::default(), "");
-    let first = showing(&pc, &mut a);
-    pc.wait_log(SOON, &format!("fake desktop: volume set to {FIRST_VOLUME}"));
+    let mut first = showing(&pc, &mut a);
+    // Until the PC took its new sound device in, its first reading may come later and
+    // put the main headset's level on it, by then the second one's (90).
+    crate::sound::wait_first_volume(&mut pc, &mut first);
     let mut loud = FakeHeadset::state();
     loud.volume = Some(HeadsetVolume::new(90, false).now());
     let mut second = FakeHeadset::connect_saying(pc.addr, &mut b, &loud)

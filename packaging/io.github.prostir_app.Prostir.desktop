@@ -5,10 +5,21 @@ GenericName=Virtual monitors for Meta Quest
 GenericName[uk]=Віртуальні монітори для Meta Quest
 Comment=Extra KDE Plasma or Hyprland monitors in a Meta Quest headset
 Comment[uk]=Додаткові монітори KDE Plasma чи Hyprland у шоломі Meta Quest
-Exec=prostir
+# The absolute path of the program, as the packages install it (/usr/bin). Up to Plasma
+# 6.7, KWin finds the entry that lets a program use a restricted interface by this
+# path, and it must be the program's real file, not a script that starts it. The tarball
+# install script writes ~/.local/bin/prostir here; the Nix package starts the program
+# through a wrapper, so it adds a second, hidden entry for the real file. Plasma 6.8
+# does not look at the path.
+Exec=/usr/bin/prostir
 Icon=prostir
 Terminal=false
 Categories=Utility;System;
 Keywords=VR;XR;Quest;monitor;display;virtual;settings;
 # The settings window's app id: the desktop finds this entry's name and icon by it.
 StartupWMClass=io.github.prostir_app.Prostir
+# The restricted KWin interface Prostir binds: the screencast one, which makes and
+# streams the virtual outputs. Windows and the mouse go through KWin scripts, so no
+# other restricted interface is listed. Without this line KWin up to 6.7 does not
+# offer the interface to the program.
+X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1

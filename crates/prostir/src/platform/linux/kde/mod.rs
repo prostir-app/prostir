@@ -1,6 +1,7 @@
 //! KDE Plasma: KWin makes and streams the outputs, KScreen places them, the Plasma
 //! shell keeps its panel and wallpapers.
 
+pub mod access;
 pub mod kscreen;
 pub mod plasma;
 pub mod virtual_output;
@@ -64,7 +65,7 @@ impl Kde {
                 // KWin removes the outputs of a connection that is gone.
                 cleans_up_after_crash: true,
             },
-            screencast: Screencast::connect()?,
+            screencast: Screencast::connect().map_err(access::explain)?,
             windows: KdeWindows::new(),
             primary_nudged: None,
             primary_looked: (0, None, None),

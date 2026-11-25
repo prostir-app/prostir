@@ -772,6 +772,21 @@ x264 by itself, so install gst-plugins-ugly too. See
 the other way round: the PC shows the code in the tray and a notification, and you
 type it in the headset.
 
+**KDE Plasma 6.0 to 6.7: "KWin does not give Prostir access to the screen".** Up to Plasma
+6.7, KWin shows its screencast interface only to a program that an application shortcut
+(a `.desktop` file) names by its real path, with `X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1`.
+The packages, the tarball's `install.sh` and the Nix package install that shortcut.
+When you run a build from the source folder, install one for it with
+`scripts/install-kde-shortcut.sh` (it takes the program's path, `target/release/prostir`
+by default; `--remove` removes it) and start Prostir again. Plasma 6.8 and newer need no
+shortcut. The window, the tray and the headset say this when it happens. If a shortcut is
+installed and KWin still refuses, log out and in once (KWin may hold an old cache); on
+NixOS install the package with `nix profile install` or in the system configuration first,
+`nix run` alone has no shortcut. As a last resort for development only,
+`KWIN_WAYLAND_NO_PERMISSION_CHECKS=1` in the environment of `kwin_wayland` (for example in
+`~/.config/plasma-workspace/env/prostir.sh`, then log in again) lets every program use the
+interface: it turns the check off for all of them.
+
 **Hyprland: no tray icon, no notifications, no autostart.** See [Hyprland](#hyprland).
 
 **`prostir: command not found` after `install.sh`.** `~/.local/bin` is not on your
@@ -827,7 +842,7 @@ crates/prostir-window/   the PC settings window (a library of prostir: prostir w
 crates/prostir-client/   the Quest app: OpenXR loop (app.rs), menu (ui.rs), layouts (layout.rs), …
 crates/prostir-testkit/  a fake headset and a fake PC, for tests and for checking the programs by hand
 lang/     the texts of all three programs: one Fluent file per language (en.ftl, uk.ftl)
-scripts/  build-apk.sh, install.sh, package-release.sh, third-party-licenses.py,
+scripts/  build-apk.sh, install.sh, install-kde-shortcut.sh, package-release.sh, third-party-licenses.py,
           selftest-headset.sh, selftest-clips.sh
 docs/     the website (prostir.ishawyha.dev) and the pictures for this README
 ```

@@ -303,6 +303,9 @@ pub struct TrayStatus {
     pub pairing: bool,
     /// The desktop does not respond (a call into it has hung for a while).
     pub desktop_stuck: bool,
+    /// The desktop is there but Prostir cannot use it, and the settings window says
+    /// what to do (see [`Unusable`]).
+    pub desktop_unusable: bool,
 }
 
 /// Why there is no pairing code typed on the PC (see `dialogs::ask_code`).

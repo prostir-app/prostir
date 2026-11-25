@@ -88,11 +88,24 @@ pub fn activity(
 
 /// Android waits for every key event (e.g. the volume buttons) to be taken and
 /// answers "not responding" after 5 s otherwise. Hand them all back to the system so
-/// the volume buttons keep working.
-pub fn hand_back_keys(app: &AndroidApp) {
+/// the volume buttons keep working; whether one was a volume button (the system
+/// changes the volume for it).
+pub fn hand_back_keys(app: &AndroidApp) -> bool {
+    use android_activity::input::{InputEvent, Keycode};
+    let mut volume_button = false;
     if let Ok(mut events) = app.input_events_iter() {
-        while events.next(|_| InputStatus::Unhandled) {}
+        while events.next(|event| {
+            volume_button |= matches!(
+                event,
+                InputEvent::KeyEvent(key) if matches!(
+                    key.key_code(),
+                    Keycode::VolumeUp | Keycode::VolumeDown | Keycode::VolumeMute
+                )
+            );
+            InputStatus::Unhandled
+        }) {}
     }
+    volume_button
 }
 
 /// Whether the loop goes on.

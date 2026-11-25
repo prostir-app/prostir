@@ -136,6 +136,10 @@ struct Brain {
     waiting_desk: Vec<Accepted>,
     /// The desktop did not respond for too long: the program ends with an error.
     desk_gave_up: bool,
+    /// Why the desktop cannot be used and what to do about it (see
+    /// [`platform::Unusable`]), in the PC's language, from the last try to connect that
+    /// failed so, until one succeeds.
+    desk_unusable: Option<String>,
     /// Desktop workers let go, until each is gone (see `deskside.rs`).
     retiring: Vec<worker::Retired>,
     /// The PC's Wi-Fi, as found when a headset last connected over the network.
@@ -1021,7 +1025,7 @@ fn full_with(
         shown_battery: None,
         for_headset: VecDeque::new(),
     };
-    control.show(None, &store, &TrayLine::default(), 0, false);
+    control.show(None, &store, &TrayLine::default(), 0, false, false);
     let now = Instant::now();
     let mut door = door::Door::new(pairing_open, origin != Origin::Own, now);
     if args.pair || why == Some(wake::Wake::Pair) {
@@ -1056,6 +1060,7 @@ fn full_with(
         quit_asked: false,
         waiting_desk: Vec::new(),
         desk_gave_up: false,
+        desk_unusable: None,
         retiring: Vec::new(),
         wifi: None,
     };
