@@ -440,7 +440,7 @@ fn the_magnet_needs_a_monitor_almost_against_another() {
     };
     // Let go 3 cm off: sticks back, edge to edge.
     let p = moved(Vec3::new(0.03, 0.01, 0.0));
-    let s = stick(&p, &two, Vec3::ZERO, 1, &mut StickScratch::default()).expect("sticks");
+    let s = stick(&p, &two, (Vec3::ZERO, 0.0), 1, &mut StickScratch::default()).expect("sticks");
     assert!(s.across && s.side > 0.0);
     let mut after = p;
     after.insert(1, s.placement);
@@ -450,7 +450,7 @@ fn the_magnet_needs_a_monitor_almost_against_another() {
         stick(
             &moved(Vec3::new(0.4, 0.0, 0.0)),
             &two,
-            Vec3::ZERO,
+            (Vec3::ZERO, 0.0),
             1,
             &mut StickScratch::default()
         )
@@ -461,7 +461,7 @@ fn the_magnet_needs_a_monitor_almost_against_another() {
         stick(
             &moved(Vec3::new(0.0, 0.0, 0.5)),
             &two,
-            Vec3::ZERO,
+            (Vec3::ZERO, 0.0),
             1,
             &mut StickScratch::default()
         )
@@ -488,7 +488,14 @@ fn dropped_on_a_seam_it_joins_the_nearer_monitor() {
             width: p[&1].width,
         },
     );
-    let s = stick(&p, &three, Vec3::ZERO, 0, &mut StickScratch::default()).expect("sticks");
+    let s = stick(
+        &p,
+        &three,
+        (Vec3::ZERO, 0.0),
+        0,
+        &mut StickScratch::default(),
+    )
+    .expect("sticks");
     assert_eq!(s.neighbour, 2);
 }
 
@@ -1660,7 +1667,8 @@ fn glued(
             width,
         },
     );
-    let s = stick(p, m, Vec3::ZERO, id, &mut StickScratch::default()).expect("the magnet takes it");
+    let s = stick(p, m, (Vec3::ZERO, 0.0), id, &mut StickScratch::default())
+        .expect("the magnet takes it");
     assert!(
         !s.across,
         "{id} glued over or under {}, not beside",
@@ -2114,7 +2122,7 @@ fn line_up_keeps_a_monitor_glued_over_two_glued() {
     let s = stick(
         &glued_upright,
         &owner,
-        Vec3::ZERO,
+        (Vec3::ZERO, 0.0),
         6,
         &mut StickScratch::default(),
     )

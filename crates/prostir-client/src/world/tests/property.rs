@@ -80,11 +80,12 @@ fn cut(a: &Placement, ah: f32, b: &Placement, bh: f32) -> bool {
 /// glued seam seen at a slant hides a sliver.
 const HIDDEN: f32 = 0.03;
 
-/// How much of a monitor hung over the seam between two glued ones the second may hide,
-/// or it of the second (a quarter): where their row curves round the eye the second
-/// reaches in front of it (the owner's 3840x2160 over two 2560x1440, as the magnet
-/// leaves it, until "Line up").
-const SEAM_HIDDEN: f32 = 0.25;
+/// How much of a monitor dropped over the seam between two glued ones those two may
+/// hide (10 %): where their row curves round the eye they reach in front of it. The
+/// magnet turns it as "Line up" would, to hide no more than 3 % of it, and where it
+/// cannot leaves it hanging with no more than 8 % hidden (`stick::SEAM_HUNG`); the
+/// grid here measures to a couple of percent.
+const SEAM_HIDDEN: f32 = 0.10;
 
 /// The points of a 16 by 16 grid over a flat rectangle (place, height), each in the
 /// middle of its cell.
@@ -139,16 +140,6 @@ enum Meeting {
     Apart,
 }
 
-impl Meeting {
-    /// How much of one of two that meet so the other may hide.
-    fn may_hide(self) -> f32 {
-        match self {
-            Meeting::Corner => SEAM_HIDDEN,
-            Meeting::Edge | Meeting::Apart => HIDDEN,
-        }
-    }
-}
-
 /// How `a` and `b` (place, height) meet.
 fn meeting(a: (&Placement, f32), b: (&Placement, f32)) -> Meeting {
     let edges = |(p, h): (&Placement, f32)| {
@@ -196,6 +187,8 @@ struct Trial {
     pcs: Vec<(u32, (u32, u32), [i32; 4])>,
     /// The sizes monitors added and refitted get.
     sizes: &'static [(u32, u32)],
+    /// The monitor dropped last.
+    dropped: Option<u32>,
 }
 
 impl Trial {
@@ -229,6 +222,7 @@ impl Trial {
             req: 0,
             pcs: Vec::new(),
             sizes: later,
+            dropped: None,
         }
     }
 
@@ -338,6 +332,7 @@ impl Trial {
             return None;
         }
         let m = ms[rng.below(ms.len())];
+        self.dropped = Some(m);
         let mut o = ms[rng.below(ms.len())];
         if o == m {
             o = ms[(ms.iter().position(|x| *x == o)? + 1) % ms.len()];
@@ -561,13 +556,20 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
             desk.sim.after(1000);
             done.push(step);
             let (cutting, unglued) = (desk.cutting(), desk.unglued());
-            // After the magnet, nothing hides another that did not already (a monitor
-            // over two glued ones only a little of the second).
+            // After the magnet, nothing hides another that did not already; only the
+            // monitor dropped, over two glued ones, may be hidden a little.
             let hiding: Vec<_> = if dropped {
                 let was = |a: u32, b: u32| hidden_before.iter().any(|h| (h.0, h.1) == (a, b));
+                let may_hide = |hidden: u32| {
+                    if Some(hidden) == desk.dropped {
+                        SEAM_HIDDEN
+                    } else {
+                        HIDDEN
+                    }
+                };
                 desk.hiding()
                     .into_iter()
-                    .filter(|h| !was(h.0, h.1) && h.2 > h.3.may_hide())
+                    .filter(|h| !was(h.0, h.1) && h.2 > may_hide(h.0))
                     .collect()
             } else {
                 Vec::new()

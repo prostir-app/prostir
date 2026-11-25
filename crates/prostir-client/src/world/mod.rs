@@ -2230,7 +2230,7 @@ impl World {
             layout::stick(
                 &self.placements,
                 &self.sizes,
-                self.center.0,
+                self.center,
                 id,
                 &mut self.stick,
             )

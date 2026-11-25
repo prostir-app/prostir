@@ -521,13 +521,29 @@ pub fn covers(a: &[Vec3; 4], b: &[Vec3; 4], slack: f64) -> bool {
 /// what lies on `a`'s side of the eye, and that is projected through the eye onto
 /// `a`'s plane. Allocates nothing (the magnet asks it every frame of a drag).
 pub fn seen_over(a: &Placement, ah: f32, b: &Placement, bh: f32, eye: Vec3) -> f64 {
+    seen_against(a, ah, b, bh, eye).0
+}
+
+/// How much of monitor `a` (`ah` high) monitor `b` (`bh` high) hides from `eye`, as a
+/// share of `a`'s face: [`seen_over`] where `b` is the nearer. Two that do not cut
+/// into each other (see [`cuts`]) stand in one order wherever they are seen over each
+/// other, so one point of that part tells which is in front. Allocates nothing.
+pub fn hidden_by(a: &Placement, ah: f32, b: &Placement, bh: f32, eye: Vec3) -> f64 {
+    match seen_against(a, ah, b, bh, eye) {
+        (share, true) => share,
+        (_, false) => 0.0,
+    }
+}
+
+/// [`seen_over`], and whether `b` is in front of `a` there.
+fn seen_against(a: &Placement, ah: f32, b: &Placement, bh: f32, eye: Vec3) -> (f64, bool) {
     use glam::DVec2;
     let turn = a.rotation.as_dquat().inverse();
     let local = |p: Vec3| -> DVec3 { turn * (p.as_dvec3() - a.position.as_dvec3()) };
     let e = local(eye);
     let (w, h) = (f64::from(a.width), f64::from(ah));
     if e.z.abs() < 1e-9 || w <= 0.0 || h <= 0.0 {
-        return 0.0;
+        return (0.0, false);
     }
     // How far towards `a`'s plane from the eye, as a share of the eye's distance from
     // it: a point of `b` with none (level with the eye or behind it) is not seen
@@ -551,13 +567,28 @@ pub fn seen_over(a: &Placement, ah: f32, b: &Placement, bh: f32, eye: Vec3) -> f
         }
     }
     if onto.n < 3 {
-        return 0.0;
+        return (0.0, false);
     }
     let mut face = Poly::default();
     for (x, y) in [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)] {
         face.push(DVec2::new(x * w, y * h));
     }
-    area(clip(&onto, face.corners()).corners()).abs() / (w * h)
+    let shared = clip(&onto, face.corners());
+    let share = area(shared.corners()).abs() / (w * h);
+    if shared.n == 0 {
+        return (share, false);
+    }
+    // A point of `a` seen behind `b` or over it, the middle of that part, and where the
+    // line of sight to it meets `b`'s plane: before it, `b` is in front.
+    let mid = shared.corners().iter().copied().sum::<DVec2>() / shared.n as f64;
+    let at = DVec3::new(mid.x, mid.y, 0.0);
+    let (on_b, b_normal) = (local(b.position), turn * b.normal().as_dvec3());
+    let along = (at - e).dot(b_normal);
+    let front = along.abs() > 1e-12 && {
+        let t = (on_b - e).dot(b_normal) / along;
+        t > 0.0 && t < 1.0
+    };
+    (share, front)
 }
 
 /// A convex polygon of up to twelve corners, kept on the stack: a four-sided figure
@@ -906,9 +937,9 @@ mod tests {
         assert!(!cuts(&a, 0.5, &up(2.0), 0.4));
     }
 
-    /// How much of one monitor another is seen over or behind: a small one halfway to
-    /// the eye covers twice its size of the one behind, and all of itself is seen
-    /// against it; side by side, hinged, nothing; behind the eye, nothing.
+    /// How much of one monitor another is seen over or behind, and hides: a small one
+    /// halfway to the eye covers twice its size of the one behind, and all of itself is
+    /// seen against it; side by side, hinged, nothing; behind the eye, nothing.
     #[test]
     fn what_one_is_seen_over() {
         let a = upright(0.0, -1.0, 0.0, 1.0);
@@ -919,6 +950,12 @@ mod tests {
             0.4 * 0.2 / 0.5
         ));
         assert!(close(seen_over(&small, 0.1, &a, 0.5, Vec3::ZERO), 1.0));
+        // The small one is in front: it hides that much of `a`, `a` none of it.
+        assert!(close(
+            hidden_by(&a, 0.5, &small, 0.1, Vec3::ZERO),
+            0.4 * 0.2 / 0.5
+        ));
+        assert_eq!(hidden_by(&small, 0.1, &a, 0.5, Vec3::ZERO), 0.0);
         let turn = 0.5f32;
         let hinged = upright(0.5 + 0.5 * turn.cos(), -1.0 + 0.5 * turn.sin(), -turn, 1.0);
         assert!(seen_over(&a, 0.5, &hinged, 0.5, Vec3::ZERO) < 1e-6);
