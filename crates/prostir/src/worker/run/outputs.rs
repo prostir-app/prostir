@@ -285,10 +285,7 @@ impl Worker {
                 None => {
                     let e = anyhow!(
                         "{}",
-                        inline_t(
-                            "його вихід на стільниці зник",
-                            "its output on the desktop is gone"
-                        )
+                        t("pc-worker-run-outputs-its-output-on-the-desktop-is")
                     )
                     .context(UserError::Capture);
                     self.failed(id, attempt, &e);
@@ -433,15 +430,9 @@ pub(super) fn show_sharing_tip(number: u32) {
     }
     let body = format!(
         "{} {}. {}",
-        inline_t(
-            "Програма, що показує екран, змінила розмір монітора",
-            "A screen sharing program changed the size of monitor"
-        ),
+        t("pc-worker-run-outputs-a-screen-sharing-program-changed-the"),
         number,
-        inline_t(
-            "Розмір повернено, але показ може стрибати. Щоб цього не було, показуйте вікно програми, а не монітор.",
-            "Its size is back, but the share may jump. To avoid that, share an app window instead of the monitor."
-        )
+        t("pc-worker-run-outputs-its-size-is-back-but-the")
     );
-    dialogs::notify(inline_t("Показ екрана", "Screen sharing"), &body);
+    dialogs::notify(t("pc-worker-run-outputs-screen-sharing"), &body);
 }

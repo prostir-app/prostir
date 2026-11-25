@@ -248,6 +248,41 @@ pc-displays-parts-more-streams-than-the-headset-takes = більше поток�
 
 pc-displays-sound-the-microphone-is-not-ready-yet = Мікрофон ще не готовий
 
+## src/encoder/choice.rs
+
+pc-encoder-choice-already-has = уже відкрито
+pc-encoder-choice-sessions-open-the-most-it-opens = сеансів, більше не відкривається
+pc-encoder-choice-did-not-start = не запустився
+pc-encoder-choice-encoding-on-the-cpu = кодування процесором
+pc-encoder-choice-frames-go-through-the-cpu = кадри йдуть через процесор
+
+## src/encoder/probe.rs
+
+pc-encoder-probe-no-video-encoder-on-the-pc = На ПК немає відеокодувальника. Intel чи AMD: встановіть VA-плагін GStreamer (gst-plugin-va або gst-plugins-bad) і VA-драйвер. NVIDIA: драйвер NVIDIA і nvcodec з gst-plugins-bad. Будь-яка відеокарта: gst-plugins-ugly (x264, кодування процесором).
+
+## src/worker/run/encoders.rs
+
+pc-worker-run-encoders-encoders-do-not-respond-no-more = кодувальників не відповідають: нових не запускаю
+pc-worker-run-encoders-did-not-respond-times = не відповідав разів:
+pc-worker-run-encoders-the-source-of-the-frames-fails = джерело кадрів не працює
+pc-worker-run-encoders-no-encoder-for-this-output = немає кодувальника для цього виходу
+pc-worker-run-encoders-another-program-keeps-changing-the = Інша програма раз у раз змінює розмір монітора
+pc-worker-run-encoders-share-an-app-window-in-it = Покажіть у ній вікно програми замість монітора, а тоді зніміть і знову вдягніть шолом.
+pc-worker-run-encoders-monitor-size = Розмір монітора
+pc-worker-run-encoders-kept = лишився
+pc-worker-run-encoders-did-not-start = не запустився
+
+## src/worker/run/outputs.rs
+
+pc-worker-run-outputs-its-output-on-the-desktop-is = його вихід на стільниці зник
+pc-worker-run-outputs-a-screen-sharing-program-changed-the = Програма, що показує екран, змінила розмір монітора
+pc-worker-run-outputs-its-size-is-back-but-the = Розмір повернено, але показ може стрибати. Щоб цього не було, показуйте вікно програми, а не монітор.
+pc-worker-run-outputs-screen-sharing = Показ екрана
+
+## src/worker/run/tests.rs
+
+pc-worker-run-tests-kept-h-264-hevc-did-not = лишився H.264: HEVC не запустився
+
 ### Settings window
 
 ## Сторінки

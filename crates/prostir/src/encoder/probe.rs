@@ -576,16 +576,7 @@ impl Catalog {
 fn no_encoder() -> anyhow::Error {
     anyhow!(
         "{}",
-        crate::i18n::inline_t(
-            "На ПК немає відеокодувальника. Intel чи AMD: встановіть VA-плагін GStreamer \
-             (gst-plugin-va або gst-plugins-bad) і VA-драйвер. NVIDIA: драйвер NVIDIA і \
-             nvcodec з gst-plugins-bad. Будь-яка відеокарта: gst-plugins-ugly (x264, \
-             кодування процесором).",
-            "No video encoder on the PC. Intel or AMD: install the GStreamer VA plugin \
-             (gst-plugin-va or gst-plugins-bad) and a VA driver. NVIDIA: the NVIDIA driver \
-             and nvcodec from gst-plugins-bad. Any graphics: gst-plugins-ugly (x264, \
-             encoding on the CPU).",
-        )
+        crate::i18n::t("pc-encoder-probe-no-video-encoder-on-the-pc")
     )
 }
 

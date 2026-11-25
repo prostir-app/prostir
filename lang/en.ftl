@@ -257,6 +257,41 @@ pc-displays-parts-more-streams-than-the-headset-takes = more streams than the he
 
 pc-displays-sound-the-microphone-is-not-ready-yet = The microphone is not ready yet
 
+## src/encoder/choice.rs
+
+pc-encoder-choice-already-has = already has
+pc-encoder-choice-sessions-open-the-most-it-opens = sessions open, the most it opens
+pc-encoder-choice-did-not-start = did not start
+pc-encoder-choice-encoding-on-the-cpu = encoding on the CPU
+pc-encoder-choice-frames-go-through-the-cpu = frames go through the CPU
+
+## src/encoder/probe.rs
+
+pc-encoder-probe-no-video-encoder-on-the-pc = No video encoder on the PC. Intel or AMD: install the GStreamer VA plugin (gst-plugin-va or gst-plugins-bad) and a VA driver. NVIDIA: the NVIDIA driver and nvcodec from gst-plugins-bad. Any graphics: gst-plugins-ugly (x264, encoding on the CPU).
+
+## src/worker/run/encoders.rs
+
+pc-worker-run-encoders-encoders-do-not-respond-no-more = encoders do not respond: no more are started
+pc-worker-run-encoders-did-not-respond-times = did not respond, times:
+pc-worker-run-encoders-the-source-of-the-frames-fails = the source of the frames fails
+pc-worker-run-encoders-no-encoder-for-this-output = no encoder for this output
+pc-worker-run-encoders-another-program-keeps-changing-the = Another program keeps changing the size of monitor
+pc-worker-run-encoders-share-an-app-window-in-it = Share an app window in it instead of the monitor, then take the headset off and put it on again.
+pc-worker-run-encoders-monitor-size = Monitor size
+pc-worker-run-encoders-kept = kept
+pc-worker-run-encoders-did-not-start = did not start
+
+## src/worker/run/outputs.rs
+
+pc-worker-run-outputs-its-output-on-the-desktop-is = its output on the desktop is gone
+pc-worker-run-outputs-a-screen-sharing-program-changed-the = A screen sharing program changed the size of monitor
+pc-worker-run-outputs-its-size-is-back-but-the = Its size is back, but the share may jump. To avoid that, share an app window instead of the monitor.
+pc-worker-run-outputs-screen-sharing = Screen sharing
+
+## src/worker/run/tests.rs
+
+pc-worker-run-tests-kept-h-264-hevc-did-not = kept H.264: HEVC did not start
+
 ### Settings window
 
 ## Pages

@@ -27,7 +27,7 @@ use std::fmt::Write as _;
 
 use prostir_proto::Codec;
 
-use crate::i18n::inline_t;
+use crate::i18n::t;
 use crate::platform::{AdapterId, Memory};
 
 /// Which hardware (or the CPU) encodes.
@@ -279,14 +279,11 @@ impl Skip {
         match self {
             Self::Limit { max } => format!(
                 "{} {max} {}",
-                inline_t("уже відкрито", "already has"),
-                inline_t(
-                    "сеансів, більше не відкривається",
-                    "sessions open, the most it opens"
-                )
+                t("pc-encoder-choice-already-has"),
+                t("pc-encoder-choice-sessions-open-the-most-it-opens")
             ),
             Self::Failed { why } => {
-                format!("{}: {why}", inline_t("не запустився", "did not start"))
+                format!("{}: {why}", t("pc-encoder-choice-did-not-start"))
             }
         }
     }
@@ -368,7 +365,7 @@ pub fn note(
             format!(
                 "{}: {}: {why}",
                 c.label(),
-                inline_t("не запустився", "did not start")
+                t("pc-encoder-choice-did-not-start")
             )
         }))
         .collect();
@@ -379,17 +376,13 @@ pub fn note(
     }
     let mut text = chosen.label();
     if cpu {
-        let _ = write!(
-            text,
-            ", {}",
-            inline_t("кодування процесором", "encoding on the CPU")
-        );
+        let _ = write!(text, ", {}", t("pc-encoder-choice-encoding-on-the-cpu"));
     }
     if copies {
         let _ = write!(
             text,
             ", {}",
-            inline_t("кадри йдуть через процесор", "frames go through the CPU")
+            t("pc-encoder-choice-frames-go-through-the-cpu")
         );
     }
     if !why.is_empty() {
@@ -542,11 +535,11 @@ mod tests {
         assert_eq!((first.backend, first.codec), (Backend::Nvenc, Codec::H264));
         assert!(first.copies());
         let said = note(&first, wanted, &ranked.skipped, &[]).unwrap();
-        let through = inline_t("кадри йдуть через процесор", "frames go through the CPU");
+        let through = t("pc-encoder-choice-frames-go-through-the-cpu");
         assert!(said.contains("NVENC") && said.contains(through), "{said}");
         let cpu = rank_for(&nvidia[1..], Memory::DmaBuf, wanted, &none, &[]);
         let said = note(&cpu.choices[0], wanted, &cpu.skipped, &[]).unwrap();
-        let on_cpu = inline_t("кодування процесором", "encoding on the CPU");
+        let on_cpu = t("pc-encoder-choice-encoding-on-the-cpu");
         assert!(said.contains(on_cpu), "{said}");
     }
 

@@ -23,7 +23,7 @@ use crate::encoder::{
 };
 use crate::errors::{UserError, code_of};
 use crate::events::{Event, EventSink};
-use crate::i18n::inline_t;
+use crate::i18n::t;
 use crate::layout::panel_size;
 use crate::platform::{
     ActiveWindow, DeskPlan, Desktop, Geometry, MonitorSpec, Output, OutputHealth, OutputKey,
