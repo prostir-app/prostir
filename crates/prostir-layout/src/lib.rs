@@ -19,7 +19,9 @@
 //!
 //! - [`circle::arrange`]: the widening circle (one row up to 210°, the radius grows to
 //!   1.5 m, then two and three rows above the main one).
-//! - [`place::place_new`]: a new monitor next to the arrangement, moving nothing.
+//! - [`place::place_new`]: a new monitor next to the arrangement, moving nothing; or
+//!   [`place::into_row`], into the main row, for one far wider than its circle that
+//!   would otherwise be out of view ([`space::in_view`]).
 //! - [`tidy::line_up`]: every row straightened on its own surface, rows never merged.
 //!
 //! Every function is generic over the key that names a monitor (`K: Copy + Ord`), so

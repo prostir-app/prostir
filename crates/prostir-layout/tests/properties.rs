@@ -352,11 +352,8 @@ fn the_circle_rows_are_the_rows_seen() {
         }
         let mut monitors: Vec<_> = scene.monitors.iter().filter(|m| m.id != MIRROR).collect();
         monitors.sort_by_key(|m| m.id);
-        let widths: Vec<f32> = monitors
-            .iter()
-            .map(|m| m.px.w as f32 * prostir_layout::space::METRES_PER_PIXEL)
-            .collect();
-        let (made, _) = circle::split(&widths, &limits);
+        let sizes: Vec<(u8, PixelSize)> = monitors.iter().map(|m| (m.id, m.px)).collect();
+        let (made, _) = circle::rows(preset, &sizes, scene.main, &limits);
         let mut without = scene.clone();
         without.monitors.retain(|m| m.id != MIRROR);
         let ids: Vec<u8> = without.monitors.iter().map(|m| m.id).collect();

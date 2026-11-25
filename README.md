@@ -116,7 +116,7 @@ primary one, which of the PC's own screens show, and where everything stands. Sa
 setup as a new profile (Profiles → New profile), save it over one you have (Save here,
 pressed twice), switch to one with a press, delete one with ×, pressed twice. Up to
 twenty; the first three are on the Quick page too. A profile is called by its number
-until you give it a name in the Prostir window on the PC (Headsets → Profiles in the
+until you give it a name in the Prostir window on the PC (Monitors → Profiles in the
 headset → Rename), or with `prostir ctl profile rename 2 Work`.
 Monitors that are the same size in both profiles stay, so their windows do not move.
 In cinema mode you pick which monitor becomes the big screen.

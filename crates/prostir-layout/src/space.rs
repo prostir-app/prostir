@@ -154,6 +154,19 @@ pub fn elevation(p: DVec3) -> f64 {
     p.y.atan2((p.x * p.x + p.z * p.z).sqrt())
 }
 
+/// How far up or down from eye level the middle of a monitor may be seen and still be
+/// in view without tipping the head far back or down (40°): a row over the main one
+/// stands lower, a monitor right over the head (a flat one far wider than the circle
+/// it stands on, whose middle comes close to the eye) higher.
+pub const VIEW_CONE: f64 = 40.0 * std::f64::consts::PI / 180.0;
+
+/// Whether the middle of `p` (a frame-local placement) is seen within [`VIEW_CONE`] of
+/// eye level. Around the user every direction counts: a row may go far to either side.
+pub fn in_view(p: &Placement) -> bool {
+    let c = p.position.as_dvec3();
+    p.position.is_finite() && elevation(c).abs() <= VIEW_CONE
+}
+
 /// `angle` moved by whole turns to within half a turn of `around`.
 pub fn unwrap(angle: f64, around: f64) -> f64 {
     use std::f64::consts::{PI, TAU};
@@ -454,10 +467,15 @@ pub fn covers(a: &[Vec3; 4], b: &[Vec3; 4], slack: f64) -> bool {
         .clone()
         .any(|p| p.as_dvec3().normalize_or_zero().dot(d) < 85f64.to_radians().cos())
     {
+        // Each around its own middle, then the second moved by whole turns to lie
+        // around the first: two seen nearly opposite each other have no direction
+        // between them worth the name (their sum points up or down), and around such
+        // a one a monitor's corners would fall on both sides of the cut.
         let rect = |c: &[Vec3; 4]| {
+            let middle = azimuth(dir(c));
             let az: Vec<f64> = c
                 .iter()
-                .map(|p| unwrap(azimuth(p.as_dvec3()), azimuth(d)))
+                .map(|p| unwrap(azimuth(p.as_dvec3()), middle))
                 .collect();
             let el: Vec<f64> = c.iter().map(|p| elevation(p.as_dvec3())).collect();
             let mut az2 = az;
@@ -472,7 +490,14 @@ pub fn covers(a: &[Vec3; 4], b: &[Vec3; 4], slack: f64) -> bool {
                 top: (el2[2] + el2[3]) / 2.0,
             }
         };
-        return overlaps(&rect(a), &rect(b), slack);
+        let (ra, rb) = (rect(a), rect(b));
+        let shift = unwrap(rb.center_x(), ra.center_x()) - rb.center_x();
+        let rb = Seen {
+            left: rb.left + shift,
+            right: rb.right + shift,
+            ..rb
+        };
+        return overlaps(&ra, &rb, slack);
     }
     let u = d.cross(DVec3::Y).normalize_or(DVec3::X);
     let v = u.cross(d);

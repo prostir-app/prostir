@@ -1594,3 +1594,73 @@ fn a_monitor_grown_pushes_its_neighbours_clear() {
         none_cut(&sim, &sizes);
     }
 }
+
+/// Every monitor of `ns` has its middle in view, and none goes through another.
+fn all_in_view(sim: &Sim, ns: &[u32], what: &str) {
+    let at = (sim.world.center, sim.world.tilt);
+    for (i, &a) in ns.iter().enumerate() {
+        assert!(layout::in_view(&sim.place(k(a)), at), "{what}: {a} in view");
+        for &b in &ns[i + 1..] {
+            let (pa, pb) = (sim.place(k(a)), sim.place(k(b)));
+            let (ha, hb) = (sim.world.height_of(k(a)), sim.world.height_of(k(b)));
+            assert!(
+                !layout::cuts(&pa, ha, &pb, hb),
+                "{what}: {a} goes through {b}"
+            );
+        }
+    }
+}
+
+/// The owner's report of 2026-11-25: a 5120x1440 monitor added to three went right over
+/// the head, and stayed there through "Line up" (its row of its own kept as the rows
+/// the PC has, in `layout.txt` too) and the preset. Now it goes into the row, which
+/// makes room; put back over the head by hand, "Line up" brings it into the row again,
+/// after a restart as well; and so does the preset.
+#[test]
+fn a_wide_monitor_is_always_brought_into_view() {
+    const WIDE: (u32, u32) = (5120, 1440);
+    let mut sim = Sim::at_desk();
+    let before = sim.places();
+    let mut list = three();
+    list.push(monitor(4, WIDE));
+    sim.list(list.clone());
+    sim.stream(4, WIDE);
+    sim.settled();
+    all_in_view(&sim, &[1, 2, 3, 4], "added");
+    let rows = row_ids(sim.arranged.last().expect("told"));
+    assert_eq!(rows.len(), 1, "into the row: {rows:?}");
+    // Where it went before, right over the head, the others where they were.
+    let over = prostir_layout::circle::on_cylinder(0.0, 0.67, 2.5, 1.25 * 1.001);
+    sim.world.placements.extend(before);
+    sim.world.placements.insert(k(4), over);
+    sim.world.save_layout();
+    sim.settled();
+    let rows = row_ids(sim.arranged.last().expect("told"));
+    assert_eq!(rows, [vec![4], vec![2, 1, 3]], "a row of its own");
+    let mut text = String::new();
+    sim.world.desk().write_text(&mut text);
+    sim.world.tidy_up(&sim.s, sim.now);
+    sim.settled();
+    all_in_view(&sim, &[1, 2, 3, 4], "lined up");
+    let rows = row_ids(sim.arranged.last().expect("told"));
+    assert_eq!(rows.len(), 1, "lined up into the row: {rows:?}");
+    // The app started again with that arrangement and its rows.
+    let mut again = Sim::new(Some(&text));
+    again.connect(PC);
+    again.list(list.clone());
+    for (n, size) in [(1, QHD), (2, QHD), (3, QHD), (4, WIDE)] {
+        again.stream(n, size);
+    }
+    again.settled();
+    assert!(!layout::in_view(
+        &again.place(k(4)),
+        (again.world.center, again.world.tilt)
+    ));
+    again.world.tidy_up(&again.s, again.now);
+    again.settled();
+    all_in_view(&again, &[1, 2, 3, 4], "lined up after a restart");
+    // And the preset.
+    again.world.preset_chosen(&again.s, again.now);
+    again.settled();
+    all_in_view(&again, &[1, 2, 3, 4], "the preset");
+}
