@@ -72,6 +72,19 @@ impl Displays {
             .map_or_else(|| facts.caps.scales.clone(), |(_, s)| s.clone())
     }
 
+    /// Whether the desktop changes a monitor's scale in place (its output and its
+    /// windows as they are).
+    pub fn scales_in_place(&self) -> bool {
+        self.facts.as_ref().is_some_and(|f| f.caps.scales_in_place)
+    }
+
+    /// The monitors in Auto, as the headsets are told them.
+    pub fn scale_auto_part(&self) -> state::ScaleAuto {
+        state::ScaleAuto {
+            auto: self.auto_ids().map(ScreenId::wire).collect(),
+        }
+    }
+
     /// Whether the desktop lets the mouse be moved from here.
     pub fn moves_mouse(&self) -> bool {
         self.facts.as_ref().is_some_and(|f| f.caps.moves_pointer)

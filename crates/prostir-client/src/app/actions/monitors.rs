@@ -12,12 +12,18 @@ impl Model {
     pub(super) fn act_monitors(&mut self, action: Action) {
         match action {
             Action::Add { width, height } => {
-                // At the scale chosen, where the PC makes it.
+                // At the scale chosen, where the PC makes it; in Auto (the PC makes every
+                // new monitor so) at 100 %, the headset choosing once it is shown.
+                let auto = self.can_auto() && self.menu.add_auto;
                 let offered =
                     self.pc().limits.as_ref().is_some_and(|l| {
                         self.can_scale() && l.scales.contains(&self.menu.add_scale)
                     });
-                let scale = if offered { self.menu.add_scale } else { 100 };
+                let scale = if offered && !auto {
+                    self.menu.add_scale
+                } else {
+                    100
+                };
                 let req = self.request(
                     Request::AddDisplay {
                         mode: Mode {
@@ -31,11 +37,20 @@ impl Model {
                 // its picture comes (not in cinema, where new monitors are not placed).
                 self.world
                     .adding_started(req, (width, height), self.head.1, self.now);
-                if req.is_some() {
+                if let Some(req) = req {
                     self.leave_profile();
+                    // Chosen by hand: taken out of Auto once made.
+                    if !auto && self.can_auto() {
+                        self.menu.add_fixed = self.session.main().map(|pc| (pc, req));
+                    }
                 }
             }
-            Action::AddScale(scale) => self.menu.add_scale = scale,
+            Action::AddScale(scale) => {
+                self.menu.add_scale = scale;
+                self.menu.add_auto = false;
+            }
+            Action::AddAuto => self.menu.add_auto = true,
+            Action::ScaleAuto(id) => self.set_scale_auto(id, true),
             Action::SetScale(id, scale) => {
                 let sent = self.request_for(
                     id,

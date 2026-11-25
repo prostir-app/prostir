@@ -12,6 +12,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod app;
+pub mod autoscale;
 pub mod background;
 pub mod backoff;
 pub mod caps;

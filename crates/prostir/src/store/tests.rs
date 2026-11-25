@@ -243,9 +243,11 @@ fn files_round_trip_and_keep_unknown_lines() {
         middle: Some(2200),
     }]);
     set.primary = Some(ScreenId::saved(1));
+    set.auto.insert(ScreenId::saved(1));
     let text = screens_text(&set, &kept, 133);
     assert!(text.contains("next 133\n"), "{text}");
-    assert!(text.contains("screen 1 1440x2560@1.25 at 720 -40 primary\n"));
+    assert!(text.contains("screen 1 1440x2560@1.25 at 720 -40 auto primary\n"));
+    assert!(text.contains("screen 0 2560x1440\n"), "not in Auto: {text}");
     assert!(text.contains(
         "physical 100 edid \"BOE 0x0a1c 0\" connector eDP-1 builtin shown seen 1795000000\n"
     ));

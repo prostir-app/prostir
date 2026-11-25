@@ -84,6 +84,45 @@ impl Worker {
         self.done(Done::Rescaled { id, percent });
     }
 
+    /// The monitors whose scale is to change in place with the next layout: made at
+    /// another scale than wanted now, the same size and number, on a desktop that
+    /// changes scales in place, and not at a scale the desktop refused.
+    pub(super) fn rescales(&self) -> Vec<Rescale> {
+        let Some(wanted) = &self.wanted else {
+            return Vec::new();
+        };
+        if !self.desktop.caps().scales_in_place {
+            return Vec::new();
+        }
+        self.slots
+            .iter()
+            .filter_map(|(id, slot)| {
+                let Made::Monitor { spec, .. } = &slot.made else {
+                    return None;
+                };
+                let key = slot.key()?;
+                let (_, w) = wanted.screens.iter().find(|(i, _)| i == id)?;
+                let What::Monitor { spec: to, .. } = &w.what else {
+                    return None;
+                };
+                let (from, to_percent) = (spec.percent(), to.percent());
+                if !slot.made.is_but_scale(&w.what)
+                    || from == to_percent
+                    || self.scale_refused.get(id) == Some(&to_percent)
+                {
+                    return None;
+                }
+                Some(Rescale {
+                    id: *id,
+                    key: key.clone(),
+                    from,
+                    to: to_percent,
+                    size: logical_at((spec.width, spec.height), to_percent),
+                })
+            })
+            .collect()
+    }
+
     /// The output that is to be primary, where it is ours to pick.
     fn primary_key(&self) -> Option<OutputKey> {
         if !self.desktop.caps().has_primary {
@@ -230,9 +269,20 @@ impl Worker {
         for (i, name) in others.into_iter().enumerate() {
             names.insert(Out::Other(i), name.clone());
         }
+        // Monitors whose scale changes in place, with this layout: laid out at the
+        // size they get. Only those the desktop lists.
+        let rescales: Vec<Rescale> = self
+            .rescales()
+            .into_iter()
+            .filter(|r| geometries.contains_key(&r.key))
+            .collect();
         // Only outputs the desktop lists: the others once it does.
         let size = |out: Out| {
-            let g = geometries.get(names.get(&out)?)?;
+            let key = names.get(&out)?;
+            if let Some(r) = rescales.iter().find(|r| &r.key == key) {
+                return Some(r.size);
+            }
+            let g = geometries.get(key)?;
             Some(desk::Size { w: g.w, h: g.h })
         };
         self.layout_waits = self
@@ -332,8 +382,42 @@ impl Worker {
         }
         // A step of its own after looking at the outputs.
         self.begin("placing the outputs");
-        self.desktop
-            .place(&DeskPlan { positions, primary }, &geometries)?;
+        let scales = rescales.iter().map(|r| (r.key.clone(), r.to)).collect();
+        let placed = self.desktop.place(
+            &DeskPlan {
+                positions,
+                primary,
+                scales,
+            },
+            &geometries,
+        );
+        if let Err(e) = placed {
+            // The scales are not asked again: the monitors stay at the ones they
+            // have, and the layout is tried again without them.
+            for r in &rescales {
+                warn!(
+                    "the desktop did not take {} % for {} in place: it stays at {} %",
+                    r.to, r.key, r.from
+                );
+                self.scale_refused.insert(r.id, r.to);
+                self.done(Done::ScaleRefused {
+                    id: r.id,
+                    percent: r.from,
+                });
+            }
+            return Err(e);
+        }
+        for r in &rescales {
+            info!("{}: {} % in place (was {} %)", r.key, r.to, r.from);
+            if let Some(slot) = self.slots.get_mut(&r.id)
+                && let Made::Monitor { spec, .. } = &mut slot.made
+            {
+                spec.scale = f64::from(r.to) / 100.0;
+                // Seen at the new scale before another given on the desktop is taken.
+                slot.seen_own = false;
+                slot.scale_seen = None;
+            }
+        }
         let on_desk = plan
             .iter()
             .map(|p| {
@@ -348,6 +432,27 @@ impl Worker {
             .collect();
         self.applied = (row_ids, plan);
         Ok(on_desk)
+    }
+}
+
+/// A monitor whose scale changes in place, with the layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Rescale {
+    pub id: ScreenId,
+    pub key: OutputKey,
+    /// The scale it has, and the one it gets, in percent.
+    pub from: u16,
+    pub to: u16,
+    /// Its size on the desktop at the new scale, in logical pixels.
+    pub size: desk::Size,
+}
+
+/// The logical size of a monitor of `pixels` at `percent`.
+pub(super) fn logical_at(pixels: (u32, u32), percent: u16) -> desk::Size {
+    let at = |px: u32| (f64::from(px) * 100.0 / f64::from(percent.max(1))).round() as i32;
+    desk::Size {
+        w: at(pixels.0),
+        h: at(pixels.1),
     }
 }
 

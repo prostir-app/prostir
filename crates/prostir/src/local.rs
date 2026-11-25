@@ -385,9 +385,33 @@ impl Brain {
             Request::AddMonitor { w, h, scale } => {
                 let mode = Mode { w, h, scale };
                 if self.displays.is_some() {
-                    self.pc_request(HeadsetRequest::AddDisplay { mode })
+                    let added = self.pc_request(HeadsetRequest::AddDisplay { mode });
+                    // A scale asked for is kept: not in Auto.
+                    if let (CtlReply::Added(n), true, Some(d)) =
+                        (&added, scale != 100, self.displays.as_mut())
+                        && d.set_scale_auto(ScreenId::saved(*n), false)
+                            .unwrap_or(false)
+                    {
+                        crate::keep_screens(&mut self.store, d, false);
+                    }
+                    added
                 } else {
                     self.add_saved(mode)
+                }
+            }
+            Request::SetScaleAuto { id: n, on } => {
+                if self.displays.is_some() {
+                    self.pc_request(HeadsetRequest::SetScaleAuto { id: id(n), on })
+                } else {
+                    self.change_saved(ScreenId::saved(n), |set, key| {
+                        set.specs.get(&key)?;
+                        if on {
+                            set.auto.insert(key);
+                        } else {
+                            set.auto.remove(&key);
+                        }
+                        Some(())
+                    })
                 }
             }
             Request::RemoveMonitor { id: n } => {
@@ -595,6 +619,8 @@ impl Brain {
         self.change_saved(id, |set, key| {
             let spec = set.specs.get_mut(&key)?;
             spec.scale = f64::from(scale) / 100.0;
+            // Chosen by hand: not in Auto any more.
+            set.auto.remove(&key);
             Some(())
         })
     }
@@ -652,6 +678,10 @@ impl Brain {
         }
         let id = self.store.new_id();
         set.specs.insert(id, spec);
+        // In Auto, unless a scale was asked for.
+        if mode.scale == 100 {
+            set.auto.insert(id);
+        }
         match set.rows.last_mut() {
             Some(row) => row.push(prostir_layout::desk::Entry::new(id)),
             None => set.rows.push(vec![prostir_layout::desk::Entry::new(id)]),
@@ -672,6 +702,7 @@ impl Brain {
             return CtlReply::failed(ApiError::LastDisplay, e.to_string());
         }
         set.specs.remove(&id);
+        set.auto.remove(&id);
         for row in &mut set.rows {
             row.retain(|e| e.id != id);
         }
@@ -901,6 +932,7 @@ impl Brain {
                         }
                         api::Display {
                             placing,
+                            auto_scale: d.is_auto(id),
                             ..api_display(&w, output.unwrap_or_default())
                         }
                     })
@@ -1092,6 +1124,7 @@ impl Brain {
                             scale: spec.percent(),
                         },
                         state: api::DisplayState::Kept,
+                        auto_scale: set.auto.contains(&id),
                         ..api::Display::default()
                     });
                 }
@@ -1152,6 +1185,7 @@ fn api_display(d: &wire::Display, output: String) -> api::Display {
             h: r.h,
         }),
         placing: false,
+        auto_scale: false,
         state,
         failure,
     }

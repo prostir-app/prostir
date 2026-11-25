@@ -19,6 +19,19 @@
 
 ### Monitors and the desktop
 
+- A monitor's scale now changes in place on KDE Plasma and Hyprland: the monitor stays,
+  its windows stay where they are and its picture goes on, instead of the monitor being
+  made anew. The PC offers 100, 125, 150, 175 and 200 %; on Hyprland only the scales
+  that make whole logical pixels (2560×1440 gets 125 % or 200 %, not 150 %).
+- Scale "Auto", on for every new Prostir monitor (never for the PC's own displays):
+  the headset picks the smallest scale at which a pixel of the desktop takes at least
+  0.85 of the headset's pixels where the monitor stands, so text stays clear without
+  making the monitor bigger. It changes only after a monitor is let go and the
+  arrangement held for a moment, with a margin either way; monitors glued edge to
+  edge get scales that keep the seam seamless. Choosing a number in the headset, in
+  the settings window or in the desktop's display settings turns Auto off for that
+  monitor. Monitors kept from before are not in Auto until you choose it.
+
 - KDE Plasma 6.0 to 6.7: KWin hides its screencast interface from a program that no
   application shortcut names, so Prostir found no way to add monitors. The shortcut
   now lists the interface and names the program by its real path in every package

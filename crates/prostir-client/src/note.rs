@@ -271,6 +271,7 @@ pub fn done_text(action: Action) -> Option<&'static str> {
         Action::ShowPhysical(_, true) => "headset-note-display-shown",
         Action::ShowPhysical(_, false) => "headset-note-display-hidden",
         Action::SetScale(..) => "headset-note-scale",
+        Action::ScaleAuto(_) => "headset-note-scale-auto",
         Action::NoLimits(true) => "headset-note-no-limits-on",
         Action::NoLimits(false) => "headset-note-no-limits-off",
         Action::SetAudio(true) => "headset-note-sound-headset",

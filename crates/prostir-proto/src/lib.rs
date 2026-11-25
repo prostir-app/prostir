@@ -259,6 +259,9 @@ wire_enum! {
         36 => PcInfo { part: PcInfo },
         /// Part: what the PC can do (in `Snapshot` only).
         37 => HostCaps { part: HostCaps },
+        /// Part: the monitors whose scale the main headset chooses ("Auto", from 0.2.0
+        /// with feature 17; an older headset skips it).
+        44 => ScaleAuto { part: state::ScaleAuto },
         /// Part: the display the mouse is on.
         16 => Focus { part: Focus },
         /// Part: the display the sound comes from, while the headset asks for it.

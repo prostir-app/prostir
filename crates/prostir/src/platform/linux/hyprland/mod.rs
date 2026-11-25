@@ -522,9 +522,10 @@ impl Rules {
         }
     }
 
-    /// Moves outputs to new logical positions, keeping their modes and scales; whether
-    /// Hyprland took them.
-    fn place(&self, positions: &[(String, i32, i32)]) -> bool {
+    /// Moves outputs to new logical positions, keeping their modes, and their scales
+    /// but for those of `scales` (outputs of ours: their positions are for the new
+    /// size); whether Hyprland took them.
+    fn place(&self, positions: &[(String, i32, i32)], scales: &[(String, f64)]) -> bool {
         let current = monitors();
         {
             let mut original = self.original.lock().unwrap();
@@ -536,21 +537,45 @@ impl Rules {
                 }
             }
         }
-        let rules: Vec<Rule> = positions
+        let new_scale = |name: &str| {
+            scales
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, scale)| *scale)
+        };
+        let mut rules: Vec<Rule> = positions
             .iter()
             .filter_map(|(name, x, y)| {
                 let m = current.iter().find(|m| &m.name == name)?;
-                ((m.x, m.y) != (*x, *y)).then(|| Rule {
+                let scale = new_scale(name).unwrap_or(m.scale);
+                ((m.x, m.y) != (*x, *y) || scale != m.scale).then(|| Rule {
                     name: name.clone(),
                     width: m.width,
                     height: m.height,
                     refresh: m.refresh,
                     x: *x,
                     y: *y,
-                    scale: m.scale,
+                    scale,
                 })
             })
             .collect();
+        // A new scale for an output the plan does not move.
+        for (name, scale) in scales {
+            if rules.iter().any(|r| &r.name == name) {
+                continue;
+            }
+            if let Some(m) = current.iter().find(|m| &m.name == name) {
+                rules.push(Rule {
+                    name: name.clone(),
+                    width: m.width,
+                    height: m.height,
+                    refresh: m.refresh,
+                    x: m.x,
+                    y: m.y,
+                    scale: *scale,
+                });
+            }
+        }
         self.apply_without_overlaps(&current, &rules)
     }
 
@@ -653,6 +678,8 @@ impl Hyprland {
                 has_primary: false,
                 origin_is_primary: false,
                 scales: Scales::Any { min: 50, max: 400 },
+                // A monitor rule with another scale, taken live.
+                scales_in_place: true,
                 refresh: vec![60],
                 screenshot_one_output: true,
                 moves_pointer: true,
@@ -696,14 +723,28 @@ impl Desktop for Hyprland {
         Ok(Box::new(HyprOutput::new(key.to_string(), None)))
     }
 
-    /// Hyprland has no primary output.
+    /// Scales of whole logical pixels only (see [`whole_pixel_scales`]).
+    fn scales_for(&self, w: u32, h: u32) -> Scales {
+        whole_pixel_scales(w, h)
+    }
+
+    /// Hyprland has no primary output. New scales go in the monitor rules with the
+    /// places, live.
     fn place(&mut self, plan: &DeskPlan, _current: &Outputs) -> Result<()> {
         let positions: Vec<(String, i32, i32)> = plan
             .positions
             .iter()
             .map(|(key, x, y)| (key.to_string(), *x, *y))
             .collect();
-        anyhow::ensure!(self.rules.place(&positions), "Hyprland refused the layout");
+        let scales: Vec<(String, f64)> = plan
+            .scales
+            .iter()
+            .map(|(key, percent)| (key.to_string(), f64::from(*percent) / 100.0))
+            .collect();
+        anyhow::ensure!(
+            self.rules.place(&positions, &scales),
+            "Hyprland refused the layout"
+        );
         Ok(())
     }
 
@@ -714,6 +755,21 @@ impl Desktop for Hyprland {
     fn pointer(&mut self) -> Option<&mut dyn Pointer> {
         Some(&mut self.windows)
     }
+}
+
+/// The scales, in steps of 5 % from 50 % to 400 %, that Hyprland gives an output of
+/// `w`x`h` pixels: those that make it a whole number of logical pixels both ways
+/// (2560x1440 at 150 % would be 1706.67 wide, which Hyprland does not take; 125 % and
+/// 200 % it does). A step of 5 % is a whole number of KWin's and Wayland's 1/120.
+pub fn whole_pixel_scales(w: u32, h: u32) -> Scales {
+    let whole = |px: u32, percent: u32| (px * 100) % percent == 0;
+    Scales::Steps(
+        (10..=80)
+            .map(|fives| fives * 5)
+            .filter(|&p| whole(w, p) && whole(h, p))
+            .filter_map(|p| u16::try_from(p).ok())
+            .collect(),
+    )
 }
 
 /// How long the scale Hyprland said for an output of ours is taken as it is.
@@ -820,6 +876,21 @@ impl Output for HyprOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hyprland's scales are those of whole logical pixels: 150 % gives 1920x1080
+    /// and 3840x2160 but not 2560x1440 (1706.67) nor its portrait; 125 % and 200 %
+    /// give every size Prostir offers.
+    #[test]
+    fn scales_of_whole_logical_pixels() {
+        let allows = |w, h, p| whole_pixel_scales(w, h).allows(p);
+        for (w, h) in crate::publish::SIZES {
+            assert!(allows(w, h, 100) && allows(w, h, 125) && allows(w, h, 200));
+        }
+        assert!(allows(1920, 1080, 150) && allows(3840, 2160, 150));
+        assert!(!allows(2560, 1440, 150) && !allows(1440, 2560, 150));
+        assert!(!allows(1920, 1080, 175) && !allows(2560, 1440, 175));
+        assert!(!allows(2560, 1440, 133) && allows(2560, 1440, 160));
+    }
 
     const MONITORS: &str = r#"[{"id":0,"name":"eDP-1","width":2880,"height":1800,
         "refreshRate":120.00000,"x":0,"y":0,"scale":2.0,"focused":false,"disabled":false},

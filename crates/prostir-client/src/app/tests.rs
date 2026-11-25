@@ -2617,3 +2617,74 @@ fn for_development_changes_the_sizes_and_the_filters() {
     assert!(!sim.m.world().dev().metrics);
     assert_eq!(sim.m.metrics_place(), None);
 }
+
+/// Auto, wired: the main headset of a known model asks a PC that changes scales in
+/// place for the scale a monitor in Auto wants, once the arrangement held, and not
+/// again at once; nothing for a monitor not in Auto, from a guest, or from a PC
+/// without the capability.
+#[test]
+fn auto_asks_the_scale_a_monitor_wants() {
+    let mut sim = Sim::of(Caps {
+        model: crate::platform::pixels::MODELS[0].0.into(),
+        ..test_caps()
+    });
+    sim.connect(&[1, 2]);
+    // 1:1 in the headset, at 150 % on the PC: 100 % is enough.
+    let at_150 = |n| Display {
+        mode: Mode {
+            scale: 150,
+            ..Mode::new(2560, 1440)
+        },
+        ..monitor(n)
+    };
+    let part = Displays {
+        displays: vec![at_150(1), at_150(2)],
+        primary: Some(DisplayId(1)),
+    };
+    sim.net(NetEvent::Part(PC, HostMsg::Displays { part }));
+    sim.limits(4, true);
+    let auto = |ids: Vec<u32>| HostMsg::ScaleAuto {
+        part: state::ScaleAuto {
+            auto: ids.into_iter().map(DisplayId).collect(),
+        },
+    };
+    sim.net(NetEvent::Part(PC, auto(vec![1])));
+    sim.net(NetEvent::Part(
+        PC,
+        HostMsg::Access {
+            part: state::Access::MAIN,
+        },
+    ));
+    sim.frames(Duration::from_secs(2));
+    assert!(
+        requests(&sim.take()).is_empty(),
+        "a PC without the capability"
+    );
+    sim.host_can(vec![caps::pc::SCALE, caps::pc::SCALE_IN_PLACE]);
+    sim.frames(Duration::from_secs(2));
+    let asked = requests(&sim.take());
+    assert!(
+        matches!(
+            &asked[..],
+            [(_, Request::AutoScale { id, scale: 100 })] if *id == DisplayId(1)
+        ),
+        "monitor 1 only, once: {asked:?}"
+    );
+    assert!(crate::view::build(&sim.m).can_auto);
+    assert_eq!(crate::view::build(&sim.m).auto, [k(1)]);
+    sim.frames(Duration::from_secs(1));
+    assert!(requests(&sim.take()).is_empty(), "not again at once");
+    // A guest asks nothing.
+    sim.net(NetEvent::Part(
+        PC,
+        HostMsg::Access {
+            part: state::Access {
+                role: state::role::GUEST,
+                perms: state::perms::ALL,
+            },
+        },
+    ));
+    sim.net(NetEvent::Part(PC, auto(vec![1, 2])));
+    sim.frames(Duration::from_secs(5));
+    assert!(requests(&sim.take()).is_empty(), "a guest");
+}

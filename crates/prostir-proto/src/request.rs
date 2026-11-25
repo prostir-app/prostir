@@ -63,10 +63,19 @@ wire_enum! {
         11 => Screenshot { id: DisplayId },
         /// Where the mouse is: [`Outcome::Pointer`].
         12 => FindMouse,
-        /// Another scale for monitor `id`, percent (one of `Limits.scales`): made anew
-        /// at it under the same number, `Starting` until it runs again (from 0.2.0 step
-        /// 7.10; an older PC answers `UNSUPPORTED`).
+        /// Another scale for monitor `id`, percent (one of `Limits.scales`): set in
+        /// place where the PC names feature 17, else made anew at it under the same
+        /// number, `Starting` until it runs again (from 0.2.0 step 7.10; an older PC
+        /// answers `UNSUPPORTED`). It takes the monitor out of "Auto".
         13 => SetScale { id: DisplayId, scale: u16 },
+        /// The scale the main headset chose for monitor `id` in "Auto", percent (one
+        /// of `Limits.scales`): set in place, the output and its windows as they are.
+        /// Done without a change for a monitor not in Auto; `BAD_ARGUMENT` for a
+        /// display of the PC or a window panel (from 0.2.0, to a PC with feature 17;
+        /// an older PC answers `UNSUPPORTED`).
+        14 => AutoScale { id: DisplayId, scale: u16 },
+        /// "Auto" on or off for monitor `id` (from 0.2.0, to a PC with feature 17).
+        15 => SetScaleAuto { id: DisplayId, on: bool },
     }
 }
 

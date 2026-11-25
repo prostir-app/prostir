@@ -35,6 +35,9 @@ pub struct SavedScreens {
     /// displays too, where the headset put them.
     pub rows: Vec<Vec<Entry<ScreenId>>>,
     pub primary: Option<ScreenId>,
+    /// The monitors whose scale the main headset chooses ("Auto"): new monitors are,
+    /// until a scale is chosen by hand. Monitors kept by versions before it are not.
+    pub auto: std::collections::BTreeSet<ScreenId>,
 }
 
 impl SavedScreens {
@@ -44,6 +47,7 @@ impl SavedScreens {
         Self {
             specs: BTreeMap::from([(id, "2560x1440".parse().expect("a valid size"))]),
             rows: vec![vec![Entry::new(id)]],
+            auto: [id].into(),
             ..Self::default()
         }
     }
@@ -177,7 +181,7 @@ fn physical_text(id: ScreenId, p: &Physical) -> String {
 
 /// The file `screens.txt`: `next N` (the counter, see [`Store::new_id`]), `physical …`
 /// for each display of the PC itself, then `row` and in each row `screen N WxH[@scale]
-/// [at C M] [primary]` for a monitor and `place N [at C M] [primary]` for a display of
+/// [at C M] [auto] [primary]` for a monitor (`auto`: its scale is the headset's choice) and `place N [at C M] [primary]` for a display of
 /// the PC (version 1 had `mirror [at C M]` for the laptop screen, number 100). The
 /// counter read, if there is one.
 pub(super) fn parse_screens(text: &str) -> (SavedScreens, Kept, Option<u32>) {
@@ -233,7 +237,9 @@ pub(super) fn parse_screens(text: &str) -> (SavedScreens, Kept, Option<u32>) {
             Some("screen") => (|| {
                 let id = ScreenId::saved(words.next()?.parse().ok()?);
                 let spec: MonitorSpec = words.next()?.parse().ok()?;
-                let rest: Vec<&str> = words.collect();
+                let mut rest: Vec<&str> = words.collect();
+                let auto = rest.contains(&"auto");
+                rest.retain(|w| *w != "auto");
                 let primary = rest.last() == Some(&"primary");
                 let seen = match rest.first() {
                     Some(&"at") => parse_seen(rest[1..].iter().copied()),
@@ -242,7 +248,14 @@ pub(super) fn parse_screens(text: &str) -> (SavedScreens, Kept, Option<u32>) {
                 if set.specs.contains_key(&id) || set.physical.contains_key(&id) {
                     return None;
                 }
-                place(&mut set, id, seen, primary).then(|| set.specs.insert(id, spec))
+                if !place(&mut set, id, seen, primary) {
+                    return None;
+                }
+                if auto {
+                    set.auto.insert(id);
+                }
+                set.specs.insert(id, spec);
+                Some(())
             })()
             .is_some(),
             Some(word @ ("place" | "mirror")) => (|| {
@@ -286,9 +299,15 @@ pub(super) fn screens_text(set: &SavedScreens, kept: &Kept, next: u32) -> String
             };
             match set.specs.get(&e.id) {
                 Some(spec) => {
+                    // After the place, which a version before "auto" reads first.
+                    let auto = if set.auto.contains(&e.id) {
+                        " auto"
+                    } else {
+                        ""
+                    };
                     let _ = writeln!(
                         text,
-                        "screen {} {spec}{}{primary}",
+                        "screen {} {spec}{}{auto}{primary}",
                         e.id.number(),
                         seen_text(e)
                     );

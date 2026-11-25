@@ -115,6 +115,14 @@ pub fn build(m: &Model) -> UiState {
         limits: m.pc().limits.clone(),
         can_scale: m.can_scale(),
         add_scale: menu.add_scale,
+        can_auto: m.can_auto(),
+        add_auto: menu.add_auto,
+        auto: world
+            .monitors()
+            .iter()
+            .map(|m| m.0)
+            .filter(|k| m.is_auto(*k))
+            .collect(),
         can_move_mouse: m.can_move_mouse(),
         monitors,
         windows,

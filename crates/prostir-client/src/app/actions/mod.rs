@@ -58,7 +58,9 @@ impl Model {
             | Action::WindowHere
             | Action::Screenshot
             | Action::AddScale(_)
+            | Action::AddAuto
             | Action::SetScale(..)
+            | Action::ScaleAuto(_)
             | Action::FindMouse => self.act_monitors(action),
             Action::Cinema(_)
             | Action::CinemaScreen(_)
