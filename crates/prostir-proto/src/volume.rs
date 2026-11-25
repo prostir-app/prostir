@@ -14,6 +14,11 @@
 //! slider has rested a moment, so a slider being dragged never jumps back; a device
 //! change equal to what the PC wrote itself is its echo and asks nothing.
 //!
+//! The level on the wire is in percent; the headset's system counts its volume in
+//! steps of its own ([`Steps`]), which only the headset knows. A request between two
+//! steps goes to the next step the way the slider moved, so a slider moved by 1 % does
+//! not stay stuck between two steps.
+//!
 //! Both sides are plain state with the time passed in, so the fake headset and the
 //! tests drive them as the apps do.
 
@@ -26,6 +31,90 @@ use crate::state::{Volume, VolumeAsk};
 pub const ASK_EVERY: Duration = Duration::from_millis(50);
 /// A level the PC wrote, give or take this, coming back from the device is its echo.
 const ECHO: u8 = 1;
+/// Requests closer together than this are one move of the slider (the PC asks every
+/// [`ASK_EVERY`] while it moves, and writes the answer only once it rested): each goes
+/// on from where the one before asked, not from the step that one became.
+pub const ONE_MOVE: Duration = Duration::from_millis(100);
+
+/// Step `index` of a volume of `steps` above silence, in percent.
+pub fn level_of(index: u8, steps: u8) -> u8 {
+    let steps = u32::from(steps.max(1));
+    let index = u32::from(index).min(steps);
+    ((index * 200 + steps) / (2 * steps)) as u8
+}
+
+/// The step of a volume of `steps` above silence nearest `level` percent.
+pub fn index_of(level: u8, steps: u8) -> u8 {
+    let steps = u32::from(steps.max(1));
+    let level = u32::from(level.min(100));
+    ((level * steps * 2 + 100) / 200) as u8
+}
+
+/// The level of the step nearest `level`, of a volume of `steps` above silence.
+pub fn step(level: u8, steps: u8) -> u8 {
+    level_of(index_of(level, steps), steps)
+}
+
+/// Where a request for `asked` goes from `from` (both in percent), on a volume of
+/// `steps` above silence: higher, to the step at or above it and at least one above
+/// `from`'s; lower, to the step at or below it and at least one below; the same,
+/// nowhere (`None`).
+pub fn toward(from: u8, asked: u8, steps: u8) -> Option<u8> {
+    let s = u32::from(steps.max(1));
+    let (from, asked) = (u32::from(from.min(100)), u32::from(asked.min(100)));
+    let index = if asked > from {
+        let up = (asked * s).div_ceil(100);
+        up.max(from * s / 100 + 1).min(s)
+    } else if asked < from {
+        let down = asked * s / 100;
+        down.min((from * s).div_ceil(100).saturating_sub(1))
+    } else {
+        return None;
+    };
+    Some(level_of(index as u8, steps))
+}
+
+/// How a headset whose system volume goes in steps takes the PC's requests: each to
+/// the next step the way it moved ([`toward`]). A request soon after one taken
+/// ([`ONE_MOVE`]) goes on from the level that one asked for, while the headset stands
+/// where it put it: while the slider is dragged, the headset is a step ahead of it, and
+/// the next request, a little further on, must not go back.
+#[derive(Debug, Clone)]
+pub struct Steps {
+    steps: u8,
+    /// The last request taken: the level asked for, the level it became, and when.
+    last: Option<(u8, u8, Instant)>,
+}
+
+impl Steps {
+    /// A volume of `steps` above silence (1 at least).
+    pub fn new(steps: u8) -> Self {
+        Self {
+            steps: steps.max(1),
+            last: None,
+        }
+    }
+
+    pub fn steps(&self) -> u8 {
+        self.steps
+    }
+
+    /// The level a request for `asked` puts the headset at, now at `level`; `now` is
+    /// when the request came.
+    pub fn take(&mut self, level: u8, asked: u8, now: Instant) -> u8 {
+        let from = match self.last {
+            Some((asked_before, became, at))
+                if became == level && now.saturating_duration_since(at) < ONE_MOVE =>
+            {
+                asked_before
+            }
+            _ => level,
+        };
+        let to = toward(from, asked, self.steps).unwrap_or(level);
+        self.last = Some((asked.min(100), to, now));
+        to
+    }
+}
 
 /// The headset's side.
 #[derive(Debug, Clone)]
@@ -191,14 +280,13 @@ impl PcVolume {
 mod tests {
     use super::*;
 
-    /// The Quest's volume has 16 steps: a level becomes the nearest one.
-    fn quest_step(level: u8) -> u8 {
-        let step = (f32::from(level) * 15.0 / 100.0).round();
-        (step * 100.0 / 15.0).round() as u8
-    }
+    /// The steps the tests run with: the first headset's (15 above silence, 16 levels
+    /// with silence), and a volume in whole percent.
+    const STEPS: [u8; 2] = [15, 100];
 
-    fn set_step(level: u8, muted: bool) -> (u8, bool) {
-        (quest_step(level), muted)
+    /// The level a request for `asked` from `from` ends at, on `steps`.
+    fn to(from: u8, asked: u8, steps: u8) -> u8 {
+        toward(from, asked, steps).unwrap_or(from)
     }
 
     /// A PC device, a headset and the network between them, in steps of 1 ms.
@@ -207,6 +295,9 @@ mod tests {
         ms: u64,
         pc: PcVolume,
         headset: HeadsetVolume,
+        steps: Steps,
+        /// The headset's level after each request it answered.
+        answers: Vec<u8>,
         /// The PC's device: its level, and every level the PC wrote to it.
         device: (u8, bool),
         writes: Vec<(u64, u8)>,
@@ -220,12 +311,14 @@ mod tests {
     }
 
     impl World {
-        fn new(latency: u64, level: u8) -> Self {
+        fn new(latency: u64, level: u8, steps: u8) -> Self {
             let mut w = Self {
                 start: Instant::now(),
                 ms: 0,
                 pc: PcVolume::default(),
                 headset: HeadsetVolume::new(level, false),
+                steps: Steps::new(steps),
+                answers: Vec::new(),
                 device: (100, false),
                 writes: Vec::new(),
                 to_headset: Vec::new(),
@@ -282,7 +375,13 @@ mod tests {
                     self.act(act);
                 }
                 for ask in take_due(&mut self.to_headset, now) {
-                    let v = self.headset.asked(&ask, set_step);
+                    let level = self.headset.now().level;
+                    let at = self.now();
+                    let steps = &mut self.steps;
+                    let v = self
+                        .headset
+                        .asked(&ask, |l, m| (steps.take(level, l, at), m));
+                    self.answers.push(v.level);
                     self.messages.push(now);
                     self.to_pc.push((now + self.latency, v));
                 }
@@ -306,7 +405,7 @@ mod tests {
 
     #[test]
     fn the_session_starts_at_the_headsets_level() {
-        let mut w = World::new(5, 40);
+        let mut w = World::new(5, 40, 15);
         w.run(300);
         assert_eq!(w.device, (40, false));
         assert_eq!(w.writes.len(), 1);
@@ -315,7 +414,7 @@ mod tests {
 
     #[test]
     fn the_buttons_reach_the_device_without_an_echo() {
-        let mut w = World::new(5, 40);
+        let mut w = World::new(5, 40, 15);
         w.run(100);
         w.buttons(53);
         w.run(400);
@@ -325,48 +424,98 @@ mod tests {
 
     #[test]
     fn the_slider_reaches_the_headset_at_its_step() {
-        let mut w = World::new(5, 40);
-        w.run(100);
-        w.slide(71);
-        w.run(500);
-        assert_eq!(w.headset.now().level, quest_step(71));
-        assert_eq!(w.device.0, quest_step(71), "the slider stands on the step");
-        // One request, one answer.
-        assert_eq!(w.messages.len(), 2);
+        for steps in STEPS {
+            let mut w = World::new(5, 40, steps);
+            w.run(100);
+            w.slide(71);
+            w.run(500);
+            let at = to(40, 71, steps);
+            assert_eq!(w.headset.now().level, at, "{steps} steps");
+            assert_eq!(w.device.0, at, "the slider stands on the step");
+            // One request, one answer.
+            assert_eq!(w.messages.len(), 2);
+        }
+        assert_eq!(to(40, 71, 15), 73, "the step above");
+        assert_eq!(to(40, 71, 100), 71);
     }
 
     /// 50 changes in a second: the device is never written while the slider moves,
-    /// ends on the headset's step, few messages go, and none once it rests.
+    /// the headset's level never goes back while it moves up, it ends on the step at
+    /// or above the slider, few messages go, and none once it rests.
     #[test]
     fn dragging_the_slider_does_not_jump_back() {
-        for latency in [1, 5, 30, 120] {
-            let mut w = World::new(latency, 20);
-            w.run(300);
-            let writes_before = w.writes.len();
-            let messages_before = w.messages.len();
-            for i in 0..50u64 {
-                w.slide((i * 2) as u8);
-                w.run(300 + (i + 1) * 20);
+        for steps in STEPS {
+            for latency in [1, 5, 30, 120] {
+                let mut w = World::new(latency, 20, steps);
+                w.run(300);
+                let writes_before = w.writes.len();
+                let messages_before = w.messages.len();
+                let answers_before = w.answers.len();
+                for i in 0..50u64 {
+                    w.slide((i * 2) as u8);
+                    w.run(300 + (i + 1) * 20);
+                }
+                let dragged_until = w.ms;
+                w.run(dragged_until + 1000);
+                let during: Vec<_> = w.writes[writes_before..]
+                    .iter()
+                    .filter(|(t, _)| *t < dragged_until)
+                    .collect();
+                let case = format!("{steps} steps, {latency} ms");
+                assert!(
+                    during.is_empty(),
+                    "written while dragging ({case}): {during:?}"
+                );
+                // The first request is for 0, below where it stood; then up only.
+                let answers = &w.answers[answers_before + 1..];
+                assert!(
+                    answers.windows(2).all(|a| a[0] <= a[1]),
+                    "the headset went back ({case}): {answers:?}"
+                );
+                let at = to(97, 98, steps);
+                assert_eq!(w.device.0, at, "at the step ({case})");
+                assert_eq!(w.headset.now().level, at);
+                let sent = w.messages.len() - messages_before;
+                assert!(sent <= 2 * 22, "{sent} messages ({case})");
+                let last = *w.messages.last().unwrap();
+                assert!(
+                    last < dragged_until + 200 + 2 * latency,
+                    "quiet after ({case})"
+                );
             }
-            let dragged_until = w.ms;
-            w.run(dragged_until + 1000);
-            let during: Vec<_> = w.writes[writes_before..]
-                .iter()
-                .filter(|(t, _)| *t < dragged_until)
-                .collect();
-            assert!(
-                during.is_empty(),
-                "written while dragging ({latency} ms): {during:?}"
-            );
-            assert_eq!(w.device.0, quest_step(98), "at the step ({latency} ms)");
-            assert_eq!(w.headset.now().level, quest_step(98));
-            let sent = w.messages.len() - messages_before;
-            assert!(sent <= 2 * 22, "{sent} messages ({latency} ms)");
-            let last = *w.messages.last().unwrap();
-            assert!(
-                last < dragged_until + 200 + 2 * latency,
-                "quiet after ({latency} ms)"
-            );
+        }
+    }
+
+    /// The slider moved by 1 % at a time, resting between moves (the volume keys of a
+    /// desktop set to 1 %): the headset never goes the other way, and every two moves
+    /// take it a step on (the first move from a level the PC wrote is within its echo
+    /// and asks nothing), up to the top and down to silence.
+    #[test]
+    fn one_percent_at_a_time_is_never_stuck() {
+        for steps in STEPS {
+            let mut w = World::new(5, 40, steps);
+            w.run(100);
+            for d in [1i16, -1] {
+                let end = if d > 0 { 100 } else { 0 };
+                let mut presses = 0;
+                let mut level = w.headset.now().level;
+                while level != end {
+                    let before = level;
+                    for _ in 0..2 {
+                        let slider = (i16::from(w.device.0) + d).clamp(0, 100) as u8;
+                        w.slide(slider);
+                        w.run(w.ms + 300);
+                        let now = w.headset.now().level;
+                        let case = format!("{steps} steps, press {presses} at {level} by {d}");
+                        assert!(i16::from(now) * d >= i16::from(level) * d, "back ({case})");
+                        assert_eq!(step(now, steps), now, "on a step ({case})");
+                        level = now;
+                        presses += 1;
+                    }
+                    assert_ne!(level, before, "stuck at {level} ({steps} steps, by {d})");
+                    assert!(presses <= 200, "{steps} steps, by {d}: too many presses");
+                }
+            }
         }
     }
 
@@ -374,18 +523,22 @@ mod tests {
     /// what was written last, and the device's echo of it asks nothing more.
     #[test]
     fn the_pc_sets_the_level_itself() {
-        let mut w = World::new(5, 40);
-        w.run(100);
-        for level in [41, 71] {
-            let before = w.messages.len();
-            let act = w.pc.set_here(level, false, w.now());
-            w.act(act);
-            w.device = (level, false);
-            w.device_events.push((w.ms + 2, (level, false)));
-            w.run(w.ms + 400);
-            assert_eq!(w.headset.now().level, quest_step(level));
-            assert_eq!(w.device.0, quest_step(level), "the device on the step");
-            assert_eq!(w.messages.len() - before, 2, "one request, one answer");
+        for steps in STEPS {
+            let mut w = World::new(5, 40, steps);
+            w.run(100);
+            for level in [41, 71] {
+                let before = w.messages.len();
+                let from = w.headset.now().level;
+                let act = w.pc.set_here(level, false, w.now());
+                w.act(act);
+                w.device = (level, false);
+                w.device_events.push((w.ms + 2, (level, false)));
+                w.run(w.ms + 400);
+                let at = to(from, level, steps);
+                assert_eq!(w.headset.now().level, at);
+                assert_eq!(w.device.0, at, "the device on the step");
+                assert_eq!(w.messages.len() - before, 2, "one request, one answer");
+            }
         }
     }
 
@@ -455,7 +608,7 @@ mod tests {
     /// The slider and the buttons at the same moment: the headset's level wins.
     #[test]
     fn at_the_same_time_the_headset_wins() {
-        let mut w = World::new(30, 40);
+        let mut w = World::new(30, 40, 15);
         w.run(200);
         w.slide(90);
         w.run(205);
@@ -469,13 +622,87 @@ mod tests {
     /// request is taken.
     #[test]
     fn a_request_after_a_seen_change_is_taken() {
-        let mut w = World::new(5, 40);
-        w.run(100);
-        w.buttons(60);
-        w.run(300);
-        w.slide(20);
-        w.run(600);
-        assert_eq!(w.headset.now().level, quest_step(20));
-        assert_eq!(w.device.0, quest_step(20));
+        for steps in STEPS {
+            let mut w = World::new(5, 40, steps);
+            w.run(100);
+            w.buttons(60);
+            w.run(300);
+            w.slide(20);
+            w.run(600);
+            assert_eq!(w.headset.now().level, to(60, 20, steps));
+            assert_eq!(w.device.0, to(60, 20, steps));
+        }
+    }
+
+    /// Percent and steps: each step's level comes back as that step, for any number
+    /// of steps the system may have up to 100 (beyond, two steps may share a percent).
+    #[test]
+    fn steps_and_percent() {
+        for steps in 1..=100u8 {
+            for index in 0..=steps {
+                assert_eq!(index_of(level_of(index, steps), steps), index, "{steps}");
+            }
+        }
+        assert_eq!(level_of(7, 15), 47);
+        assert_eq!(level_of(15, 15), 100);
+        assert_eq!(index_of(46, 15), 7);
+        assert_eq!(step(45, 15), 47);
+        assert_eq!(step(42, 15), 40);
+        assert_eq!(level_of(20, 15), 100, "no step beyond the top");
+        assert_eq!(level_of(3, 0), 100, "one step at least");
+    }
+
+    /// A request goes the way it asks: higher to a step at or above it and above
+    /// where it came from, lower to one at or below it and below; the same, nowhere.
+    #[test]
+    fn a_request_goes_the_way_it_asks() {
+        assert_eq!(toward(40, 41, 15), Some(47));
+        assert_eq!(toward(47, 46, 15), Some(40));
+        assert_eq!(toward(40, 40, 15), None);
+        assert_eq!(toward(0, 1, 15), Some(7));
+        assert_eq!(toward(100, 99, 15), Some(93));
+        assert_eq!(toward(100, 100, 15), None);
+        assert_eq!(toward(93, 100, 15), Some(100));
+        for steps in [1, 2, 7, 15, 16, 30, 100, 150, 255] {
+            for index in 0..=steps {
+                let from = level_of(index, steps);
+                for asked in 0..=100u8 {
+                    let Some(to) = toward(from, asked, steps) else {
+                        assert_eq!(asked, from);
+                        continue;
+                    };
+                    let case = format!("{steps} steps, {from} asked {asked}: {to}");
+                    assert_eq!(step(to, steps), to, "on a step ({case})");
+                    if asked > from {
+                        assert!(to >= asked && to > from, "up ({case})");
+                    } else {
+                        assert!(to <= asked && to < from, "down ({case})");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Requests within [`ONE_MOVE`] of each other go on from what the last asked for,
+    /// while the headset stands where it put it; later ones, or after a change of the
+    /// headset's own, from where the headset stands.
+    #[test]
+    fn requests_of_one_move_go_on_from_the_last() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut s = Steps::new(15);
+        assert_eq!(s.take(40, 42, at(0)), 47, "up from 40");
+        // Back below what it asked before: down.
+        assert_eq!(s.take(47, 41, at(50)), 40, "down from 42 asked before");
+        let mut s = Steps::new(15);
+        assert_eq!(s.take(40, 42, at(0)), 47);
+        // Still moving up, below the step it went to: not back down.
+        assert_eq!(s.take(47, 44, at(50)), 47, "on up from 42");
+        assert_eq!(s.take(47, 46, at(100)), 47, "on up from 44");
+        assert_eq!(s.take(47, 48, at(150)), 53, "on up from 46");
+        // At rest, the slider stands at 53 now: down from there.
+        assert_eq!(s.take(53, 52, at(400)), 47, "down from where it stands");
+        // A change of the headset's own between: from where it stands.
+        assert_eq!(s.take(60, 59, at(450)), 53, "down from its own level");
     }
 }

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use prostir_proto::ClientMsg;
 use prostir_proto::request::{Outcome, Request};
 use prostir_proto::state::{UpKind, UpState, permission};
-use prostir_testkit::{FIRST_VOLUME, FakeHeadset, View, quest_step};
+use prostir_testkit::{FIRST_VOLUME, FakeHeadset, VOLUME_STEPS, View, stepped};
 
 use crate::pc::{Options, Pc, TestDir};
 use crate::{SOON, session};
@@ -67,10 +67,11 @@ fn one_volume_for_the_slider_and_the_buttons() {
         "nothing asked for the headset's own changes"
     );
 
-    // The slider.
+    // The slider: down from the buttons' 73, to the step at or below it.
     pc.desktop("volume 21");
-    wait_written(&pc, &mut headset, quest_step(21));
-    assert_eq!(headset.volume(), Some(quest_step(21)));
+    let at = stepped(73, 21, VOLUME_STEPS);
+    wait_written(&pc, &mut headset, at);
+    assert_eq!(headset.volume(), Some(at));
     assert_eq!(headset.view().volume_asks.len(), 1);
 
     // Dragged from 0 to 100 in a second: no level written while it moves, once when
@@ -109,6 +110,41 @@ fn one_volume_for_the_slider_and_the_buttons() {
     headset.take_for(Duration::from_secs(2)).unwrap();
     assert_eq!(headset.view().volume_asks.len(), asks);
     assert_eq!(written(&pc).len(), before + during.len());
+}
+
+/// The slider moved by 1 % at a time, as the desktop's volume keys set to 1 % move it,
+/// on a headset of the first headset's steps and on one of 100: each move that asks
+/// the headset (the first from a level the PC wrote is within its echo) takes it to
+/// its next step that way, so the slider never stays stuck between two steps, and the
+/// device stands on that step after.
+#[test]
+fn the_slider_by_one_percent_goes_step_by_step() {
+    for steps in [VOLUME_STEPS, 100] {
+        let name = format!("volume-steps-{steps}");
+        let (_dir, mut pc, _keys, mut headset) = session(&name, &Options::default());
+        headset.set_volume_steps(steps);
+        wait_first_volume(&mut pc, &mut headset);
+        let mut level = FIRST_VOLUME;
+        for d in [1i16, 1, -1, -1] {
+            let asks = headset.view().volume_asks.len();
+            let mut slider = level;
+            for _ in 0..2 {
+                slider = (i16::from(slider) + d) as u8;
+                pc.desktop(&format!("volume {slider}"));
+                pc.wait_log(SOON, &format!("fake desktop: volume moved to {slider}"));
+            }
+            let at = stepped(level, slider, steps);
+            assert!(
+                i16::from(at) * d > i16::from(level) * d,
+                "{steps} steps: {level} by {d} went to {at}"
+            );
+            wait_written(&pc, &mut headset, at);
+            headset.take_for(Duration::from_millis(300)).unwrap();
+            assert_eq!(headset.volume(), Some(at), "{steps} steps");
+            assert_eq!(headset.view().volume_asks.len(), asks + 1, "{steps} steps");
+            level = at;
+        }
+    }
 }
 
 /// The slider and the buttons at the same moment (the PC's request and the headset's
@@ -385,9 +421,10 @@ fn the_sound_watcher_starts_again_and_catches_up() {
     headset
         .wait(SOON, "the microphone wanted", mic_wanted)
         .unwrap();
-    wait_written(&pc, &mut headset, quest_step(60));
+    let at = stepped(FIRST_VOLUME, 60, VOLUME_STEPS);
+    wait_written(&pc, &mut headset, at);
     assert_eq!(headset.view().volume_asks.len(), asks + 1);
-    assert_eq!(headset.volume(), Some(quest_step(60)));
+    assert_eq!(headset.volume(), Some(at));
     // And it follows on.
     pc.desktop("record off");
     headset
@@ -640,8 +677,9 @@ fn the_pc_follows_pactl() {
 
     // The slider: one request, and the headset's step on the device.
     pactl.slide(21);
-    pc.wait_log(SOON, &set(quest_step(21)));
-    assert_eq!(pactl.read("volume"), quest_step(21).to_string());
+    let down = stepped(FIRST_VOLUME, 21, VOLUME_STEPS);
+    pc.wait_log(SOON, &set(down));
+    assert_eq!(pactl.read("volume"), down.to_string());
     headset.take_for(Duration::from_millis(500)).unwrap();
     assert_eq!(headset.view().volume_asks.len(), asks + 1);
 
@@ -664,10 +702,11 @@ fn the_pc_follows_pactl() {
     pc.wait_log(SOON, "sound: the sound system's events stopped");
     pactl.write("volume", "60");
     pc.wait_log(SOON, "sound: following the sound system again");
-    pc.wait_log(SOON, &set(quest_step(60)));
+    let up = stepped(down, 60, VOLUME_STEPS);
+    pc.wait_log(SOON, &set(up));
     headset.take_for(Duration::from_millis(500)).unwrap();
     assert_eq!(headset.view().volume_asks.len(), asks + 2);
-    assert_eq!(headset.volume(), Some(quest_step(60)));
+    assert_eq!(headset.volume(), Some(up));
     assert_eq!(pactl.subscriptions(), 2);
 }
 

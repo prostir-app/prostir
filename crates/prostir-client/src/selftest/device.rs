@@ -99,6 +99,7 @@ const KEYS: &[&str] = &[
     "streams_max",
     "layers_max",
     "volume_steps",
+    "volume_set",
     "refresh_rates",
     "refresh_hz",
     "period_ms",
@@ -805,6 +806,17 @@ impl Selftest {
             Some(steps) => r.set("volume_steps", steps),
             None => r.set("volume_steps", "none"),
         }
+        // Whether the system takes the app's setting of its volume (one step off and
+        // back): what one volume with the PC needs, first checked on each new headset.
+        let settable = crate::platform::android::volume_settable();
+        r.set(
+            "volume_set",
+            match settable {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "unknown",
+            },
+        );
         self.perf_levels = caps.perf_levels;
     }
 

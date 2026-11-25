@@ -120,6 +120,16 @@ pub fn android_main(app: AndroidApp) {
     }
 }
 
+/// A volume button pressed or let go (the system changes the volume for it).
+fn is_volume_button(event: &android_activity::input::InputEvent<'_>) -> bool {
+    use android_activity::input::{InputEvent, Keycode};
+    matches!(
+        event,
+        InputEvent::KeyEvent(key)
+            if matches!(key.key_code(), Keycode::VolumeUp | Keycode::VolumeDown | Keycode::VolumeMute)
+    )
+}
+
 /// The headset's local time, broken down.
 fn local_time() -> Option<libc::tm> {
     // SAFETY: plain libc time calls on a zeroed `tm`.
@@ -320,6 +330,10 @@ impl Shell<'_> {
                 }
             }
             Effect::Sound(SoundCmd::Place(angle)) => self.gains.place(angle),
+            Effect::Sound(SoundCmd::SetVolume { level, muted, n }) => {
+                self.system.set_volume(level, muted, n);
+            }
+            Effect::System(SystemCmd::WatchVolume(steps)) => self.system.watch_volume(steps),
             Effect::Mic(MicCmd::Allowed(on)) => self.mic.set_allowed(on),
             Effect::Mic(MicCmd::AskAgain) => self.mic.ask_again(),
             Effect::Mic(MicCmd::RefreshPermission) => self.mic.refresh_permission(),
@@ -723,6 +737,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         t.caps(&caps);
         t.set_perf(&session);
     }
+    // The system's volume now, for the first `Open`; the system thread follows it.
+    let volume = caps.volume_steps.and_then(android::volume_now);
     let layers_max = usize::from(caps.layers_max);
 
     let (net_tx, net_rx) = mpsc::channel();
@@ -739,7 +755,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             mic: mic.clone(),
         }),
         // What the first `Open` says, before the core says more.
-        headset_state(&settings, true, battery, mic.permission(), &caps),
+        headset_state(&settings, true, battery, volume, mic.permission(), &caps),
     )?;
 
     // SAFETY: the VM pointer is valid for the life of the process.
@@ -763,6 +779,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             lang,
             system_lang,
             battery,
+            volume,
             caps,
             refresh_hz: meta::display_rate(&session),
             custom_panorama: custom_pano,
@@ -874,9 +891,17 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if input_waiting {
             // Android waits for every key event (e.g. the volume buttons) to be taken
             // and answers "not responding" after 5 s otherwise. Hand them all back to
-            // the system so the volume buttons keep working.
+            // the system so the volume buttons keep working; the volume is read soon
+            // after one.
             if let Ok(mut events) = app.input_events_iter() {
-                while events.next(|_| InputStatus::Unhandled) {}
+                let mut volume_button = false;
+                while events.next(|event| {
+                    volume_button |= is_volume_button(event);
+                    InputStatus::Unhandled
+                }) {}
+                if volume_button {
+                    shell.system.volume_button();
+                }
             }
         }
 
@@ -1047,6 +1072,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 }
                 SystemEvent::Languages(known) => {
                     shell.handle(now, Event::Platform(PlatformEvent::Languages(known)));
+                }
+                SystemEvent::Volume { level, muted, done } => {
+                    let read = PlatformEvent::Volume { level, muted, done };
+                    shell.handle(now, Event::Platform(read));
                 }
             }
         }

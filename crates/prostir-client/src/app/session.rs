@@ -87,6 +87,7 @@ impl Model {
             }
             NetEvent::Part(pc, part) => self.part_came(pc, part),
             NetEvent::Command { pc, req, asked } => self.take_command(pc, req, &asked),
+            NetEvent::VolumeAsk { pc, asked } => self.volume_asked(pc, &asked),
             NetEvent::Notice(_, text) => self.show_toast(text),
             NetEvent::Reply { pc, req, outcome } => {
                 match (self.answered(pc, req, &outcome), outcome) {
@@ -165,6 +166,7 @@ impl Model {
                 self.menu.notes.forget_requests(pc);
                 self.menu.physical_asked.retain(|(k, _)| k.pc != pc);
                 self.sessions.remove(&pc);
+                self.watch_volume();
                 self.videos.pc_ended(pc);
                 // Its streams went with it, also one whose end the network never said.
                 self.effects.extend(
@@ -215,6 +217,7 @@ impl Model {
             self.say_paired(host);
         }
         self.sessions.insert(pc);
+        self.watch_volume();
         self.world.connected(pc);
         if language.is_some() && language != self.settings.pc_language {
             self.settings.pc_language = language;
@@ -238,6 +241,12 @@ impl Model {
         }
         if now.profiles != opened_with.profiles {
             self.tell_profiles();
+        }
+        if let Some(part) = now.volume
+            && now.volume != opened_with.volume
+        {
+            self.effects
+                .push(Effect::Tell(pc, ClientMsg::Volume { part }));
         }
         // Asleep already as the session opened (`Open` says only "not worn").
         if self.presence.state() == presence::State::Asleep {

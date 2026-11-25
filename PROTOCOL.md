@@ -837,9 +837,14 @@ requests.
   `VolumeAsk{level, muted, seen: the last seq from the headset, ask}`; while a slider
   is dragged, at most every 50 ms, with the newest level.
 - **The headset gets `VolumeAsk`**: if `seen` is at least its own last `seq` (the host
-  saw every change of the headset's), it takes the level (to the nearest step it has),
-  keeps `seq`, and answers `Volume{the level it took, seq, ask}`. Otherwise its own
-  change wins, and it answers `Volume{its level, seq, ask}`.
+  saw every change of the headset's), it takes the level, keeps `seq`, and answers
+  at once `Volume{the level it took, seq, ask}`. Otherwise its own change wins, and it
+  answers `Volume{its level, seq, ask}`. A headset whose volume goes in steps takes the
+  next step the way the slider moved (higher: the step at or above `level`, lower: the
+  one at or below), so a slider moved by 1 % is not stuck between two steps; requests
+  of one drag (less than 100 ms apart) go on from the level the last one asked for.
+  The steps are the headset's own: they are not on the wire. Should its system then
+  hold another level (a limit of its own), that is a change of the headset's own.
 - **The host gets `Volume`**: if `ask` is older than its newest request not answered
   yet, it leaves the device alone (the slider is still moving, it does not jump back).
   Otherwise it sets the device to `level`, so the slider rests on the headset's step.

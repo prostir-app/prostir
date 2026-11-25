@@ -367,6 +367,10 @@ impl Caps {
         if !self.image_flip {
             features.push(caps::headset::ROWS_UP);
         }
+        // The system lets the app set its volume: one volume with the PC.
+        if self.offers(Offer::SharedVolume) {
+            features.push(caps::headset::VOLUME);
+        }
         HeadsetCaps {
             features,
             decoders: told()
@@ -606,6 +610,12 @@ mod tests {
         assert_eq!(told.streams_max, 4);
         assert_eq!(told.layers_max, LAYERS_AT_LEAST);
         assert_eq!(told.model, "Test");
+        assert!(
+            told.has(caps::headset::VOLUME),
+            "the volume is the system's"
+        );
+        let fixed = Caps::without_extensions("Test".into(), vec![DECODERS_UNSAID[0]], 4, None);
+        assert!(!fixed.headset_caps().has(caps::headset::VOLUME));
     }
 
     /// The rate by the rule: the highest up to 90 as usual, the lowest from 72 to save

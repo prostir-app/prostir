@@ -996,7 +996,11 @@ fn the_volume_from_the_pc_reaches_the_headset() {
         &(format!(r#"{{"request":"volume","level":{level}}}"#).as_str(),),
     )
     .unwrap();
-    let step = prostir_testkit::quest_step(level);
+    let step = prostir_testkit::stepped(
+        prostir_testkit::FIRST_VOLUME,
+        level,
+        prostir_testkit::VOLUME_STEPS,
+    );
     headset
         .wait(SOON, "the headset asked for the volume", |v| {
             v.volume_asks.len() > asks
@@ -1027,7 +1031,7 @@ fn the_volume_from_the_pc_reaches_the_headset() {
         headset.take_for(Duration::from_millis(50)).unwrap();
     }
     call(&bus, "Call", &(r#"{"request":"volume","level":20}"#,)).unwrap();
-    let step = prostir_testkit::quest_step(20);
+    let step = prostir_testkit::stepped(60, 20, prostir_testkit::VOLUME_STEPS);
     let started = Instant::now();
     while volume(&bus)
         != (prostir_api::Volume {

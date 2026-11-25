@@ -19,7 +19,7 @@ use prostir_proto::state::{
     PixelBudget, Prefs, Presence, ReqId, UpFormat, UpKind, UpState, VolumeAsk, caps, permission,
 };
 use prostir_proto::stats::{Gaps, Pings};
-use prostir_proto::volume::HeadsetVolume;
+use prostir_proto::volume::{self, HeadsetVolume, Steps};
 use prostir_proto::{ClientMsg, Codec, HostMsg};
 
 use crate::nal;
@@ -39,10 +39,16 @@ const GOODBYE_WAIT: Duration = Duration::from_secs(1);
 /// The fake headset's volume when it connects, percent.
 pub const FIRST_VOLUME: u8 = 40;
 
-/// The Quest's volume has 16 steps: a level becomes the nearest one.
-pub fn quest_step(level: u8) -> u8 {
-    let step = (f32::from(level) * 15.0 / 100.0).round();
-    (step * 100.0 / 15.0).round() as u8
+/// The fake headset's volume steps above silence, unless a test sets others
+/// ([`FakeHeadset::set_volume_steps`]): the first headset's, 15 (16 levels with
+/// silence).
+pub const VOLUME_STEPS: u8 = 15;
+
+/// The level a headset at `from` with `steps` above silence goes to when the PC asks
+/// for `asked`, as the fake headset and the headset app take a request at rest (see
+/// [`prostir_proto::volume::toward`]).
+pub fn stepped(from: u8, asked: u8, steps: u8) -> u8 {
+    volume::toward(from, asked, steps).unwrap_or(from)
 }
 
 /// A headset's long-term key, the PCs it trusts, and their find secrets (what its
@@ -509,8 +515,8 @@ struct Shared {
     silent: AtomicBool,
     /// Answer the PC's commands with this failure.
     refuse: Mutex<Option<prostir_proto::state::ErrorCode>>,
-    /// The headset's volume, which the PC asks to change.
-    volume: Mutex<Option<HeadsetVolume>>,
+    /// The headset's volume, which the PC asks to change, and its steps.
+    volume: Mutex<Option<(HeadsetVolume, Steps)>>,
     /// The profiles it has, which the PC renames.
     profiles: Mutex<Option<prostir_proto::state::Profiles>>,
     /// Why reading stopped.
@@ -730,7 +736,10 @@ impl FakeHeadset {
         let shared = Arc::new(Shared::default());
         shared.profiles.lock().unwrap().clone_from(&state.profiles);
         if let Some(v) = state.volume {
-            *shared.volume.lock().unwrap() = Some(HeadsetVolume::new(v.level, v.muted));
+            *shared.volume.lock().unwrap() = Some((
+                HeadsetVolume::new(v.level, v.muted),
+                Steps::new(VOLUME_STEPS),
+            ));
         }
         let incoming = spawn_reader(
             receiver,
@@ -910,7 +919,7 @@ impl FakeHeadset {
             .lock()
             .unwrap()
             .as_mut()
-            .and_then(|v| v.changed_here(level, false));
+            .and_then(|(v, _)| v.changed_here(level, false));
         if let Some(part) = changed {
             self.send(&ClientMsg::Volume { part })?;
         }
@@ -924,7 +933,15 @@ impl FakeHeadset {
             .lock()
             .unwrap()
             .as_ref()
-            .map(|v| v.now().level)
+            .map(|(v, _)| v.now().level)
+    }
+
+    /// The headset's system volume has `steps` above silence from now on
+    /// ([`VOLUME_STEPS`] until then).
+    pub fn set_volume_steps(&self, steps: u8) {
+        if let Some((_, s)) = self.shared.volume.lock().unwrap().as_mut() {
+            *s = Steps::new(steps);
+        }
     }
 
     /// Streams `slices` of 10 ms of silence as the microphone: its start, the slices,
@@ -1165,15 +1182,13 @@ fn spawn_reader(
                     HostMsg::Pong { seq } => {
                         round_trip = shared.pings.lock().unwrap().pong(*seq, at);
                     }
-                    // Takes the PC's level, as the Quest does (to its nearest step), unless
-                    // its own change crossed it.
+                    // Takes the PC's level as the headset app does (to its next step
+                    // the way the slider moved), unless its own change crossed it.
                     HostMsg::VolumeAsk { asked } => {
-                        let answer = shared
-                            .volume
-                            .lock()
-                            .unwrap()
-                            .as_mut()
-                            .map(|v| v.asked(asked, |level, muted| (quest_step(level), muted)));
+                        let answer = shared.volume.lock().unwrap().as_mut().map(|(v, s)| {
+                            let level = v.now().level;
+                            v.asked(asked, |to, muted| (s.take(level, to, at), muted))
+                        });
                         if let Some(part) = answer {
                             let _ = send(&mut **writer.lock().unwrap(), ClientMsg::Volume { part });
                         }

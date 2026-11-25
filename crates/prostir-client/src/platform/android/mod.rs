@@ -313,20 +313,148 @@ pub fn intent_extra(app: &AndroidApp, key: &str) -> Option<String> {
     .flatten()
 }
 
+/// The system's `AudioManager`, or a null object when it has none.
+fn audio_manager<'a>(env: &mut Env<'a>, context: &JObject<'_>) -> jni::errors::Result<JObject<'a>> {
+    let name = env.new_string("audio")?;
+    env.call_method(
+        context,
+        jni_str!("getSystemService"),
+        jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+        &[JValue::Object(&name)],
+    )?
+    .l()
+}
+
+/// The step the media volume is at now, and whether it is muted.
+fn media_volume(env: &mut Env<'_>, manager: &JObject<'_>) -> jni::errors::Result<(i32, bool)> {
+    let index = env
+        .call_method(
+            manager,
+            jni_str!("getStreamVolume"),
+            jni_sig!("(I)I"),
+            &[JValue::Int(STREAM_MUSIC)],
+        )?
+        .i()?;
+    let muted = env
+        .call_method(
+            manager,
+            jni_str!("isStreamMute"),
+            jni_sig!("(I)Z"),
+            &[JValue::Int(STREAM_MUSIC)],
+        )?
+        .z()?;
+    Ok((index, muted))
+}
+
+/// Puts the media volume at step `index`, with no flags: the system shows nothing.
+fn set_media_index(
+    env: &mut Env<'_>,
+    manager: &JObject<'_>,
+    index: i32,
+) -> jni::errors::Result<()> {
+    env.call_method(
+        manager,
+        jni_str!("setStreamVolume"),
+        jni_sig!("(III)V"),
+        &[
+            JValue::Int(STREAM_MUSIC),
+            JValue::Int(index),
+            JValue::Int(0),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Mutes the media volume or unmutes it (`adjustStreamVolume` with `ADJUST_MUTE` or
+/// `ADJUST_UNMUTE`), with no flags.
+fn mute_media(env: &mut Env<'_>, manager: &JObject<'_>, muted: bool) -> jni::errors::Result<()> {
+    /// `AudioManager.ADJUST_MUTE` and `ADJUST_UNMUTE`.
+    const ADJUST_MUTE: i32 = -100;
+    const ADJUST_UNMUTE: i32 = 100;
+    let direction = if muted { ADJUST_MUTE } else { ADJUST_UNMUTE };
+    env.call_method(
+        manager,
+        jni_str!("adjustStreamVolume"),
+        jni_sig!("(III)V"),
+        &[
+            JValue::Int(STREAM_MUSIC),
+            JValue::Int(direction),
+            JValue::Int(0),
+        ],
+    )?;
+    Ok(())
+}
+
+/// The step `index` in percent of `steps`, and muted, as read.
+fn in_percent((index, muted): (i32, bool), steps: u8) -> (u8, bool) {
+    let index = u8::try_from(index.max(0)).unwrap_or(u8::MAX);
+    (prostir_proto::volume::level_of(index, steps), muted)
+}
+
+/// The media volume now: percent of its `steps` above silence, and whether it is
+/// muted. `None` when the system could not be asked.
+pub fn volume_now(steps: u8) -> Option<(u8, bool)> {
+    with_app_context(|env, context| {
+        let manager = audio_manager(env, context)?;
+        if manager.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(in_percent(media_volume(env, &manager)?, steps)))
+    })
+    .flatten()
+}
+
+/// Puts the media volume at `level` percent of its `steps` above silence, muted or
+/// not, without the system's own display of it; what it is after, as
+/// [`volume_now`] says it (the system may keep to a limit of its own). The level first,
+/// then the mute: setting a step may unmute.
+pub fn set_volume(steps: u8, level: u8, muted: bool) -> Option<(u8, bool)> {
+    with_app_context(|env, context| {
+        let manager = audio_manager(env, context)?;
+        if manager.is_null() {
+            return Ok(None);
+        }
+        let index = i32::from(prostir_proto::volume::index_of(level, steps));
+        let (_, was_muted) = media_volume(env, &manager)?;
+        if !muted && was_muted {
+            mute_media(env, &manager, false)?;
+        }
+        set_media_index(env, &manager, index)?;
+        if muted {
+            mute_media(env, &manager, true)?;
+        }
+        Ok(Some(in_percent(media_volume(env, &manager)?, steps)))
+    })
+    .flatten()
+}
+
+/// Whether the system takes the app's setting of its media volume: one step off and
+/// back, without the system's display of it (the selftest asks; the app never does
+/// this). `None` when the system could not be asked.
+pub fn volume_settable() -> Option<bool> {
+    with_app_context(|env, context| {
+        let manager = audio_manager(env, context)?;
+        if manager.is_null() {
+            return Ok(None);
+        }
+        let (index, _) = media_volume(env, &manager)?;
+        let other = if index > 0 { index - 1 } else { index + 1 };
+        set_media_index(env, &manager, other)?;
+        let (became, _) = media_volume(env, &manager)?;
+        set_media_index(env, &manager, index)?;
+        let (back, _) = media_volume(env, &manager)?;
+        log::info!("volume: at step {index}, set to {other}: {became}, back: {back}");
+        Ok(Some(became == other && back == index))
+    })
+    .flatten()
+}
+
 /// The system's volume for media (`AudioManager.STREAM_MUSIC`): its steps above
 /// silence (`getStreamMaxVolume`) and whether it is fixed (`isVolumeFixed`: then the
 /// app cannot set it). `None` when the system could not be asked.
 pub fn volume() -> Option<(i32, bool)> {
     with_app_context(|env, context| {
-        let name = env.new_string("audio")?;
-        let manager = env
-            .call_method(
-                context,
-                jni_str!("getSystemService"),
-                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
-                &[JValue::Object(&name)],
-            )?
-            .l()?;
+        let manager = audio_manager(env, context)?;
         if manager.is_null() {
             return Ok(None);
         }

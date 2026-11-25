@@ -137,6 +137,7 @@ impl Sim {
             lang: LangState::new(crate::lang::builtin("en"), Vec::new()),
             system_lang: None,
             battery: Some((80, false)),
+            volume: Some((40, false)),
             caps,
             refresh_hz: Some(90.0),
             custom_panorama: false,
@@ -1802,4 +1803,183 @@ fn a_keyboard_window_that_fails_is_said_and_kept() {
     assert!(!view.keyboard_available, "not offered now");
     assert!(sim.m.settings().keyboard_window, "kept as chosen");
     assert_eq!(sim.saves(), [], "nothing changed to save");
+}
+
+/// What the headset told the PC of its volume among `fx`.
+fn volumes(fx: &[Effect]) -> Vec<state::Volume> {
+    sent(fx)
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Volume { part } => Some(*part),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What the system was asked to set its volume to among `fx`.
+fn volume_sets(fx: &[Effect]) -> Vec<(u8, bool, u32)> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Sound(SoundCmd::SetVolume { level, muted, n }) => Some((*level, *muted, *n)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn volume_ask(level: u8, seen: u32, ask: u32) -> NetEvent {
+    NetEvent::VolumeAsk {
+        pc: PC,
+        asked: state::VolumeAsk {
+            level,
+            muted: false,
+            seen,
+            ask,
+        },
+    }
+}
+
+fn volume_read(level: u8, done: u32) -> Event {
+    Event::Platform(PlatformEvent::Volume {
+        level,
+        muted: false,
+        done,
+    })
+}
+
+fn heard(level: u8, seq: u32, ask: u32) -> state::Volume {
+    state::Volume {
+        level,
+        muted: false,
+        seq,
+        ask,
+    }
+}
+
+/// One volume with the PC on a headset whose system volume goes in 15 steps: `Open`
+/// names it and carries the level; the PC's request goes to the next step the way it
+/// moved, set at once and answered at once; the system's reading of it says nothing
+/// more, nor one from before the newest set; a reading that differs is a change of the
+/// headset's own; a request that did not see it is not taken; the next `Open` carries
+/// the level; the system's volume is followed only while the session is open.
+#[test]
+fn one_volume_with_the_pc() {
+    let mut sim = Sim::of(Caps {
+        volume_steps: Some(15),
+        ..test_caps()
+    });
+    let open = sim.m.headset_state();
+    assert!(open.caps.unwrap().has(caps::headset::VOLUME));
+    assert_eq!(open.volume, Some(heard(40, 0, 0)));
+    sim.connect(&[1]);
+    assert!(
+        sim.m
+            .volume
+            .as_ref()
+            .is_some_and(volume::SharedVolume::watched)
+    );
+
+    // Up by 1 %: the step above, at once.
+    sim.net(volume_ask(41, 0, 1));
+    let fx = sim.take();
+    assert_eq!(volume_sets(&fx), [(47, false, 1)]);
+    assert_eq!(volumes(&fx), [heard(47, 0, 1)]);
+    sim.handle(volume_read(47, 1));
+    assert!(sim.take().is_empty(), "the set read back");
+
+    // Later, down: the step below. A reading from before that set is old.
+    sim.after(Duration::from_millis(300));
+    sim.net(volume_ask(30, 0, 2));
+    let fx = sim.take();
+    assert_eq!(volume_sets(&fx), [(27, false, 2)]);
+    assert_eq!(volumes(&fx), [heard(27, 0, 2)]);
+    sim.handle(volume_read(47, 1));
+    sim.handle(volume_read(27, 2));
+    assert!(
+        volumes(&sim.take()).is_empty(),
+        "old, then the set read back"
+    );
+
+    // The same level again: nothing to set.
+    sim.after(Duration::from_millis(300));
+    sim.net(volume_ask(27, 0, 3));
+    let fx = sim.take();
+    assert!(volume_sets(&fx).is_empty());
+    assert_eq!(volumes(&fx), [heard(27, 0, 3)]);
+
+    // The buttons: a change of the headset's own, told as such.
+    sim.handle(volume_read(60, 2));
+    assert_eq!(volumes(&sim.take()), [heard(60, 1, 0)]);
+    // A request that had not seen it stands back; the answer says the level.
+    sim.net(volume_ask(20, 0, 4));
+    let fx = sim.take();
+    assert!(volume_sets(&fx).is_empty());
+    assert_eq!(volumes(&fx), [heard(60, 1, 4)]);
+
+    // The system took a set otherwise (a limit of its own): its level stands.
+    sim.after(Duration::from_millis(300));
+    sim.net(volume_ask(80, 1, 5));
+    let fx = sim.take();
+    assert_eq!(volume_sets(&fx), [(80, false, 3)]);
+    assert_eq!(volumes(&fx), [heard(80, 1, 5)]);
+    sim.handle(volume_read(73, 3));
+    assert_eq!(volumes(&sim.take()), [heard(73, 2, 0)]);
+
+    // The next `Open` says it, once, at the end of the pass.
+    sim.m.end_pass();
+    let told: Vec<_> = sim
+        .take()
+        .into_iter()
+        .filter_map(|e| match e {
+            Effect::Net(NetCmd::SetHeadset(state)) => state.volume,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(told, [heard(73, 2, 0)]);
+    sim.m.end_pass();
+    assert!(sim.take().is_empty(), "told once");
+
+    // The session ends: no longer followed.
+    sim.net(NetEvent::Ended {
+        step: StepId(1),
+        pc: Some(PC),
+        why: Disconnect::Closed,
+        ended: Ended::default(),
+        lasted: Duration::from_secs(60),
+    });
+    assert!(
+        sim.take()
+            .contains(&Effect::System(SystemCmd::WatchVolume(None)))
+    );
+}
+
+/// A headset whose system volume the app cannot set: `Open` neither names the shared
+/// volume nor carries a level, and the PC's request (were it to come) does nothing.
+#[test]
+fn a_fixed_volume_is_not_shared() {
+    let mut sim = Sim::of(test_caps());
+    let open = sim.m.headset_state();
+    assert!(!open.caps.unwrap().has(caps::headset::VOLUME));
+    assert_eq!(open.volume, None);
+    sim.connect(&[1]);
+    sim.net(volume_ask(41, 0, 1));
+    assert!(sim.take().is_empty());
+    // One the app could set but could not read at the start: neither.
+    let steps = Caps {
+        volume_steps: Some(15),
+        ..test_caps()
+    };
+    let open = headset_state(&Settings::default(), true, None, None, 0, &steps);
+    assert!(!open.caps.unwrap().has(caps::headset::VOLUME));
+    assert_eq!(open.volume, None);
+    let open = headset_state(&Settings::default(), true, None, Some((7, true)), 0, &steps);
+    assert!(open.caps.unwrap().has(caps::headset::VOLUME));
+    assert_eq!(
+        open.volume,
+        Some(state::Volume {
+            level: 7,
+            muted: true,
+            seq: 0,
+            ask: 0
+        })
+    );
 }
