@@ -1417,9 +1417,14 @@ While the pointer is apart, the host sends:
   often as the display's frames, 60 to 120 times a second): `u`, `v` across the
   display's picture as streamed, the point of the look's `hot_x`, `hot_y` there.
   `display` none when it is on no display streamed to this headset (a display of
-  the PC not shown, another output); `shape` 0 when the PC hides it (a video full
-  screen, a game, touch). Right after `Snapshot` (or once the pointer goes apart) the
-  host sends the look and place it has now.
+  the PC not shown, another output, a window panel: a panel's frames keep the
+  pointer); `shape` 0 when the PC hides it (a video full screen, a game, touch).
+  Right after `Snapshot` (or once the pointer goes apart) the host sends the look and
+  place it has now. A headset not worn is sent nothing of the pointer, and the place
+  it has now once it is worn again.
+- A look in the pixels of the picture as streamed: over a picture the host scales
+  down to stream, a look scaled down with it (a look of its own, with its own
+  number).
 
 The headset draws the look over the display at that point, the size it has in the
 picture (`w` pixels of the picture's width), and hides it with the display. It can

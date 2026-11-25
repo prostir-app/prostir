@@ -249,6 +249,9 @@ struct StreamSlot {
     name: String,
     /// Its output on the desktop, where the pointer is said to be.
     key: Option<OutputKey>,
+    /// Its frames keep the pointer (a window panel): it counts as on none of the
+    /// displays there.
+    keeps_pointer: bool,
     size: Option<(u32, u32)>,
     /// What the encoder makes, announced with the stream.
     codec: Codec,
@@ -438,6 +441,9 @@ struct RouterInner {
     /// The pointer goes to the headsets apart from the pictures: every one of them
     /// draws it (see [`cursor::apart_for`]).
     cursor_apart: bool,
+    /// The desktop tells the pointer apart from the pictures (PC feature 16): without
+    /// it, nothing of the pointer goes to any headset.
+    cursor_source: bool,
 }
 
 impl RouterInner {
@@ -454,15 +460,20 @@ impl RouterInner {
             .collect()
     }
 
-    /// Whether the pointer goes apart from the pictures for the headsets there are.
+    /// Whether the pointer goes apart from the pictures for the headsets there are:
+    /// where the desktop tells it, and every one of them draws it.
     fn cursor_apart_now(&self) -> bool {
-        cursor::apart_for(self.receivers.values().map(|r| &r.headset))
+        self.cursor_source && cursor::apart_for(self.receivers.values().map(|r| &r.headset))
     }
 
     /// The headsets came or went: the pointer goes apart from the pictures, or back
-    /// into them. Back into them, each headset that drew it hears that it is nowhere
-    /// (the pictures have it now).
+    /// into them. Back into them, each headset told where it was hears that it is
+    /// nowhere (the pictures have it now). Without a headset nothing changes: one
+    /// that loses its connection for a moment and comes back starts nothing over.
     fn cursor_follow_headsets(&mut self) {
+        if self.receivers.is_empty() {
+            return;
+        }
         let apart = self.cursor_apart_now();
         if apart == self.cursor_apart {
             return;
@@ -478,15 +489,15 @@ impl RouterInner {
         );
         if !apart {
             for r in self.receivers.values_mut() {
-                if r.headset.has(state::caps::headset::CURSOR) && r.cursor.news(At::NOWHERE) {
+                if r.cursor.told() && r.cursor.news(At::NOWHERE) {
                     r.tx.cursor(At::NOWHERE.msg());
                 }
             }
         }
     }
 
-    /// Tells the headsets where the pointer is now and how it looks, where that is
-    /// news to them (`only`: to that one). Nothing while it is in the pictures.
+    /// Tells the headsets on the head where the pointer is now and how it looks, where
+    /// that is news to them (`only`: to that one). Nothing while it is in the pictures.
     fn tell_cursor(&mut self, only: Option<SessionId>) {
         if !self.cursor_apart {
             return;
@@ -497,21 +508,23 @@ impl RouterInner {
             pointer,
             ..
         } = self;
-        let shape = pointer.shape();
-        // The stream of the output it is on, and its point across that picture.
-        let on = pointer.at().and_then(|(key, x, y)| {
+        // The stream of the output it is on (not a window panel, whose frames keep the
+        // pointer), its point across that picture, and the picture's size as streamed.
+        let on = pointer.at().and_then(|(key, x, y, native)| {
             streams.iter().find_map(|(id, s)| {
-                (s.key.as_ref() == Some(key))
-                    .then(|| Some((*id, cursor::uv_of(x, y, s.size?))))
+                (s.key.as_ref() == Some(key) && !s.keeps_pointer)
+                    .then(|| Some((*id, cursor::uv_of(x, y, native), s.size?)))
                     .flatten()
             })
         });
+        let look = pointer.look(on.map(|(_, _, size)| size));
+        let shape = look.map_or(0, |(id, _)| id);
         for (session, r) in receivers.iter_mut() {
-            if only.is_some_and(|o| o != *session) {
+            if only.is_some_and(|o| o != *session) || !r.worn {
                 continue;
             }
             let at = match on {
-                Some((id, (u, v)))
+                Some((id, (u, v), _))
                     if r.published.contains(&id)
                         && r.streams.get(&id).is_some_and(|d| !d.too_big) =>
                 {
@@ -531,7 +544,7 @@ impl RouterInner {
                 continue;
             }
             if r.cursor.needs(shape)
-                && let Some(msg) = pointer.shape_msg()
+                && let Some((_, msg)) = look
             {
                 r.tx.control(msg.clone());
             }
@@ -589,6 +602,7 @@ impl Router {
                 quiet: Quiet::default(),
                 pointer: Pointer::default(),
                 cursor_apart: false,
+                cursor_source: false,
             }),
             broken: Mutex::new(Vec::new()),
             unopened: Mutex::new(Vec::new()),
@@ -676,7 +690,8 @@ impl Router {
             return Vec::new();
         }
         let now = Instant::now();
-        r.streams
+        let fresh = r
+            .streams
             .iter_mut()
             .filter(|(_, d)| !d.too_big)
             .filter_map(|(id, d)| {
@@ -684,7 +699,10 @@ impl Router {
                 d.fresh_since = Some(now);
                 std::mem::take(&mut d.held).then_some(*id)
             })
-            .collect()
+            .collect();
+        // Where the pointer is now: nothing of it went while it was off the head.
+        inner.tell_cursor(Some(session));
+        fresh
     }
 
     /// Whether stream `id` is still larger than every headset decodes (a stream found
@@ -840,11 +858,22 @@ impl Router {
         self.inner.lock().unwrap().pointer.clear();
     }
 
-    /// Stream `id` is of output `key`, where the desktop says the pointer is.
-    pub fn set_stream_key(&self, id: ScreenId, key: OutputKey) {
+    /// Whether the desktop tells the pointer apart from the pictures (PC feature 16):
+    /// only then does it go apart, with the headsets that all draw it.
+    pub fn set_cursor_source(&self, tells: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.cursor_source = tells;
+        inner.cursor_follow_headsets();
+    }
+
+    /// Stream `id` is of output `key`, where the desktop says the pointer is; one
+    /// whose frames keep the pointer (`keeps_pointer`: a window panel) counts as on
+    /// none of the displays.
+    pub fn set_stream_output(&self, id: ScreenId, key: OutputKey, keeps_pointer: bool) {
         let mut inner = self.inner.lock().unwrap();
         if let Some(slot) = inner.streams.get_mut(&id) {
             slot.key = Some(key);
+            slot.keeps_pointer = keeps_pointer;
             inner.tell_cursor(None);
         }
     }
@@ -1009,6 +1038,7 @@ impl Router {
         let slot = StreamSlot {
             name,
             key: None,
+            keeps_pointer: false,
             size: None,
             codec,
             keyframe_asked: None,

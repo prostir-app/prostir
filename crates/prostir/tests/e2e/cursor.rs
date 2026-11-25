@@ -86,8 +86,8 @@ fn a_headset_that_draws_the_pointer_gets_its_look_and_place() {
     let one = display_of_width(headset.view(), 640);
     let two = display_of_width(headset.view(), 480);
 
-    pc.desktop("cursor-shape 32 32 4 2 200");
-    pc.desktop("cursor-move Fake-1 100 50");
+    // In one order: a second one written before the first is read takes its place.
+    pc.desktop("cursor-shape 32 32 4 2 200\ncursor-move Fake-1 100 50");
     headset
         .wait(SOON, "the pointer's look", |v| !v.cursor_shapes.is_empty())
         .unwrap();
@@ -120,8 +120,7 @@ fn a_headset_that_draws_the_pointer_gets_its_look_and_place() {
     wait_at(&mut headset, off, "off the monitors");
     pc.desktop("cursor-hide");
     wait_at(&mut headset, CursorAt { shape: 0, ..off }, "hidden");
-    pc.desktop("cursor-shape 32 32 4 2 200");
-    pc.desktop("cursor-move Fake-1 100 50");
+    pc.desktop("cursor-shape 32 32 4 2 200\ncursor-move Fake-1 100 50");
     wait_at(&mut headset, on_one, "shown again");
     assert_eq!(headset.view().cursor_shapes.len(), 1, "the look came once");
     // Another look.
@@ -191,8 +190,7 @@ fn a_headset_that_draws_the_pointer_gets_its_look_and_place() {
 fn a_headset_that_does_not_draw_the_pointer_gets_none() {
     let (_dir, pc, mut first, _second) = start("cursor-old");
     let mut headset = showing(&pc, &mut first, &FakeHeadset::state());
-    pc.desktop("cursor-shape 32 32 4 2 200");
-    pc.desktop("cursor-move Fake-1 100 50");
+    pc.desktop("cursor-shape 32 32 4 2 200\ncursor-move Fake-1 100 50");
     headset.take_for(Duration::from_secs(1)).unwrap();
     let view = headset.view();
     assert!(view.cursor_at.is_empty() && view.cursor_shapes.is_empty());

@@ -85,7 +85,7 @@ static LAYOUT: Mutex<Option<Layout>> = Mutex::new(None);
 struct FakePointer {
     image: Option<CursorImage>,
     hidden: bool,
-    at: Option<(OutputKey, i32, i32)>,
+    at: Option<(OutputKey, i32, i32, (u32, u32))>,
     sink: Option<CursorSink>,
 }
 
@@ -99,7 +99,7 @@ impl FakePointer {
         let at = self
             .at
             .clone()
-            .map(|(output, x, y)| CursorEvent::Moved { output, x, y });
+            .map(|(output, x, y, size)| CursorEvent::Moved { output, x, y, size });
         std::iter::once(look).chain(at).collect()
     }
 }
@@ -117,7 +117,9 @@ fn pointer_event(event: CursorEvent) -> Result<()> {
             p.image = Some(image.clone());
             p.hidden = false;
         }
-        CursorEvent::Moved { output, x, y } => p.at = Some((output.clone(), *x, *y)),
+        CursorEvent::Moved { output, x, y, size } => {
+            p.at = Some((output.clone(), *x, *y, *size));
+        }
         CursorEvent::Hidden => p.hidden = true,
     }
     if let Some(sink) = &p.sink {
@@ -688,6 +690,8 @@ fn command(line: &str) -> Result<()> {
             output: OutputKey::new(name),
             x: x.parse()?,
             y: y.parse()?,
+            // The output's picture as it makes it; one it does not have, as a usual screen.
+            size: Screen::find(name).map_or((1920, 1080), |s| s.size()),
         });
     }
     if let ["cursor-hide"] = words[..] {

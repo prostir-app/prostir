@@ -209,7 +209,15 @@ impl Worker {
             self.shared
                 .router
                 .add_stream(id, choice.codec, name.to_owned());
-            self.shared.router.set_stream_key(id, output.key().clone());
+            // A window panel keeps the pointer in its frames (see `CursorSource`).
+            let panel = self.wanted.as_ref().is_some_and(|w| {
+                w.screens
+                    .iter()
+                    .any(|(i, s)| *i == id && matches!(s.what, What::Panel { .. }))
+            });
+            self.shared
+                .router
+                .set_stream_output(id, output.key().clone(), panel);
             let router = self.shared.router.clone();
             let (input, gpu) = (source.input.clone(), self.gpu.clone());
             // Left behind after its time, a late encoder sends nothing; nor does one

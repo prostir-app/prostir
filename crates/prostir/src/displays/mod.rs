@@ -358,6 +358,7 @@ impl Displays {
         self.cfg.backend = c.backend;
         self.cfg.codec = c.codec;
         self.choices = c.choices;
+        self.router.set_cursor_source(c.cursor);
         self.facts = Some(Facts {
             caps: c.caps,
             scales: c.scales,

@@ -189,10 +189,14 @@ pub trait Desktop: Send {
 /// its streams' metadata, wlroots desktops in a pointer session of
 /// `ext-image-copy-capture`, Windows in Desktop Duplication.
 pub trait CursorSource: Send {
-    /// With a sink: from now on the pointer is left out of the frames of every output,
-    /// and `sink` hears how it looks and where it is, at once (as they are now) and on
-    /// every change, from any thread. Without: it is drawn into the frames again, and
-    /// nothing more is told.
+    /// With a sink: from now on the pointer is left out of the frames of every output
+    /// but window panels, and `sink` hears how it looks and where it is, at once (as
+    /// they are now) and on every change, from any thread. Without: it is drawn into
+    /// the frames again, and nothing more is told.
+    ///
+    /// A window panel keeps the pointer in its frames all the same: it shows one
+    /// window, which the person works in at the PC as much as in the headset, and the
+    /// core takes the pointer on a panel for on none of the displays.
     fn set_apart(&mut self, sink: Option<CursorSink>);
 
     /// Whether a change of [`CursorSource::set_apart`] reaches only streams started
@@ -208,15 +212,22 @@ pub trait CursorSource: Send {
 pub enum CursorEvent {
     /// It looks so now, and shows (if it was hidden).
     Shape(CursorImage),
-    /// Its point is at `x`, `y` in the pixels of the picture of `output`, as that is
-    /// streamed (turned as its frames are); outside that picture when it is off it.
-    Moved { output: OutputKey, x: i32, y: i32 },
+    /// Its point is at `x`, `y` in the pixels of the picture of `output` as the
+    /// desktop makes it, `size` of them (turned as its frames are, before any
+    /// scaling down for an encoder); outside that picture when it is off it.
+    Moved {
+        output: OutputKey,
+        x: i32,
+        y: i32,
+        size: (u32, u32),
+    },
     /// It is hidden (a video full screen, a game, touch), until a look comes again.
     Hidden,
 }
 
 /// A look of the pointer: `w`x`h` pixels of 8-bit RGBA in sRGB, not premultiplied, top
-/// row first, pointing at `hot_x`, `hot_y`.
+/// row first, pointing at `hot_x`, `hot_y`. In the pixels of the outputs' pictures as
+/// the desktop makes them (the core scales it with a picture scaled down to stream).
 #[derive(Clone, PartialEq, Eq)]
 pub struct CursorImage {
     pub w: u16,
@@ -899,6 +910,7 @@ mod windows_shape {
                 output: OutputKey::new("DISPLAY1"),
                 x: -3,
                 y: 2000,
+                size: (3840, 2160),
             },
             CursorEvent::Hidden,
         ];
