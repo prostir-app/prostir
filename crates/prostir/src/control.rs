@@ -42,6 +42,7 @@ impl Control {
         headset: &TrayLine,
         others: usize,
         pairing: bool,
+        desktop_unusable: bool,
     ) {
         let status = TrayStatus {
             no_limits: headset.no_limits,
@@ -54,6 +55,7 @@ impl Control {
             encoding: displays.and_then(Displays::encoding_line),
             pairing,
             desktop_stuck: displays.is_some_and(Displays::desk_stuck),
+            desktop_unusable,
         };
         if self.shown.as_ref() != Some(&status) {
             tray::set_status(self.tray.as_ref(), status.clone());

@@ -121,6 +121,7 @@ pc-tray-virtual-monitors = Virtual monitors
 pc-tray-pairing-code = Pairing code
 pc-tray-other-headsets = Other headsets
 pc-tray-the-desktop-does-not-respond = The desktop does not respond
+pc-tray-no-access-to-the-desktop = No access to the desktop: see the settings window
 pc-tray-headset-microphone-no-permission = Headset microphone: no permission
 pc-tray-headset-battery = Headset battery:
 pc-tray-charging = , charging
@@ -138,6 +139,16 @@ pc-tray-quit = Quit
 pc-tray-quality-economy = Economy: 15 Mbit/s
 pc-tray-quality-normal = Normal: 30 Mbit/s
 pc-tray-quality-high = High: 50 Mbit/s
+
+## src/platform/linux/kde/access.rs
+
+pc-kde-needs-wayland = Prostir needs a Plasma Wayland session, and this one runs on X11. Log out and pick "Plasma (Wayland)" on the login screen.
+pc-kde-needs-shortcut-installed = KWin does not give Prostir access to the screen, because no application shortcut names this program. Install Prostir from its package, so that its shortcut exists, and start it again. Or update to Plasma 6.8 or newer, which needs no shortcut.
+# $exe: the path of the program that runs
+pc-kde-needs-shortcut-built = KWin does not give this copy of Prostir access to the screen, because no application shortcut names it. In the source folder, run: scripts/install-kde-shortcut.sh { $exe } and start Prostir again. Plasma 6.8 or newer needs no shortcut.
+# $version: KWin's version, like 6.5.6
+pc-kde-version = (KWin { $version })
+pc-kde-sandboxed = KWin { $version } does not give Prostir access to the screen, because the program runs in a sandbox (Flatpak or Snap). Run Prostir from its package or from a build, outside a sandbox.
 
 ## src/platform/linux/dialogs.rs
 

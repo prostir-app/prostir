@@ -964,6 +964,12 @@ impl Brain {
                 text: crate::session::desktop_not_responding(),
             });
         }
+        if let Some(text) = &self.desk_unusable {
+            problems.push(api::Problem {
+                code: ApiError::Desktop,
+                text: text.clone(),
+            });
+        }
         let codec = |c: Codec| match c {
             Codec::H264 => api::Codec::H264,
             Codec::H265 => api::Codec::H265,

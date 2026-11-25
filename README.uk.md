@@ -724,6 +724,15 @@ x264, тож поставте й gst-plugins-ugly. Див. [NVIDIA і кодув
 майте `fuzzel`, `wofi` чи `rofi`. Або натисніть кнопку під кодом у шоломі, щоб зробити
 навпаки: ПК покаже код у треї та сповіщенні, а ви введете його в шоломі.
 
+**KDE Plasma 6.0 до 6.7: «KWin не дає Prostir доступу до екрана».** До Plasma 6.7 KWin показує
+інтерфейс захоплення екрана лише програмі, яку за справжнім шляхом називає ярлик застосунку
+(файл `.desktop`) з `X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1`. Пакети,
+`install.sh` із архіву й пакет Nix ставлять такий ярлик. Якщо ви запускаєте збірку з теки
+з вихідним кодом, установіть ярлик для неї командою `scripts/install-kde-shortcut.sh` (вона
+приймає шлях до програми, типово `target/release/prostir`; `--remove` прибирає ярлик) і
+запустіть Prostir знову. Plasma 6.8 і новішим ярлик не потрібен. Вікно, трей і шолом
+кажуть про це, коли таке трапляється.
+
 **Hyprland: немає іконки в треї, сповіщень чи автозапуску.** Див. [Hyprland](#hyprland).
 
 **`prostir: command not found` після `install.sh`.** `~/.local/bin` немає у вашому
@@ -778,7 +787,7 @@ crates/prostir-window/   вікно налаштувань на ПК (біблі
 crates/prostir-client/   застосунок для Quest: цикл OpenXR (app.rs), меню (ui.rs), розкладки (layout.rs), …
 crates/prostir-testkit/  фальшивий шолом і фальшивий ПК для тестів і для перевірки програм вручну
 lang/     тексти всіх трьох програм: один файл Fluent на мову (en.ftl, uk.ftl)
-scripts/  build-apk.sh, install.sh, package-release.sh, third-party-licenses.py,
+scripts/  build-apk.sh, install.sh, install-kde-shortcut.sh, package-release.sh, third-party-licenses.py,
           selftest-headset.sh, selftest-clips.sh
 docs/     сайт (prostir.ishawyha.dev) і картинки для цього README
 ```
