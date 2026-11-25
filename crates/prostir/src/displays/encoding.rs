@@ -203,9 +203,20 @@ impl Displays {
     /// one in a codec some headset does not decode (a choice saved with another
     /// headset) starts over in H.264, which every headset decodes. The choice stays
     /// saved, and the streams go back to it once every headset decodes it again.
+    ///
+    /// The rows go bottom first when every one of them asks for that
+    /// (`caps::headset::ROWS_UP`: its compositor shows them the other way round).
     pub fn fit_codec(&mut self, headsets: &[state::HeadsetCaps]) {
         if headsets.is_empty() {
             return;
+        }
+        let rows_up = Self::rows_up_for(headsets);
+        if rows_up != self.cfg.rows_up {
+            info!(
+                "the rows of the pictures go {} first",
+                if rows_up { "bottom" } else { "top" }
+            );
+            self.cfg.rows_up = rows_up;
         }
         // The one chosen where it was put aside for a headset, else what encodes now.
         let base = if self.fitted_down {
@@ -216,6 +227,16 @@ impl Displays {
         if let Err(e) = self.encode_for(base.0, base.1, headsets) {
             warn!("{e:#}");
         }
+    }
+
+    /// Whether the rows go bottom first for the headsets with a session (`headsets`,
+    /// not none): only when every one of them asks for that (`caps::headset::ROWS_UP`;
+    /// one picture goes to all of them).
+    pub fn rows_up_for(headsets: &[state::HeadsetCaps]) -> bool {
+        !headsets.is_empty()
+            && headsets
+                .iter()
+                .all(|h| h.has(state::caps::headset::ROWS_UP))
     }
 
     /// The codec the streams go in when `codec` is chosen and the headsets with a

@@ -44,6 +44,7 @@ use super::{
 use crate::caps::Caps;
 use crate::net::NetEvent;
 use crate::platform::openxr::{self as xrutil, Gfx};
+use crate::video::Fault;
 
 /// How many times `android_main` started in this process (the first is 1).
 static RUNS: AtomicU32 = AtomicU32::new(0);
@@ -92,6 +93,7 @@ const KEYS: &[&str] = &[
     "caps",
     "caps.off",
     "flip",
+    "room",
     "decoders",
     "decoders.pixels",
     "streams_max",
@@ -127,7 +129,9 @@ const KEYS: &[&str] = &[
     "decoder_wakeups_per_s",
     "keyframe_asked_ms",
     "decoder_recovered_ms",
+    "decoder_error_recovered_ms",
     "surface_recreated_ms",
+    "corrupt_frame_recovered_ms",
     "stream_restart_ms",
     "stream_unfreeze_ms",
     "keyframe_asks_ignored",
@@ -195,6 +199,9 @@ pub enum Act {
     AddMonitor(u32, u32),
     /// Remove the monitor with this number on the PC, as the menu does (both presses).
     RemoveMonitor(DisplayId),
+    /// Cause this fault in the decoder of the monitor with this number, on the real
+    /// decoder (`SurfaceVideo::inject`).
+    Inject(DisplayId, Fault),
     /// Done: leave the main loop.
     Finish,
 }
@@ -210,6 +217,12 @@ enum Phase {
     Menu,
     /// A frame its decoder cannot take, then waiting for the picture to come back.
     Broken,
+    /// Its codec fails on purpose (the hook); until its picture comes back.
+    DecoderError,
+    /// Its surface counts as lost (the hook); until a picture in the new one.
+    SurfaceLost,
+    /// A frame spoiled before the codec takes it (the hook); until a picture after it.
+    CorruptFrame,
     /// A stream started over in a new generation.
     Restart,
     /// The stream started over without its keyframe, and the fake PC ignored the
@@ -269,6 +282,11 @@ pub struct Selftest {
     broken: Option<(DisplayId, Gen, u32, Instant)>,
     keyframe_asked_ms: Option<f64>,
     recovered_ms: Option<f64>,
+    /// A fault caused through the hook: its stream and when; the first picture since.
+    fault: Option<(DisplayId, Instant)>,
+    fault_recovered_ms: Option<f64>,
+    surface_ms: Option<f64>,
+    corrupt_ms: Option<f64>,
     restart: Option<DisplayId>,
     restart_ms: Option<f64>,
     /// The stream started over without its keyframe, and when; its first picture
@@ -346,11 +364,11 @@ fn clock_offset_us() -> Option<(i64, u64)> {
     let mut best: Option<(u64, i64)> = None;
     let mut line = String::new();
     for _ in 0..20 {
-        let sent = crate::decoder::monotonic_us();
+        let sent = crate::platform::video::decoder::monotonic_us();
         writer.write_all(b"t\n").ok()?;
         line.clear();
         reader.read_line(&mut line).ok()?;
-        let back = crate::decoder::monotonic_us();
+        let back = crate::platform::video::decoder::monotonic_us();
         let pc_us: i64 = line.trim().parse().ok()?;
         let round = back.saturating_sub(sent);
         let mid = (sent + round / 2) as i64;
@@ -523,6 +541,10 @@ impl Selftest {
             broken: None,
             keyframe_asked_ms: None,
             recovered_ms: None,
+            fault: None,
+            fault_recovered_ms: None,
+            surface_ms: None,
+            corrupt_ms: None,
             restart: None,
             restart_ms: None,
             frozen: None,
@@ -729,9 +751,10 @@ impl Selftest {
         minimal: bool,
         flip: bool,
     ) {
-        // Whether the stream's picture is turned over by the runtime's extension, or
-        // shown as the surface keeps it (rows top down).
-        self.report.set("flip", if flip { "ext" } else { "none" });
+        // Who turns the stream's picture the right way up: the compositor (the
+        // runtime's extension), or the PC, which sends its rows bottom first.
+        self.report.set("flip", if flip { "layer" } else { "pc" });
+        super::set_rows_up(!flip);
         if let Ok(p) = instance.properties() {
             self.report.set(
                 "runtime",
@@ -774,6 +797,8 @@ impl Selftest {
                     .map_or_else(|| "unsaid".to_owned(), |p| p.to_string())
             }),
         );
+        // How the room behind the monitors is shown (see `caps::room_ways`).
+        r.set("room", caps.room.map_or("none", |room| room.way.name()));
         r.set("streams_max", caps.streams_max);
         r.set("layers_max", caps.layers_max);
         match caps.volume_steps {
@@ -1109,6 +1134,20 @@ impl Selftest {
                 Act::SwitchTab
             }
             Phase::Broken if self.recovered_ms.is_some() || in_phase >= RECOVER_WITHIN => {
+                self.next(Phase::DecoderError, now);
+                self.inject(Fault::DecoderError, now)
+            }
+            Phase::DecoderError
+                if self.fault_recovered_ms.is_some() || in_phase >= RECOVER_WITHIN =>
+            {
+                self.next(Phase::SurfaceLost, now);
+                self.inject(Fault::SurfaceLost, now)
+            }
+            Phase::SurfaceLost if self.surface_ms.is_some() || in_phase >= RECOVER_WITHIN => {
+                self.next(Phase::CorruptFrame, now);
+                self.inject(Fault::CorruptFrame, now)
+            }
+            Phase::CorruptFrame if self.corrupt_ms.is_some() || in_phase >= RECOVER_WITHIN => {
                 let id = self
                     .monitors
                     .get(1)
@@ -1149,6 +1188,22 @@ impl Selftest {
             Phase::Done => Act::Finish,
             _ => Act::Nothing,
         }
+    }
+
+    /// Asks for `fault` in the first monitor's decoder, its pictures watched from now
+    /// on.
+    fn inject(&mut self, fault: Fault, now: Instant) -> Act {
+        let Some(id) = self.monitors.first().copied() else {
+            return Act::Nothing;
+        };
+        let Some(generation) = self.streams.get(&id).map(|s| s.generation) else {
+            return Act::Nothing;
+        };
+        if let Some(probe) = &self.probe {
+            lock(probe).watch(id.0, generation.0);
+        }
+        self.fault = Some((id, now));
+        Act::Inject(id, fault)
     }
 
     /// Has the fake PC send a frame the first monitor's decoder cannot take, with the
@@ -1234,6 +1289,19 @@ impl Selftest {
             && let Some(&(_, at)) = p.watched.iter().find(|(seq, _)| *seq > bad)
         {
             self.recovered_ms = Some(ms(at.saturating_duration_since(since)));
+        }
+        // The first picture after a fault the hook caused.
+        let after_fault = self.fault.and_then(|(_, since)| {
+            let &(_, at) = p.watched.iter().find(|(_, at)| *at > since)?;
+            Some(ms(at.saturating_duration_since(since)))
+        });
+        match self.phase {
+            Phase::DecoderError if self.fault_recovered_ms.is_none() => {
+                self.fault_recovered_ms = after_fault;
+            }
+            Phase::SurfaceLost if self.surface_ms.is_none() => self.surface_ms = after_fault,
+            Phase::CorruptFrame if self.corrupt_ms.is_none() => self.corrupt_ms = after_fault,
+            _ => {}
         }
     }
 
@@ -1423,8 +1491,9 @@ impl Selftest {
         }
         r.set_ms("keyframe_asked_ms", self.keyframe_asked_ms);
         r.set_ms("decoder_recovered_ms", self.recovered_ms);
-        // The decoder's own fault hooks come with its rework (step 7.8b); until then
-        // this stays `none`.
+        r.set_ms("decoder_error_recovered_ms", self.fault_recovered_ms);
+        r.set_ms("surface_recreated_ms", self.surface_ms);
+        r.set_ms("corrupt_frame_recovered_ms", self.corrupt_ms);
         r.set_ms("stream_restart_ms", self.restart_ms);
         r.set_ms("stream_unfreeze_ms", self.unfreeze_ms);
         r.set("keyframe_asks_ignored", self.asks_ignored);

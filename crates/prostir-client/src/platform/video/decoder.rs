@@ -5,6 +5,12 @@
 //! decoder thread for each frame. A picture goes to the compositor the moment it is
 //! decoded, a frame goes into the codec the moment both it and a buffer are there, and
 //! a decoder with nothing to do sleeps instead of looking every few milliseconds.
+//!
+//! When it fails it follows the rules of `crate::video`: a passing failure makes the
+//! codec again after a pause, asking the PC for a keyframe, and every third in a row
+//! ends the thread asking for a new surface ([`End::NewSurface`]); a lasting one ends
+//! it with the reason ([`End::Failed`]). What the shell watches of it is its
+//! [`Status`]: since when it fails without a picture.
 
 #![expect(
     clippy::disallowed_methods,
@@ -13,13 +19,13 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{JoinHandle, Thread};
 use std::time::Duration;
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use log::{error, info, warn};
 use ndk::media::media_codec::{
     ActionCode, AsyncNotifyCallback, BufferInfo, MediaCodec, MediaCodecDirection,
@@ -33,6 +39,7 @@ use prostir_proto::{ClientMsg, Codec};
 
 use crate::frames::{Frame, Frames, KeyframeWait, Taken};
 use crate::net::Feedback;
+use crate::video::{self, Fault, Why};
 
 /// The stream a decoder decodes: its display and generation (see `StreamStart`).
 #[derive(Debug, Clone, Copy)]
@@ -54,6 +61,93 @@ pub struct DecoderJob {
     /// Set when the monitor goes: the decoder stops before its surface does. Whoever
     /// sets it unparks the decoder thread too (see [`spawn`]).
     pub stop: Arc<AtomicBool>,
+    /// What the shell watches of it.
+    pub status: Arc<Status>,
+    /// Passing failures in a row so far: kept when the thread is made again with a new
+    /// surface, so the pauses go on growing.
+    pub failures: u32,
+    /// The largest picture the headset said this codec decodes (`Caps.decoders`;
+    /// `None`: it said it has no such decoder). A refusal within it, or a decoder not
+    /// found though said, fails for a moment, not for good.
+    pub said: Option<(u32, u32)>,
+}
+
+/// What the shell watches of a decoder thread: since when it fails without a picture,
+/// and a failure asked for on purpose (see `SurfaceVideo::inject`). Atomics only:
+/// looked at every pass, nothing made.
+pub struct Status {
+    epoch: Instant,
+    /// Nanoseconds from `epoch` to the first failure with no picture since, plus one;
+    /// 0 while pictures come.
+    failing: AtomicU64,
+    /// A [`Fault`] to cause (see [`Status::fault_code`]); 0: none.
+    fault: AtomicU8,
+    /// A picture came out in this generation (with any of its surfaces).
+    pictured: AtomicBool,
+}
+
+impl Status {
+    pub fn new() -> Self {
+        Self {
+            epoch: Instant::now(),
+            failing: AtomicU64::new(0),
+            fault: AtomicU8::new(0),
+            pictured: AtomicBool::new(false),
+        }
+    }
+
+    /// Since when it fails without a picture (`None`: pictures come).
+    pub fn failing_since(&self) -> Option<Instant> {
+        match self.failing.load(Ordering::Relaxed) {
+            0 => None,
+            n => Some(self.epoch + Duration::from_nanos(n - 1)),
+        }
+    }
+
+    /// It failed at `now`: counts from the first failure since the last picture.
+    fn failed(&self, now: Instant) {
+        let n = u64::try_from(now.saturating_duration_since(self.epoch).as_nanos())
+            .unwrap_or(u64::MAX - 1)
+            + 1;
+        let _ = self
+            .failing
+            .compare_exchange(0, n, Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    /// A picture came out.
+    fn picture(&self) {
+        self.failing.store(0, Ordering::Relaxed);
+        self.pictured.store(true, Ordering::Relaxed);
+    }
+
+    /// Asks the decoder thread to fail as `fault` says (its next look, once).
+    pub fn cause(&self, fault: Fault) {
+        self.fault.store(Self::fault_code(fault), Ordering::Relaxed);
+    }
+
+    fn fault_code(fault: Fault) -> u8 {
+        match fault {
+            Fault::CorruptFrame => 1,
+            Fault::DecoderError => 2,
+            Fault::SurfaceLost => 3,
+        }
+    }
+
+    /// The fault asked for, once.
+    fn take_fault(&self) -> Option<Fault> {
+        match self.fault.swap(0, Ordering::Relaxed) {
+            1 => Some(Fault::CorruptFrame),
+            2 => Some(Fault::DecoderError),
+            3 => Some(Fault::SurfaceLost),
+            _ => None,
+        }
+    }
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// A reader of the pictures of one stream that reads the PC's time code out of each
@@ -81,8 +175,15 @@ fn time_code_reader(
                 return;
             };
             let size = |v: i32| usize::try_from(v).unwrap_or(0);
-            if let Some(pc_ms) = prostir_proto::timecode::read(luma, size(stride), size(w), size(h))
-            {
+            let (stride, w, h) = (size(stride), size(w), size(h));
+            // Upside down, the code's middle row is 8 rows from the bottom: the rows
+            // from 16 above that read as its first ones.
+            let from = h.saturating_sub(prostir_proto::timecode::CELL + 1) * stride;
+            let luma = match luma.get(from..) {
+                Some(rows) if crate::selftest::rows_up() => rows,
+                _ => luma,
+            };
+            if let Some(pc_ms) = prostir_proto::timecode::read(luma, stride, w, h) {
                 crate::selftest::time_code(pc_ms, at_us);
             }
         }))
@@ -111,8 +212,6 @@ const STALLED: Duration = Duration::from_secs(1);
 /// Frames wait and the codec has handed out no input buffer for this long, without
 /// saying it failed: it is made again, as after an error.
 const NO_INPUT: Duration = Duration::from_secs(3);
-/// After a codec failed, before it is made again.
-const RESTART_PAUSE: Duration = Duration::from_millis(200);
 /// The longest a decoder sleeps with nothing to do. Whatever gives it work wakes it at
 /// once (a frame, the codec, `stop`): this is only a safety net.
 const IDLE: Duration = Duration::from_secs(1);
@@ -121,12 +220,44 @@ const TRANSIENT_LOG_EVERY: Duration = Duration::from_secs(10);
 /// Room for the codec's buffer numbers, made once (more only if a codec has more).
 const BUFFERS: usize = 32;
 
-/// How a decoder thread ended: its job back (to make the decoder again with), and
-/// whether it gave up (its codec failed again and again) rather than the stream ending
-/// or `stop`.
+/// How a decoder thread ended: its job back (to make the decoder again with), and why.
 pub struct Stopped {
     pub job: DecoderJob,
-    pub failed: bool,
+    pub end: End,
+}
+
+/// Why a decoder thread ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// The stream ended, or `stop` was set.
+    Ended,
+    /// Its passing failures want a new surface (see `video::new_surface_due`): the
+    /// thread is made again with it, with its job and failures so far.
+    NewSurface,
+    /// It cannot decode this stream.
+    Failed(Why),
+}
+
+/// How a codec failed.
+enum Fail {
+    /// For a moment: made again after a pause.
+    Passing(anyhow::Error),
+    /// The surface counts as broken: made again with a new one.
+    Surface(anyhow::Error),
+    /// For this stream: not tried again.
+    Lasting(Why, anyhow::Error),
+}
+
+impl From<anyhow::Error> for Fail {
+    fn from(e: anyhow::Error) -> Self {
+        Fail::Passing(e)
+    }
+}
+
+impl From<MediaError> for Fail {
+    fn from(e: MediaError) -> Self {
+        Fail::Passing(e.into())
+    }
 }
 
 /// Decodes the job's frames into its window until the stream ends or `stop` is set.
@@ -137,18 +268,17 @@ pub fn spawn(job: DecoderJob) -> JoinHandle<Stopped> {
     std::thread::Builder::new()
         .name(format!("decoder-{id}"))
         .spawn(move || {
+            let mut job = job;
             crate::platform::android::raise_thread_priority(
                 crate::platform::android::Priority::Video,
             );
-            let failed = match run(&job) {
-                Ok(()) => false,
-                Err(e) => {
-                    error!("decoder {id}: {e:#}");
-                    true
-                }
-            };
-            info!("decoder {id} stopped");
-            Stopped { job, failed }
+            let end = run(&mut job);
+            match end {
+                End::Ended => info!("decoder {id} stopped"),
+                End::NewSurface => warn!("decoder {id}: made again with a new surface"),
+                End::Failed(why) => error!("decoder {id}: cannot decode this stream ({why:?})"),
+            }
+            Stopped { job, end }
         })
         .expect("spawn decoder thread")
 }
@@ -182,9 +312,12 @@ impl Told {
 struct Decoding<'a> {
     frames: &'a Frames,
     stop: &'a AtomicBool,
+    status: &'a Status,
+    /// The next frame is spoiled on purpose (see [`Fault::CorruptFrame`]).
+    spoil: bool,
     gate: KeyframeGate,
     timing: Timing,
-    /// Codec failures in a row.
+    /// Passing failures in a row (a picture starts it over).
     failures: u32,
     /// Input buffers free to fill, taken from [`Told`].
     free: VecDeque<usize>,
@@ -197,7 +330,7 @@ struct Decoding<'a> {
     no_input: Option<Instant>,
 }
 
-fn run(job: &DecoderJob) -> Result<()> {
+fn run(job: &mut DecoderJob) -> End {
     let DecoderJob {
         stream,
         codec,
@@ -207,14 +340,24 @@ fn run(job: &DecoderJob) -> Result<()> {
         ref frames,
         ref feedback,
         ref stop,
+        ref status,
+        failures,
+        said,
     } = *job;
     // The selftest against a real PC reads the time code out of one stream's pictures
     // (the PC's time of their capture): they go to a reader instead of the compositor,
     // so that monitor shows nothing.
     #[cfg(all(feature = "selftest", not(feature = "store")))]
-    let reader = crate::selftest::reads_time_code(stream.id.0)
+    let reader = match crate::selftest::reads_time_code(stream.id.0)
         .then(|| time_code_reader(width, height))
-        .transpose()?;
+        .transpose()
+    {
+        Ok(reader) => reader,
+        Err(e) => {
+            warn!("decoder {}: {e:#}", stream.id.0);
+            None
+        }
+    };
     #[cfg(all(feature = "selftest", not(feature = "store")))]
     let reader_window = reader.as_ref().map(|(_, w)| w.clone());
     #[cfg(all(feature = "selftest", not(feature = "store")))]
@@ -223,11 +366,17 @@ fn run(job: &DecoderJob) -> Result<()> {
     frames.wake(std::thread::current());
     let mut gate = KeyframeGate::new(stream, feedback.clone());
     // The PC starts every stream with a keyframe and the network passes its frames
-    // from one on: only a codec made again after a failure asks for one.
+    // from one on: only a codec made again after a failure asks for one (also on a
+    // still screen, where no frame would come to ask with).
     gate.expect_keyframe();
+    if failures > 0 {
+        gate.wait();
+    }
     let mut d = Decoding {
         frames,
         stop,
+        status,
+        spoil: false,
         gate,
         timing: Timing {
             stream: Some(stream),
@@ -235,19 +384,19 @@ fn run(job: &DecoderJob) -> Result<()> {
             started: Some(Instant::now()),
             ..Default::default()
         },
-        failures: 0,
+        failures,
         free: VecDeque::with_capacity(BUFFERS),
         ready: VecDeque::with_capacity(BUFFERS),
         stalled: None,
         no_input: None,
     };
-    // A decoder error (a lost surface, a bad frame), or a codec that does not start,
-    // makes the decoder again instead of freezing the monitor; only repeated failures
-    // in a row give up (the frame loop then makes the thread again, or lets the
-    // stream go).
-    loop {
+    // A passing failure (a lost surface, a bad frame), or a codec that does not start
+    // for a moment, makes the codec again instead of freezing the monitor, as often as
+    // it takes; every third in a row, the surface too. A lasting one ends the thread.
+    let end = loop {
         let told = Arc::new(Mutex::new(Told::new()));
-        let result = match start_decoder(codec, width, height, window, &told) {
+        let size = (width, height);
+        let result = match start_decoder(codec, size, said, window, &told, d.failures) {
             Ok(decoder) => {
                 d.free.clear();
                 d.ready.clear();
@@ -260,37 +409,84 @@ fn run(job: &DecoderJob) -> Result<()> {
             }
             Err(e) => Err(e),
         };
-        match result {
-            Ok(()) => return Ok(()),
-            Err(e) if d.failures < 5 => {
-                d.failures += 1;
-                warn!("decoder {}: {e:#}; starting it again", stream.id.0);
-                // A pause, cut short when the monitor goes.
-                let until = Instant::now() + RESTART_PAUSE;
-                while !d.stop.load(Ordering::Relaxed)
-                    && let Some(left) = until.checked_duration_since(Instant::now())
-                {
-                    std::thread::park_timeout(left);
-                }
-                if d.stop.load(Ordering::Relaxed) {
-                    return Ok(());
-                }
-                d.gate.wait();
+        let now = Instant::now();
+        let (e, surface) = match result {
+            Ok(()) => break End::Ended,
+            Err(Fail::Lasting(why, e)) => {
+                error!("decoder {}: {e:#}", stream.id.0);
+                status.failed(now);
+                break End::Failed(why);
             }
-            Err(e) => return Err(e),
+            Err(Fail::Passing(e)) => (e, false),
+            Err(Fail::Surface(e)) => (e, true),
+        };
+        status.failed(now);
+        d.failures = d.failures.saturating_add(1);
+        // No picture at all in this generation, for long: it cannot be decoded.
+        let pictured = status.pictured.load(Ordering::Relaxed);
+        if let Some(since) = status.failing_since()
+            && video::gives_up(pictured, since, now)
+        {
+            error!(
+                "decoder {}: {e:#}; no picture in {} s of failing, given up",
+                stream.id.0,
+                video::GIVE_UP_WITHOUT_PICTURE.as_secs()
+            );
+            break End::Failed(Why::Undecodable);
         }
-    }
+        let new_surface = surface || video::new_surface_due(d.failures);
+        let pause = video::retry_pause(d.failures);
+        warn!(
+            "decoder {}: {e:#}; made again in {} ms ({} in a row){}",
+            stream.id.0,
+            pause.as_millis(),
+            d.failures,
+            if new_surface {
+                ", with a new surface"
+            } else {
+                ""
+            }
+        );
+        // A pause, cut short when the monitor goes.
+        let until = now + pause;
+        while !d.stop.load(Ordering::Relaxed)
+            && let Some(left) = until.checked_duration_since(Instant::now())
+        {
+            std::thread::park_timeout(left);
+        }
+        if d.stop.load(Ordering::Relaxed) {
+            break End::Ended;
+        }
+        if new_surface {
+            break End::NewSurface;
+        }
+        d.gate.wait();
+    };
+    job.failures = d.failures;
+    end
 }
 
 impl Decoding<'_> {
     /// Feeds the codec and hands its pictures on until the stream ends or `stop` is
     /// set (`Ok`), or the codec fails.
-    fn pump(&mut self, decoder: &MediaCodec, told: &Mutex<Told>) -> Result<()> {
+    fn pump(&mut self, decoder: &MediaCodec, told: &Mutex<Told>) -> Result<(), Fail> {
         while !self.stop.load(Ordering::Relaxed) {
+            match self.status.take_fault() {
+                Some(Fault::CorruptFrame) => self.spoil = true,
+                Some(Fault::DecoderError) => {
+                    return Err(Fail::Passing(anyhow::anyhow!("a codec error, on purpose")));
+                }
+                Some(Fault::SurfaceLost) => {
+                    return Err(Fail::Surface(anyhow::anyhow!(
+                        "the surface lost, on purpose"
+                    )));
+                }
+                None => {}
+            }
             {
                 let mut t = lock(told);
                 if let Some(why) = t.failed.take() {
-                    bail!(why);
+                    return Err(Fail::Passing(anyhow::anyhow!(why)));
                 }
                 if !t.inputs.is_empty() {
                     self.no_input = None;
@@ -302,6 +498,9 @@ impl Decoding<'_> {
             while let Some((index, pts_us)) = self.ready.pop_front() {
                 decoder.release_output_buffer_by_index(index, true)?;
                 self.timing.decoded(pts_us);
+                // A picture: whatever failed before is over.
+                self.status.picture();
+                self.failures = 0;
             }
             while let Some(&index) = self.free.front() {
                 let frame = match self.frames.take() {
@@ -316,9 +515,8 @@ impl Decoding<'_> {
                 self.free.pop_front();
                 // The codec took one: whatever waits gets its full second again.
                 self.stalled = None;
-                if feed(decoder, index, &frame, &mut self.timing)? {
-                    self.failures = 0;
-                } else {
+                let spoil = std::mem::take(&mut self.spoil);
+                if !feed(decoder, index, &frame, spoil, &mut self.timing)? {
                     self.gate.wait();
                 }
             }
@@ -330,10 +528,10 @@ impl Decoding<'_> {
                 // Frames wait, and the codec frees no buffer for them.
                 let silent = *self.no_input.get_or_insert(now);
                 if now.saturating_duration_since(silent) >= NO_INPUT {
-                    bail!(
+                    return Err(Fail::Passing(anyhow::anyhow!(
                         "no input buffer from the codec for {} s",
                         NO_INPUT.as_secs()
-                    );
+                    )));
                 }
                 let since = *self.stalled.get_or_insert(now);
                 let stuck = now.saturating_duration_since(since);
@@ -368,16 +566,36 @@ impl Decoding<'_> {
     }
 }
 
+/// Whether a codec that did not configure or start failed for a moment: the system
+/// short of codecs (another stream's still going) or taking it back.
+fn passing(e: MediaError) -> bool {
+    matches!(
+        e,
+        MediaError::CodecErrorInsufficientResource | MediaError::CodecErrorReclaimed
+    )
+}
+
+/// A codec for `codec` decoding `width`×`height` into `window`, told what happens in
+/// `told`. The failure lasts only where the headset said so too (`said`, the largest
+/// picture it said the codec decodes): no decoder for a codec it said it has none of,
+/// or (on its first try, `failures` 0) a refusal of a size beyond what it said.
 fn start_decoder(
     codec: Codec,
-    width: u32,
-    height: u32,
+    (width, height): (u32, u32),
+    said: Option<(u32, u32)>,
     window: &NativeWindow,
     told: &Arc<Mutex<Told>>,
-) -> Result<MediaCodec> {
+    failures: u32,
+) -> Result<MediaCodec, Fail> {
     let mime = codec.mime();
-    let mut decoder =
-        MediaCodec::from_decoder_type(mime).with_context(|| format!("no decoder for {mime}"))?;
+    let Some(mut decoder) = MediaCodec::from_decoder_type(mime) else {
+        let e = anyhow::anyhow!("no decoder for {mime}");
+        return Err(match said {
+            None => Fail::Lasting(Why::NoDecoder, e),
+            Some(_) => Fail::Passing(e),
+        });
+    };
+    let beyond = said.is_none_or(|(w, h)| width > w || height > h);
     // Before `configure`: a codec takes it only then.
     decoder
         .set_async_notify_callback(Some(callbacks(told, std::thread::current())))
@@ -398,10 +616,22 @@ fn start_decoder(
     if crate::selftest::decoder_rate_max() {
         format.set_i32("operating-rate", i32::from(i16::MAX));
     }
+    // A codec that worked for this stream before and now refuses fails for a moment;
+    // one that refuses it from the start, with a reason other than being short of
+    // codecs, refuses its size.
+    let refused = |e: MediaError, what: &str| {
+        let lasting = failures == 0 && beyond && !passing(e);
+        let e = anyhow::Error::from(e).context(format!("{what} {width}x{height}"));
+        if lasting {
+            Fail::Lasting(Why::BadSize, e)
+        } else {
+            Fail::Passing(e)
+        }
+    };
     decoder
         .configure(&format, Some(window), MediaCodecDirection::Decoder)
-        .context("configure decoder")?;
-    decoder.start().context("start decoder")?;
+        .map_err(|e| refused(e, "configure decoder"))?;
+    decoder.start().map_err(|e| refused(e, "start decoder"))?;
     info!(
         "decoder {} started for {width}x{height}",
         decoder.name().unwrap_or_default()
@@ -508,7 +738,14 @@ impl KeyframeGate {
 
 /// Hands a frame to the codec in input buffer `index`; `false` when it had to be
 /// dropped.
-fn feed(decoder: &MediaCodec, index: usize, frame: &Frame, timing: &mut Timing) -> Result<bool> {
+/// With `spoil`, its bytes past the start are spoiled first (a fault on purpose).
+fn feed(
+    decoder: &MediaCodec,
+    index: usize,
+    frame: &Frame,
+    spoil: bool,
+    timing: &mut Timing,
+) -> Result<bool> {
     let dst = decoder
         .input_buffer(index)
         .context("the codec gave no input buffer")?;
@@ -522,6 +759,16 @@ fn feed(decoder: &MediaCodec, index: usize, frame: &Frame, timing: &mut Timing) 
         return Ok(false);
     }
     dst[..n].write_copy_of_slice(&frame.data);
+    if spoil {
+        // Past the headers of the first units: the picture data itself, every few
+        // bytes turned over.
+        for b in dst[n.min(64)..n].iter_mut().step_by(7) {
+            // SAFETY: written just above (`write_copy_of_slice`), so initialised.
+            let v = unsafe { b.assume_init_read() };
+            b.write(!v);
+        }
+        warn!("decoder: a frame of {n} bytes spoiled on purpose");
+    }
     decoder.queue_input_buffer_by_index(index, 0, n, frame.pts_us, 0)?;
     timing.queued(frame);
     Ok(true)

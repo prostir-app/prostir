@@ -282,6 +282,8 @@ fn connected() -> Loop {
     for n in [1, 2] {
         l.handle(Event::StreamStarted {
             id: DisplayKey::new(PC, DisplayId(n)),
+            generation: prostir_proto::state::Gen(1),
+            codec: prostir_proto::Codec::H264,
             size: (2560, 1440),
         });
     }

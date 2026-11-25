@@ -262,6 +262,7 @@ pc-displays-sound-the-microphone-is-not-ready-yet = The microphone is not ready 
 pc-encoder-choice-already-has = already has
 pc-encoder-choice-sessions-open-the-most-it-opens = sessions open, the most it opens
 pc-encoder-choice-did-not-start = did not start
+pc-encoder-cannot-turn-over = this graphics card cannot turn the picture over for the headset
 pc-encoder-choice-encoding-on-the-cpu = encoding on the CPU
 pc-encoder-choice-frames-go-through-the-cpu = frames go through the CPU
 
@@ -969,6 +970,19 @@ headset-error-too-big = { $name }: { $size } ({ $codec }) is too large for this 
 headset-error-cameras = Cameras unavailable: { $error }
 headset-error-cameras-lost = The cameras stopped working: "Room" and "Dimmed" come back once the app starts again.
 headset-error-keyboard-window = The keyboard window cannot be shown now: it is tried again when the app starts next.
+## A monitor's picture, under its name in the menu
+headset-video-trouble = No picture, recovering…
+# $codec (String): the video's codec, H.264 or H.265
+headset-video-no-decoder = this headset has no { $codec } decoder
+# $codec (String): H.264 or H.265; $size (String): the picture's size, 7680 × 2160
+headset-video-bad-size = this headset does not decode { $codec } at { $size }
+headset-video-no-surface = the headset could not show this picture
+headset-video-stopped = the video decoder stopped
+headset-video-undecodable = the headset could not decode this picture
+# $reason (String): why, one of the lines above
+headset-video-not-shown = Not shown: { $reason }
+# $name (String): the monitor, as the menu names it ("Monitor 2"); $reason (String): why, one of the lines above
+headset-video-failed = { $name } is not shown: { $reason }
 # $typed (String): what was typed
 headset-error-not-ip = «{ $typed }»: is not an IP address
 # $error (String): what went wrong, as the system says it

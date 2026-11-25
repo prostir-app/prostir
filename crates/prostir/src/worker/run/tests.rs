@@ -161,6 +161,7 @@ fn wanted(specs: &[(u32, u32, u32)]) -> Wanted {
             bitrate_kbps: 8000,
             backend: Backend::X264,
             sharp: false,
+            rows_up: false,
         },
         streaming: true,
         layout: super::super::Layout {

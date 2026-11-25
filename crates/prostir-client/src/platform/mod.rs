@@ -1,7 +1,9 @@
 //! The headset's platform, in the parts any headset on OpenXR and Android splits into
-//! (step 7, 4.4): standard OpenXR ([`openxr`]), the extensions of one maker
-//! ([`meta`], each by its own check), what every headset on Android shares
-//! ([`android`]), the sound ([`sound`]) and the store a build comes from ([`store`]).
+//! (step 7, 4.4): standard OpenXR ([`openxr`]), the extensions of each maker
+//! ([`meta`], [`htc`], each by its own check), the room behind the monitors by
+//! whichever way the runtime offers ([`room`]), what every headset on Android shares
+//! ([`android`]), the streams' video ([`video`]), the sound ([`sound`]) and the store a
+//! build comes from ([`store`]).
 //! The core sees none of it: what the headset can do comes to it as [`crate::caps::Caps`],
 //! made here at the start ([`caps`]).
 //!
@@ -16,11 +18,17 @@ pub mod store;
 #[cfg(target_os = "android")]
 pub mod android;
 #[cfg(target_os = "android")]
+pub mod htc;
+#[cfg(target_os = "android")]
 pub mod meta;
 #[cfg(target_os = "android")]
 pub mod openxr;
 #[cfg(target_os = "android")]
+pub mod room;
+#[cfg(target_os = "android")]
 pub mod sound;
+#[cfg(target_os = "android")]
+pub mod video;
 
 #[cfg(target_os = "android")]
 pub use self::found::caps;
@@ -30,21 +38,20 @@ mod found {
     use log::{info, warn};
     use openxr as xr;
 
-    use super::meta::passthrough::Passthrough;
     use super::openxr::Gfx;
     use super::{android, meta};
     use crate::caps::{self, Caps, RoomCaps};
 
     /// What this headset can do: from the extensions turned on (`on`; with
     /// `caps=minimal` only those it cannot do without), what the runtime says of the
-    /// system and the display, the cameras made (`passthrough`), and what Android says
-    /// of its decoders and its volume. Asked once, at the start.
+    /// system and the display, the room as it is shown (`room`, see `platform::room`),
+    /// and what Android says of its decoders and its volume. Asked once, at the start.
     pub fn caps(
         on: &xr::ExtensionSet,
         instance: &xr::Instance,
         system: xr::SystemId,
         session: &xr::Session<Gfx>,
-        passthrough: Option<&Passthrough>,
+        room: Option<RoomCaps>,
         hands: bool,
         model: String,
     ) -> Caps {
@@ -83,9 +90,8 @@ mod found {
         c.cylinder = on.khr_composition_layer_cylinder;
         c.equirect = on.khr_composition_layer_equirect2;
         c.color_scale = on.khr_composition_layer_color_scale_bias;
-        c.room = passthrough.map(|p| RoomCaps {
-            keyboard_window: p.window_supported(),
-        });
+        c.room = room;
+        c.image_flip = on.fb_composition_layer_image_layout;
         c.hands = hands;
         c.hand_aim = on.ext_hand_interaction;
         c.menu_gesture = hands && on.fb_hand_tracking_aim;

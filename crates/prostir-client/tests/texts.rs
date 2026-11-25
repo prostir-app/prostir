@@ -76,7 +76,15 @@ const OTHER_CODE: &[(&str, &str)] = &[
     ("background.rs", include_str!("../src/background.rs")),
     ("caps.rs", include_str!("../src/caps.rs")),
     ("commands.rs", include_str!("../src/commands.rs")),
-    ("decoder.rs", include_str!("../src/decoder.rs")),
+    (
+        "platform/video/decoder.rs",
+        include_str!("../src/platform/video/decoder.rs"),
+    ),
+    (
+        "platform/video/mod.rs",
+        include_str!("../src/platform/video/mod.rs"),
+    ),
+    ("video.rs", include_str!("../src/video.rs")),
     ("device.rs", include_str!("../src/device.rs")),
     (
         "platform/openxr/egl.rs",

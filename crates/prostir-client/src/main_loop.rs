@@ -18,14 +18,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use anyhow::{Result, anyhow, bail};
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use log::{error, info, warn};
 use openxr as xr;
 use openxr::sys::Handle as _;
@@ -45,20 +44,23 @@ use crate::platform::meta::{self, passthrough};
 use crate::platform::openxr::input::Controls;
 use crate::platform::openxr::overlay::{self, Overlay, Sphere};
 use crate::platform::openxr::{self as xrutil, Gfx, ImageLayer, as_layer, egl, pose, posef, vec3};
+use crate::platform::room::Room;
 use crate::platform::sound::audio::Gains;
 use crate::platform::sound::mic::Mic;
 use crate::platform::store::StoreCheck;
+use crate::platform::video::{self, SurfaceVideo};
 use crate::platform::{self, android};
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 use crate::selftest::device::{self as selftest, Act, Selftest};
 use crate::settings::{Background, HandMode};
 use crate::ui::{self, Action, Panel, Tab};
+use crate::video::VideoEvent;
 use crate::view::View;
 use crate::world::{
     ATTACH_PX, ATTACH_WIDTH, BUTTON_SIZE, KEYBOARD_ASPECT, WRIST_MENU_WIDTH, attach_height,
     panel_height, panel_width, wrist_menu_height,
 };
-use crate::{app, background, decoder, net, persist};
+use crate::{app, background, net, persist};
 #[cfg(not(all(feature = "selftest", not(feature = "store"))))]
 use no_selftest::{self as selftest, Act, Selftest};
 
@@ -71,6 +73,9 @@ const TOAST_PX: (u32, u32) = (1024, 132);
 const SCREEN_EVERY: Duration = Duration::from_millis(250);
 /// How often the wall clock is read for the menu's clock.
 const WALL_EVERY: Duration = Duration::from_secs(1);
+/// The side of the black layer over a dimmed room, in metres, a metre in front of
+/// the eyes: wider than any field of view.
+const DIM_SIZE: f32 = 40.0;
 /// Width of the placeholder's picture, in pixels (its height follows the monitor's
 /// shape).
 const PLACEHOLDER_PX: u32 = 1024;
@@ -135,41 +140,6 @@ fn moment(tm: &libc::tm) -> Moment {
         weekday: small(tm.tm_wday, 6),
         hour: small(tm.tm_hour, 23),
         minute: small(tm.tm_min, 59),
-    }
-}
-
-/// One stream: the compositor surface it is decoded into and its decoder thread.
-struct Monitor {
-    width_px: u32,
-    height_px: u32,
-    decoder: Option<JoinHandle<decoder::Stopped>>,
-    /// How many times its decoder thread was made again lately, and when last (see
-    /// `Shell::decoders_now`).
-    restarts: (u32, Option<Instant>),
-    stop: Arc<AtomicBool>,
-    swapchain: xr::Swapchain<Gfx>,
-}
-
-/// A decoder thread that gave up is made again this many times for its stream within
-/// [`DECODER_RESTARTS_WITHIN`] of the last time; then the stream counts as failed.
-const DECODER_RESTARTS: u32 = 3;
-const DECODER_RESTARTS_WITHIN: Duration = Duration::from_secs(60);
-
-impl Monitor {
-    fn aspect(&self) -> f32 {
-        self.height_px as f32 / self.width_px as f32
-    }
-}
-
-impl Drop for Monitor {
-    fn drop(&mut self) {
-        // The decoder must stop writing into the surface before the swapchain goes away.
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.decoder.take() {
-            // It sleeps until there is work: woken, it sees `stop` at once.
-            t.thread().unpark();
-            let _ = t.join();
-        }
     }
 }
 
@@ -255,7 +225,9 @@ struct Shell<'s> {
     model: Model,
     session: &'s xr::Session<Gfx>,
     /// The streams shown, each with its surface and decoder.
-    monitors: HashMap<DisplayKey, Monitor>,
+    video: SurfaceVideo,
+    /// What the video said in a pass, kept to be filled again.
+    video_events: Vec<VideoEvent>,
     /// Messages to each PC in a session.
     outboxes: BTreeMap<PcId, Feedback>,
     /// The files' writer of this start: what is changed last is written as this goes
@@ -267,7 +239,8 @@ struct Shell<'s> {
     /// Where the PC's sound comes from, for the audio thread.
     gains: Arc<Gains>,
     controls: Controls,
-    passthrough: Option<passthrough::Passthrough>,
+    /// The room behind the monitors, whichever way this headset shows it.
+    room: Room,
     /// Where the person's own files are (none in a selftest).
     external_dir: Option<PathBuf>,
     /// The effects being done, kept to be filled again.
@@ -339,9 +312,7 @@ impl Shell<'_> {
             Effect::Haptic(hand) => self.controls.pulse(self.session, hand),
             Effect::Xr(XrCmd::RefreshRate(hz)) => meta::set_display_rate(self.session, hz),
             Effect::Xr(XrCmd::Room { on, opacity }) => {
-                if let Some(pt) = &mut self.passthrough
-                    && let Err(e) = pt.set_room(on).and_then(|()| pt.set_room_opacity(opacity))
-                {
+                if let Err(e) = self.room.set(on, opacity) {
                     self.later
                         .push(Event::Platform(PlatformEvent::CamerasFailed(format!(
                             "{e:#}"
@@ -352,9 +323,7 @@ impl Shell<'_> {
             Effect::Mic(MicCmd::Allowed(on)) => self.mic.set_allowed(on),
             Effect::Mic(MicCmd::AskAgain) => self.mic.ask_again(),
             Effect::Mic(MicCmd::RefreshPermission) => self.mic.refresh_permission(),
-            Effect::Video(VideoCmd::Drop(id)) => {
-                self.monitors.remove(&id);
-            }
+            Effect::Video(VideoCmd::Drop(id)) => self.video.end(id),
             Effect::System(SystemCmd::LoadLanguage(lang)) => self.system.load_language(lang),
             Effect::System(SystemCmd::PalmMenu(shown)) => self.system.palm_menu(shown),
             Effect::System(SystemCmd::LookForFiles) => {
@@ -415,41 +384,38 @@ impl Shell<'_> {
                 frames,
                 feedback,
             } => {
-                let stream = decoder::Stream { id, generation };
                 let id = DisplayKey::new(pc, id);
-                self.monitors.remove(&id);
-                match xrutil::create_surface_swapchain(self.session, vm, width, height) {
-                    Ok((swapchain, window)) => {
-                        let stop = Arc::new(AtomicBool::new(false));
-                        let decoder = decoder::spawn(decoder::DecoderJob {
-                            stream,
-                            codec,
-                            width,
-                            height,
-                            window,
-                            frames,
-                            feedback,
-                            stop: stop.clone(),
-                        });
-                        self.monitors.insert(
-                            id,
-                            Monitor {
-                                width_px: width,
-                                height_px: height,
-                                decoder: Some(decoder),
-                                restarts: (0, None),
-                                stop,
-                                swapchain,
-                            },
-                        );
-                        let size = (width, height);
-                        self.handle(now, Event::StreamStarted { id, size });
-                    }
-                    Err(e) => {
-                        error!("monitor {id}: {e:#}");
-                        self.handle(now, Event::StreamFailed(id));
-                    }
+                let said = self
+                    .model
+                    .headset()
+                    .caps
+                    .decoder(codec)
+                    .map(|d| (d.max_w, d.max_h));
+                let spec = video::Spec {
+                    id,
+                    generation,
+                    codec,
+                    width,
+                    height,
+                    said,
+                };
+                let mut events = std::mem::take(&mut self.video_events);
+                self.video
+                    .start(self.session, vm, spec, frames, feedback, &mut events);
+                let size = (width, height);
+                self.handle(
+                    now,
+                    Event::StreamStarted {
+                        id,
+                        generation,
+                        codec,
+                        size,
+                    },
+                );
+                for e in events.drain(..) {
+                    self.handle(now, Event::Video(e));
                 }
+                self.video_events = events;
             }
             event => {
                 // A session ended: its outbox goes with it.
@@ -461,66 +427,16 @@ impl Shell<'_> {
         }
     }
 
-    /// A decoder thread that ended on its own while its monitor stays (its codec
-    /// failed again and again, or it panicked) is made again with its job, the PC asked
-    /// for a keyframe, up to [`DECODER_RESTARTS`] times; then (or after a panic) the
-    /// stream counts as failed and its monitor goes. Looked at once a pass: a look at
-    /// each monitor, nothing made; one stream failed a pass (another one is found on
-    /// the next).
-    fn decoders_now(&mut self, now: Instant) {
-        let mut failed = None;
-        for (id, m) in &mut self.monitors {
-            if m.stop.load(Ordering::Relaxed)
-                || !m.decoder.as_ref().is_some_and(JoinHandle::is_finished)
-            {
-                continue;
-            }
-            let Some(thread) = m.decoder.take() else {
-                continue;
-            };
-            // Made again long ago: it ran well since.
-            if m.restarts
-                .1
-                .is_some_and(|at| now.saturating_duration_since(at) >= DECODER_RESTARTS_WITHIN)
-            {
-                m.restarts.0 = 0;
-            }
-            let gave_up = match thread.join() {
-                // The stream ended: its end comes from the network.
-                Ok(decoder::Stopped { failed: false, .. }) => false,
-                Ok(decoder::Stopped { job, failed: true }) if m.restarts.0 < DECODER_RESTARTS => {
-                    m.restarts = (m.restarts.0 + 1, Some(now));
-                    warn!(
-                        "monitor {id}: its decoder gave up, made again ({} of {DECODER_RESTARTS})",
-                        m.restarts.0
-                    );
-                    let _ = job
-                        .feedback
-                        .send(prostir_proto::ClientMsg::RequestKeyframe {
-                            id: job.stream.id,
-                            generation: job.stream.generation,
-                        });
-                    m.decoder = Some(decoder::spawn(job));
-                    false
-                }
-                Ok(_) => {
-                    error!("monitor {id}: its decoder gave up for good");
-                    true
-                }
-                Err(_) => {
-                    error!("monitor {id}: its decoder panicked");
-                    true
-                }
-            };
-            if gave_up {
-                failed = Some(*id);
-                break;
-            }
+    /// What the streams' video came to since the last pass (see
+    /// `SurfaceVideo::poll`): a look at each stream, nothing made unless a decoder
+    /// thread ended.
+    fn video_now(&mut self, now: Instant, vm: &jni::JavaVM) {
+        let mut events = std::mem::take(&mut self.video_events);
+        self.video.poll(now, self.session, vm, &mut events);
+        for e in events.drain(..) {
+            self.handle(now, Event::Video(e));
         }
-        if let Some(id) = failed {
-            self.monitors.remove(&id);
-            self.handle(now, Event::StreamFailed(id));
-        }
+        self.video_events = events;
     }
 
     /// Reads the screen where presence wants it (only while the app is put away, at
@@ -551,6 +467,8 @@ struct LayerBuffers {
     quads: Vec<xr::sys::CompositionLayerQuad>,
     cylinders: Vec<xr::sys::CompositionLayerCylinderKHR>,
     cursors: Vec<xr::sys::CompositionLayerQuad>,
+    /// What is wrong with a monitor's picture, over it or in its place.
+    troubles: Vec<xr::sys::CompositionLayerQuad>,
     /// The layers' list for `end`: its memory only, empty between frames (see
     /// [`reuse`]).
     layers: Vec<&'static xr::CompositionLayerBase<'static, Gfx>>,
@@ -667,14 +585,46 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mic = Arc::new(Mic::new(settings.mic, app.clone()));
     let gains = Arc::new(Gains::default());
 
-    // Passthrough keeps the cameras busy and costs battery: only when "Room" is chosen.
-    let passthrough = if exts.fb_passthrough {
-        passthrough::Passthrough::new(&session, settings.background.is_room())
-            .inspect_err(|e| warn!("passthrough unavailable: {e:#}"))
-            .ok()
-    } else {
-        None
+    // The room behind the monitors, by the first way the runtime offers that can be
+    // made (see `caps::room_ways`). The cameras keep busy and cost battery: on only
+    // while a "Room" background is chosen.
+    let blend_modes: Vec<crate::caps::BlendMode> = instance
+        .enumerate_environment_blend_modes(system, xr::ViewConfigurationType::PRIMARY_STEREO)
+        .inspect_err(|e| warn!("blend modes: {e}"))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| match m {
+            xr::EnvironmentBlendMode::OPAQUE => Some(crate::caps::BlendMode::Opaque),
+            xr::EnvironmentBlendMode::ADDITIVE => Some(crate::caps::BlendMode::Additive),
+            xr::EnvironmentBlendMode::ALPHA_BLEND => Some(crate::caps::BlendMode::AlphaBlend),
+            _ => None,
+        })
+        .collect();
+    info!("blend modes: {blend_modes:?}");
+    let room_ways = crate::caps::room_ways(&crate::caps::RoomFound {
+        blend_modes: &blend_modes,
+        fb_passthrough: exts.fb_passthrough,
+        htc_passthrough: exts.htc_passthrough,
+    });
+    // A frame without the cameras' room blended in: opaque where the runtime offers it.
+    let plain = match crate::caps::plain_blend(&blend_modes) {
+        crate::caps::BlendMode::Opaque => xr::EnvironmentBlendMode::OPAQUE,
+        crate::caps::BlendMode::Additive => xr::EnvironmentBlendMode::ADDITIVE,
+        crate::caps::BlendMode::AlphaBlend => xr::EnvironmentBlendMode::ALPHA_BLEND,
     };
+    let room = Room::make(
+        &room_ways,
+        plain,
+        &session,
+        settings.background.is_room(),
+        settings.background.room_opacity(),
+    );
+    let room_caps = room.way().map(|way| crate::caps::RoomCaps {
+        way,
+        keyboard_window: room
+            .fb_ref()
+            .is_some_and(passthrough::Passthrough::window_supported),
+    });
 
     let local =
         session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
@@ -690,9 +640,15 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
     let mut attach_layer = ImageLayer::new(&session, format, ATTACH_PX.0, ATTACH_PX.1, false)?;
     // What the "Attach" texture shows now: language and lit (pointed at).
     let mut attach_drawn: Option<(Texts, bool)> = None;
+    // The black layer over a dimmed room blended with the frame, and how dark.
+    let mut dim_layer: Option<(u8, ImageLayer)> = None;
     // The placeholder of a monitor being added: its layer, made for a size and
     // language.
     let mut placeholder: Option<(ImageLayer, (u32, u32), Texts)> = None;
+    // What is wrong with each monitor's picture, in words, for what it is now and the
+    // language it was drawn in.
+    let mut trouble_layers: HashMap<DisplayKey, (crate::video::Health, Texts, ImageLayer)> =
+        HashMap::new();
     // The toast drawn last (see `Toast::n`).
     let mut toast_drawn = 0;
     cursor_layer.upload(&gl, &ui::cursor_image(CURSOR_PX))?;
@@ -759,7 +715,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         &instance,
         system,
         &session,
-        passthrough.as_ref(),
+        room_caps,
         hand_trackers.is_some(),
         model.clone(),
     );
@@ -815,7 +771,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             only: fake_pc,
         }),
         session: &session,
-        monitors: HashMap::new(),
+        video: SurfaceVideo::new(),
+        video_events: Vec::with_capacity(8),
         outboxes: BTreeMap::new(),
         saver,
         network,
@@ -823,7 +780,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         mic,
         gains,
         controls,
-        passthrough,
+        room,
         external_dir,
         fx: Vec::new(),
         later: Vec::new(),
@@ -1017,7 +974,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     let flags = e.flags();
                     if flags.contains(xr::PassthroughStateChangedFlagsFB::NON_RECOVERABLE_ERROR) {
                         error!("the cameras failed for good");
-                        shell.passthrough = None;
+                        shell.room.lost();
                         shell.handle(now, Event::Platform(PlatformEvent::CamerasLost));
                     } else if flags.contains(xr::PassthroughStateChangedFlagsFB::RECOVERABLE_ERROR)
                     {
@@ -1079,7 +1036,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             }
             shell.net_event(now, event, &vm);
         }
-        shell.decoders_now(now);
+        shell.video_now(now, &vm);
         // Only the newest battery reading matters (several wait after a pause).
         let mut newest = None;
         while let Some(event) = shell.system.try_recv() {
@@ -1176,7 +1133,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         if !state.should_render {
             shell.model.tick(now, &FrameInput::hidden(wall));
             shell.apply(now);
-            frame_stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &[])?;
+            frame_stream.end(time, shell.room.blend_mode(), &[])?;
             continue;
         }
         // How long the menu took to draw in this frame, for the selftest.
@@ -1288,6 +1245,15 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                     }
                 }
             }
+            Act::Inject(id, fault) => {
+                // The fault on purpose, in the real decoder (the selftest's hook).
+                #[cfg(all(feature = "selftest", not(feature = "store")))]
+                if let Some(k) = shell.model.key(id) {
+                    shell.video.inject(k, fault);
+                }
+                #[cfg(not(all(feature = "selftest", not(feature = "store"))))]
+                let _ = (id, fault);
+            }
             Act::Nothing | Act::Finish => {}
         }
 
@@ -1353,6 +1319,27 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                 &panels.main.placeholder_image(label, PLACEHOLDER_PX, px_h),
             )?;
             placeholder = Some((layer, a.size, model.texts().clone()));
+        }
+        // What is wrong with a monitor's picture, in words: over it while it recovers,
+        // in its place while it cannot be shown. Made again only when that changes.
+        let videos = model.videos();
+        trouble_layers.retain(|id, (h, t, _)| videos.health(*id) == *h && t == model.texts());
+        for &(id, w, h) in world.monitors() {
+            let health = videos.health(id);
+            if health == crate::video::Health::Fine || trouble_layers.contains_key(&id) {
+                continue;
+            }
+            let text = match videos.failure(id) {
+                Some(f) => crate::video::shown_text(&f, model.texts()),
+                None => model.texts().t("headset-video-trouble").to_owned(),
+            };
+            let px_h = (PLACEHOLDER_PX * h / w.max(1)).clamp(64, 4 * PLACEHOLDER_PX);
+            let mut layer = ImageLayer::new(&session, format, PLACEHOLDER_PX, px_h, true)?;
+            layer.upload(
+                &gl,
+                &panels.main.placeholder_image(&text, PLACEHOLDER_PX, px_h),
+            )?;
+            trouble_layers.insert(id, (health, model.texts().clone(), layer));
         }
         // Only what changed is uploaded: pointing at another button changes its part.
         if world.wrist().is_some() && panels.palm.render_if_dirty().is_some() {
@@ -1523,11 +1510,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // The keyboard window: placed in front of the user at desk height the first
         // time, then wherever it was moved.
         let mut keyboard_failed = false;
-        if let Some(pt) = shell
-            .passthrough
-            .as_mut()
-            .filter(|pt| pt.window_supported())
-        {
+        if let Some(pt) = shell.room.fb().filter(|pt| pt.window_supported()) {
             let shown = shell
                 .model
                 .keyboard_window()
@@ -1551,16 +1534,35 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         };
         let keyboard_layer = passthrough_layer(
             shell
-                .passthrough
-                .as_ref()
+                .room
+                .fb_ref()
                 .and_then(passthrough::Passthrough::window_layer),
         );
         let passthrough_layer = passthrough_layer(
             shell
-                .passthrough
-                .as_ref()
+                .room
+                .fb_ref()
                 .and_then(passthrough::Passthrough::room_layer),
         );
+        let htc_layer = shell.room.htc_passthrough().and_then(|p| p.layer(&local));
+        // The room blended with the frame and dimmed: a black layer over it, letting
+        // part of it through (made once for each darkness).
+        let dim = shell.room.dim();
+        if let Some(alpha) = dim
+            && dim_layer.as_ref().is_none_or(|(a, _)| *a != alpha)
+        {
+            let mut layer = ImageLayer::new(&session, format, 4, 4, true)?;
+            layer.upload(&gl, &[0, 0, 0, alpha].repeat(16))?;
+            dim_layer = Some((alpha, layer));
+        }
+        let dim_quad = dim.and(dim_layer.as_ref()).map(|(_, l)| {
+            l.quad(
+                &view,
+                pose(Vec3::new(0.0, 0.0, -1.0), Quat::IDENTITY),
+                DIM_SIZE,
+                DIM_SIZE,
+            )
+        });
         let model = &shell.model;
         let world = model.world();
         let pano = pano_layer
@@ -1624,17 +1626,17 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             } else {
                 video_next
             };
-            let (Some(m), Some(p)) = (shell.monitors.get(id), world.shown(*id)) else {
+            let (Some(m), Some(p)) = (shell.video.image(*id), world.shown(*id)) else {
                 continue;
             };
-            let height = p.width * m.aspect();
+            let height = p.width * m.height as f32 / m.width.max(1) as f32;
             let sub_image = xr::sys::SwapchainSubImage {
                 swapchain: m.swapchain.as_raw(),
                 image_rect: xr::Rect2Di {
                     offset: xr::Offset2Di { x: 0, y: 0 },
                     extent: xr::Extent2Di {
-                        width: m.width_px as i32,
-                        height: m.height_px as i32,
+                        width: m.width as i32,
+                        height: m.height as i32,
                     },
                 },
                 image_array_index: 0,
@@ -1712,12 +1714,24 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         let mut layers = reuse(std::mem::take(&mut buffers.layers));
         if let Some(l) = &passthrough_layer {
             layers.push(as_layer(l));
-        } else if let Some(l) = &pano {
+        } else if let Some(l) = &htc_layer {
+            layers.push(as_layer(l));
+        } else if let Some(l) = &dim_quad {
+            layers.push(as_layer(l));
+        } else if let Some(l) = pano.as_ref().filter(|_| !shell.room.shown()) {
             layers.push(as_layer(l));
         }
         layers.extend(keyboard_layer.iter().map(as_layer));
         layers.extend(cylinders.iter().map(as_layer));
         layers.extend(quads.iter().map(as_layer));
+        let troubles = &mut buffers.troubles;
+        troubles.clear();
+        for (_, id) in order {
+            if let (Some((_, _, l)), Some(p)) = (trouble_layers.get(id), world.shown(*id)) {
+                troubles.push(l.quad(&local, posef(p), p.width, world.height_of(*id)));
+            }
+        }
+        layers.extend(troubles.iter().map(as_layer));
         let placeholder_quad = world.adding().and_then(|a| {
             let (layer, _, _) = placeholder.as_ref()?;
             Some(layer.quad(&local, posef(&a.place), a.place.width, a.height()))
@@ -1750,7 +1764,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         let layers_wanted = layers.len();
         // As many layers as the compositor takes.
         layers.truncate(layers_max);
-        let ended = frame_stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &layers);
+        let ended = frame_stream.end(time, shell.room.blend_mode(), &layers);
         buffers.layers = reuse(layers);
         match ended {
             // One frame the compositor refused is not worth closing the app over.
@@ -1812,6 +1826,7 @@ mod no_selftest {
         CloseMenu,
         AddMonitor(u32, u32),
         RemoveMonitor(DisplayId),
+        Inject(DisplayId, crate::video::Fault),
         Finish,
     }
 

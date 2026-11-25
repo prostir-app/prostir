@@ -165,6 +165,7 @@ impl Model {
                 self.menu.notes.forget_requests(pc);
                 self.menu.physical_asked.retain(|(k, _)| k.pc != pc);
                 self.sessions.remove(&pc);
+                self.videos.pc_ended(pc);
                 // Its streams went with it, also one whose end the network never said.
                 self.effects.extend(
                     self.world
@@ -185,6 +186,7 @@ impl Model {
             NetEvent::StreamEnd { pc, id } => {
                 let k = DisplayKey::new(pc, id);
                 self.effects.push(Effect::Video(VideoCmd::Drop(k)));
+                self.videos.ended(k);
                 self.world.stream_ended(k);
             }
         }
@@ -262,6 +264,7 @@ impl Model {
             .world
             .listed(pc, displays, &self.settings, self.head, self.now);
         for id in gone {
+            self.videos.ended(*id);
             self.effects.push(Effect::Video(VideoCmd::Drop(*id)));
         }
     }

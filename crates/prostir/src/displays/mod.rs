@@ -265,6 +265,7 @@ impl Displays {
                 bitrate_kbps: settings.bitrate * 1000,
                 backend: Backend::X264,
                 sharp: settings.sharp,
+                rows_up: false,
             },
             primary: None,
             manage_primary,

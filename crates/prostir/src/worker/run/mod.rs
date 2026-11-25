@@ -185,6 +185,8 @@ struct Slot {
     output: Option<Box<dyn Output>>,
     /// The encoder and codec wanted when its encoder started.
     started_for: Option<(Backend, Codec)>,
+    /// Its encoder sends the rows bottom first (see `EncoderConfig::rows_up`).
+    rows_up: bool,
     /// The attempt it failed at (tried again only at another).
     failed: Option<u32>,
     /// A display of the PC is shown again from then.
@@ -210,6 +212,7 @@ impl Slot {
             encoder: None,
             output: None,
             started_for: None,
+            rows_up: false,
             failed: None,
             rest_until: None,
             kept: None,
@@ -518,7 +521,11 @@ impl Worker {
             if !w.stream {
                 return Some(Step::StopStream(*id));
             }
-            if slot.is_some_and(|s| restart_due(s.started_for, s.kept, cfg, now)) {
+            // Another encoder or codec wanted, or the rows the other way round (the
+            // headsets with a session changed).
+            if slot.is_some_and(|s| {
+                restart_due(s.started_for, s.kept, cfg, now) || s.rows_up != wanted.encoding.rows_up
+            }) {
                 return Some(Step::Restart(*id));
             }
             if encoder.is_paused() == wanted.streaming {

@@ -3,7 +3,6 @@
 
 use super::super::{Effect, Model, XrCmd};
 use crate::persist;
-use crate::settings::Background;
 use crate::ui::Action;
 
 impl Model {
@@ -79,14 +78,9 @@ impl Model {
     /// The cameras on only for the "room" backgrounds.
     pub(in super::super) fn set_passthrough(&mut self) {
         let background = self.settings.background;
-        let opacity = if background == Background::RoomDim {
-            0.4
-        } else {
-            1.0
-        };
         self.effects.push(Effect::Xr(XrCmd::Room {
             on: background.is_room(),
-            opacity,
+            opacity: background.room_opacity(),
         }));
     }
 }

@@ -10,6 +10,7 @@ use crate::ids::DisplayKey;
 use crate::physical;
 use crate::session::Attempt;
 use crate::ui::{self, MonitorEntry, UiState};
+use crate::video::{self, Health};
 
 /// The menu's state as last made, and the model's [`Model::rev`] it was made at.
 #[derive(Debug, Default)]
@@ -64,9 +65,33 @@ pub fn build(m: &Model) -> UiState {
             place: ui::Place::Unknown,
             seen: None,
             scale: 100,
+            picture: ui::Picture::Shows,
         })
         .collect();
     windows.sort_unstable_by_key(|w| w.id);
+    let videos = m.videos();
+    let picture = |id| match videos.health(id) {
+        Health::Fine => ui::Picture::Shows,
+        Health::Trouble => ui::Picture::Recovering,
+        Health::Failed(_) => videos.failure(id).map_or(ui::Picture::Shows, |f| {
+            ui::Picture::NotShown(video::shown_text(&f, m.texts()))
+        }),
+    };
+    let monitors: Vec<MonitorEntry> = world
+        .monitors()
+        .iter()
+        .enumerate()
+        .map(|(i, &(id, width, height))| MonitorEntry {
+            id,
+            label: m.label_of(id).unwrap_or_else(|| (i + 1).to_string()),
+            width,
+            height,
+            place: world.place_of(id, m.view_eye()),
+            seen: spot(id),
+            scale: m.display(id).map_or(100, |d| d.mode.scale),
+            picture: picture(id),
+        })
+        .collect();
     UiState {
         host: session.host().map(str::to_owned),
         found: search
@@ -91,20 +116,7 @@ pub fn build(m: &Model) -> UiState {
         can_scale: m.can_scale(),
         add_scale: menu.add_scale,
         can_move_mouse: m.can_move_mouse(),
-        monitors: world
-            .monitors()
-            .iter()
-            .enumerate()
-            .map(|(i, &(id, width, height))| MonitorEntry {
-                id,
-                label: m.label_of(id).unwrap_or_else(|| (i + 1).to_string()),
-                width,
-                height,
-                place: world.place_of(id, m.view_eye()),
-                seen: spot(id),
-                scale: m.display(id).map_or(100, |d| d.mode.scale),
-            })
-            .collect(),
+        monitors,
         windows,
         primary: world.primary(),
         cinema_screen: world.desk().cinema(),

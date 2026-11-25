@@ -57,6 +57,7 @@ impl Worker {
                 self.shared.router.set_keyframer(id, encoder.keyframer());
                 slot.encoder = Some(encoder);
                 slot.started_for = Some(used);
+                slot.rows_up = wanted.encoding.rows_up;
                 slot.kept = (used != asked).then(|| (asked, Instant::now() + KEPT_FOR));
                 slot.failed = None;
                 self.layout_due = true;

@@ -708,6 +708,7 @@ fn run_probe(backend: Backend, codec: Codec) -> Result<()> {
         bitrate_kbps: 2000,
         backend,
         sharp: false,
+        rows_up: false,
     };
     // A fakesink: an appsink would hold the end of the stream back until its frames are
     // taken.

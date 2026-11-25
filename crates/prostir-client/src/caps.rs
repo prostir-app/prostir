@@ -5,8 +5,8 @@
 //!
 //! What the menu and the scene offer by which field is [`Offer`] and
 //! [`Caps::offers`] (the table of the step 7 note, 4.4); the display rate is chosen by
-//! a rule from the rates the runtime offers ([`Caps::rate`]), not from a list of
-//! headsets.
+//! a rule from the rates the runtime offers ([`Caps::rate`]), and the way the room is
+//! shown from the ways it offers ([`room_ways`]), not from a list of headsets.
 
 #![forbid(unsafe_code)]
 
@@ -27,12 +27,97 @@ pub struct Decoder {
     pub max_pixels: Option<u32>,
 }
 
-/// The cameras.
+/// How the room behind the monitors is seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomWay {
+    /// Glasses: the display lets the room through, always (`ADDITIVE`). There is no
+    /// "Room" to choose, and the room cannot be dimmed.
+    Glasses,
+    /// The frame is blended with the cameras' picture by its alpha (`ALPHA_BLEND`).
+    Blend,
+    /// The cameras' picture as a layer (`XR_FB_passthrough`).
+    FbPassthrough,
+    /// The cameras' picture as a layer (`XR_HTC_passthrough`).
+    HtcPassthrough,
+}
+
+impl RoomWay {
+    /// As the selftest writes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            RoomWay::Glasses => "glasses",
+            RoomWay::Blend => "blend",
+            RoomWay::FbPassthrough => "fb_passthrough",
+            RoomWay::HtcPassthrough => "htc_passthrough",
+        }
+    }
+}
+
+/// The room behind the monitors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RoomCaps {
+    pub way: RoomWay,
     /// A window onto the real keyboard (the cameras' picture on a rectangle where the
     /// keyboard is).
     pub keyboard_window: bool,
+}
+
+/// A way the runtime blends the frame with the world
+/// (`xrEnumerateEnvironmentBlendModes`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlendMode {
+    Opaque,
+    Additive,
+    AlphaBlend,
+}
+
+/// What the runtime offers for the room: its blend modes, the runtime's own preference
+/// first, and the extensions turned on for the cameras' picture.
+#[derive(Debug, Clone, Copy)]
+pub struct RoomFound<'a> {
+    pub blend_modes: &'a [BlendMode],
+    /// `XR_FB_passthrough` is on.
+    pub fb_passthrough: bool,
+    /// `XR_HTC_passthrough` is on.
+    pub htc_passthrough: bool,
+}
+
+/// The ways to show the room this runtime offers, to try in this order (the first that
+/// can be made is the only one used; none: no room). A display that lets the room
+/// through (`ADDITIVE` preferred, or without `OPAQUE`) is glasses, and nothing else is
+/// tried. Otherwise the maker's own way first, as native as the headset has it: the
+/// cameras' layer of `XR_FB_passthrough`, then of `XR_HTC_passthrough`, and the frame
+/// blended with the cameras (`ALPHA_BLEND`) last. Only one is ever used, so a layer and
+/// the blend never fight over the background.
+pub fn room_ways(found: &RoomFound<'_>) -> Vec<RoomWay> {
+    let modes = found.blend_modes;
+    let has = |m| modes.contains(&m);
+    if modes.first() == Some(&BlendMode::Additive)
+        || (has(BlendMode::Additive) && !has(BlendMode::Opaque))
+    {
+        return vec![RoomWay::Glasses];
+    }
+    let mut ways = Vec::new();
+    if found.fb_passthrough {
+        ways.push(RoomWay::FbPassthrough);
+    }
+    if found.htc_passthrough {
+        ways.push(RoomWay::HtcPassthrough);
+    }
+    if has(BlendMode::AlphaBlend) {
+        ways.push(RoomWay::Blend);
+    }
+    ways
+}
+
+/// The blend mode of a frame while the cameras' room is not blended in: opaque where the
+/// runtime offers it (or says nothing), else the first it offers.
+pub fn plain_blend(modes: &[BlendMode]) -> BlendMode {
+    if modes.is_empty() || modes.contains(&BlendMode::Opaque) {
+        BlendMode::Opaque
+    } else {
+        modes[0]
+    }
 }
 
 /// What this headset can do (see the module).
@@ -49,8 +134,13 @@ pub struct Caps {
     /// A layer's colour scaled (`XR_KHR_composition_layer_color_scale_bias`): monitors
     /// out of focus dimmed, monitors fading in.
     pub color_scale: bool,
-    /// The cameras: the "Room" backgrounds, and what they can do more.
+    /// The room behind the monitors (`None`: no way to show it): the "Room"
+    /// backgrounds where it is the cameras', and what they can do more.
     pub room: Option<RoomCaps>,
+    /// The compositor turns a layer's picture over
+    /// (`XR_FB_composition_layer_image_layout`); without, the PC sends a stream's rows
+    /// bottom first (`caps::headset::ROWS_UP`), as the compositor shows a surface's.
+    pub image_flip: bool,
     /// Tracked hands (`XR_EXT_hand_tracking`).
     pub hands: bool,
     /// The hands' ray and pinch from the runtime (`XR_EXT_hand_interaction`); without,
@@ -77,7 +167,8 @@ pub struct Caps {
 /// 4.4). Without it the item is hidden, or the scene does without, and the rest works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Offer {
-    /// The "Room" and "Dimmed room" backgrounds (`room`); without, the others.
+    /// The "Room" and "Dimmed room" backgrounds (`room`, by the cameras: not on
+    /// glasses, where the room always shows); without, the others.
     RoomBackground,
     /// The window onto the real keyboard (`room` with its keyboard window).
     KeyboardWindow,
@@ -197,6 +288,7 @@ impl Caps {
             equirect: false,
             color_scale: false,
             room: None,
+            image_flip: false,
             hands: false,
             hand_aim: false,
             menu_gesture: false,
@@ -211,7 +303,7 @@ impl Caps {
     /// Whether the menu or the scene offers `offer` on this headset (see [`Offer`]).
     pub fn offers(&self, offer: Offer) -> bool {
         match offer {
-            Offer::RoomBackground => self.room.is_some(),
+            Offer::RoomBackground => self.room.is_some_and(|r| r.way != RoomWay::Glasses),
             Offer::KeyboardWindow => self.room.is_some_and(|r| r.keyboard_window),
             Offer::MenuGesture => self.menu_gesture,
             Offer::Hands => self.hands,
@@ -264,13 +356,19 @@ impl Caps {
     pub fn headset_caps(&self) -> HeadsetCaps {
         let told = || self.decoders.iter().filter(|d| d.max_w > 0 && d.max_h > 0);
         let codec = |d: &Decoder| prostir_proto::wire::encode(&d.codec).map_or(0, |b| b[0]);
+        let mut features = vec![
+            caps::headset::PHYSICAL,
+            caps::headset::WINDOWS,
+            caps::headset::COMMANDS,
+            caps::headset::MIC,
+        ];
+        // The compositor shows a surface's rows bottom first and cannot turn the layer
+        // over: the PC turns the picture over instead.
+        if !self.image_flip {
+            features.push(caps::headset::ROWS_UP);
+        }
         HeadsetCaps {
-            features: vec![
-                caps::headset::PHYSICAL,
-                caps::headset::WINDOWS,
-                caps::headset::COMMANDS,
-                caps::headset::MIC,
-            ],
+            features,
             decoders: told()
                 .map(|d| state::Decoder {
                     codec: codec(d),
@@ -303,6 +401,7 @@ impl Caps {
             ("equirect", !self.equirect),
             ("color_scale", !self.color_scale),
             ("room", self.room.is_none()),
+            ("image_flip", !self.image_flip),
             (
                 "keyboard_window",
                 self.room.is_none_or(|r| !r.keyboard_window),
@@ -411,8 +510,10 @@ mod tests {
             equirect: true,
             color_scale: true,
             room: Some(RoomCaps {
+                way: RoomWay::FbPassthrough,
                 keyboard_window: true,
             }),
+            image_flip: true,
             hands: true,
             hand_aim: true,
             menu_gesture: true,
@@ -460,11 +561,24 @@ mod tests {
         without(
             |c| {
                 c.room = Some(RoomCaps {
+                    way: RoomWay::FbPassthrough,
                     keyboard_window: false,
                 });
             },
             &[Offer::KeyboardWindow],
         );
+        // Glasses: the room always shows, nothing to choose.
+        without(
+            |c| {
+                c.room = Some(RoomCaps {
+                    way: RoomWay::Glasses,
+                    keyboard_window: false,
+                });
+            },
+            &[Offer::RoomBackground, Offer::KeyboardWindow],
+        );
+        // The picture turned over by the PC instead: nothing hidden.
+        without(|c| c.image_flip = false, &[]);
         without(|c| c.hands = false, &[Offer::Hands]);
         without(|c| c.hand_aim = false, &[Offer::HandRay]);
         without(|c| c.menu_gesture = false, &[Offer::MenuGesture]);
@@ -482,8 +596,8 @@ mod tests {
         assert_eq!(offered(&c), [Offer::SharedVolume]);
         assert_eq!(
             c.missing(),
-            "refresh_rates,perf_levels,cylinder,equirect,color_scale,room,keyboard_window,\
-             hands,hand_aim,menu_gesture"
+            "refresh_rates,perf_levels,cylinder,equirect,color_scale,room,image_flip,\
+             keyboard_window,hands,hand_aim,menu_gesture"
         );
         assert_eq!(c.rate(false), None);
         assert_eq!(c.rate(true), None);
@@ -556,6 +670,67 @@ mod tests {
         assert!(!told.fits(Codec::H265, 1920, 1080));
         assert_eq!((told.streams_max, told.layers_max), (3, 32));
         assert!(told.has(caps::headset::MIC));
+        // The compositor turns the picture over: the rows go top first.
+        assert!(!told.has(caps::headset::ROWS_UP));
+        c.image_flip = false;
+        assert!(c.headset_caps().has(caps::headset::ROWS_UP));
+    }
+
+    /// The way the room is shown, from what the runtime offers (the families of
+    /// headsets there are, as their runtimes say it), by what it says, not by name.
+    #[test]
+    fn the_room_from_what_the_runtime_offers() {
+        use BlendMode::{Additive, AlphaBlend, Opaque};
+        let ways = |modes: &[BlendMode], fb_passthrough, htc_passthrough| {
+            room_ways(&RoomFound {
+                blend_modes: modes,
+                fb_passthrough,
+                htc_passthrough,
+            })
+        };
+        // Opaque only, and the cameras' layer of `XR_FB_passthrough`.
+        assert_eq!(ways(&[Opaque], true, false), [RoomWay::FbPassthrough]);
+        // The same without the extension (`caps=minimal`): no room.
+        assert_eq!(ways(&[Opaque], false, false), []);
+        // Blended and the layer both: the layer first, the blend if it cannot be made.
+        assert_eq!(
+            ways(&[Opaque, AlphaBlend], true, false),
+            [RoomWay::FbPassthrough, RoomWay::Blend]
+        );
+        assert_eq!(
+            ways(&[AlphaBlend, Opaque], false, true),
+            [RoomWay::HtcPassthrough, RoomWay::Blend]
+        );
+        // Blended only.
+        assert_eq!(ways(&[Opaque, AlphaBlend], false, false), [RoomWay::Blend]);
+        assert_eq!(ways(&[AlphaBlend, Opaque], false, false), [RoomWay::Blend]);
+        // The layer of `XR_HTC_passthrough`.
+        assert_eq!(ways(&[Opaque], false, true), [RoomWay::HtcPassthrough]);
+        // Both layers: the first that can be made, `XR_FB_passthrough` first.
+        assert_eq!(
+            ways(&[Opaque], true, true),
+            [RoomWay::FbPassthrough, RoomWay::HtcPassthrough]
+        );
+        // Glasses: additive, alone or preferred; never a layer over them.
+        assert_eq!(ways(&[Additive], true, true), [RoomWay::Glasses]);
+        assert_eq!(ways(&[Additive, Opaque], false, false), [RoomWay::Glasses]);
+        assert_eq!(
+            ways(&[Additive, AlphaBlend], false, false),
+            [RoomWay::Glasses]
+        );
+        // Additive offered but opaque preferred: not glasses.
+        assert_eq!(
+            ways(&[Opaque, Additive], true, false),
+            [RoomWay::FbPassthrough]
+        );
+        // A runtime that says nothing.
+        assert_eq!(ways(&[], false, false), []);
+        // The frame without the room: opaque where offered, else the first offered.
+        assert_eq!(plain_blend(&[Opaque, AlphaBlend]), Opaque);
+        assert_eq!(plain_blend(&[AlphaBlend, Opaque]), Opaque);
+        assert_eq!(plain_blend(&[AlphaBlend]), AlphaBlend);
+        assert_eq!(plain_blend(&[Additive]), Additive);
+        assert_eq!(plain_blend(&[]), Opaque);
     }
 
     #[test]
