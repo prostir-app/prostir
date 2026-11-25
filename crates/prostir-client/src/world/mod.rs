@@ -1191,9 +1191,10 @@ impl World {
 
     /// Where a new monitor of `size` pixels goes next to the others (it has no place
     /// yet), near where the head looks (`gaze`), in view; `true` when that is in the
-    /// main row and its neighbours there are to make room (see `layout::place_in_view`).
+    /// main row and its neighbours there are to make room (see `layout::place_in_view`):
+    /// any monitor, as over a row it may be out of view.
     fn place_for_new(&self, size: (u32, u32), gaze: Vec3) -> (Placement, bool) {
-        self.place_in_view(size, gaze, false)
+        self.place_in_view(size, gaze, true)
     }
 
     /// Where the placeholder of a new monitor of `size` pixels waits for its picture:
@@ -1214,6 +1215,7 @@ impl World {
             gaze,
             self.sent_rows(),
             self.radius,
+            place,
         );
         (waits, true)
     }
@@ -1720,11 +1722,13 @@ impl World {
             self.arrange_all(s, now);
             return;
         }
-        self.line_up_rows();
-        if self.bring_into_view(s) {
-            self.line_up_rows();
-        }
-        self.further_into_view(s);
+        let lined = self.line_up_rows();
+        let glued = if self.bring_into_view(s) {
+            self.line_up_rows()
+        } else {
+            lined
+        };
+        self.further_into_view(s, &glued);
         self.rearranged = true;
         self.held = [None, None];
         self.save_layout();
@@ -1772,18 +1776,26 @@ impl World {
     }
 
     /// A monitor still out of view (rows of ordinary monitors stacked high, say): the
-    /// whole arrangement a little further away, a centimetre of its radius at a time,
-    /// as a preset takes it (see `prostir_layout::circle`), each monitor where it was
-    /// around the user and so seen nearer eye level (see `layout::further`), and lined
-    /// up again; the PC's own displays carried as one piece, window panels left where
-    /// they are. The first such place where every monitor is in view and nothing goes
-    /// through anything, no further than `layout::VIEW_RADIUS`; with none, everything
-    /// stays as it was.
-    fn further_into_view(&mut self, s: &Settings) {
-        /// How much further at a time (a centimetre).
-        const STEP: f32 = 0.01;
-        /// How many times it is lined up again at most.
-        const TRIES: u32 = 10;
+    /// whole arrangement further away, as a preset takes it (see
+    /// `prostir_layout::circle`), each monitor where it was around the user and so seen
+    /// nearer eye level (see `layout::further`), and lined up again, the rows glued as
+    /// it stood kept glued (their seams, opened in the room by the carry, close again);
+    /// the PC's own displays carried as one piece, window panels left where they are.
+    /// At the least radius at which everything carried is in view (found by halving:
+    /// carrying is cheap), or 5 cm further where lining up took a monitor out of view
+    /// again: where every monitor is in view, nothing goes through anything and no
+    /// seam closed before is open; no further than `layout::VIEW_RADIUS`. Else
+    /// everything stays as it was.
+    /// `glued`: the pairs lining up kept glued as it stands now (see
+    /// [`Self::line_up_rows`]).
+    fn further_into_view(&mut self, s: &Settings, glued: &[(DisplayKey, DisplayKey)]) {
+        /// Past the least radius in view as carried, how much further it is lined up
+        /// again (lined up, rows pushed apart may come out of view again; each time
+        /// costs a lining up, some milliseconds on the headset).
+        const ON: [f32; 2] = [0.0, 0.05];
+        /// How much a seam closed as seen may open, as seen (radians: half a millimetre
+        /// a metre away).
+        const OPEN: f32 = 5e-4;
         let group = self.placed_group();
         let at = (self.center, self.tilt);
         let laid: Vec<(DisplayKey, u32, u32)> = self
@@ -1799,63 +1811,127 @@ impl World {
                     .is_some_and(|p| !layout::in_view(p, at))
             })
         };
-        if !unseen(&self.placements) || self.radius <= 0.0 {
+        if !unseen(&self.placements) || self.radius <= 0.0 || self.radius >= layout::VIEW_RADIUS {
             return;
         }
         let frame = layout::frame(self.center, self.tilt);
         let wall = s.preset == Preset::Wall;
         let (was, was_radius) = (self.placements.clone(), self.radius);
         let lead = group.first().and_then(|id| was.get(id)).copied();
-        // Lined up again only from where it is all in view as carried, and a few
-        // centimetres on: further, the rows lined up go through each other the same.
-        let mut tries = 0;
-        for step in 1u32.. {
-            let radius = was_radius + step as f32 * STEP;
-            if radius > layout::VIEW_RADIUS || tries == TRIES {
-                break;
-            }
+        // Every monitor of `was` carried as if its circle were `radius` (see above).
+        let carry = |radius: f32, to: &mut HashMap<DisplayKey, Placement>| {
             let k = radius / was_radius;
-            let carry = lead.map_or(Vec3::ZERO, |p| {
+            let lead_by = lead.map_or(Vec3::ZERO, |p| {
                 layout::further(p, &frame, k, wall).position - p.position
             });
             for m in &laid {
-                let (Some(from), Some(to)) = (was.get(&m.0), self.placements.get_mut(&m.0)) else {
+                let (Some(from), Some(to)) = (was.get(&m.0), to.get_mut(&m.0)) else {
                     continue;
                 };
                 *to = if group.contains(&m.0) {
                     Placement {
-                        position: from.position + carry,
+                        position: from.position + lead_by,
                         ..*from
                     }
                 } else {
                     layout::further(*from, &frame, k, wall)
                 };
             }
-            if tries == 0 && unseen(&self.placements) {
-                continue;
+        };
+        // The least radius in view as carried, halved down to a millimetre: carried
+        // further, every monitor is seen nearer eye level.
+        let mut next = was.clone();
+        carry(layout::VIEW_RADIUS, &mut next);
+        if unseen(&next) {
+            return;
+        }
+        let (mut lo, mut hi) = (was_radius, layout::VIEW_RADIUS);
+        while hi - lo > 0.001 {
+            let mid = (lo + hi) / 2.0;
+            carry(mid, &mut next);
+            if unseen(&next) {
+                lo = mid;
+            } else {
+                hi = mid;
             }
-            tries += 1;
-            self.line_up_rows();
-            if !unseen(&self.placements) && !layout::cut_any(&self.placements, &laid) {
+        }
+        let gaps_was = layout::seam_gaps(&was, &laid, at, glued);
+        for on in ON {
+            let radius = hi + on;
+            if radius > layout::VIEW_RADIUS {
+                break;
+            }
+            carry(radius, &mut self.placements);
+            self.line_up_keeping(glued);
+            let gaps = layout::seam_gaps(&self.placements, &laid, at, glued);
+            let opened = gaps
+                .iter()
+                .zip(&gaps_was)
+                .any(|(now, was)| now - was > OPEN);
+            let still = unseen(&self.placements);
+            if !opened && !still && !layout::cut_any(&self.placements, &laid) {
                 info!("out of view: the arrangement taken {radius:.2} m away");
                 self.radius = radius;
                 return;
+            }
+            // Further on helps only what lining up took out of view again.
+            if !still {
+                break;
             }
         }
         self.placements = was;
     }
 
-    /// Every row of the desk arrangement lined up (see `layout::line_up`), the PC's own
-    /// displays with the first of them.
-    fn line_up_rows(&mut self) {
-        // The first display of the PC itself that shows is lined up as a laptop's
-        // screen; the others go with it, standing to it as they stood (they are not
-        // lined up, and so cover no monitor the first one does not).
+    /// The pairs of monitors "Line up" keeps glued as they stand (see
+    /// `layout::glued_pairs`), with what it lines up (see [`Self::line_up_rows`]).
+    #[cfg(test)]
+    fn glued_now(&self) -> Vec<(DisplayKey, DisplayKey)> {
+        let (lid, sizes) = self.lined_up_ones();
+        layout::glued_pairs(
+            &self.placements,
+            &sizes,
+            (self.center, self.tilt),
+            self.primary(),
+            self.sent_rows(),
+            lid,
+        )
+    }
+
+    /// What "Line up" lines up: the first display of the PC itself that shows, as a
+    /// laptop's screen (see [`Self::line_up_rows`]), and the sizes of it and the
+    /// monitors.
+    fn lined_up_ones(&self) -> (Option<DisplayKey>, Vec<(DisplayKey, u32, u32)>) {
         let lid = self
             .physical()
             .iter()
             .map(|p| p.0)
             .find(|id| self.streams.contains_key(id) && self.placements.contains_key(id));
+        let sizes = self
+            .sizes
+            .iter()
+            .filter(|m| Some(m.0) == lid || !self.physical().iter().any(|p| p.0 == m.0))
+            .copied()
+            .collect();
+        (lid, sizes)
+    }
+
+    /// Every row of the desk arrangement lined up (see `layout::line_up`), the PC's own
+    /// displays with the first of them.
+    fn line_up_rows(&mut self) -> Vec<(DisplayKey, DisplayKey)> {
+        self.line_up_keeping(&[])
+    }
+
+    /// [`Self::line_up_rows`], each of `glued` kept glued as well (see
+    /// `layout::line_up_keeping`). The pairs it kept glued.
+    fn line_up_keeping(
+        &mut self,
+        glued: &[(DisplayKey, DisplayKey)],
+    ) -> Vec<(DisplayKey, DisplayKey)> {
+        let mut kept = Vec::new();
+        // The first display of the PC itself that shows is lined up as a laptop's
+        // screen; the others go with it, standing to it as they stood (they are not
+        // lined up, and so cover no monitor the first one does not).
+        let (lid, sizes) = self.lined_up_ones();
         let others: Vec<DisplayKey> = self
             .physical()
             .iter()
@@ -1863,13 +1939,7 @@ impl World {
             .filter(|id| Some(*id) != lid)
             .collect();
         let lid_was = lid.and_then(|id| self.placements.get(&id).copied());
-        let sizes: Vec<(DisplayKey, u32, u32)> = self
-            .sizes
-            .iter()
-            .filter(|m| !others.contains(&m.0))
-            .copied()
-            .collect();
-        let lined = layout::line_up(
+        let lined = layout::line_up_keeping(
             &self.placements,
             &sizes,
             self.center,
@@ -1877,6 +1947,8 @@ impl World {
             self.primary(),
             self.sent_rows(),
             lid,
+            glued,
+            Some(&mut kept),
         );
         // Window panels (and anything not laid out) stay as they are.
         self.placements.extend(lined);
@@ -1914,6 +1986,7 @@ impl World {
                 }
             }
         }
+        kept
     }
 
     /// Swaps the places of monitor `id` and its neighbour `delta` along in the order.

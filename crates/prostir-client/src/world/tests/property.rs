@@ -552,20 +552,23 @@ fn a_wide_monitor_added_is_in_view() {
     );
 }
 
+/// Common sizes: full HD, QHD, ultrawide, 4K, super ultrawide, a portrait QHD and a
+/// laptop's 2880x1800 lid.
+const COMMON: [(u32, u32); 7] = [
+    (1920, 1080),
+    (2560, 1440),
+    (3440, 1440),
+    (3840, 2160),
+    (5120, 1440),
+    (1440, 2560),
+    (2880, 1800),
+];
+
 /// Desks of one to four monitors of common sizes (the same every run), the laptop's
 /// 2880x1800 lid among them, laid out by each preset: every monitor is in view, and so
 /// after "Line up" then, and nothing cuts.
 #[test]
 fn presets_and_line_up_leave_nothing_out_of_view() {
-    const COMMON: [(u32, u32); 7] = [
-        (1920, 1080),
-        (2560, 1440),
-        (3440, 1440),
-        (3840, 2160),
-        (5120, 1440),
-        (1440, 2560),
-        (2880, 1800),
-    ];
     let mut rng = Lcg(11);
     let mut failures = Vec::new();
     for preset in [Preset::Arc, Preset::Overhead, Preset::Wall] {

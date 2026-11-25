@@ -262,8 +262,9 @@ const FURTHER: f32 = 0.01;
 /// (`fewer` cuts the monitors into that many rows) on the larger radius that needs.
 /// For rows of others (tall monitors stacked high, wide ones whose middles come close
 /// to the eye): the same rows a little further away, where the rows over the main one
-/// are seen lower, or one row fewer, whichever is nearer; neither past [`VIEW_RADIUS`].
-/// One row is always in view. Only when something is out of view, so rows already in
+/// are seen lower, or one row fewer, whichever is nearer; neither past [`VIEW_RADIUS`],
+/// nor any row fewer after such a one (else the rows before it stay). One row is
+/// always in view. Only when something is out of view, so rows already in
 /// view stay as they are.
 fn in_view_rows<K: Copy + Ord>(
     sorted: &[Item<K>],
@@ -295,6 +296,9 @@ fn in_view_rows<K: Copy + Ord>(
             })
             .collect()
     };
+    // The rows before the first row fewer for ordinary monitors: past it, a row fewer
+    // for any monitor goes no further than VIEW_RADIUS either.
+    let mut ordinary: Option<(Vec<Range<usize>>, f32)> = None;
     while rows.len() > 1 {
         let out = unseen(&rows, radius);
         if out.is_empty() {
@@ -314,6 +318,13 @@ fn in_view_rows<K: Copy + Ord>(
             if needs > VIEW_RADIUS {
                 break;
             }
+            if ordinary.is_none() {
+                ordinary = Some((rows.clone(), radius));
+            }
+        } else if needs > VIEW_RADIUS
+            && let Some(before) = ordinary.take()
+        {
+            return before;
         }
         (rows, radius) = (cut, needs);
     }
@@ -942,6 +953,11 @@ mod tests {
     /// rows and the radius are what they were; and the circle is no further than
     /// [`VIEW_RADIUS`] unless it was so before.
     fn presets_bring_into_view(presets: &[Preset], desks: &[Vec<(u32, PixelSize)>]) {
+        presets_keep_to(presets, desks, true);
+    }
+
+    /// [`presets_bring_into_view`]; `seen`: whether every monitor must be in view.
+    fn presets_keep_to(presets: &[Preset], desks: &[Vec<(u32, PixelSize)>], seen: bool) {
         let limits = Limits::default();
         let mut failures = Vec::new();
         for &preset in presets {
@@ -952,7 +968,7 @@ mod tests {
                     let case = format!("{preset:?} {sizes:?}, primary {primary:?}");
                     let (now, radius) = rows(preset, desk, primary, &limits);
                     let placed = arrange(preset, desk, primary, None, None, &limits);
-                    if !all_in_view(preset, &placed) {
+                    if seen && !all_in_view(preset, &placed) {
                         failures.push(format!("{case}: out of view, radius {radius}"));
                     }
                     let (was, was_radius) = rows_before(preset, &sorted, primary, &limits);
@@ -1014,10 +1030,8 @@ mod tests {
         }
     }
 
-    /// Five to seven monitors of common sizes on a wall (a few thousand of them, the same
-    /// every run): three rows would stand a row out of view, two do not.
-    #[test]
-    fn a_wall_of_five_to_seven_leaves_nothing_out_of_view() {
+    /// Five to seven monitors of common sizes (a few thousand desks, the same every run).
+    fn five_to_seven() -> Vec<Vec<(u32, PixelSize)>> {
         let mut seed: u64 = 1;
         let mut below = |n: usize| {
             seed = seed
@@ -1025,7 +1039,7 @@ mod tests {
                 .wrapping_add(1_442_695_040_888_963_407);
             ((seed >> 33) as usize) % n
         };
-        let desks: Vec<Vec<(u32, PixelSize)>> = (0..3000)
+        (0..3000)
             .map(|_| {
                 let n = 5 + below(3) as u32;
                 (0..n)
@@ -1035,8 +1049,22 @@ mod tests {
                     })
                     .collect()
             })
-            .collect();
-        presets_bring_into_view(&[Preset::Wall], &desks);
+            .collect()
+    }
+
+    /// Five to seven monitors on a wall: three rows would stand a row out of view, two
+    /// do not.
+    #[test]
+    fn a_wall_of_five_to_seven_leaves_nothing_out_of_view() {
+        presets_bring_into_view(&[Preset::Wall], &five_to_seven());
+    }
+
+    /// Five to seven monitors around the user: some stay out of view (one row would be
+    /// too far away), but none goes further than [`VIEW_RADIUS`] where it did not
+    /// before, nor changes where it was in view.
+    #[test]
+    fn five_to_seven_around_go_no_further_than_before() {
+        presets_keep_to(&[Preset::Arc, Preset::Overhead], &five_to_seven(), false);
     }
 
     #[test]

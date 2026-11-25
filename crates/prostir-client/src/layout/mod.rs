@@ -23,8 +23,9 @@ mod tests;
 
 pub use arrange::{
     Physical, ahead, alone_out_of_view, arrange, carried, clear_along_up, covers_any, cut_any,
-    edge_to, facing_yaw, frame, further, in_view, kept_to, left_of, level_towards, lifted, line_up,
-    make_room, place_in_view, place_new, place_waiting, preset_radius, refit, spread, tilt,
+    edge_to, facing_yaw, frame, further, glued_pairs, in_view, kept_to, left_of, level_towards,
+    lifted, line_up, line_up_keeping, make_room, place_in_view, place_new, place_waiting,
+    preset_radius, refit, seam_gaps, spread, tilt,
 };
 pub use cinema::{cinema, cinema_choice};
 pub use desktop::{Desktop, DesktopMemo};

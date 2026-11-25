@@ -259,12 +259,56 @@ pub fn line_up<K: Key>(
     previous: &[Vec<K>],
     lid: Option<K>,
 ) -> HashMap<K, Placement> {
+    line_up_keeping(
+        placements,
+        monitors,
+        center,
+        tilt,
+        primary,
+        previous,
+        lid,
+        &[],
+        None,
+    )
+}
+
+/// [`line_up`], each of `glued` kept glued as well (see
+/// `prostir_layout::tidy::line_up_keeping`): pairs [`glued_pairs`] gave before the
+/// monitors were carried away from the eye. The pairs it keeps glued go into `kept`.
+#[allow(clippy::too_many_arguments)]
+pub fn line_up_keeping<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    center: (Vec3, f32),
+    tilt: f32,
+    primary: Option<K>,
+    previous: &[Vec<K>],
+    lid: Option<K>,
+    glued: &[(K, K)],
+    kept: Option<&mut Vec<(K, K)>>,
+) -> HashMap<K, Placement> {
     let all = placed(placements, monitors);
     let frame = frame(center, tilt);
     let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
-    tidy::line_up(&all, &frame, primary, Some(&rows), lid)
+    tidy::line_up_keeping(&all, &frame, primary, Some(&rows), lid, glued, kept)
         .into_iter()
         .collect()
+}
+
+/// The pairs of monitors [`line_up`] keeps glued (one over or under the other, their
+/// seam closed as seen), the one of the row nearer the main one first, in order.
+pub fn glued_pairs<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    (center, tilt): ((Vec3, f32), f32),
+    primary: Option<K>,
+    previous: &[Vec<K>],
+    lid: Option<K>,
+) -> Vec<(K, K)> {
+    let all = placed(placements, monitors);
+    let frame = frame(center, tilt);
+    let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
+    tidy::glued_pairs(&all, &frame, primary, Some(&rows), lid)
 }
 
 /// Where a new monitor of `size` pixels goes next to the placed ones of `monitors`
@@ -301,14 +345,14 @@ pub fn place_new<K: Key>(
 }
 
 /// [`place_new`], but where that place is out of view (see
-/// `prostir_layout::space::in_view`: a monitor too wide for any row, over the head),
-/// in the main row instead, at the seam nearest the gaze (see
-/// `prostir_layout::place::into_row`): then `true`, and the neighbours it covers there
-/// are to be pushed aside along the row (see [`make_room`]). `any`: any monitor goes
-/// into the row so, else only one too wide for the row's circle (a new one: one that
-/// fits has its place over the row, as before). With no room in the row (it would go
-/// all the way around), a monitor too wide for the circle goes over or under a row on a
-/// wider circle (see [`FAR_ONE`]) where that is in view.
+/// `prostir_layout::space::in_view`: a monitor too wide for any row, over the head; or
+/// over a row of tall ones): one too wide for the row's circle in the main row instead,
+/// at the seam nearest the gaze (see `prostir_layout::place::into_row`): then `true`,
+/// and the neighbours it covers there are to be pushed aside along the row (see
+/// [`make_room`]). Another where it was, further away (see [`back_into_view`]), where
+/// that is in view; else, with `any`, into the main row as well. With no room in the
+/// row (it would go all the way around), a monitor too wide for the circle goes over or
+/// under a row on a wider circle (see [`FAR_ONE`]) where that is in view.
 #[allow(clippy::too_many_arguments)]
 pub fn place_in_view<K: Key>(
     placements: &HashMap<K, Placement>,
@@ -331,7 +375,13 @@ pub fn place_in_view<K: Key>(
     let all = placed(placements, monitors);
     let rows = rows_seen(&Room::new(&frame, &all), &all, previous);
     let px = prostir_layout::space::PixelSize::new(size.0, size.1);
-    if let Some(p) = place::into_row(&all, &frame, gaze, px, Some(&rows), any) {
+    if let Some(p) = place::into_row(&all, &frame, gaze, px, Some(&rows), false) {
+        return (p, true);
+    }
+    if let Some(p) = back_into_view(at, px, &all, &frame) {
+        return (p, false);
+    }
+    if any && let Some(p) = place::into_row(&all, &frame, gaze, px, Some(&rows), true) {
         return (p, true);
     }
     // No room in the row: over or under one, further away, so seen lower.
@@ -350,11 +400,80 @@ pub fn place_in_view<K: Key>(
     )
 }
 
+/// `at`, a place over (or under) a row out of view for a monitor of stream size `px`,
+/// carried away from the eye as if its circle were larger (see [`further`]), its
+/// bottom (top) edge seen where it was, on the row: seen nearer eye level, and smaller.
+/// The nearest such place where its middle is in view and it covers and goes through
+/// none of `monitors`, its edges no further than `circle::VIEW_RADIUS` from the eye.
+fn back_into_view<K: Key>(
+    at: Placement,
+    px: prostir_layout::space::PixelSize,
+    monitors: &[Monitor<K>],
+    frame: &Frame,
+) -> Option<Placement> {
+    let local = frame.unplace(at);
+    let height = local.width * px.aspect();
+    let up = if local.position.y >= 0.0 { 1.0 } else { -1.0 };
+    let edge = local.position.y - up * height / 2.0;
+    let along = Vec3::new(local.position.x, 0.0, local.position.z).length();
+    let reach = (along * along + local.width * local.width / 4.0).sqrt();
+    if along < 1e-6 || reach >= circle::VIEW_RADIUS {
+        return None;
+    }
+    let others: Vec<(Placement, f32)> = monitors
+        .iter()
+        .map(|m| (frame.unplace(m.placement), m.height()))
+        .collect();
+    // Under a row, the same with heights turned over.
+    let flip = |p: Placement| Placement {
+        position: Vec3::new(p.position.x, up * p.position.y, p.position.z),
+        ..p
+    };
+    let flipped: Vec<(Placement, f32)> = others.iter().map(|&(o, h)| (flip(o), h)).collect();
+    // Carried `k` times as far, resting on the row as seen (see `circle::clear_of`).
+    let at_k = |k: f32| {
+        let mut p = frame.unplace(further(at, frame, k, false));
+        let s = Vec3::new(p.position.x, 0.0, p.position.z).length() / along;
+        let rest = up * edge * s;
+        p.position.y = up * (rest + height / 2.0);
+        let bottom = circle::clear_of(&[(flip(p), height)], &flipped).map_or(rest, |c| c.max(rest));
+        p.position.y = up * (bottom + height / 2.0);
+        p
+    };
+    let seen = |p: &Placement| prostir_layout::space::in_view(p);
+    let most = circle::VIEW_RADIUS / reach;
+    if !seen(&at_k(most)) {
+        return None;
+    }
+    let (mut lo, mut hi) = (1.0f32, most);
+    while hi - lo > 1e-3 {
+        let mid = (lo + hi) / 2.0;
+        if seen(&at_k(mid)) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let clear = |p: &Placement| {
+        let mine = p.corners(height);
+        others
+            .iter()
+            .all(|(o, oh)| !covers(&o.corners(*oh), &mine, SLACK) && !cuts(o, *oh, p, height))
+    };
+    (0..=20)
+        .map(|i| hi + (most - hi) * i as f32 / 20.0)
+        .map(at_k)
+        .find(|p| clear(p))
+        .map(|p| frame.place(p))
+}
+
 /// Where the placeholder of a new monitor of `size` pixels stands while its picture is
-/// on the way, when [`place_in_view`] puts it into the main row (its neighbours make
-/// room there only once it comes): where it covers nothing and goes through nothing.
-/// Over or under a row on a wider circle (see [`FAR_ONE`]) where that is in view, else
-/// where [`place_new`] puts it. The arguments are those of [`place_in_view`].
+/// on the way, when [`place_in_view`] puts it into the main row at `into` (its
+/// neighbours make room there only once it comes): where it goes through nothing, in
+/// view. Over or under a row on a wider circle (see [`FAR_ONE`]) where that is in view
+/// (it covers nothing there either); else at `into`, carried away from the eye (see
+/// [`further`]) until it goes through none of them, seen where it will be, behind its
+/// neighbours. The other arguments are those of [`place_in_view`].
 #[allow(clippy::too_many_arguments)]
 pub fn place_waiting<K: Key>(
     placements: &HashMap<K, Placement>,
@@ -365,6 +484,7 @@ pub fn place_waiting<K: Key>(
     gaze: Vec3,
     previous: &[Vec<K>],
     radius: f32,
+    into: Placement,
 ) -> Placement {
     let frame = frame(center, tilt);
     let all = placed(placements, monitors);
@@ -378,7 +498,15 @@ pub fn place_waiting<K: Key>(
     if in_view(&far, (center, tilt)) {
         return far;
     }
-    place::place_new(&all, &frame, gaze, px, Some(&rows), &limits)
+    let height = into.width * px.aspect();
+    let clear = |p: &Placement| {
+        all.iter()
+            .all(|m| !cuts(&m.placement, m.height(), p, height))
+    };
+    (1..=40)
+        .map(|i| further(into, &frame, 1.0 + 0.05 * i as f32, false))
+        .find(|p| clear(p))
+        .unwrap_or_else(|| further(into, &frame, 3.0, false))
 }
 
 /// The most a monitor too wide for every row's circle takes around the user, over or
@@ -483,6 +611,69 @@ pub fn cut_any<K: Key>(placements: &HashMap<K, Placement>, monitors: &[(K, u32, 
             .iter()
             .any(|b| cuts(&a.placement, a.height(), &b.placement, b.height()))
     })
+}
+
+/// How far apart each of `pairs` (one over or under the other, as [`glued_pairs`] gives
+/// them) is seen from `center` tilted up by `tilt`, in the middle of where the edges they
+/// face each other with run along each other: radians up or down, above 0 apart, below
+/// overlapping. 0 for a pair not both placed or whose edges do not run along each other.
+pub fn seam_gaps<K: Key>(
+    placements: &HashMap<K, Placement>,
+    monitors: &[(K, u32, u32)],
+    (center, tilt): ((Vec3, f32), f32),
+    pairs: &[(K, K)],
+) -> Vec<f32> {
+    let frame = frame(center, tilt);
+    let local = |k: K| {
+        let m = monitor_of(placements, monitors, k)?;
+        Some((frame.unplace(m.placement), m.height()))
+    };
+    let az = |v: Vec3| v.x.atan2(-v.z);
+    let around = |a: f32, c: f32| {
+        c + (a - c + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+    };
+    // Where the edge from `a` to `b` is seen up or down at azimuth `at`.
+    let seen_at = |(a, b): (Vec3, Vec3), at: f32| {
+        let d = b - a;
+        let (c, s) = (at.cos(), at.sin());
+        let across = d.x * c + d.z * s;
+        let t = if across.abs() < 1e-9 {
+            0.5
+        } else {
+            -(a.x * c + a.z * s) / across
+        };
+        let q = a + d * t.clamp(0.0, 1.0);
+        q.y.atan2(Vec3::new(q.x, 0.0, q.z).length())
+    };
+    pairs
+        .iter()
+        .map(|&(p, u)| {
+            let (Some((pp, ph)), Some((up, uh))) = (local(p), local(u)) else {
+                return 0.0;
+            };
+            let over = up.position.y > pp.position.y;
+            let [ptl, ptr, pbr, pbl] = pp.corners(ph);
+            let [utl, utr, ubr, ubl] = up.corners(uh);
+            let (ue, pe) = if over {
+                ((ubl, ubr), (ptl, ptr))
+            } else {
+                ((utl, utr), (pbl, pbr))
+            };
+            let c = az(up.position);
+            let span = |(a, b): (Vec3, Vec3)| {
+                let (x, y) = (around(az(a), c), around(az(b), c));
+                (x.min(y), x.max(y))
+            };
+            let ((ul, ur), (pl, pr)) = (span(ue), span(pe));
+            let (lo, hi) = (ul.max(pl), ur.min(pr));
+            if hi <= lo {
+                return 0.0;
+            }
+            let mid = (lo + hi) / 2.0;
+            let (at_u, at_p) = (seen_at(ue, mid), seen_at(pe, mid));
+            if over { at_u - at_p } else { at_p - at_u }
+        })
+        .collect()
 }
 
 /// `p` for a stream now `now` pixels in size instead of `was`: the same size of a
