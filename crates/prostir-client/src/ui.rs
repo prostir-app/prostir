@@ -2760,10 +2760,9 @@ impl Panel {
     /// line, or two when long (the end cut off with "…" if even that is not enough).
     /// Premultiplied RGBA.
     pub fn toast_image(&mut self, message: &str, width: u32, height: u32) -> Vec<u8> {
-        let mut p = Pixmap::new(width, height).expect("toast size");
+        let mut p = toast_pill(width, height);
         let c = &mut Canvas::whole(&mut p);
         let (w, h) = (width as f32, height as f32);
-        fill(c, rounded(rect(0.0, 0.0, w, h), 28.0), [16, 18, 24, 235]);
         let room = w - 72.0;
         let one = h * 0.3;
         if self.text_width(message, one, true) <= room {
@@ -2808,6 +2807,44 @@ impl Panel {
             self.draw_text(c, (w - tw) / 2.0, baseline, size, k == 0, TEXT, line);
         }
         p.take()
+    }
+}
+
+/// The dark pill of a toast, `width`×`height`, with nothing written on it.
+pub fn toast_pill(width: u32, height: u32) -> Pixmap {
+    let mut p = Pixmap::new(width, height).expect("toast size");
+    let c = &mut Canvas::whole(&mut p);
+    fill(
+        c,
+        rounded(rect(0.0, 0.0, width as f32, height as f32), 28.0),
+        [16, 18, 24, 235],
+    );
+    p
+}
+
+impl Panel {
+    /// `message` on one line in the middle of `pill` (a [`toast_pill`] or a copy of
+    /// one), smaller where it would not fit, never in two lines: for a label drawn
+    /// again and again. With the glyphs of its letters and size drawn once before,
+    /// nothing is allocated.
+    pub fn write_line(&mut self, pill: &mut Pixmap, message: &str) {
+        let (w, h) = (pill.width() as f32, pill.height() as f32);
+        let room = w - 72.0;
+        let mut size = h * 0.3;
+        while size > 12.0 && self.text_width(message, size, true) > room {
+            size -= 2.0;
+        }
+        let tw = self.text_width(message, size, true);
+        let c = &mut Canvas::whole(pill);
+        self.draw_text(
+            c,
+            (w - tw) / 2.0,
+            h / 2.0 + size * 0.36,
+            size,
+            true,
+            TEXT,
+            message,
+        );
     }
 }
 
