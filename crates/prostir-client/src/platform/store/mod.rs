@@ -48,7 +48,7 @@ impl Store for NoStore {
 
     fn update_hint(&self) -> UpdateHint {
         UpdateHint {
-            how: "store-update-apk",
+            how: "headset-store-update-apk",
             place: "github.com/prostir-app/prostir/releases",
         }
     }

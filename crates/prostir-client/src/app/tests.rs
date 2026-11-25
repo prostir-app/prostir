@@ -557,7 +557,7 @@ fn a_message_not_sent_is_said() {
     let shows = crate::view::build(&sim.m).error;
     assert_eq!(
         shows.as_deref(),
-        Some(sim.m.texts().t("error-not-connected"))
+        Some(sim.m.texts().t("headset-error-not-connected"))
     );
     // Shown for a while, then gone.
     sim.after(ERROR_SHOWN_FOR);
@@ -1503,7 +1503,7 @@ fn off_the_head_without_frames_is_a_rest() {
         assert!(
             sim.m
                 .toast()
-                .is_none_or(|t| t.text != sim.m.texts().t("rest-eyes")),
+                .is_none_or(|t| t.text != sim.m.texts().t("headset-rest-eyes")),
             "a reminder 5 min after a 10 min rest"
         );
     }
@@ -1635,7 +1635,7 @@ fn a_keyboard_window_that_fails_is_said_and_kept() {
     let view = crate::view::build(&sim.m);
     assert_eq!(
         view.error.as_deref(),
-        Some(sim.m.texts().t("error-keyboard-window"))
+        Some(sim.m.texts().t("headset-error-keyboard-window"))
     );
     assert!(!view.keyboard_available, "not offered now");
     assert!(sim.m.settings().keyboard_window, "kept as chosen");

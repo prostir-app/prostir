@@ -27,15 +27,15 @@ pub fn desk_rect(r: DeskRect) -> [i32; 4] {
 /// `DELL U2720Q`, from PCs of step 7.9 on), else by its connector (`HDMI-A-1`).
 pub fn label(d: &Display, l: &Texts) -> String {
     match &d.kind {
-        DisplayKind::Physical { builtin: true, .. } => l.t("laptop-screen").to_owned(),
+        DisplayKind::Physical { builtin: true, .. } => l.t("headset-laptop-screen").to_owned(),
         DisplayKind::Physical { connector, .. } if !d.name.is_empty() && d.name != *connector => {
             d.name.clone()
         }
         DisplayKind::Physical { connector, .. } if !connector.is_empty() => {
-            l.f("pc-display-named", &[("name", connector.into())])
+            l.f("headset-pc-display-named", &[("name", connector.into())])
         }
-        _ if !d.name.is_empty() => l.f("pc-display-named", &[("name", (&d.name).into())]),
-        _ => l.t("pc-display").to_owned(),
+        _ if !d.name.is_empty() => l.f("headset-pc-display-named", &[("name", (&d.name).into())]),
+        _ => l.t("headset-pc-display").to_owned(),
     }
 }
 

@@ -82,10 +82,10 @@ impl std::fmt::Display for UserError {
             Self::UnknownDisplay => f.write_str(t("Такого екрана немає", "No such display")),
             Self::Limit { max, of } => {
                 let id = match of {
-                    Counted::Monitors => "limit-monitors",
-                    Counted::Windows => "limit-windows",
-                    Counted::Physical => "limit-physical",
-                    Counted::Streams => "limit-streams",
+                    Counted::Monitors => "pc-limit-monitors",
+                    Counted::Windows => "pc-limit-windows",
+                    Counted::Physical => "pc-limit-physical",
+                    Counted::Streams => "pc-limit-streams",
                 };
                 f.write_str(&crate::i18n::count(id, *max))
             }

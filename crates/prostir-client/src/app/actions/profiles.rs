@@ -76,9 +76,10 @@ impl Model {
                     return;
                 }
                 if self.profiles.len() >= MAX_PROFILES {
-                    let text = self
-                        .texts()
-                        .f("note-profiles-full", &[("count", MAX_PROFILES.into())]);
+                    let text = self.texts().f(
+                        "headset-note-profiles-full",
+                        &[("count", MAX_PROFILES.into())],
+                    );
                     self.tell_press(Note::failed(Some(action), &text), true);
                     return;
                 }
@@ -126,7 +127,7 @@ impl Model {
                 self.profiles_changed();
                 let text = self
                     .texts()
-                    .f("note-profile-deleted", &[("name", name.into())]);
+                    .f("headset-note-profile-deleted", &[("name", name.into())]);
                 self.tell_press(Note::done(Some(action), &text), true);
             }
             Action::ProfilePage(page) => self.menu.profile_page = page,
@@ -144,7 +145,7 @@ impl Model {
         let name = self.profile_name(i);
         let text = self
             .texts()
-            .f("toast-profile-saved", &[("name", name.into())]);
+            .f("headset-toast-profile-saved", &[("name", name.into())]);
         self.tell_press(Note::done(Some(action), &text), true);
     }
 }

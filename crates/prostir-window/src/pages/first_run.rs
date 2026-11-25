@@ -13,7 +13,7 @@ pub(super) fn first_run(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     text(
         ui,
         tk.f(
-            "fr-step",
+            "window-fr-step",
             &[("n", (step + 1).into()), ("total", STEPS.into())],
         ),
         tk.small(),
@@ -52,16 +52,16 @@ pub(super) fn first_run(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
             0 => {
                 w::brand_mark(ui, tk, 72.0);
                 ui.add_space(tk.th.shape.padding);
-                title(ui, "fr-1-title");
-                text(ui, tk.t("fr-1-body"), tk.body(), p.text_muted);
+                title(ui, "window-fr-1-title");
+                text(ui, tk.t("window-fr-1-body"), tk.body(), p.text_muted);
                 ui.add_space(tk.th.shape.padding);
-                if w::button(ui, tk, &tk.t("fr-1-link"), Kind::Secondary, true).clicked() {
+                if w::button(ui, tk, &tk.t("window-fr-1-link"), Kind::Secondary, true).clicked() {
                     v.out.push(Action::OpenUrl(RELEASES.into()));
                 }
             }
             1 => {
-                title(ui, "fr-2-title");
-                text(ui, tk.t("fr-2-body"), tk.body(), p.text_muted);
+                title(ui, "window-fr-2-title");
+                text(ui, tk.t("window-fr-2-body"), tk.body(), p.text_muted);
                 ui.add_space(tk.th.shape.padding);
                 let found = s
                     .nearby
@@ -69,15 +69,21 @@ pub(super) fn first_run(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                     .or_else(|| s.pairing.as_ref().and_then(|p| p.code_for.as_ref()));
                 match found {
                     Some(name) => {
-                        w::status(ui, tk, p.ok, &tk.f("fr-2-found", &[("name", name.into())]));
+                        w::status(
+                            ui,
+                            tk,
+                            p.ok,
+                            &tk.f("window-fr-2-found", &[("name", name.into())]),
+                        );
                     }
                     None if v.ui.unsupported.contains("pair_new_headset") => {
-                        w::status(ui, tk, p.text_muted, &tk.t("fr-2-asks"));
+                        w::status(ui, tk, p.text_muted, &tk.t("window-fr-2-asks"));
                     }
                     None if s.pairing.is_none() => {
-                        w::status(ui, tk, p.text_muted, &tk.t("fr-2-closed"));
+                        w::status(ui, tk, p.text_muted, &tk.t("window-fr-2-closed"));
                         ui.add_space(tk.th.shape.spacing);
-                        if w::button(ui, tk, &tk.t("pair-reopen"), Kind::Secondary, true).clicked()
+                        if w::button(ui, tk, &tk.t("window-pair-reopen"), Kind::Secondary, true)
+                            .clicked()
                         {
                             v.send(Request::PairNewHeadset);
                         }
@@ -87,19 +93,24 @@ pub(super) fn first_run(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                     None => {
                         ui.horizontal(|ui| {
                             w::spinner(ui, tk, 22.0);
-                            text(ui, tk.t("fr-2-looking"), tk.body(), p.text);
+                            text(ui, tk.t("window-fr-2-looking"), tk.body(), p.text);
                         });
                     }
                 }
                 ui.add_space(tk.th.shape.padding);
-                text(ui, tk.t("pair-firewall"), tk.small(), p.text_muted);
+                text(ui, tk.t("window-pair-firewall"), tk.small(), p.text_muted);
             }
             2 => {
-                title(ui, "fr-3-title");
-                text(ui, tk.t("fr-3-body"), tk.body(), p.text_muted);
+                title(ui, "window-fr-3-title");
+                text(ui, tk.t("window-fr-3-body"), tk.body(), p.text_muted);
                 ui.add_space(tk.th.shape.padding);
                 if let Some(name) = &paired {
-                    w::status(ui, tk, p.ok, &tk.f("pair-done", &[("name", name.into())]));
+                    w::status(
+                        ui,
+                        tk,
+                        p.ok,
+                        &tk.f("window-pair-done", &[("name", name.into())]),
+                    );
                 } else if let Some(pr) = &s.pairing {
                     pair_body(ui, v, pr, &s.pc.addresses, revision);
                     next_ok = false;
@@ -108,26 +119,27 @@ pub(super) fn first_run(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                         ui,
                         tk,
                         p.ok,
-                        &tk.f("pair-done", &[("name", (&h.name).into())]),
+                        &tk.f("window-pair-done", &[("name", (&h.name).into())]),
                     );
                 } else if v.ui.unsupported.contains("pair_new_headset") {
-                    w::status(ui, tk, p.text_muted, &tk.t("fr-3-wait"));
+                    w::status(ui, tk, p.text_muted, &tk.t("window-fr-3-wait"));
                     next_ok = false;
                 } else {
-                    text(ui, tk.t("pair-expired"), tk.body(), p.text_muted);
+                    text(ui, tk.t("window-pair-expired"), tk.body(), p.text_muted);
                     ui.add_space(tk.th.shape.padding);
-                    if w::button(ui, tk, &tk.t("pair-reopen"), Kind::Primary, true).clicked() {
+                    if w::button(ui, tk, &tk.t("window-pair-reopen"), Kind::Primary, true).clicked()
+                    {
                         v.send(Request::PairNewHeadset);
                     }
                     next_ok = !s.headsets.is_empty();
                 }
             }
             _ => {
-                title(ui, "fr-4-title");
-                text(ui, tk.t("fr-4-body"), tk.body(), p.text_muted);
+                title(ui, "window-fr-4-title");
+                text(ui, tk.t("window-fr-4-body"), tk.body(), p.text_muted);
                 if let Some(on) = s.autostart {
                     ui.add_space(tk.th.shape.padding);
-                    let label = tk.t("ov-autostart");
+                    let label = tk.t("window-ov-autostart");
                     w::row(ui, tk, &label, None, |ui| {
                         if let Some(on) = w::switch(ui, tk, &label, on, true) {
                             v.out.push(Action::Send(Request::Autostart { on }));
@@ -139,11 +151,11 @@ pub(super) fn first_run(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
         ui.add_space(tk.th.shape.section_gap);
         let last = step + 1 == STEPS;
         let label = if last {
-            tk.t("fr-done")
+            tk.t("window-fr-done")
         } else {
-            tk.t("fr-next")
+            tk.t("window-fr-next")
         };
-        let back = tk.t("fr-back");
+        let back = tk.t("window-fr-back");
         // Laid out left to right after a gap, so Tab meets Back before Next, as seen.
         let width = w::button_width(ui, tk, &label)
             + if step > 0 {

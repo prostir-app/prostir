@@ -69,7 +69,7 @@ impl Model {
                     self.forget_pc(f.pc);
                     let text = self
                         .texts()
-                        .f("note-pc-forgotten", &[("pc", f.name.into())]);
+                        .f("headset-note-pc-forgotten", &[("pc", f.name.into())]);
                     self.tell(Note::done(Some(f.on), &text), true, f.in_menu);
                 }
                 self.session.paired_list(list);
@@ -112,7 +112,7 @@ impl Model {
                             let name = self.profile_name(slot);
                             let text = self
                                 .texts()
-                                .f("toast-profile-switched", &[("name", name.into())]);
+                                .f("headset-toast-profile-switched", &[("name", name.into())]);
                             let note = Note::done(Some(Action::ApplyProfile(slot)), &text);
                             self.tell(note, true, true);
                             let keys = ids.into_iter().map(|id| DisplayKey::new(pc, id)).collect();
@@ -138,7 +138,7 @@ impl Model {
                 ..
             } => {
                 let text = self.texts().f(
-                    "error-too-big",
+                    "headset-error-too-big",
                     &[
                         ("name", name.into()),
                         ("size", format!("{w}×{h}").into()),
@@ -246,7 +246,9 @@ impl Model {
 
     /// The headset paired with the PC called `host`: said once.
     fn say_paired(&mut self, host: String) {
-        let text = self.texts().f("note-paired", &[("pc", host.into())]);
+        let text = self
+            .texts()
+            .f("headset-note-paired", &[("pc", host.into())]);
         self.tell(Note::done(None, &text), true, true);
     }
 
@@ -299,7 +301,7 @@ impl Model {
         use prostir_proto::state::ErrorCode;
         info!("the PC asks: {asked:?}");
         let texts = self.texts().clone();
-        let menu_name = |n: usize| texts.f("profile-n", &[("n", n.into())]);
+        let menu_name = |n: usize| texts.f("headset-profile-n", &[("n", n.into())]);
         let outcome = match crate::commands::what_to_do(asked, &self.profiles, &menu_name) {
             Does::Act(action) => {
                 self.act(action, By::Elsewhere);

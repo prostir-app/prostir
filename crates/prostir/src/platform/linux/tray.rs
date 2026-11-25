@@ -38,7 +38,7 @@ fn qualities(bitrate: u32) -> (usize, Vec<String>) {
         Some(i) => i,
         None if bitrate == 0 => labels.len(),
         None => {
-            labels.push(crate::i18n::count("quality-custom", bitrate as usize));
+            labels.push(crate::i18n::count("pc-quality-custom", bitrate as usize));
             labels.len() - 1
         }
     };

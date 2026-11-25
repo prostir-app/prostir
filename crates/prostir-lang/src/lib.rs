@@ -22,6 +22,15 @@ use fluent_syntax::ast::Entry;
 use unic_langid::LanguageIdentifier;
 use unicode_segmentation::UnicodeSegmentation;
 
+/// The files built into every program: `lang/<code>.ftl` at the root of the repository,
+/// one per language, English (complete, behind every other one) and Ukrainian. The PC
+/// app, the settings window and the headset app share them; each uses the messages
+/// whose ids start with its own name (`pc-`, `window-`, `headset-`).
+pub const BUILTIN: &[(&str, &str)] = &[
+    ("en", include_str!("../../../lang/en.ftl")),
+    ("uk", include_str!("../../../lang/uk.ftl")),
+];
+
 /// The language every other one falls back to; always built in.
 pub const FALLBACK: &str = "en";
 
