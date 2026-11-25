@@ -159,7 +159,7 @@ impl Worker {
         if behind >= BEHIND_AT_MOST {
             bail!(
                 "{behind} {}",
-                t(
+                inline_t(
                     "кодувальників не відповідають: нових не запускаю",
                     "encoders do not respond: no more are started"
                 )
@@ -193,7 +193,7 @@ impl Worker {
             if hangs >= HANGS_OF_A_KIND {
                 let why = format!(
                     "{} {hangs}",
-                    t("не відповідав разів:", "did not respond, times:")
+                    inline_t("не відповідав разів:", "did not respond, times:")
                 );
                 tried.push((choice, why));
                 continue;
@@ -239,7 +239,7 @@ impl Worker {
                     retired.store(true, Ordering::Relaxed);
                     let text = format!("{e:#}");
                     if source_again || output.health() == OutputHealth::Closed {
-                        return Err(e.context(t(
+                        return Err(e.context(inline_t(
                             "джерело кадрів не працює",
                             "the source of the frames fails",
                         )));
@@ -308,7 +308,7 @@ impl Worker {
                     .err()
                     .map_or_else(
                         || {
-                            t(
+                            inline_t(
                                 "немає кодувальника для цього виходу",
                                 "no encoder for this output",
                             )
@@ -389,17 +389,17 @@ impl Worker {
                     warn!("{name} keeps being resized by another program: leaving it at {w}x{h}");
                     let body = format!(
                         "{} {}. {}",
-                        t(
+                        inline_t(
                             "Інша програма раз у раз змінює розмір монітора",
                             "Another program keeps changing the size of monitor"
                         ),
                         number,
-                        t(
+                        inline_t(
                             "Покажіть у ній вікно програми замість монітора, а тоді зніміть і знову вдягніть шолом.",
                             "Share an app window in it instead of the monitor, then take the headset off and put it on again."
                         )
                     );
-                    dialogs::notify(t("Розмір монітора", "Monitor size"), &body);
+                    dialogs::notify(inline_t("Розмір монітора", "Monitor size"), &body);
                 }
             }
         }
@@ -552,9 +552,9 @@ pub(super) fn kept_note(used: Codec, asked: Codec) -> String {
     let name = crate::encoder::codec_label;
     format!(
         "{} {}: {} {}",
-        t("лишився", "kept"),
+        inline_t("лишився", "kept"),
         name(used),
         name(asked),
-        t("не запустився", "did not start")
+        inline_t("не запустився", "did not start")
     )
 }

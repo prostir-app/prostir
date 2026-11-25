@@ -354,7 +354,7 @@ impl Displays {
         if sorted != current {
             bail!(
                 "{}",
-                t(
+                inline_t(
                     "Порядок не збігається з моніторами",
                     "The order does not match the monitors"
                 )

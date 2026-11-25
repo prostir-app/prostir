@@ -285,7 +285,7 @@ impl Worker {
                 None => {
                     let e = anyhow!(
                         "{}",
-                        t(
+                        inline_t(
                             "його вихід на стільниці зник",
                             "its output on the desktop is gone"
                         )
@@ -433,15 +433,15 @@ pub(super) fn show_sharing_tip(number: u32) {
     }
     let body = format!(
         "{} {}. {}",
-        t(
+        inline_t(
             "Програма, що показує екран, змінила розмір монітора",
             "A screen sharing program changed the size of monitor"
         ),
         number,
-        t(
+        inline_t(
             "Розмір повернено, але показ може стрибати. Щоб цього не було, показуйте вікно програми, а не монітор.",
             "Its size is back, but the share may jump. To avoid that, share an app window instead of the monitor."
         )
     );
-    dialogs::notify(t("Показ екрана", "Screen sharing"), &body);
+    dialogs::notify(inline_t("Показ екрана", "Screen sharing"), &body);
 }

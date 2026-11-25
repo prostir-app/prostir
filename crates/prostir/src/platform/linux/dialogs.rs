@@ -7,19 +7,19 @@ use std::time::Duration;
 
 use log::warn;
 
-use crate::i18n::t;
+use crate::i18n::inline_t;
 use crate::platform::{NoCode, run, run_until};
 
 /// Asks for the code the headset shows, in a small dialog on the PC, closed when
 /// `gone` says the headset is gone.
 pub fn ask_code(gone: &dyn Fn() -> bool) -> Result<String, NoCode> {
-    let text = t(
+    let text = inline_t(
         "Шолом хоче підключитися.\nВведіть код, який він показує:",
         "A headset wants to connect.\nType the code it shows:",
     );
     // Launchers in dmenu mode (common on Hyprland and Sway) print what was typed; they
     // show one line, so the prompt is shorter.
-    let prompt = t("Код із шолома: ", "Code from the headset: ");
+    let prompt = inline_t("Код із шолома: ", "Code from the headset: ");
     let attempts: [(&str, Vec<&str>); 5] = [
         ("kdialog", vec!["--title", "Prostir", "--inputbox", text]),
         ("zenity", vec!["--entry", "--title=Prostir", "--text", text]),

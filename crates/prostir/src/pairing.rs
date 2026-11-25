@@ -1,6 +1,6 @@
 //! Encrypted connections and pairing on the PC side.
 
-use crate::i18n::t;
+use crate::i18n::inline_t;
 use std::io;
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -57,8 +57,8 @@ fn attempt_failed() {
     let tell = LIMITER.lock().unwrap().failed();
     if tell {
         notify(
-            t("Неправильні коди сполучення", "Wrong pairing codes"),
-            t(
+            inline_t("Неправильні коди сполучення", "Wrong pairing codes"),
+            inline_t(
                 "Хтось кілька разів ввів неправильний код. Нові спроби тепер чекають.",
                 "Someone typed wrong codes several times. New attempts now have to wait.",
             ),
@@ -771,11 +771,11 @@ fn accept_within(
                             &mut conn,
                             &format!(
                                 "{} {minutes} {}",
-                                t(
+                                inline_t(
                                     "Забагато неправильних кодів. Спробуйте за",
                                     "Too many wrong codes. Try again in",
                                 ),
-                                t("хв.", "min."),
+                                inline_t("хв.", "min."),
                             ),
                         )?;
                         bail!(
@@ -787,7 +787,7 @@ fn accept_within(
                         info!("another headset is pairing: this one is told to wait");
                         refuse(
                             &mut conn,
-                            t(
+                            inline_t(
                                 "Інший шолом саме сполучається з цим ПК. Спробуйте за хвилину.",
                                 "Another headset is pairing with this PC right now. Try again in a minute.",
                             ),
@@ -816,14 +816,14 @@ fn accept_within(
                     }
                     Err(NoCode::Cancelled) => refuse(
                         &mut conn,
-                        t("На ПК код не введено", "No code was typed on the PC"),
+                        inline_t("На ПК код не введено", "No code was typed on the PC"),
                     )
                     .map(|_| None),
                     Err(NoCode::NoDialog) => {
                         shown = false;
                         refuse(
                             &mut conn,
-                            t(
+                            inline_t(
                                 "На ПК немає вікна для коду. Виберіть «Навпаки: код на ноутбуці, ввести тут».",
                                 "The PC has no dialog for the code. Choose \"The other way: code on the PC, type it here\".",
                             ),
@@ -862,7 +862,7 @@ fn accept_within(
                         LIMITER.lock().unwrap().succeeded();
                         tell(crate::events::Event::Paired {
                             name: if name.is_empty() {
-                                t("Шолом", "Headset").into()
+                                inline_t("Шолом", "Headset").into()
                             } else {
                                 name.clone()
                             },
@@ -877,10 +877,10 @@ fn accept_within(
                         security.trusted.lock().unwrap().add(peer.key, &label)?;
                         info!("paired with {label} ({})", secure::fingerprint(&peer.key));
                         notify(
-                            t("Шолом сполучено", "Headset paired"),
+                            inline_t("Шолом сполучено", "Headset paired"),
                             &format!(
                                 "{label} {}",
-                                t("тепер може підключатися.", "can connect now.")
+                                inline_t("тепер може підключатися.", "can connect now.")
                             ),
                         );
                     }
@@ -913,7 +913,7 @@ fn obtain_code(
         // The settings window is open: the code is typed there.
         let (to, code) = std::sync::mpsc::channel();
         let name = if name.is_empty() {
-            t("Шолом", "Headset").to_owned()
+            inline_t("Шолом", "Headset").to_owned()
         } else {
             name.to_owned()
         };
@@ -955,10 +955,10 @@ fn obtain_code(
     // Once per code: a peer asking again and again must not flood the desktop.
     if new {
         notify(
-            t("Сполучення шолома", "Pairing a headset"),
+            inline_t("Сполучення шолома", "Pairing a headset"),
             &format!(
                 "{} {shown}",
-                t("Введіть у шоломі код", "Type this code in the headset:")
+                inline_t("Введіть у шоломі код", "Type this code in the headset:")
             ),
         );
     }
@@ -1018,37 +1018,37 @@ enum Update {
 fn incompatible(link: &mut Link, update: Update, headset_app: &str) -> Result<bool> {
     let ours = prostir_proto::app_version(env!("CARGO_PKG_VERSION"));
     let headset_app = if headset_app.is_empty() {
-        t("старіша", "older")
+        inline_t("старіша", "older")
     } else {
         headset_app
     };
     let (title, body) = match update {
         Update::Pc => (
-            t("Оновіть Prostir на ПК", "Update Prostir on the PC"),
+            inline_t("Оновіть Prostir на ПК", "Update Prostir on the PC"),
             format!(
                 "{} {headset_app}, {} {ours}. prostir.ishawyha.dev",
-                t("Застосунок у шоломі новіший:", "The headset app is newer:"),
-                t("а на ПК", "the PC has")
+                inline_t("Застосунок у шоломі новіший:", "The headset app is newer:"),
+                inline_t("а на ПК", "the PC has")
             ),
         ),
         Update::Headset => (
-            t("Оновіть Prostir у шоломі", "Update Prostir in the headset"),
+            inline_t("Оновіть Prostir у шоломі", "Update Prostir in the headset"),
             format!(
                 "{} {headset_app}, {} {ours}.",
-                t("Застосунок у шоломі старіший:", "The headset app is older:"),
-                t("а на ПК", "the PC has")
+                inline_t("Застосунок у шоломі старіший:", "The headset app is older:"),
+                inline_t("а на ПК", "the PC has")
             ),
         ),
         Update::Both => (
-            t(
+            inline_t(
                 "Збірки шолома й ПК з різних версій гілки",
                 "The headset and PC builds are from different versions of the branch",
             ),
             format!(
                 "{} {headset_app}, {} {ours}. {}",
-                t("У шоломі", "The headset has"),
-                t("а на ПК", "the PC has"),
-                t("Оновіть обидві.", "Update both.")
+                inline_t("У шоломі", "The headset has"),
+                inline_t("а на ПК", "the PC has"),
+                inline_t("Оновіть обидві.", "Update both.")
             ),
         ),
     };

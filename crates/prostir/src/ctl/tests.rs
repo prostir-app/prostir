@@ -297,7 +297,7 @@ fn status_says_asleep_or_port_taken() {
         );
         (code, String::from_utf8(out).unwrap())
     };
-    let not_running = format!("{}\n", t("Не працює", "Not running"));
+    let not_running = format!("{}\n", inline_t("Не працює", "Not running"));
     assert_eq!(
         status(false, false, false),
         (NOT_RUNNING, not_running.clone())
@@ -424,13 +424,16 @@ fn state_for_people() {
     };
     let (code, out, _) = ctl("status", &client);
     assert_eq!(code, DONE);
-    assert_eq!(out.trim(), t("Чекає на шолом", "Waiting for a headset"));
+    assert_eq!(
+        out.trim(),
+        inline_t("Чекає на шолом", "Waiting for a headset")
+    );
     let (_, out, _) = ctl("monitor list", &client);
     let line = format!(
         "103\tProstir-1\t{}\t640x360 100%\t{}{}",
-        t("монітор", "monitor"),
-        t("працює", "running"),
-        t(", головний", ", primary")
+        inline_t("монітор", "monitor"),
+        inline_t("працює", "running"),
+        inline_t(", головний", ", primary")
     );
     assert_eq!(out.trim(), line);
     let (_, out, _) = ctl("autostart status --json", &client);

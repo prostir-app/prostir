@@ -744,11 +744,11 @@ fn serve(args: Args, why: Why, moved: bool) -> Result<i32> {
             // Hyprland's config is the person's own: what to change is only said.
             if by == login::Login::Hyprland {
                 platform::dialogs::notify(
-                    i18n::t(
+                    i18n::inline_t(
                         "Prostir у конфігу Hyprland",
                         "Prostir in the Hyprland config",
                     ),
-                    i18n::t(
+                    i18n::inline_t(
                         "Замініть exec-once = prostir на exec-once = prostir serve: сам prostir тепер відкриває вікно налаштувань.",
                         "Change exec-once = prostir to exec-once = prostir serve: a bare prostir now opens the settings window.",
                     ),
@@ -895,12 +895,12 @@ fn open_sockets(args: &Args, discovery: Option<u16>) -> Result<platform::sockets
             });
             if taken {
                 platform::dialogs::notify_and_wait(
-                    i18n::t("Prostir не працює", "Prostir is not running"),
+                    i18n::inline_t("Prostir не працює", "Prostir is not running"),
                     &format!(
                         "{} {} {}",
-                        i18n::t("Порт", "Port"),
+                        i18n::inline_t("Порт", "Port"),
                         args.port,
-                        i18n::t("зайнятий іншою програмою.", "is taken by another program.")
+                        i18n::inline_t("зайнятий іншою програмою.", "is taken by another program.")
                     ),
                 );
             }

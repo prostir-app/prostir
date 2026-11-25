@@ -45,7 +45,7 @@ use std::time::Instant;
 
 use prostir_proto::state::{self, ErrorCode, MicDevice};
 
-use crate::i18n::t;
+use crate::i18n::inline_t;
 
 /// Where the PC's sound plays while it goes to the headset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +84,7 @@ impl NeedsDriver {
 
 impl fmt::Display for NeedsDriver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let text = t(
+        let text = inline_t(
             "Потрібен драйвер {name}: {url}. Після встановлення оберіть у програмах \
              мікрофон «{device}».",
             "Needs the {name} driver: {url}. Once it is installed, choose “{device}” as \

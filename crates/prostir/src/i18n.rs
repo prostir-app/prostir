@@ -1,5 +1,5 @@
 //! Interface language of the PC side, from the desktop's locale: Ukrainian for `uk*`,
-//! English otherwise. Strings are written as `t("український", "English")` pairs.
+//! English otherwise. Strings are written as `inline_t("український", "English")` pairs.
 
 use std::sync::OnceLock;
 
@@ -14,13 +14,13 @@ fn ukrainian() -> bool {
     })
 }
 
-pub fn t<'a>(uk: &'a str, en: &'a str) -> &'a str {
+pub fn inline_t<'a>(uk: &'a str, en: &'a str) -> &'a str {
     if ukrainian() { uk } else { en }
 }
 
 /// `uk` or `en`, sent to the headset.
 pub fn code() -> &'static str {
-    t("uk", "en")
+    inline_t("uk", "en")
 }
 
 /// Text `id` of `lang/*.ftl` with the count `n`, in the PC's language: its words in

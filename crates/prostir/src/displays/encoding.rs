@@ -117,7 +117,7 @@ impl Displays {
         let first = noted.first()?;
         let mut line = format!("{}: {}", first.name, first.note.as_deref().unwrap_or(""));
         if noted.len() > 1 {
-            let _ = write!(line, " (+{} {})", noted.len() - 1, t("ще", "more"));
+            let _ = write!(line, " (+{} {})", noted.len() - 1, inline_t("ще", "more"));
         }
         Some(state::clip(&line, 120))
     }
@@ -309,7 +309,7 @@ impl Displays {
 pub(super) fn too_big_why((w, h): (u32, u32), codec: Codec) -> String {
     format!(
         "{w}x{h} {} {}",
-        t(
+        inline_t(
             "більше, ніж шолом декодує в",
             "is larger than the headset decodes in"
         ),

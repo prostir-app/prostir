@@ -9,7 +9,7 @@
 use prostir_proto::request::Outcome;
 use prostir_proto::state::ErrorCode;
 
-use crate::i18n::t;
+use crate::i18n::inline_t;
 
 /// What a display count is of, for [`UserError::Limit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,12 +74,12 @@ impl UserError {
 impl std::fmt::Display for UserError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unsupported => f.write_str(t("ПК цього не вміє", "The PC cannot do this")),
-            Self::NotAllowed => f.write_str(t(
+            Self::Unsupported => f.write_str(inline_t("ПК цього не вміє", "The PC cannot do this")),
+            Self::NotAllowed => f.write_str(inline_t(
                 "Цьому шолому це не дозволено",
                 "This headset is not allowed to do this",
             )),
-            Self::UnknownDisplay => f.write_str(t("Такого екрана немає", "No such display")),
+            Self::UnknownDisplay => f.write_str(inline_t("Такого екрана немає", "No such display")),
             Self::Limit { max, of } => {
                 let id = match of {
                     Counted::Monitors => "pc-limit-monitors",
@@ -92,32 +92,39 @@ impl std::fmt::Display for UserError {
             Self::BadSize { w, h, scale } => write!(
                 f,
                 "{} {w}x{h} {scale}%",
-                t("ПК не створює монітор", "The PC does not make a monitor of")
+                inline_t("ПК не створює монітор", "The PC does not make a monitor of")
             ),
-            Self::LastDisplay => f.write_str(t(
+            Self::LastDisplay => f.write_str(inline_t(
                 "Останній монітор прибрати не можна",
                 "The last monitor cannot be removed",
             )),
-            Self::NoWindow => f.write_str(t(
+            Self::NoWindow => f.write_str(inline_t(
                 "Немає активного вікна на ПК",
                 "No active window on the PC",
             )),
-            Self::Desktop => f.write_str(t(
+            Self::Desktop => f.write_str(inline_t(
                 "Стільниця ПК цього не зробила",
                 "The PC's desktop did not do it",
             )),
-            Self::Encoder => {
-                f.write_str(t("Кодувальник не запустився", "The encoder did not start"))
-            }
-            Self::Capture => {
-                f.write_str(t("Зображення не знято", "The picture could not be taken"))
-            }
-            Self::Sound => f.write_str(t("Звук не перемкнувся", "The sound could not be switched")),
-            Self::NotOnDisplays => f.write_str(t(
+            Self::Encoder => f.write_str(inline_t(
+                "Кодувальник не запустився",
+                "The encoder did not start",
+            )),
+            Self::Capture => f.write_str(inline_t(
+                "Зображення не знято",
+                "The picture could not be taken",
+            )),
+            Self::Sound => f.write_str(inline_t(
+                "Звук не перемкнувся",
+                "The sound could not be switched",
+            )),
+            Self::NotOnDisplays => f.write_str(inline_t(
                 "Миша не на жодному з екранів",
                 "The mouse is on none of the displays",
             )),
-            Self::BadArgument => f.write_str(t("Неправильне значення", "A value out of range")),
+            Self::BadArgument => {
+                f.write_str(inline_t("Неправильне значення", "A value out of range"))
+            }
         }
     }
 }

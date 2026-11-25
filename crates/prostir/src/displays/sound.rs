@@ -105,7 +105,7 @@ impl Displays {
             (Some(_), _) => Some(MicAvailability::Ready),
             (None, Some(why)) => Some(why.clone()),
             (None, None) => Some(MicAvailability::Failed(
-                t("Мікрофон ще не готовий", "The microphone is not ready yet").into(),
+                inline_t("Мікрофон ще не готовий", "The microphone is not ready yet").into(),
             )),
         };
         SoundStatus {

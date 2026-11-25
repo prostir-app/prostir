@@ -185,7 +185,7 @@ impl AudioOut {
     pub fn start(on_sound: impl Fn(Vec<u8>) + Send + Sync + 'static) -> Result<Self> {
         Self::start_as(
             SINK,
-            crate::i18n::t("Prostir — шолом", "Prostir headset"),
+            crate::i18n::inline_t("Prostir — шолом", "Prostir headset"),
             true,
             on_sound,
         )
@@ -566,13 +566,13 @@ fn pw_loopback(mic: &str, feed: &str) -> Command {
         &format!(
             "media.class=Audio/Sink audio.position=[ MONO ] node.name={feed} \
              node.description=\"{}\" state.restore-props=false",
-            crate::i18n::t("Prostir (службовий)", "Prostir (internal)")
+            crate::i18n::inline_t("Prostir (службовий)", "Prostir (internal)")
         ),
         "--playback-props",
         &format!(
             "media.class=Audio/Source audio.position=[ MONO ] node.name={mic} \
              node.description=\"{}\"",
-            crate::i18n::t("Prostir — мікрофон шолома", "Prostir headset microphone")
+            crate::i18n::inline_t("Prostir — мікрофон шолома", "Prostir headset microphone")
         ),
     ])
     .stdout(Stdio::null())

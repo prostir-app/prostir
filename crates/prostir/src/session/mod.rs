@@ -198,10 +198,10 @@ impl Closing {
 fn notify_battery(percent: u8) {
     let body = format!(
         "{} {percent}%.",
-        i18n::t("Заряд шолома:", "Headset battery:")
+        i18n::inline_t("Заряд шолома:", "Headset battery:")
     );
     platform::dialogs::notify(
-        i18n::t("Шолом скоро розрядиться", "The headset battery is low"),
+        i18n::inline_t("Шолом скоро розрядиться", "The headset battery is low"),
         &body,
     );
 }
@@ -565,7 +565,10 @@ impl Session {
                         r,
                         CtlReply::failed(
                             ApiError::Unsupported,
-                            i18n::t("Шолом не виконує команд", "The headset takes no commands"),
+                            i18n::inline_t(
+                                "Шолом не виконує команд",
+                                "The headset takes no commands",
+                            ),
                         ),
                     );
                 }
@@ -601,7 +604,7 @@ impl Session {
                         r,
                         CtlReply::failed(
                             ApiError::TimedOut,
-                            i18n::t("Шолом не відповідає", "The headset does not answer"),
+                            i18n::inline_t("Шолом не відповідає", "The headset does not answer"),
                         ),
                     );
                 }
@@ -618,7 +621,7 @@ impl Session {
                     r,
                     CtlReply::failed(
                         ApiError::Disconnected,
-                        i18n::t("Шолом відключився", "The headset disconnected"),
+                        i18n::inline_t("Шолом відключився", "The headset disconnected"),
                     ),
                 );
             }
@@ -698,7 +701,7 @@ impl Session {
 /// What the headset and the person at the PC are told while the desktop does not
 /// respond.
 pub fn desktop_not_responding() -> String {
-    i18n::t("Стільниця не відповідає", "The desktop does not respond").into()
+    i18n::inline_t("Стільниця не відповідає", "The desktop does not respond").into()
 }
 
 /// Whether the headset is on the head, as it last said (one that never said counts as

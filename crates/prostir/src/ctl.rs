@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::api::{
     self, Answer, ApiError, CALL_SECONDS, CodecChoice, DisplayState, Failure, Request, State,
 };
-use crate::i18n::t;
+use crate::i18n::inline_t;
 
 /// Done.
 pub const DONE: i32 = 0;
@@ -408,18 +408,18 @@ pub fn run(
                         let _ = writeln!(
                             io.out,
                             "{}",
-                            t("Чекає на шолом (спить)", "Waiting for the headset (asleep)")
+                            inline_t("Чекає на шолом (спить)", "Waiting for the headset (asleep)")
                         );
                     } else if taken {
                         let _ = writeln!(
                             io.out,
                             "{} {} {}",
-                            t("Не працює: порт", "Not running: port"),
+                            inline_t("Не працює: порт", "Not running: port"),
                             prostir_proto::TCP_PORT,
-                            t("зайнятий іншою програмою", "is taken by another program")
+                            inline_t("зайнятий іншою програмою", "is taken by another program")
                         );
                     } else {
-                        let _ = writeln!(io.out, "{}", t("Не працює", "Not running"));
+                        let _ = writeln!(io.out, "{}", inline_t("Не працює", "Not running"));
                     }
                     NOT_RUNNING
                 }
@@ -458,17 +458,20 @@ pub fn what_failed(e: &ClientError, for_headset: bool) -> (i32, &'static str, St
         ClientError::NoBus(why) => (
             NOT_RUNNING,
             "NoBus",
-            format!("{}: {why}", t("Немає сеансової шини", "No session bus")),
+            format!(
+                "{}: {why}",
+                inline_t("Немає сеансової шини", "No session bus")
+            ),
         ),
         ClientError::NotRunning => (
             NOT_RUNNING,
             "NotRunning",
-            t("Prostir не працює", "Prostir is not running").to_owned(),
+            inline_t("Prostir не працює", "Prostir is not running").to_owned(),
         ),
         ClientError::TimedOut => (
             TIMED_OUT,
             "TimedOut",
-            t("Немає відповіді вчасно", "No answer in time").to_owned(),
+            inline_t("Немає відповіді вчасно", "No answer in time").to_owned(),
         ),
         ClientError::Broken(why) => (FAILED, ApiError::Other.name(), why.clone()),
         ClientError::Refused(f) => {
@@ -495,20 +498,20 @@ fn error_json(name: &str, text: &str, running: Option<bool>) -> serde_json::Valu
 fn done_line(answer: &Answer) -> String {
     if let Some(path) = &answer.path {
         let whole = if answer.whole == Some(true) {
-            t(" (уся стільниця)", " (whole desktop)")
+            inline_t(" (уся стільниця)", " (whole desktop)")
         } else {
             ""
         };
-        return format!("{} {path}{whole}", t("Збережено:", "Saved:"));
+        return format!("{} {path}{whole}", inline_t("Збережено:", "Saved:"));
     }
     match (answer.id, answer.seconds_left) {
-        (Some(id), _) => format!("{} {id}", t("Додано, номер", "Added, id")),
+        (Some(id), _) => format!("{} {id}", inline_t("Додано, номер", "Added, id")),
         (_, Some(left)) => format!(
             "{} {left} {}",
-            t("Сполучення відкрите ще", "Pairing is open for"),
-            t("с", "s")
+            inline_t("Сполучення відкрите ще", "Pairing is open for"),
+            inline_t("с", "s")
         ),
-        _ => t("Зроблено", "Done").to_owned(),
+        _ => inline_t("Зроблено", "Done").to_owned(),
     }
 }
 
@@ -564,11 +567,11 @@ fn show_state(ctl: &Ctl, revision: u32, text: &str, json: bool, io: &mut Output<
             out,
             "{}",
             match state.counting {
-                Some(api::Counting::Yes) => t("так", "yes"),
-                Some(api::Counting::No) => t("ні", "no"),
-                Some(api::Counting::Unasked) => t("ще не спитано", "not asked yet"),
-                Some(api::Counting::Other) => t("невідомо", "unknown"),
-                None => t("недоступно", "not available"),
+                Some(api::Counting::Yes) => inline_t("так", "yes"),
+                Some(api::Counting::No) => inline_t("ні", "no"),
+                Some(api::Counting::Unasked) => inline_t("ще не спитано", "not asked yet"),
+                Some(api::Counting::Other) => inline_t("невідомо", "unknown"),
+                None => inline_t("недоступно", "not available"),
             }
         ),
         (_, true) => writeln!(
@@ -580,9 +583,9 @@ fn show_state(ctl: &Ctl, revision: u32, text: &str, json: bool, io: &mut Output<
             out,
             "{}",
             match state.autostart {
-                Some(true) => t("увімкнено", "on"),
-                Some(false) => t("вимкнено", "off"),
-                None => t("недоступно", "not available"),
+                Some(true) => inline_t("увімкнено", "on"),
+                Some(false) => inline_t("вимкнено", "off"),
+                None => inline_t("недоступно", "not available"),
             }
         ),
     };
@@ -609,23 +612,23 @@ pub fn status_line(state: &State) -> String {
             let worn = if session.worn {
                 ""
             } else {
-                t(", знято", ", taken off")
+                inline_t(", знято", ", taken off")
             };
             format!(
                 "{} {} ({via}{worn}), {}: {monitors}",
-                t("Підключено", "Connected:"),
+                inline_t("Підключено", "Connected:"),
                 headset.name,
-                t("моніторів", "monitors"),
+                inline_t("моніторів", "monitors"),
             )
         }
         (None, api::Phase::Lingering) => format!(
             "{}: {monitors}",
-            t(
+            inline_t(
                 "Чекає на шолом, монітори лишаються",
                 "Waiting for the headset, monitors kept"
             )
         ),
-        _ => t("Чекає на шолом", "Waiting for a headset").to_owned(),
+        _ => inline_t("Чекає на шолом", "Waiting for a headset").to_owned(),
     }
 }
 
@@ -633,12 +636,12 @@ pub fn status_line(state: &State) -> String {
 fn wifi_line(w: &api::Wifi) -> String {
     format!(
         "{} ({}): {}",
-        t(
+        inline_t(
             "На Wi-Fi цього ПК увімкнено енергозбереження",
             "Power saving is on for this PC's Wi-Fi"
         ),
         w.interface,
-        t(
+        inline_t(
             "воно може затримувати картинку на десятки мс. Допоможе кабель або \
              `nmcli connection modify <з'єднання> 802-11-wireless.powersave 2`",
             "it can hold the picture back by tens of ms. A cable helps, or \
@@ -649,17 +652,17 @@ fn wifi_line(w: &api::Wifi) -> String {
 
 fn display_line(d: &api::Display, primary: Option<u32>) -> String {
     let kind = match d.kind {
-        api::DisplayKind::Virtual => t("монітор", "monitor"),
-        api::DisplayKind::Physical => t("екран ПК", "PC display"),
-        api::DisplayKind::Window => t("вікно", "window"),
+        api::DisplayKind::Virtual => inline_t("монітор", "monitor"),
+        api::DisplayKind::Physical => inline_t("екран ПК", "PC display"),
+        api::DisplayKind::Window => inline_t("вікно", "window"),
         api::DisplayKind::Other => "",
     };
     let state = match d.state {
-        DisplayState::Starting => t("запускається", "starting"),
-        DisplayState::Running => t("працює", "running"),
-        DisplayState::Failed => t("не вдалося", "failed"),
-        DisplayState::Absent => t("не під'єднано", "not connected"),
-        DisplayState::Kept => t("чекає на шолом", "kept for the headset"),
+        DisplayState::Starting => inline_t("запускається", "starting"),
+        DisplayState::Running => inline_t("працює", "running"),
+        DisplayState::Failed => inline_t("не вдалося", "failed"),
+        DisplayState::Absent => inline_t("не під'єднано", "not connected"),
+        DisplayState::Kept => inline_t("чекає на шолом", "kept for the headset"),
         DisplayState::Other => "",
     };
     let mut line = format!(
@@ -668,13 +671,13 @@ fn display_line(d: &api::Display, primary: Option<u32>) -> String {
     );
     if d.kind == api::DisplayKind::Physical {
         line.push_str(if d.shown {
-            t(", показано", ", shown")
+            inline_t(", показано", ", shown")
         } else {
-            t(", приховано", ", hidden")
+            inline_t(", приховано", ", hidden")
         });
     }
     if primary == Some(d.id) {
-        line.push_str(t(", головний", ", primary"));
+        line.push_str(inline_t(", головний", ", primary"));
     }
     if let Some(f) = &d.failure {
         let _ = write!(line, ": {}", f.text);
@@ -689,26 +692,26 @@ fn stats_line(s: &api::StreamStats) -> String {
     format!(
         "{:.1} {} ({:.1} {}), {:.1} {}, {} {:.1} {} ({} {:.1})",
         f64::from(s.frames) / secs,
-        t("кадрів/с", "frames/s"),
+        inline_t("кадрів/с", "frames/s"),
         f64::from(s.repeats) / secs,
-        t("повторених", "repeated"),
+        inline_t("повторених", "repeated"),
         s.bytes as f64 * 8.0 / secs / 1e6,
-        t("Мбіт/с", "Mbit/s"),
-        t("кодування", "encoder"),
+        inline_t("Мбіт/с", "Mbit/s"),
+        inline_t("кодування", "encoder"),
         f64::from(s.encode_us_avg) / 1e3,
-        t("мс", "ms"),
-        t("макс.", "max"),
+        inline_t("мс", "ms"),
+        inline_t("макс.", "max"),
         f64::from(s.encode_us_max) / 1e3,
     )
 }
 
 fn headset_line(h: &api::Headset) -> String {
     let role = match h.role {
-        api::Role::Guest => t("гість", "guest"),
-        _ => t("головний", "main"),
+        api::Role::Guest => inline_t("гість", "guest"),
+        _ => inline_t("головний", "main"),
     };
     let connected = if h.session.is_some() {
-        t(", підключено", ", connected")
+        inline_t(", підключено", ", connected")
     } else {
         ""
     };
@@ -723,7 +726,7 @@ fn watch(client: &dyn CtlClient, json: bool, io: &mut Output<'_>) -> i32 {
         let _ = writeln!(io.out, "{line}");
         let _ = io.out.flush();
     };
-    let waiting = t(
+    let waiting = inline_t(
         "Prostir не працює, чекаю",
         "Prostir is not running, waiting",
     );
@@ -746,7 +749,7 @@ fn watch(client: &dyn CtlClient, json: bool, io: &mut Output<'_>) -> i32 {
             Watched::Event(event) if json => Some(to_json(&event)),
             Watched::Event(event) => event_line(&event),
             Watched::Appeared if json => Some(r#"{"event":"appeared"}"#.to_owned()),
-            Watched::Appeared => Some(t("Prostir працює", "Prostir is running").to_owned()),
+            Watched::Appeared => Some(inline_t("Prostir працює", "Prostir is running").to_owned()),
             Watched::Vanished if json => Some(r#"{"event":"vanished"}"#.to_owned()),
             Watched::Vanished => {
                 said.clear();
@@ -784,20 +787,20 @@ fn event_line(event: &api::Event) -> Option<String> {
     Some(match event {
         api::Event::HeadsetConnected { headset, name, via } => format!(
             "{} {name} ({headset}, {})",
-            t("Шолом підключився:", "Headset connected:"),
+            inline_t("Шолом підключився:", "Headset connected:"),
             via.name()
         ),
         api::Event::HeadsetDisconnected { headset, reason } => format!(
             "{} {headset} ({})",
-            t("Шолом відключився:", "Headset disconnected:"),
+            inline_t("Шолом відключився:", "Headset disconnected:"),
             reason.name()
         ),
         api::Event::HeadsetWorn { headset, worn } => format!(
             "{} {headset}",
             if *worn {
-                t("Шолом вдягнули:", "Headset put on:")
+                inline_t("Шолом вдягнули:", "Headset put on:")
             } else {
-                t("Шолом зняли:", "Headset taken off:")
+                inline_t("Шолом зняли:", "Headset taken off:")
             }
         ),
         api::Event::Other => return None,
@@ -849,7 +852,7 @@ pub fn open(client: &dyn CtlClient, wake: &dyn Fn() -> std::io::Result<Woken>) -
             if ended.is_none() && std::time::Instant::now() >= until {
                 eprintln!(
                     "prostir: {}",
-                    t(
+                    inline_t(
                         "Prostir не з'явився на шині вчасно",
                         "Prostir did not come on the bus in time"
                     )
@@ -859,7 +862,7 @@ pub fn open(client: &dyn CtlClient, wake: &dyn Fn() -> std::io::Result<Woken>) -
             if let Some(how) = ended {
                 eprintln!(
                     "prostir: {} ({how})",
-                    t(
+                    inline_t(
                         "Prostir завершився, не запустившись",
                         "Prostir ended before it started"
                     )

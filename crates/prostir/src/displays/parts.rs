@@ -194,7 +194,7 @@ impl Displays {
                 let state = if streams_here && streams >= streams_max {
                     let why = format!(
                         "{} ({streams_max})",
-                        t(
+                        inline_t(
                             "більше потоків, ніж шолом бере",
                             "more streams than the headset takes"
                         )

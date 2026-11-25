@@ -23,7 +23,7 @@ use std::time::Duration;
 use log::{info, warn};
 
 use super::system::{config_home, run};
-use crate::i18n::t;
+use crate::i18n::inline_t;
 
 /// The socket unit.
 const SOCKET: &str = "prostir.socket";
@@ -284,8 +284,8 @@ pub fn first_start() {
         info!("starting with the session: on (the first start; the tray turns it off)");
     } else if places.hyprland {
         crate::platform::dialogs::notify(
-            t("Запуск разом із Hyprland", "Starting with Hyprland"),
-            t(
+            inline_t("Запуск разом із Hyprland", "Starting with Hyprland"),
+            inline_t(
                 "Щоб Prostir чекав на шолом після входу, додайте в конфіг Hyprland рядок: exec-once = prostir serve",
                 "For Prostir to wait for the headset after login, add this line to the Hyprland config: exec-once = prostir serve",
             ),

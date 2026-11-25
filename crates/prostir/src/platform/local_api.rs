@@ -461,7 +461,7 @@ const MAX_REQUEST: usize = 64 * 1024;
 fn quitting() -> BusError {
     Failure::new(
         ApiError::Other,
-        crate::i18n::t("Prostir завершує роботу", "Prostir is quitting"),
+        crate::i18n::inline_t("Prostir завершує роботу", "Prostir is quitting"),
     )
     .into()
 }

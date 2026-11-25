@@ -576,7 +576,7 @@ impl Catalog {
 fn no_encoder() -> anyhow::Error {
     anyhow!(
         "{}",
-        crate::i18n::t(
+        crate::i18n::inline_t(
             "На ПК немає відеокодувальника. Intel чи AMD: встановіть VA-плагін GStreamer \
              (gst-plugin-va або gst-plugins-bad) і VA-драйвер. NVIDIA: драйвер NVIDIA і \
              nvcodec з gst-plugins-bad. Будь-яка відеокарта: gst-plugins-ugly (x264, \

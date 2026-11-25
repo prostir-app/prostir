@@ -1,7 +1,7 @@
 //! System tray icon (StatusNotifierItem): connection status, video quality,
 //! start with the session, quit.
 
-use crate::i18n::t;
+use crate::i18n::inline_t;
 use std::path::PathBuf;
 
 use ksni::blocking::TrayMethods;
@@ -32,7 +32,7 @@ const QUALITIES: [(u32, &str, &str); 3] = [
 fn qualities(bitrate: u32) -> (usize, Vec<String>) {
     let mut labels: Vec<String> = QUALITIES
         .iter()
-        .map(|(_, uk, en)| t(uk, en).into())
+        .map(|(_, uk, en)| inline_t(uk, en).into())
         .collect();
     let selected = match QUALITIES.iter().position(|(m, _, _)| *m == bitrate) {
         Some(i) => i,
@@ -118,9 +118,9 @@ fn with_state(label: &str, on: bool) -> String {
     if plasma {
         label.to_owned()
     } else if on {
-        format!("{label}: {}", t("увімкнено", "on"))
+        format!("{label}: {}", inline_t("увімкнено", "on"))
     } else {
-        format!("{label}: {}", t("вимкнено", "off"))
+        format!("{label}: {}", inline_t("вимкнено", "off"))
     }
 }
 
@@ -143,27 +143,30 @@ fn icon() -> String {
 impl Tray {
     fn status_line(&self) -> String {
         match self.status.connected {
-            Some(_) if self.status.paused => t(
+            Some(_) if self.status.paused => inline_t(
                 "Шолом знято, трансляцію призупинено",
                 "Headset taken off, streaming paused",
             )
             .into(),
-            Some(via) => format!("{} ({via})", t("Шолом підключено", "Headset connected")),
-            None => t("Чекаю на шолом…", "Waiting for the headset…").into(),
+            Some(via) => format!(
+                "{} ({via})",
+                inline_t("Шолом підключено", "Headset connected")
+            ),
+            None => inline_t("Чекаю на шолом…", "Waiting for the headset…").into(),
         }
     }
 
     fn monitors_line(&self) -> String {
         let mirror = if self.status.mirror {
-            t(", екран ПК у шоломі", ", a PC display in the headset")
+            inline_t(", екран ПК у шоломі", ", a PC display in the headset")
         } else {
             ""
         };
         match self.status.monitors {
-            0 => t("Віртуальних моніторів немає", "No virtual monitors").into(),
+            0 => inline_t("Віртуальних моніторів немає", "No virtual monitors").into(),
             n => format!(
                 "{}: {n}{mirror}",
-                t("Віртуальних моніторів", "Virtual monitors")
+                inline_t("Віртуальних моніторів", "Virtual monitors")
             ),
         }
     }
@@ -202,7 +205,7 @@ impl ksni::Tray for Tray {
         ToolTip {
             title: format!("Prostir {}", env!("CARGO_PKG_VERSION")),
             description: match &self.pairing_code {
-                Some(code) => format!("{}: {code}", t("Код сполучення", "Pairing code")),
+                Some(code) => format!("{}: {code}", inline_t("Код сполучення", "Pairing code")),
                 None => format!("{}\n{}", self.status_line(), self.monitors_line()),
             },
             ..Default::default()
@@ -215,7 +218,7 @@ impl ksni::Tray for Tray {
         if let Some(code) = &self.pairing_code {
             items.push(
                 StandardItem {
-                    label: format!("{}: {code}", t("Код сполучення", "Pairing code")),
+                    label: format!("{}: {code}", inline_t("Код сполучення", "Pairing code")),
                     enabled: false,
                     ..Default::default()
                 }
@@ -242,7 +245,7 @@ impl ksni::Tray for Tray {
                 StandardItem {
                     label: format!(
                         "{}: {}",
-                        t("Інших шоломів", "Other headsets"),
+                        inline_t("Інших шоломів", "Other headsets"),
                         self.status.others
                     ),
                     enabled: false,
@@ -254,7 +257,8 @@ impl ksni::Tray for Tray {
         if self.status.desktop_stuck {
             items.push(
                 StandardItem {
-                    label: t("Стільниця не відповідає", "The desktop does not respond").into(),
+                    label: inline_t("Стільниця не відповідає", "The desktop does not respond")
+                        .into(),
                     enabled: false,
                     ..Default::default()
                 }
@@ -274,7 +278,7 @@ impl ksni::Tray for Tray {
         if self.status.mic_denied {
             items.push(
                 StandardItem {
-                    label: t(
+                    label: inline_t(
                         "Мікрофон шолома: немає дозволу",
                         "Headset microphone: no permission",
                     )
@@ -290,9 +294,9 @@ impl ksni::Tray for Tray {
                 StandardItem {
                     label: format!(
                         "{} {percent}%{}",
-                        t("Заряд шолома:", "Headset battery:"),
+                        inline_t("Заряд шолома:", "Headset battery:"),
                         if charging {
-                            t(", заряджається", ", charging")
+                            inline_t(", заряджається", ", charging")
                         } else {
                             ""
                         }
@@ -306,7 +310,7 @@ impl ksni::Tray for Tray {
         if self.status.connected.is_some() {
             items.push(
                 StandardItem {
-                    label: t("Монітори перед собою", "Bring the monitors in front").into(),
+                    label: inline_t("Монітори перед собою", "Bring the monitors in front").into(),
                     activate: Box::new(|tray: &mut Self| ask(tray, HeadsetCommand::Recenter)),
                     ..Default::default()
                 }
@@ -318,7 +322,10 @@ impl ksni::Tray for Tray {
         let no_limits = self.status.no_limits;
         items.push(
             CheckmarkItem {
-                label: with_state(t("Без обмежень", "No limits"), no_limits == Some(true)),
+                label: with_state(
+                    inline_t("Без обмежень", "No limits"),
+                    no_limits == Some(true),
+                ),
                 checked: no_limits == Some(true),
                 enabled: no_limits.is_some(),
                 activate: Box::new(|tray: &mut Self| {
@@ -333,7 +340,7 @@ impl ksni::Tray for Tray {
         items.extend([
             MenuItem::Separator,
             SubMenu {
-                label: t("Якість відео", "Video quality").into(),
+                label: inline_t("Якість відео", "Video quality").into(),
                 submenu: vec![
                     RadioGroup {
                         selected,
@@ -358,7 +365,7 @@ impl ksni::Tray for Tray {
             .into(),
             CheckmarkItem {
                 label: with_state(
-                    t(
+                    inline_t(
                         "Чіткіший текст (кодування на ~2 мс довше)",
                         "Sharper text (about 2 ms more encoding)",
                     ),
@@ -373,7 +380,7 @@ impl ksni::Tray for Tray {
             .into(),
             CheckmarkItem {
                 label: with_state(
-                    t(
+                    inline_t(
                         "Рахувати цей ПК серед користувачів",
                         "Count this PC among users",
                     ),
@@ -388,7 +395,7 @@ impl ksni::Tray for Tray {
             }
             .into(),
             CheckmarkItem {
-                label: t("Запускати разом із системою", "Start with the system").into(),
+                label: inline_t("Запускати разом із системою", "Start with the system").into(),
                 checked: autostart::enabled(),
                 // Hyprland (without uwsm) ignores XDG autostart: its own config starts it.
                 visible: !crate::platform::linux::hyprland::running(),
@@ -401,7 +408,7 @@ impl ksni::Tray for Tray {
             }
             .into(),
             StandardItem {
-                label: t("Налаштування…", "Settings…").into(),
+                label: inline_t("Налаштування…", "Settings…").into(),
                 icon_name: "configure".into(),
                 activate: Box::new(|tray: &mut Self| {
                     tray.commands.tray(Command::ShowSettings);
@@ -411,7 +418,7 @@ impl ksni::Tray for Tray {
             .into(),
             if self.status.pairing {
                 StandardItem {
-                    label: t("Зупинити сполучення", "Stop pairing").into(),
+                    label: inline_t("Зупинити сполучення", "Stop pairing").into(),
                     activate: Box::new(|tray: &mut Self| {
                         tray.commands.tray(Command::StopPairing);
                     }),
@@ -419,7 +426,7 @@ impl ksni::Tray for Tray {
                 }
             } else {
                 StandardItem {
-                    label: t("Сполучити новий шолом", "Pair a new headset").into(),
+                    label: inline_t("Сполучити новий шолом", "Pair a new headset").into(),
                     activate: Box::new(|tray: &mut Self| {
                         tray.commands.tray(Command::PairNewHeadset);
                     }),
@@ -428,7 +435,7 @@ impl ksni::Tray for Tray {
             }
             .into(),
             StandardItem {
-                label: t("Забути сполучені шоломи", "Forget paired headsets").into(),
+                label: inline_t("Забути сполучені шоломи", "Forget paired headsets").into(),
                 activate: Box::new(|tray: &mut Self| {
                     tray.commands.tray(Command::ForgetHeadsets);
                 }),
@@ -443,7 +450,7 @@ impl ksni::Tray for Tray {
             }
             .into(),
             StandardItem {
-                label: t("Вийти", "Quit").into(),
+                label: inline_t("Вийти", "Quit").into(),
                 icon_name: "application-exit".into(),
                 activate: Box::new(|tray: &mut Self| {
                     tray.commands.tray(Command::Quit);
