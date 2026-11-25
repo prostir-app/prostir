@@ -253,14 +253,21 @@ impl Sim {
         });
         self.list(monitors);
         for n in monitors {
-            self.handle(Event::StreamStarted {
-                id: k(*n),
-                size: (2560, 1440),
-            });
+            self.stream(*n, Gen(1), (2560, 1440));
         }
         self.frames(Duration::from_secs(1));
         self.take();
         self.saves();
+    }
+
+    /// Generation `generation` of monitor `n`'s stream starts, `size` pixels.
+    fn stream(&mut self, n: u32, generation: Gen, size: (u32, u32)) {
+        self.handle(Event::StreamStarted {
+            id: k(n),
+            generation,
+            codec: Codec::H264,
+            size,
+        });
     }
 
     fn list(&mut self, monitors: &[u32]) {
@@ -1002,6 +1009,90 @@ fn each_display_of_the_pc_has_its_switch() {
     assert_eq!(&*note.text, "The PC display is hidden");
 }
 
+/// Scenario 15 (step 7 note, 10.1): a stream started again in a new generation for the
+/// same display counts from then on, and what comes of the old one is let go; a
+/// lasting failure takes the monitor out of the room, keeps it in the menu with its
+/// reason, is said once and asks nothing again, until the next generation.
+#[test]
+fn streams_by_generation_and_a_failure_said_once() {
+    use crate::video::{Happened, VideoEvent, Why};
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    let video = |generation, what| {
+        Event::Video(VideoEvent {
+            id: k(1),
+            generation: Gen(generation),
+            what,
+        })
+    };
+    let picture = |sim: &Sim, n| {
+        crate::view::build(&sim.m)
+            .monitors
+            .into_iter()
+            .find(|m| m.id == k(n))
+            .map(|m| m.picture)
+    };
+    assert_eq!(picture(&sim, 1), Some(ui::Picture::Shows));
+    sim.handle(video(1, Happened::Trouble));
+    assert_eq!(picture(&sim, 1), Some(ui::Picture::Recovering));
+    assert_eq!(picture(&sim, 2), Some(ui::Picture::Shows), "only its own");
+    // The PC starts the stream again: the new generation shows, the old one's news
+    // is let go.
+    sim.stream(1, Gen(2), (7680, 2160));
+    assert_eq!(picture(&sim, 1), Some(ui::Picture::Shows));
+    let rev = sim.m.rev();
+    sim.handle(video(1, Happened::Failed(Why::BadSize)));
+    assert!(
+        sim.m.world().streams(k(1)),
+        "an old generation's failure is let go"
+    );
+    assert_eq!(picture(&sim, 1), Some(ui::Picture::Shows));
+    assert!(sim.m.toast().is_none());
+    assert!(sim.m.rev() > rev);
+    sim.take();
+    // The new one fails for good: out of the room, in the menu with why, said once.
+    sim.handle(video(2, Happened::Failed(Why::BadSize)));
+    assert!(!sim.m.world().streams(k(1)));
+    let Some(ui::Picture::NotShown(why)) = picture(&sim, 1) else {
+        panic!("the menu shows it with its reason");
+    };
+    assert!(
+        why.contains("7680 × 2160") && why.contains("H.264"),
+        "{why}"
+    );
+    let toast = sim.m.toast().expect("said").n;
+    assert!(sim.m.toast().unwrap().text.contains(&why));
+    // Nothing is asked again: no retry, no message to the PC, no video command.
+    let fx = sim.take();
+    assert!(
+        !fx.iter()
+            .any(|e| matches!(e, Effect::Video(_) | Effect::Send(..))),
+        "{fx:?}"
+    );
+    sim.handle(video(2, Happened::Failed(Why::BadSize)));
+    sim.handle(video(2, Happened::Trouble));
+    assert_eq!(sim.m.toast().unwrap().n, toast, "said once");
+    let Some(ui::Picture::NotShown(_)) = picture(&sim, 1) else {
+        panic!("the failure stays until the next generation");
+    };
+    // It can be picked in the menu, and taken away there.
+    sim.menu(Action::SelectMonitor(k(1)));
+    assert_eq!(crate::view::build(&sim.m).selected, Some(k(1)));
+    // The next generation shows again, where it stood.
+    sim.stream(1, Gen(3), (2560, 1440));
+    assert!(sim.m.world().streams(k(1)));
+    assert_eq!(picture(&sim, 1), Some(ui::Picture::Shows));
+    let shown = crate::view::build(&sim.m);
+    assert_eq!(shown.monitors.iter().filter(|m| m.id == k(1)).count(), 1);
+    // A failed stream of a PC whose session ended is gone from the menu.
+    sim.handle(video(3, Happened::Failed(Why::NoDecoder)));
+    sim.net(NetEvent::StreamEnd {
+        pc: PC,
+        id: DisplayId(1),
+    });
+    assert_eq!(sim.m.videos().failed().count(), 0);
+}
+
 /// The PC's own displays shown stand under the primary monitor as one group, as they
 /// stand to each other on the PC's desktop: the monitor above the laptop's panel,
 /// side by side ones side by side.
@@ -1014,7 +1105,7 @@ fn the_pcs_displays_stand_as_on_its_desktop() {
     let right = physical(117, "HDMI-A-1", false, true, [1920, 0, 2560, 1440]);
     sim.list_with(vec![laptop, right]);
     for (n, size) in [(100, (1920, 1080)), (117, (2560, 1440))] {
-        sim.handle(Event::StreamStarted { id: k(n), size });
+        sim.stream(n, Gen(1), size);
     }
     sim.frames(Duration::from_secs(1));
     let world = sim.m.world();

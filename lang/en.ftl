@@ -969,6 +969,16 @@ headset-error-too-big = { $name }: { $size } ({ $codec }) is too large for this 
 headset-error-cameras = Cameras unavailable: { $error }
 headset-error-cameras-lost = The cameras stopped working: "Room" and "Dimmed" come back once the app starts again.
 headset-error-keyboard-window = The keyboard window cannot be shown now: it is tried again when the app starts next.
+## A monitor's picture, under its name in the menu
+headset-video-trouble = No picture, recovering…
+# $codec (String): the video's codec, H.264 or H.265
+headset-video-no-decoder = This headset has no { $codec } decoder
+# $codec (String): H.264 or H.265; $size (String): the picture's size, 7680 × 2160
+headset-video-bad-size = This headset does not decode { $codec } at { $size }
+headset-video-no-surface = The headset could not show this picture
+headset-video-stopped = The video decoder stopped
+# $name (String): the monitor, as the menu names it ("Monitor 2"); $reason (String): why, one of the lines above
+headset-video-failed = { $name } is not shown: { $reason }
 # $typed (String): what was typed
 headset-error-not-ip = «{ $typed }»: is not an IP address
 # $error (String): what went wrong, as the system says it

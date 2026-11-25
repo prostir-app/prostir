@@ -27,11 +27,11 @@ use std::time::{Duration, Instant};
 
 use glam::{Vec2, Vec3};
 use log::{info, warn};
-use prostir_proto::ClientMsg;
 use prostir_proto::request::{Outcome, Request};
 use prostir_proto::state::{
-    self, Battery, DisplayId, ErrorCode, HeadsetState, PcState, Prefs, Presence, ReqId, caps,
+    self, Battery, DisplayId, ErrorCode, Gen, HeadsetState, PcState, Prefs, Presence, ReqId, caps,
 };
+use prostir_proto::{ClientMsg, Codec};
 
 use crate::caps::{Caps, Offer};
 use crate::ids::{DisplayKey, PcId};
@@ -48,6 +48,7 @@ use crate::profiles::{self, Profile};
 use crate::session::{Attempt, NetCmd, Session};
 use crate::settings::Settings;
 use crate::ui::{self, Action, Tab};
+use crate::video::{self, Happened, VideoEvent, Videos};
 use crate::world::World;
 
 pub use actions::By;
@@ -112,10 +113,18 @@ pub enum Event {
         language: Option<Lang>,
         opened_with: HeadsetState,
     },
-    /// A stream of display `id` shows, `size` pixels (its surface and decoder made).
-    StreamStarted { id: DisplayKey, size: (u32, u32) },
-    /// A stream of display `id` came but could not be shown (no surface for it).
-    StreamFailed(DisplayKey),
+    /// Generation `generation` of display `id`'s stream started, `size` pixels in
+    /// `codec` (its surface and decoder being made; whether they could be is a
+    /// [`Event::Video`] after).
+    StreamStarted {
+        id: DisplayKey,
+        generation: Gen,
+        codec: Codec,
+        size: (u32, u32),
+    },
+    /// What became of a stream's video: trouble, a picture again, or a lasting failure
+    /// (see `video`).
+    Video(VideoEvent),
     /// A message to PC `pc` was not sent: no session with it (`None`), or why not.
     SendFailed { pc: PcId, why: Option<String> },
     /// A menu's action, pressed `by` (or the same done for a command or the selftest).
@@ -377,6 +386,8 @@ pub struct Model {
 
     /// Where everything stands in the room, and the rules it is arranged by.
     world: World,
+    /// The generation of each display's stream, and how its picture is.
+    videos: Videos,
     /// The connections to PCs: the search, and each PC's link with its state and the
     /// menu's requests to it.
     session: Session,
@@ -476,6 +487,7 @@ impl Model {
             rev: 0,
             effects: Vec::new(),
             world,
+            videos: Videos::default(),
             session: Session::new(crate::session::MAX_PCS, only, now),
             profiles,
             presence: presence::Presence::new(),
@@ -562,6 +574,11 @@ impl Model {
 
     pub fn world(&self) -> &World {
         &self.world
+    }
+
+    /// The generation of each display's stream, and how its picture is.
+    pub fn videos(&self) -> &Videos {
+        &self.videos
     }
 
     pub fn session(&self) -> &Session {
@@ -749,12 +766,18 @@ impl Model {
                 language,
                 opened_with,
             } => self.connected(pc, addr, language, &opened_with),
-            Event::StreamStarted { id, size } => {
+            Event::StreamStarted {
+                id,
+                generation,
+                codec,
+                size,
+            } => {
+                self.videos.started(id, generation, codec, size);
                 let head = self.head;
                 self.world
                     .stream_started(id, size, &self.settings, head, now);
             }
-            Event::StreamFailed(id) => self.world.stream_ended(id),
+            Event::Video(e) => self.video(&e),
             Event::SendFailed { pc, why } => {
                 let text = match why {
                     Some(e) => self.texts().f("headset-error-send", &[("error", e.into())]),
@@ -1069,6 +1092,34 @@ impl Model {
             }
             PlatformEvent::CustomPanorama(there) => self.headset.custom_panorama = there,
         }
+    }
+
+    /// What became of a stream's video (of its generation streaming now only). A
+    /// lasting failure takes the monitor out of the room (its place is kept for the
+    /// next generation) and is said once; the menu shows it with its reason.
+    fn video(&mut self, e: &VideoEvent) {
+        if self.videos.happened(e).is_none() {
+            return;
+        }
+        info!("monitor {}: {:?}", e.id, e.what);
+        let Happened::Failed(_) = e.what else {
+            return;
+        };
+        self.world.stream_ended(e.id);
+        let Some(failed) = self.videos.failed().find(|f| f.id == e.id) else {
+            return;
+        };
+        let reason = video::why_text(&failed, self.texts());
+        let name = self.texts().f(
+            "headset-monitor-n",
+            &[("n", self.label_of(e.id).unwrap_or_default().into())],
+        );
+        let text = self.texts().f(
+            "headset-video-failed",
+            &[("name", name.into()), ("reason", reason.into())],
+        );
+        warn!("{text}");
+        self.tell(Note::failed(None, &text), true, false);
     }
 
     /// The cameras broke for good: the "Room" backgrounds and the window onto the

@@ -14,11 +14,10 @@
     reason = "the loop is the shell: it takes the time once a pass, starts the threads and looks for the person's files"
 )]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -48,17 +47,19 @@ use crate::platform::openxr::{self as xrutil, Gfx, ImageLayer, as_layer, egl, po
 use crate::platform::sound::audio::Gains;
 use crate::platform::sound::mic::Mic;
 use crate::platform::store::StoreCheck;
+use crate::platform::video::{self, SurfaceVideo};
 use crate::platform::{self, android};
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 use crate::selftest::device::{self as selftest, Act, Selftest};
 use crate::settings::{Background, HandMode};
 use crate::ui::{self, Action, Panel, Tab};
+use crate::video::VideoEvent;
 use crate::view::View;
 use crate::world::{
     ATTACH_PX, ATTACH_WIDTH, BUTTON_SIZE, KEYBOARD_ASPECT, WRIST_MENU_WIDTH, attach_height,
     panel_height, panel_width, wrist_menu_height,
 };
-use crate::{app, background, decoder, net, persist};
+use crate::{app, background, net, persist};
 #[cfg(not(all(feature = "selftest", not(feature = "store"))))]
 use no_selftest::{self as selftest, Act, Selftest};
 
@@ -135,41 +136,6 @@ fn moment(tm: &libc::tm) -> Moment {
         weekday: small(tm.tm_wday, 6),
         hour: small(tm.tm_hour, 23),
         minute: small(tm.tm_min, 59),
-    }
-}
-
-/// One stream: the compositor surface it is decoded into and its decoder thread.
-struct Monitor {
-    width_px: u32,
-    height_px: u32,
-    decoder: Option<JoinHandle<decoder::Stopped>>,
-    /// How many times its decoder thread was made again lately, and when last (see
-    /// `Shell::decoders_now`).
-    restarts: (u32, Option<Instant>),
-    stop: Arc<AtomicBool>,
-    swapchain: xr::Swapchain<Gfx>,
-}
-
-/// A decoder thread that gave up is made again this many times for its stream within
-/// [`DECODER_RESTARTS_WITHIN`] of the last time; then the stream counts as failed.
-const DECODER_RESTARTS: u32 = 3;
-const DECODER_RESTARTS_WITHIN: Duration = Duration::from_secs(60);
-
-impl Monitor {
-    fn aspect(&self) -> f32 {
-        self.height_px as f32 / self.width_px as f32
-    }
-}
-
-impl Drop for Monitor {
-    fn drop(&mut self) {
-        // The decoder must stop writing into the surface before the swapchain goes away.
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.decoder.take() {
-            // It sleeps until there is work: woken, it sees `stop` at once.
-            t.thread().unpark();
-            let _ = t.join();
-        }
     }
 }
 
@@ -255,7 +221,9 @@ struct Shell<'s> {
     model: Model,
     session: &'s xr::Session<Gfx>,
     /// The streams shown, each with its surface and decoder.
-    monitors: HashMap<DisplayKey, Monitor>,
+    video: SurfaceVideo,
+    /// What the video said in a pass, kept to be filled again.
+    video_events: Vec<VideoEvent>,
     /// Messages to each PC in a session.
     outboxes: BTreeMap<PcId, Feedback>,
     /// The files' writer of this start: what is changed last is written as this goes
@@ -352,9 +320,7 @@ impl Shell<'_> {
             Effect::Mic(MicCmd::Allowed(on)) => self.mic.set_allowed(on),
             Effect::Mic(MicCmd::AskAgain) => self.mic.ask_again(),
             Effect::Mic(MicCmd::RefreshPermission) => self.mic.refresh_permission(),
-            Effect::Video(VideoCmd::Drop(id)) => {
-                self.monitors.remove(&id);
-            }
+            Effect::Video(VideoCmd::Drop(id)) => self.video.end(id),
             Effect::System(SystemCmd::LoadLanguage(lang)) => self.system.load_language(lang),
             Effect::System(SystemCmd::PalmMenu(shown)) => self.system.palm_menu(shown),
             Effect::System(SystemCmd::LookForFiles) => {
@@ -415,41 +381,31 @@ impl Shell<'_> {
                 frames,
                 feedback,
             } => {
-                let stream = decoder::Stream { id, generation };
                 let id = DisplayKey::new(pc, id);
-                self.monitors.remove(&id);
-                match xrutil::create_surface_swapchain(self.session, vm, width, height) {
-                    Ok((swapchain, window)) => {
-                        let stop = Arc::new(AtomicBool::new(false));
-                        let decoder = decoder::spawn(decoder::DecoderJob {
-                            stream,
-                            codec,
-                            width,
-                            height,
-                            window,
-                            frames,
-                            feedback,
-                            stop: stop.clone(),
-                        });
-                        self.monitors.insert(
-                            id,
-                            Monitor {
-                                width_px: width,
-                                height_px: height,
-                                decoder: Some(decoder),
-                                restarts: (0, None),
-                                stop,
-                                swapchain,
-                            },
-                        );
-                        let size = (width, height);
-                        self.handle(now, Event::StreamStarted { id, size });
-                    }
-                    Err(e) => {
-                        error!("monitor {id}: {e:#}");
-                        self.handle(now, Event::StreamFailed(id));
-                    }
+                let spec = video::Spec {
+                    id,
+                    generation,
+                    codec,
+                    width,
+                    height,
+                };
+                let mut events = std::mem::take(&mut self.video_events);
+                self.video
+                    .start(self.session, vm, spec, frames, feedback, &mut events);
+                let size = (width, height);
+                self.handle(
+                    now,
+                    Event::StreamStarted {
+                        id,
+                        generation,
+                        codec,
+                        size,
+                    },
+                );
+                for e in events.drain(..) {
+                    self.handle(now, Event::Video(e));
                 }
+                self.video_events = events;
             }
             event => {
                 // A session ended: its outbox goes with it.
@@ -461,66 +417,16 @@ impl Shell<'_> {
         }
     }
 
-    /// A decoder thread that ended on its own while its monitor stays (its codec
-    /// failed again and again, or it panicked) is made again with its job, the PC asked
-    /// for a keyframe, up to [`DECODER_RESTARTS`] times; then (or after a panic) the
-    /// stream counts as failed and its monitor goes. Looked at once a pass: a look at
-    /// each monitor, nothing made; one stream failed a pass (another one is found on
-    /// the next).
-    fn decoders_now(&mut self, now: Instant) {
-        let mut failed = None;
-        for (id, m) in &mut self.monitors {
-            if m.stop.load(Ordering::Relaxed)
-                || !m.decoder.as_ref().is_some_and(JoinHandle::is_finished)
-            {
-                continue;
-            }
-            let Some(thread) = m.decoder.take() else {
-                continue;
-            };
-            // Made again long ago: it ran well since.
-            if m.restarts
-                .1
-                .is_some_and(|at| now.saturating_duration_since(at) >= DECODER_RESTARTS_WITHIN)
-            {
-                m.restarts.0 = 0;
-            }
-            let gave_up = match thread.join() {
-                // The stream ended: its end comes from the network.
-                Ok(decoder::Stopped { failed: false, .. }) => false,
-                Ok(decoder::Stopped { job, failed: true }) if m.restarts.0 < DECODER_RESTARTS => {
-                    m.restarts = (m.restarts.0 + 1, Some(now));
-                    warn!(
-                        "monitor {id}: its decoder gave up, made again ({} of {DECODER_RESTARTS})",
-                        m.restarts.0
-                    );
-                    let _ = job
-                        .feedback
-                        .send(prostir_proto::ClientMsg::RequestKeyframe {
-                            id: job.stream.id,
-                            generation: job.stream.generation,
-                        });
-                    m.decoder = Some(decoder::spawn(job));
-                    false
-                }
-                Ok(_) => {
-                    error!("monitor {id}: its decoder gave up for good");
-                    true
-                }
-                Err(_) => {
-                    error!("monitor {id}: its decoder panicked");
-                    true
-                }
-            };
-            if gave_up {
-                failed = Some(*id);
-                break;
-            }
+    /// What the streams' video came to since the last pass (see
+    /// `SurfaceVideo::poll`): a look at each stream, nothing made unless a decoder
+    /// thread ended.
+    fn video_now(&mut self, now: Instant, vm: &jni::JavaVM) {
+        let mut events = std::mem::take(&mut self.video_events);
+        self.video.poll(now, self.session, vm, &mut events);
+        for e in events.drain(..) {
+            self.handle(now, Event::Video(e));
         }
-        if let Some(id) = failed {
-            self.monitors.remove(&id);
-            self.handle(now, Event::StreamFailed(id));
-        }
+        self.video_events = events;
     }
 
     /// Reads the screen where presence wants it (only while the app is put away, at
@@ -815,7 +721,8 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             only: fake_pc,
         }),
         session: &session,
-        monitors: HashMap::new(),
+        video: SurfaceVideo::new(),
+        video_events: Vec::with_capacity(8),
         outboxes: BTreeMap::new(),
         saver,
         network,
@@ -1079,7 +986,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             }
             shell.net_event(now, event, &vm);
         }
-        shell.decoders_now(now);
+        shell.video_now(now, &vm);
         // Only the newest battery reading matters (several wait after a pause).
         let mut newest = None;
         while let Some(event) = shell.system.try_recv() {
@@ -1287,6 +1194,15 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
                         shell.handle(now, Event::Menu(Action::Remove(k), app::By::Elsewhere));
                     }
                 }
+            }
+            Act::Inject(id, fault) => {
+                // The fault on purpose, in the real decoder (the selftest's hook).
+                #[cfg(all(feature = "selftest", not(feature = "store")))]
+                if let Some(k) = shell.model.key(id) {
+                    shell.video.inject(k, fault);
+                }
+                #[cfg(not(all(feature = "selftest", not(feature = "store"))))]
+                let _ = (id, fault);
             }
             Act::Nothing | Act::Finish => {}
         }
@@ -1624,17 +1540,17 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             } else {
                 video_next
             };
-            let (Some(m), Some(p)) = (shell.monitors.get(id), world.shown(*id)) else {
+            let (Some(m), Some(p)) = (shell.video.image(*id), world.shown(*id)) else {
                 continue;
             };
-            let height = p.width * m.aspect();
+            let height = p.width * m.height as f32 / m.width.max(1) as f32;
             let sub_image = xr::sys::SwapchainSubImage {
                 swapchain: m.swapchain.as_raw(),
                 image_rect: xr::Rect2Di {
                     offset: xr::Offset2Di { x: 0, y: 0 },
                     extent: xr::Extent2Di {
-                        width: m.width_px as i32,
-                        height: m.height_px as i32,
+                        width: m.width as i32,
+                        height: m.height as i32,
                     },
                 },
                 image_array_index: 0,
@@ -1812,6 +1728,7 @@ mod no_selftest {
         CloseMenu,
         AddMonitor(u32, u32),
         RemoveMonitor(DisplayId),
+        Inject(DisplayId, crate::video::Fault),
         Finish,
     }
 

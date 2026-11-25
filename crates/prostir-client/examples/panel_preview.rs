@@ -202,6 +202,7 @@ fn main() {
                 place: Place::default(),
                 seen: None,
                 scale: 100,
+                picture: prostir::ui::Picture::Shows,
             }]
         } else {
             Vec::new()
@@ -284,6 +285,7 @@ fn main() {
                 place: Place::default(),
                 seen: Some([-1.0, 0.0, 0.5, 0.28]),
                 scale: 100,
+                picture: prostir::ui::Picture::Shows,
             },
             MonitorEntry {
                 id: k(1),
@@ -293,6 +295,7 @@ fn main() {
                 place: Place::default(),
                 seen: Some([0.0, 0.0, 0.5, 0.28]),
                 scale: 125,
+                picture: prostir::ui::Picture::Shows,
             },
             MonitorEntry {
                 id: k(2),
@@ -302,6 +305,7 @@ fn main() {
                 place: Place::default(),
                 seen: Some([0.78, 0.12, 0.28, 0.5]),
                 scale: 100,
+                picture: prostir::ui::Picture::Shows,
             },
         ],
         primary: Some(k(1)),

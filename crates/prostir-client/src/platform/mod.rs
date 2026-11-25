@@ -1,7 +1,8 @@
 //! The headset's platform, in the parts any headset on OpenXR and Android splits into
 //! (step 7, 4.4): standard OpenXR ([`openxr`]), the extensions of one maker
 //! ([`meta`], each by its own check), what every headset on Android shares
-//! ([`android`]), the sound ([`sound`]) and the store a build comes from ([`store`]).
+//! ([`android`]), the streams' video ([`video`]), the sound ([`sound`]) and the store a
+//! build comes from ([`store`]).
 //! The core sees none of it: what the headset can do comes to it as [`crate::caps::Caps`],
 //! made here at the start ([`caps`]).
 //!
@@ -21,6 +22,8 @@ pub mod meta;
 pub mod openxr;
 #[cfg(target_os = "android")]
 pub mod sound;
+#[cfg(target_os = "android")]
+pub mod video;
 
 #[cfg(target_os = "android")]
 pub use self::found::caps;

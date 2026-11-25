@@ -58,6 +58,19 @@ pub struct MonitorEntry {
     pub seen: Option<[f32; 4]>,
     /// Its scale, percent (100: one pixel of the picture is one of the desktop).
     pub scale: u16,
+    /// How its picture is.
+    pub picture: Picture,
+}
+
+/// How a monitor's picture is, said under its name in the menu.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Picture {
+    #[default]
+    Shows,
+    /// No picture since its video failed; being recovered.
+    Recovering,
+    /// It cannot be shown, for this reason (in the menu's words).
+    NotShown(String),
 }
 
 /// A display of the PC itself, with its switch.
@@ -2920,21 +2933,26 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
         items.push(title);
         let remove = rect(lx + lw - 58.0, y + 7.0, 48.0, 48.0);
         let primary = rect(lx + lw - 58.0 - 10.0 - 210.0, y + 7.0, 210.0, 48.0);
-        // Left of the buttons.
-        items.push(text_in(
-            primary.left() - lx - 10.0,
-            text(
-                lx,
-                y + 50.0,
-                16.0,
-                false,
+        // Left of the buttons: its size and place, or what is wrong with its picture.
+        let (color, line) = match &m.picture {
+            Picture::Shows => (
                 MUTED,
-                &match m.place.name() {
+                match m.place.name() {
                     Some(place) => format!("{} × {} · {}", m.width, m.height, l.t(place)),
                     None => format!("{} × {}", m.width, m.height),
                 },
             ),
-        ));
+            Picture::Recovering => (WAIT, l.t("headset-video-trouble").to_owned()),
+            Picture::NotShown(why) => (DANGER, why.clone()),
+        };
+        let mut info = text_in(
+            primary.left() - lx - 10.0,
+            text(lx, y + 50.0, 16.0, false, color, &line),
+        );
+        if let Item::Text { shorten, .. } = &mut info {
+            *shorten = true;
+        }
+        items.push(info);
         // Another scale, where the PC makes monitors at its scales.
         let scales = scales_of(s);
         if !scales.is_empty() {
@@ -5205,6 +5223,7 @@ mod tests {
                 place: Place::Unknown,
                 seen: None,
                 scale: 100,
+                picture: Picture::Shows,
             }],
             host: Some("workstation".into()),
             found: Vec::new(),
@@ -5219,6 +5238,7 @@ mod tests {
                     place: Place::Unknown,
                     seen: Some([-1.0, 0.0, 0.5, 0.28]),
                     scale: 100,
+                    picture: Picture::Shows,
                 },
                 MonitorEntry {
                     id: k(102),
@@ -5228,6 +5248,7 @@ mod tests {
                     place: Place::Unknown,
                     seen: Some([0.0, 0.0, 0.5, 0.28]),
                     scale: 100,
+                    picture: Picture::Shows,
                 },
                 MonitorEntry {
                     id: k(103),
@@ -5237,6 +5258,7 @@ mod tests {
                     place: Place::Unknown,
                     seen: Some([0.78, 0.12, 0.28, 0.5]),
                     scale: 100,
+                    picture: Picture::Shows,
                 },
             ],
             selected: None,
@@ -5912,6 +5934,7 @@ mod tests {
                         place: Place::Right,
                         seen: Some([(id as f32 - 2.5) * 0.9, 0.0, 0.45, 0.19]),
                         scale: 100,
+                        picture: Picture::Shows,
                     })
                     .collect();
                 states.push(st);
@@ -6565,6 +6588,7 @@ mod tests {
                 place: Place::Center,
                 seen: spots.get(&id).copied(),
                 scale: 100,
+                picture: Picture::Shows,
             })
             .collect();
         for selected in std::iter::once(None).chain(monitors.iter().map(|m| Some(k(m.0)))) {

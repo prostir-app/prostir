@@ -37,12 +37,11 @@ pub mod selftest;
 pub mod session;
 pub mod settings;
 pub mod ui;
+pub mod video;
 pub mod view;
 pub mod world;
 
 #[cfg(target_os = "android")]
 mod alloc_count;
-#[cfg(target_os = "android")]
-mod decoder;
 #[cfg(target_os = "android")]
 mod main_loop;
