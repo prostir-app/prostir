@@ -149,6 +149,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         mic_permission,
         mut shell,
     } = start::start(app, &xr, frames, test.as_deref_mut(), &data_dir, fake_pc)?;
+    // The preview build's numbers of the input, from `feel.txt` where there is one.
+    #[cfg(feature = "preview")]
+    {
+        let text = shell::read_feel(shell.external_dir.as_deref());
+        let feel = crate::app::Event::Platform(crate::app::PlatformEvent::Feel(text));
+        shell.handle(Instant::now(), feel);
+    }
     let gpu = Gpu {
         session: &xr.session,
         gl: &xr.gl,

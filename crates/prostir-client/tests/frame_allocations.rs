@@ -5,7 +5,10 @@
 //! monitor with the menu closed or open, or over the seam between two glued ones (the
 //! magnet turning it there), allocate nothing; the menu's state is made
 //! anew only when what it shows changed. Pointing about the menu's picture, once each
-//! button was pointed at, draws nothing and takes no memory.
+//! button was pointed at, draws nothing and takes no memory. Step 8's hands (the
+//! preview build's trial): a fingertip touching a monitor, the ray as the mouse with
+//! `MouseTo` each frame, a fist carrying a monitor past its neighbour (the magnet),
+//! the ray giving way to touch and back, the input recorded, all take none.
 //!
 //! On the desktop only: the app built for Android has its own counting allocator, and
 //! a program has one.
@@ -24,7 +27,7 @@ use glam::Vec3;
 use prostir::app::{By, Effect, Event, Model, PlatformEvent, Start};
 use prostir::caps::{self, Caps};
 use prostir::ids::{DisplayKey, PcId};
-use prostir::interaction::{Button, FrameInput, HandState, Hands, Head, Menu, Menus};
+use prostir::interaction::{Button, FrameInput, HandState, Hands, Head, Joints, Menu, Menus};
 use prostir::lang::{self, LangState};
 use prostir::layers::{self, Plan, Ready};
 use prostir::layout::{Desk, Placement, Ray};
@@ -139,6 +142,11 @@ struct Loop {
     #[cfg(feature = "preview")]
     redrawn: u64,
     frames: u64,
+    /// Step 8: `MouseTo` sent, frames a fingertip pressed a monitor, frames the right
+    /// hand's ray was shown and not.
+    mouse_tos: u64,
+    pressed: u64,
+    rays: (u64, u64),
 }
 
 /// What the shell has for the layers: every picture drawn.
@@ -189,6 +197,11 @@ impl Loop {
             .iter()
             .filter(|e| matches!(e, Effect::Send(_, ClientMsg::Gaze { .. })))
             .count() as u64;
+        self.mouse_tos += self
+            .fx
+            .iter()
+            .filter(|e| matches!(e, Effect::Send(_, ClientMsg::MouseTo { .. })))
+            .count() as u64;
     }
 
     fn handle(&mut self, event: Event) {
@@ -197,6 +210,11 @@ impl Loop {
     }
 
     fn frame(&mut self, right: HandState) {
+        self.frame_with(right, None);
+    }
+
+    /// A frame with the right hand as `right` and its joints `joints`.
+    fn frame_with(&mut self, right: HandState, joints: Option<&Joints>) {
         self.now += FRAME;
         let now = self.now;
         self.m.end_pass();
@@ -211,7 +229,7 @@ impl Loop {
             wall: None,
             focused: true,
             hands: [HandState::default(), right],
-            joints: [None, None],
+            joints: [None, joints.copied()],
             menu_button: false,
             menu_gesture: false,
             align: false,
@@ -227,6 +245,14 @@ impl Loop {
         }
         self.hands.step(now, &input, &mut self.m, &mut Pictures);
         self.take();
+        self.pressed += u64::from(self.hands.near_monitor(1).is_some_and(|n| n.pressed));
+        if input.hands[1].ray.is_some() {
+            if self.hands.ray(1).is_some() {
+                self.rays.0 += 1;
+            } else {
+                self.rays.1 += 1;
+            }
+        }
         self.m.animate(now, &input);
         self.take();
         if self.m.menu().open {
@@ -259,6 +285,25 @@ impl Loop {
                     .update(&mut self.panel, &self.m, |_| Some((bytes, Some(key))), now);
             self.redrawn += u64::from(drawn.is_some());
         }
+    }
+
+    /// The same as [`Loop::measure`], the right hand's joints too.
+    #[cfg(feature = "preview")]
+    fn measure_with(
+        &mut self,
+        frames: u32,
+        right: impl Fn(u32) -> (HandState, Option<Joints>),
+    ) -> u64 {
+        for i in 0..30 {
+            let (hand, joints) = right(i);
+            self.frame_with(hand, joints.as_ref());
+        }
+        let before = allocations();
+        for i in 0..frames {
+            let (hand, joints) = right(30 + i);
+            self.frame_with(hand, joints.as_ref());
+        }
+        allocations() - before
     }
 
     /// `frames` frames with the right hand as `right` says for each, after 30 to
@@ -343,6 +388,9 @@ fn connected(layers_max: u8) -> Loop {
         #[cfg(feature = "preview")]
         redrawn: 0,
         frames: 0,
+        mouse_tos: 0,
+        pressed: 0,
+        rays: (0, 0),
     };
     l.now += Duration::from_millis(1);
     l.m.tick(l.now, &FrameInput::hidden(None));
@@ -747,4 +795,143 @@ fn a_drag_over_a_seam_takes_no_memory() {
         l.frame(drag(i));
     }
     assert_eq!(allocations() - before, 0, "a drag over a seam");
+}
+
+/// A right hand with its index fingertip at `tip`, fingers forward: pointing (the
+/// other fingers curled) or a fist.
+#[cfg(feature = "preview")]
+fn right_hand(tip: Vec3, fist: bool) -> Joints {
+    let palm = tip - Vec3::new(0.025, 0.0, -0.1);
+    let mut j = [(palm, 0.01); 26];
+    j[1].0 = palm + Vec3::new(0.0, 0.0, 0.06);
+    j[12].0 = palm + Vec3::new(0.0, 0.0, -0.03);
+    for (t, dx) in [(10, 0.025), (15, -0.01), (20, -0.025), (25, -0.04)] {
+        let out = t == 10 && !fist;
+        j[t].0 = palm
+            + if out {
+                Vec3::new(dx, 0.0, -0.1)
+            } else {
+                Vec3::new(dx, -0.02, -0.025)
+            };
+    }
+    j[5].0 = palm + Vec3::new(0.06, 0.0, -0.04);
+    j
+}
+
+/// Step 8's hands, the preview build's trial on (see the module): touching a monitor,
+/// the ray as the mouse, a fist carrying a monitor past its neighbour, the ray giving
+/// way to touch and back, and the input recorded, each 300 frames without memory.
+#[cfg(feature = "preview")]
+#[test]
+fn step_8s_hands_take_no_memory() {
+    use prostir::interaction::Take;
+    use prostir::settings::HandMode;
+    let mut l = connected(16);
+    let part = HostCaps {
+        features: vec![
+            prostir_proto::state::caps::pc::GAZE,
+            prostir_proto::state::caps::pc::MOVE_MOUSE,
+        ],
+    };
+    l.handle(Event::Net(NetEvent::Part(PC, HostMsg::HostCaps { part })));
+    for action in [
+        Action::Hands(HandMode::Control),
+        Action::DevMonitors(true),
+        Action::DevTake(Take::Fist),
+    ] {
+        l.handle(Event::Menu(action, By::Elsewhere));
+    }
+    let one =
+        *l.m.world()
+            .shown(DisplayKey::new(PC, DisplayId(1)))
+            .expect("drawn");
+    let before = |z: f32| one.position + one.rotation * Vec3::new(0.1, 0.0, z);
+    let hand = HandState {
+        is_hand: true,
+        ..HandState::default()
+    };
+
+    // A fingertip in and out of the monitor's surface: touches, again and again.
+    let touch = |i: u32| {
+        let z = 0.03 - 0.035 * ((i as f32 * 0.2).sin() * 0.5 + 0.5);
+        (hand, Some(right_hand(before(z), false)))
+    };
+    assert_eq!(l.measure_with(300, touch), 0, "touching a monitor");
+    assert!(l.pressed > 30, "pressed in {} frames", l.pressed);
+
+    // The ray as the mouse: a controller's, a little further each frame.
+    let target = one.position;
+    let mouse = |i: u32| {
+        let t = target + Vec3::new((i as f32 * 0.05).sin() * 0.2, 0.0, 0.0);
+        let ray = ray_at(t);
+        (
+            HandState {
+                ray,
+                ..HandState::default()
+            },
+            None,
+        )
+    };
+    let sent = l.mouse_tos;
+    assert_eq!(l.measure_with(300, mouse), 0, "the ray as the mouse");
+    assert!(
+        l.mouse_tos - sent > 250,
+        "MouseTo {} times",
+        l.mouse_tos - sent
+    );
+
+    // The ray gives way to touch and comes back, the fingertip 30 to 5 cm away.
+    let switch = |i: u32| {
+        let z = 0.05 + 0.25 * ((i as f32 * 0.05).sin() * 0.5 + 0.5);
+        let joints = right_hand(before(z), false);
+        let ray = ray_at(target);
+        (
+            HandState {
+                ray,
+                is_hand: true,
+                ..HandState::default()
+            },
+            Some(joints),
+        )
+    };
+    assert_eq!(l.measure_with(300, switch), 0, "touch and the ray in turn");
+    assert!(
+        l.rays.0 > 30 && l.rays.1 > 30,
+        "the ray shown and not: {:?}",
+        l.rays
+    );
+
+    // Recorded meanwhile.
+    l.handle(Event::Menu(Action::DevRecord, By::Elsewhere));
+    assert_eq!(l.measure_with(300, switch), 0, "recorded");
+
+    // A fist right after pointing takes monitor 1, then carries it to and fro past
+    // monitor 2, the magnet's edge lit when near.
+    let two =
+        *l.m.world()
+            .shown(DisplayKey::new(PC, DisplayId(2)))
+            .expect("drawn");
+    let palm_at = |i: u32| {
+        let k = ((i as f32) * 0.03).sin() * 0.5 + 0.5;
+        Vec3::new(0.05 + 0.1 * k, -0.3, -0.35)
+    };
+    let carry = move |i: u32| {
+        let tip = palm_at(i) + Vec3::new(0.025, 0.0, -0.1);
+        let ray = (i < 3)
+            .then(|| ray_at(two.position.lerp(one.position, 0.9)))
+            .flatten();
+        (
+            HandState {
+                ray,
+                is_hand: true,
+                ..HandState::default()
+            },
+            Some(right_hand(tip, i >= 3)),
+        )
+    };
+    assert_eq!(l.measure_with(300, carry), 0, "a fist carrying a monitor");
+    assert!(
+        l.hands.held().any(|t| t.display().is_some()),
+        "the fist holds a monitor"
+    );
 }

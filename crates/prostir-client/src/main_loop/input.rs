@@ -69,6 +69,7 @@ pub fn read(
     let local = &stage.local;
     let hand_mode = shell.model.settings().hands;
     shell.controls.hands_enabled = hand_mode == HandMode::Control;
+    shell.controls.feel = *shell.model.feel();
     // A profile changed without its event (a runtime does not always say): let go
     // of what was held, as for the event.
     if shell.controls.sync(session, local, time)? && kept.hands.busy() {

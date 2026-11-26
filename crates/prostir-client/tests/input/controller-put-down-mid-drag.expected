@@ -1,0 +1,4 @@
+0.033 take display 1
+0.033 haptic right
+0.044..0.132 drag display 1 x9 at (0.00, 1.75, -1.50)
+0.143 let-go display 1

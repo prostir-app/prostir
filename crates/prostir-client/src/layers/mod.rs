@@ -470,8 +470,12 @@ pub fn plan(model: &Model, hands: &Hands, ready: &impl Ready, plan: &mut Plan) {
         plan.push(Layer::Hands, Rank::Own(4));
     }
     // Where a ray meets something: a dot facing out of it, as big to the eye near
-    // and far.
-    for &Target { hit, .. } in hands.picks().iter().flatten() {
+    // and far. None where the ray is the PC's mouse, whose pointer the headset draws
+    // there (step 8: one pointer).
+    for (h, pick) in hands.picks().iter().enumerate() {
+        let Some(Target { hit, .. }) = pick.filter(|_| !hands.is_mouse(h)) else {
+            continue;
+        };
         let size = 0.011 * hit.t.clamp(0.3, 4.0);
         plan.push(
             Layer::Cursor(dot(hit.point, hit.normal, 0.004, size)),

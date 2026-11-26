@@ -234,6 +234,12 @@
 - On KDE Plasma, a picture KWin says nothing changed on is not encoded again (the repeat of a still screen and a fresh picture asked by the headset
   still go).
 
+### Hands in the headset
+
+- A hand that carries a monitor, the menu or the keyboard window no longer presses a
+  button of the menu when its fingertip passes in front of it: a hand does one thing at
+  a time.
+
 ### Settings
 
 - The PC keeps its settings in `~/.config/prostir/settings.txt` and the monitors with

@@ -1,6 +1,6 @@
 //! Renders the headset menu to a PNG for checking the design on the desktop.
 //! cargo run -p prostir-client --example panel_preview -- panel.png [hover_x hover_y]
-//! Environment: WRIST=1 (the wrist menu), TAB=monitors|profiles|look|sound|language|pc|paired|help|dev (default: quick), DEV=1 ("For development", as the preview build has it, built with `--features preview`; UNKNOWN_HEADSET=1: a headset not in the table), LANG_UI=en|uk|qps (qps: the longer pseudo-language), PAIR=show|type|failed, OFFLINE=1, KEYPAD=…, NOTE=done|failed|waiting|saved (what the page says under a button pressed on it), PHYSICAL=n (the PC's own displays, 0 to 5; 2 by default), PHYSICAL_MAX=n (how many of them the PC lets show; 4 by default), PROFILES=n (saved profiles; 3 by default), SELECTED=1 (the second monitor picked on the map), NO_SCALE=1 (a PC without monitors at another scale)
+//! Environment: WRIST=1 (the wrist menu), TAB=monitors|profiles|look|sound|language|pc|paired|help|dev|dev-hands (default: quick), DEV=1 ("For development", as the preview build has it, built with `--features preview`; UNKNOWN_HEADSET=1: a headset not in the table), LANG_UI=en|uk|qps (qps: the longer pseudo-language), PAIR=show|type|failed, OFFLINE=1, KEYPAD=…, NOTE=done|failed|waiting|saved (what the page says under a button pressed on it), PHYSICAL=n (the PC's own displays, 0 to 5; 2 by default), PHYSICAL_MAX=n (how many of them the PC lets show; 4 by default), PROFILES=n (saved profiles; 3 by default), SELECTED=1 (the second monitor picked on the map), NO_SCALE=1 (a PC without monitors at another scale)
 
 use prostir::ids::{DisplayKey, PcId};
 use prostir::lang::{BUILTIN, Known, Lang, Language, Loader, Texts};
@@ -351,6 +351,8 @@ fn main() {
             Ok("help") => Tab::Settings(Section::Help),
             #[cfg(feature = "preview")]
             Ok("dev") => Tab::Settings(Section::Dev),
+            #[cfg(feature = "preview")]
+            Ok("dev-hands") => Tab::Settings(Section::DevHands),
             Ok("controls") => Tab::Settings(Section::Controls),
             _ => Tab::Quick,
         },
@@ -374,6 +376,12 @@ fn main() {
             known: std::env::var("UNKNOWN_HEADSET").is_err(),
             can_reset: true,
             auto_line: 85,
+            // FEEL=1: feel.txt read; RECORDING=1: the input being recorded.
+            hands: prostir::ui::DevHands {
+                feel: std::env::var("FEEL").is_ok().then_some((true, 3, 1)),
+                recording: std::env::var("RECORDING").is_ok().then_some(17),
+                ..prostir::ui::DevHands::default()
+            },
         }),
         texts,
         languages: languages.into(),
