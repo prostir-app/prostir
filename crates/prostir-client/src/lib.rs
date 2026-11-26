@@ -24,6 +24,7 @@ pub mod device;
 pub mod frames;
 pub mod ids;
 pub mod interaction;
+pub mod keyboard;
 pub mod lang;
 pub mod layers;
 pub mod layout;

@@ -332,6 +332,8 @@ fn main() {
         custom_available: false,
         curve_available: true,
         keyboard_available: true,
+        keyboard_tracking: false,
+        keyboard_follows: false,
         hands_available: true,
         display_rates: Some((90, 72)),
         display_rate_now: Some(90),

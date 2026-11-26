@@ -42,6 +42,7 @@ use openxr as xr;
 
 use crate::interaction::{FrameInput, Hands};
 use crate::lang::Moment;
+use crate::platform::meta;
 use crate::platform::openxr::Gfx;
 use crate::platform::openxr::overlay::Overlay;
 #[cfg(all(feature = "selftest", not(feature = "store")))]
@@ -83,6 +84,8 @@ struct Kept {
     /// What the selftest asked for, done in the next frame drawn.
     selftest_act: Act,
     allocations: crate::alloc_count::Tally,
+    /// The person's keyboard as the runtime tracks it (step 8.7).
+    keyboard: meta::keyboard::Tracker,
 }
 
 #[unsafe(no_mangle)]
@@ -177,6 +180,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         wall_read: None,
         selftest_act: Act::Nothing,
         allocations: crate::alloc_count::Tally::default(),
+        keyboard: meta::keyboard::Tracker::new(shell.session),
     };
 
     'main: loop {

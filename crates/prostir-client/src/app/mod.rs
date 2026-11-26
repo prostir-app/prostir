@@ -43,6 +43,7 @@ use crate::caps::{Caps, Offer};
 use crate::cursors::Cursors;
 use crate::ids::{DisplayKey, PcId};
 use crate::interaction::{Feel, FrameInput, Head};
+use crate::keyboard::Follow;
 use crate::lang::{Known, Lang, LangState, Moment, Texts};
 use crate::layout::{self, Desk, Placement};
 use crate::net::NetEvent;
@@ -56,7 +57,7 @@ use crate::session::{Attempt, NetCmd, Session};
 use crate::settings::Settings;
 use crate::ui::{self, Action, Tab};
 use crate::video::{self, Happened, VideoEvent, Videos};
-use crate::world::World;
+use crate::world::{KEYBOARD_ASPECT, World};
 
 pub use actions::By;
 use actions::Forgetting;
@@ -189,6 +190,9 @@ pub enum PlatformEvent {
     CamerasFailed(String),
     /// The window onto the keyboard could not be shown.
     KeyboardWindowFailed,
+    /// The runtime will not track the person's keyboard for this app: the window stays
+    /// where it was put, for this run.
+    KeyboardTrackingFailed,
     /// Whether the person's own background picture is on the headset (looked for when
     /// the menu opened).
     CustomPanorama(bool),
@@ -485,6 +489,11 @@ pub struct Model {
     hands_in_view: bool,
     /// Where the window onto the keyboard is this frame (`None`: not shown).
     keyboard_window: Option<Placement>,
+    /// How deep the window onto the keyboard is: the tracked keyboard's, else the usual
+    /// share of its width.
+    keyboard_depth: f32,
+    /// The window easing to the tracked keyboard (step 8.7).
+    keyboard_follow: Follow,
     /// Where each monitor stands for the menu (`World::place_of`), as last looked at
     /// in a drag: kept to be filled again.
     map_places: Vec<(DisplayKey, ui::Place)>,
@@ -640,6 +649,8 @@ impl Model {
             view_eye: None,
             hands_in_view: false,
             keyboard_window: None,
+            keyboard_depth: 0.0,
+            keyboard_follow: Follow::default(),
             map_places: Vec::new(),
             press_in_menu: false,
             language_asked: false,
@@ -887,6 +898,25 @@ impl Model {
         self.keyboard_window
     }
 
+    /// The window onto the keyboard lies over the keyboard the headset tracks now.
+    pub fn keyboard_follows(&self) -> bool {
+        self.world.keyboard_tracked()
+    }
+
+    /// How deep the window onto the keyboard is (metres).
+    pub fn keyboard_depth(&self) -> f32 {
+        self.keyboard_depth
+    }
+
+    /// Whether the shell is to read where the person's keyboard is: the window is shown
+    /// and the headset tracks keyboards (step 8.7).
+    pub fn keyboard_wanted(&self) -> bool {
+        let caps = &self.headset.caps;
+        caps.keyboard_tracking
+            && caps.offers(Offer::KeyboardWindow)
+            && self.settings.keyboard_window
+    }
+
     /// The headset counts as on the head.
     pub fn worn(&self) -> bool {
         self.presence.worn()
@@ -1012,6 +1042,7 @@ impl Model {
     /// (requests time out, a placeholder goes, the desktop's arrangement is told once
     /// it stood, the search goes on), and with a frame the head is followed.
     pub fn tick(&mut self, now: Instant, input: &FrameInput) {
+        self.now = now;
         self.presence_due(now);
         // The time alone changes what the connection screen shows: an answer gone
         // stale, the hint (both in `Search`).
@@ -1080,9 +1111,35 @@ impl Model {
         }
         // The window onto the keyboard: in front of the user at desk height the first
         // time, then wherever it was moved.
-        let keyboard = self.headset.caps.offers(Offer::KeyboardWindow);
-        self.keyboard_window = (keyboard && self.settings.keyboard_window)
-            .then(|| self.world.keyboard_here(self.head));
+        // With a keyboard the headset tracks, it settles over that one instead (and is
+        // not taken by a hand: it is where the keyboard is); once the keyboard is gone,
+        // the hand's window is back.
+        let shown = self.keyboard_wanted();
+        let tracked = shown
+            .then(|| {
+                self.keyboard_follow
+                    .step(self.now, input.dt, input.keyboard)
+            })
+            .flatten();
+        if !shown {
+            self.keyboard_follow.reset();
+        }
+        if tracked.is_some() != self.world.keyboard_tracked() {
+            // The menu says whether the window follows the keyboard.
+            self.rev += 1;
+        }
+        self.world.set_keyboard_tracked(tracked.is_some());
+        let shown =
+            self.headset.caps.offers(Offer::KeyboardWindow) && self.settings.keyboard_window;
+        self.keyboard_window = match tracked {
+            Some(w) => Some(w.place),
+            None => shown.then(|| self.world.keyboard_here(self.head)),
+        };
+        self.keyboard_depth = match (tracked, self.keyboard_window) {
+            (Some(w), _) => w.depth,
+            (None, Some(p)) => p.width * KEYBOARD_ASPECT,
+            (None, None) => 0.0,
+        };
         // Far monitors first so nearer (and grabbed) ones draw on top.
         self.world.animate(&self.settings, input.dt);
         // Keep the desktop's arrangement in step once nothing is being moved.
@@ -1315,6 +1372,16 @@ impl Model {
                 self.keyboard_window = None;
                 let text = self.texts().t("headset-error-keyboard-window").to_owned();
                 self.show_error(text);
+            }
+            // Not tried again for this run; the window is the one placed by hand.
+            // Said once: the event comes only while the tracking is on.
+            PlatformEvent::KeyboardTrackingFailed => {
+                self.headset.caps.keyboard_tracking = false;
+                self.keyboard_follow.reset();
+                self.world.set_keyboard_tracked(false);
+                self.rev += 1;
+                let text = self.texts().t("headset-note-keyboard-untracked").to_owned();
+                self.show_toast(text);
             }
             PlatformEvent::CustomPanorama(there) => self.headset.custom_panorama = there,
             PlatformEvent::LayersHidden(hidden) => self.layers_hidden(hidden),

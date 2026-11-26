@@ -102,6 +102,9 @@ mod found {
         c.menu_gesture = hands && on.fb_hand_tracking_aim;
         c.controller_models = on.fb_render_model || on.msft_controller_model;
         c.hand_mesh = hands && on.fb_hand_tracking_mesh;
+        // A keyboard to follow needs a window to put over it.
+        c.keyboard_tracking =
+            room.is_some_and(|r| r.keyboard_window) && meta::keyboard::supported(instance, system);
         info!(
             "models: controllers {}, hands {}",
             if on.fb_render_model {

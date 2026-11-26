@@ -293,6 +293,9 @@ pub struct World {
     button: Option<Placement>,
     /// Where the keyboard window lies (set the first time it is shown).
     keyboard: Option<Placement>,
+    /// The window is where the headset tracks the keyboard (step 8.7): a hand does not
+    /// take it, and a ray goes through it.
+    keyboard_tracked: bool,
     /// The palm menu, while the palm is turned to the face.
     wrist: Option<Placement>,
 
@@ -451,6 +454,7 @@ impl World {
             },
             button: None,
             keyboard,
+            keyboard_tracked: false,
             wrist: None,
             held: [None, None],
             groups: [Vec::new(), Vec::new()],
@@ -2927,6 +2931,25 @@ impl World {
         self.wrist = place;
     }
 
+    /// The keyboard window is over the keyboard the headset tracks (or not). When the
+    /// tracking starts, a hand moving the hand-placed window lets go of it where it is
+    /// (the drag is cut short: the window's file is not written for it).
+    pub fn set_keyboard_tracked(&mut self, on: bool) {
+        if on && !self.keyboard_tracked {
+            for held in &mut self.held {
+                if *held == Some(Thing::Keyboard) {
+                    *held = None;
+                }
+            }
+        }
+        self.keyboard_tracked = on;
+    }
+
+    /// Whether the keyboard window is over the keyboard the headset tracks.
+    pub fn keyboard_tracked(&self) -> bool {
+        self.keyboard_tracked
+    }
+
     /// The keyboard window's place: in front of the user at desk height the first
     /// time, then wherever it was moved.
     pub fn keyboard_here(&mut self, (head, forward): (Vec3, Vec3)) -> Placement {
@@ -3057,6 +3080,7 @@ impl World {
             consider(Thing::Display(m.id), Some(m.hit));
         }
         if s.keyboard_window
+            && !self.keyboard_tracked
             && let Some(k) = &self.keyboard
         {
             consider(

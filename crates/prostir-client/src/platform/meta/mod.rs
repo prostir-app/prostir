@@ -2,8 +2,10 @@
 //! own check that the runtime has it, not by who made the headset: another runtime with
 //! one of them gets it too. What they give: the cameras ([`passthrough`]), the display
 //! rate, sharper layers, the stream's picture the right way up, the left hand's menu
-//! gesture, the models of the controllers and hands ([`models`]).
+//! gesture, the models of the controllers and hands ([`models`]), the person's keyboard
+//! ([`keyboard`]).
 
+pub mod keyboard;
 pub mod models;
 pub mod passthrough;
 
@@ -23,6 +25,7 @@ pub fn extensions(available: &xr::ExtensionSet, on: &mut xr::ExtensionSet) {
     on.fb_composition_layer_settings = available.fb_composition_layer_settings;
     on.fb_composition_layer_image_layout = available.fb_composition_layer_image_layout;
     on.fb_hand_tracking_aim = available.fb_hand_tracking_aim;
+    keyboard::extensions(available, on);
     models::extensions(available, on);
 }
 

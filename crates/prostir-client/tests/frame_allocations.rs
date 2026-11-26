@@ -139,6 +139,8 @@ struct Loop {
     gazes: u64,
     /// The frame's layers.
     plan: Plan,
+    /// The person's keyboard as the headset tracks it, given in each frame (step 8.7).
+    keyboard: Option<prostir::keyboard::Seen>,
     /// The hands, rays and effects drawn (step 8.2), and the most in a frame.
     effects: Effects,
     most_effects: usize,
@@ -294,6 +296,7 @@ impl Loop {
             menu_button: false,
             menu_gesture: false,
             align: false,
+            keyboard: self.keyboard,
         };
         self.m.tick(now, &input);
         self.take();
@@ -401,8 +404,13 @@ fn ray_at(target: Vec3) -> Option<Ray> {
 /// The model with a PC in a session, two monitors streaming, a second of frames, on a
 /// headset whose compositor takes `layers_max` layers.
 fn connected(layers_max: u8) -> Loop {
+    connected_with(layers_max, |_| {})
+}
+
+/// [`connected`], the start changed by `change` first.
+fn connected_with(layers_max: u8, change: impl FnOnce(&mut Start)) -> Loop {
     let now = Instant::now();
-    let m = Model::new(Start {
+    let mut start = Start {
         now,
         settings: Settings::default(),
         desk: Desk::default(),
@@ -434,7 +442,9 @@ fn connected(layers_max: u8) -> Loop {
         update_from: prostir::platform::store::NoStore.update_hint(),
         mic_permission: permission::UNKNOWN,
         only: Some(addr()),
-    });
+    };
+    change(&mut start);
+    let m = Model::new(start);
     let mut l = Loop {
         m,
         hands: Hands::new(),
@@ -447,6 +457,7 @@ fn connected(layers_max: u8) -> Loop {
         forward: -Vec3::Z,
         gazes: 0,
         plan: Plan::new(),
+        keyboard: None,
         effects: Effects::new(),
         most_effects: 0,
         loaded: Loaded::default(),
@@ -1134,4 +1145,49 @@ fn step_8s_hands_take_no_memory() {
         l.hands.held().any(|t| t.display().is_some()),
         "the fist holds a monitor"
     );
+}
+
+/// The window onto the keyboard over the keyboard the headset tracks (step 8.7): eased
+/// to it while it moves a little, kept a moment out of view, and the hand's window again
+/// once it is gone, with no memory taken.
+#[test]
+fn a_tracked_keyboard_takes_no_memory() {
+    use glam::Quat;
+    use prostir::caps::{RoomCaps, RoomWay};
+    use prostir::keyboard::Seen;
+    let mut l = connected_with(16, |s| {
+        s.settings.keyboard_window = true;
+        s.caps.room = Some(RoomCaps {
+            way: RoomWay::FbPassthrough,
+            keyboard_window: true,
+        });
+        s.caps.keyboard_tracking = true;
+    });
+    let seen = |i: u32| Seen {
+        position: Vec3::new((i as f32 * 0.05).sin() * 0.02, -0.4, -0.45),
+        rotation: Quat::IDENTITY,
+        width: 0.44,
+        depth: 0.14,
+    };
+    l.keyboard = Some(seen(0));
+    l.frame(HandState::default());
+    assert!(l.m.keyboard_follows(), "over the keyboard");
+    for i in 0..30 {
+        l.keyboard = Some(seen(i));
+        l.frame(HandState::default());
+    }
+    let before = allocations();
+    for i in 30..330 {
+        l.keyboard = Some(seen(i));
+        l.frame(HandState::default());
+    }
+    assert_eq!(allocations() - before, 0, "a keyboard in view");
+    l.keyboard = None;
+    assert_eq!(
+        l.measure(300, |_| HandState::default()),
+        (0, 0),
+        "out of view, then gone"
+    );
+    assert!(!l.m.keyboard_follows(), "the hand's window again");
+    assert!(l.m.keyboard_window().is_some(), "still shown");
 }
