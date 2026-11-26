@@ -400,3 +400,59 @@ fn a_no_holds_for_the_next_displays_too() {
     assert_eq!(again.asked.load(Ordering::Relaxed), 0);
     first.tick(Instant::now());
 }
+
+/// Real touches hide the pointer from a finger down until the mouse moves, each
+/// change said once: a second finger, a finger moved or one of two lifted change
+/// nothing; the last one lifted keeps it hidden; a move, a press or the wheel shows
+/// it. Devices gone mid-touch lift the fingers. A desktop without touch moves the
+/// pointer as the mouse and never hides it.
+#[test]
+fn real_touches_hide_the_pointer_until_the_mouse_moves() {
+    let said = Arc::new(Mutex::new(Vec::new()));
+    let run_with = |o: &Arc<Opener>| {
+        let mut run = opened(o);
+        let said = said.clone();
+        run.pointing = Box::new(move |p| said.lock().unwrap().push(p));
+        run
+    };
+    let said_now = || std::mem::take(&mut *said.lock().unwrap());
+    let now = Instant::now();
+    let touch = |slot, phase| Ev::Touch {
+        from: 1,
+        slot,
+        phase,
+        at: Some(at(50.0)),
+        came: now,
+    };
+    let o = opener(true, false);
+    let mut run = run_with(&o);
+    run.event(touch(0, TouchPhase::Down), now);
+    run.event(touch(1, TouchPhase::Down), now);
+    run.event(touch(0, TouchPhase::Move), now);
+    run.event(touch(0, TouchPhase::Up), now);
+    assert_eq!(said_now(), [Pointing::Touch]);
+    run.event(touch(1, TouchPhase::Cancel), now);
+    assert_eq!(said_now(), [Pointing::Lifted]);
+    run.event(click(1, false), now);
+    assert_eq!(said_now(), [Pointing::Mouse], "moved there first");
+    run.event(
+        Ev::Scroll {
+            from: 1,
+            dx: 0,
+            dy: 120,
+        },
+        now,
+    );
+    assert!(said_now().is_empty(), "shown already");
+    run.event(touch(0, TouchPhase::Down), now);
+    o.broken.store(true, Ordering::Relaxed);
+    run.event(touch(0, TouchPhase::Move), now);
+    assert_eq!(said_now(), [Pointing::Touch, Pointing::Lifted], "gone");
+
+    let o = opener(false, false);
+    let mut run = run_with(&o);
+    run.event(touch(0, TouchPhase::Down), now);
+    run.event(touch(0, TouchPhase::Up), now + Duration::from_millis(80));
+    assert_eq!(told(&o), ["to 50,10", "Left down", "Left up"]);
+    assert_eq!(said_now(), [Pointing::Mouse]);
+}

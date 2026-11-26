@@ -1499,7 +1499,8 @@ display's picture as in `MouseTo` and `CursorAt`.
 - **Fingers.** `Down`, any number of `Move`, then `Up` or `Cancel`, each finger by its
   `slot`; a slot is free again after `Up` or `Cancel`. Where the desktop has touch,
   the host makes touches of them, and the programs on the PC tap, scroll and hold by
-  themselves. Where it has none, the host makes mouse actions of the first finger
+  themselves; as on a touch screen, the pointer then hides (`CursorAt` with `shape`
+  0) from a finger down until the mouse moves again. Where it has none, the host makes mouse actions of the first finger
   (implementation-defined; the current host: a tap is a left click, moving at once
   scrolls with the finger and goes on a little after it lifts, holding still for
   0.6 s a right click, holding and then moving drags with the left button). Other

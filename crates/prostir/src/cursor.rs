@@ -6,14 +6,35 @@
 //! ([`Pointer`]) and tells each headset in its own terms: the display and the point
 //! across its picture, and a look it has ([`Told`]). The pictures leave the pointer
 //! out only while every headset with a session draws it ([`apart_for`]).
+//!
+//! Real touches from a headset hide it, as a touch screen does ([`Pointing`]): from a
+//! finger down until the mouse moves again, the headsets hear `shape` 0.
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use log::warn;
 use prostir_proto::state::{DisplayId, HeadsetCaps, caps};
 use prostir_proto::{CURSOR_SHAPES, HostMsg};
 
+use crate::input::Pointing;
 use crate::platform::{CursorEvent, CursorImage, OutputKey};
+
+/// A move the desktop tells this soon after the last finger lifted is the touch's own
+/// (told late, or the desktop putting the pointer where the finger was), not the
+/// mouse's: the pointer stays hidden.
+const LIFT_SETTLES: Duration = Duration::from_millis(300);
+
+/// Whether touches hide the pointer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ByTouch {
+    #[default]
+    No,
+    /// A finger touches.
+    Touching,
+    /// The last finger lifted then: hidden until the mouse moves.
+    Lifted(Instant),
+}
 
 /// Whether the pictures leave the pointer out for the headsets with a session
 /// (`headsets`): only when there is one and every one draws it itself (the picture is
@@ -144,6 +165,8 @@ pub struct Pointer {
     /// The output it is on, its point there, and that output's picture, in pixels as
     /// the desktop makes it.
     at: Option<(OutputKey, i32, i32, (u32, u32))>,
+    /// Hidden by touches (the input's, not the desktop's: kept by [`Pointer::clear`]).
+    by_touch: ByTouch,
 }
 
 impl Pointer {
@@ -183,16 +206,47 @@ impl Pointer {
         }
     }
 
-    /// Forgets everything: the desktop says it anew once it is asked again.
+    /// Forgets everything the desktop said: it says it anew once it is asked again.
     pub fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            by_touch: self.by_touch,
+            ..Self::default()
+        };
+    }
+
+    /// What the input did at `now` (see [`Pointing`]); whether that hides or shows
+    /// the pointer.
+    pub fn touch(&mut self, p: Pointing, now: Instant) -> bool {
+        let was = self.by_touch != ByTouch::No;
+        self.by_touch = match (p, self.by_touch) {
+            (Pointing::Touch, _) => ByTouch::Touching,
+            (Pointing::Lifted, ByTouch::No) => ByTouch::No,
+            (Pointing::Lifted, _) => ByTouch::Lifted(now),
+            (Pointing::Mouse, _) => ByTouch::No,
+        };
+        was != (self.by_touch != ByTouch::No)
+    }
+
+    /// The desktop told a move of the pointer at `now` (see [`Pointer::take`]): once
+    /// the fingers lifted a moment ago, the mouse moved it, and it shows again.
+    pub fn desktop_moved(&mut self, now: Instant) {
+        if let ByTouch::Lifted(at) = self.by_touch
+            && now.saturating_duration_since(at) >= LIFT_SETTLES
+        {
+            self.by_touch = ByTouch::No;
+        }
+    }
+
+    /// Hidden by touches.
+    pub fn touch_hides(&self) -> bool {
+        self.by_touch != ByTouch::No
     }
 
     /// The look shown over a picture streamed at `stream` pixels (none: over none), its
-    /// number and message: scaled down as that picture is. None when hidden or not
-    /// known.
+    /// number and message: scaled down as that picture is. None when hidden (by the
+    /// desktop, by touches) or not known.
     pub fn look(&mut self, stream: Option<(u32, u32)>) -> Option<(u32, &HostMsg)> {
-        if self.hidden {
+        if self.hidden || self.touch_hides() {
             return None;
         }
         let native = self.at.as_ref().map(|(_, _, _, size)| *size);
@@ -409,6 +463,36 @@ mod tests {
         assert_eq!(shape(&mut p), 0, "too large to send");
         p.clear();
         assert_eq!(p.at(), None);
+    }
+
+    /// Touches hide the pointer from a finger down until the mouse moves: the input's
+    /// own move, or one the desktop tells once the lift settled; a move told right
+    /// after the lift is the touch's own. Forgetting what the desktop said keeps it.
+    #[test]
+    fn touches_hide_the_pointer_until_the_mouse_moves() {
+        let t0 = Instant::now();
+        let mut p = Pointer::default();
+        let shape = |p: &mut Pointer| p.look(None).map_or(0, |(id, _)| id);
+        let a = image(32, 32, 1);
+        p.take(CursorEvent::Shape(a.clone()));
+        assert!(!p.touch(Pointing::Lifted, t0), "nothing touched");
+        assert!(!p.touch(Pointing::Mouse, t0));
+        assert!(p.touch(Pointing::Touch, t0), "hidden");
+        assert_eq!(shape(&mut p), 0);
+        p.desktop_moved(t0 + LIFT_SETTLES * 2);
+        assert_eq!(shape(&mut p), 0, "moved while the finger touches");
+        let lifted = t0 + Duration::from_secs(1);
+        assert!(!p.touch(Pointing::Lifted, lifted), "still hidden");
+        p.desktop_moved(lifted + LIFT_SETTLES / 2);
+        assert_eq!(shape(&mut p), 0, "the touch's own move");
+        p.clear();
+        p.take(CursorEvent::Shape(a.clone()));
+        assert_eq!(shape(&mut p), 0, "kept over a clear");
+        p.desktop_moved(lifted + LIFT_SETTLES);
+        assert_eq!(shape(&mut p), shape_id(&a), "the mouse moved it");
+        assert!(p.touch(Pointing::Touch, lifted));
+        assert!(p.touch(Pointing::Mouse, lifted), "the input's mouse");
+        assert_eq!(shape(&mut p), shape_id(&a));
     }
 
     /// Over a picture scaled down to stream (a 4K monitor sent as 1920x1080), the look

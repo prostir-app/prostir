@@ -208,6 +208,11 @@ impl Held {
         !self.by.is_empty()
     }
 
+    /// Whether a finger of any session touches the desktop.
+    pub fn touching(&self) -> bool {
+        self.by.values().any(|h| !h.touches.is_empty())
+    }
+
     /// The desktop's devices are gone, and what they held with them.
     pub fn clear(&mut self) {
         self.by.clear();

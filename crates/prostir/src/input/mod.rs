@@ -22,6 +22,9 @@
 //!
 //! Devices the person closed (they stopped the desktop's remote control) count as a
 //! no: not opened again by themselves. Only devices that did not open are tried again.
+//!
+//! Real touches hide the desktop's pointer, as on a touch screen: from a finger down
+//! until the mouse moves again ([`Pointing`], for the headsets that draw the pointer).
 
 pub mod held;
 pub mod touch_mouse;
@@ -89,6 +92,19 @@ impl State {
             Self::Unavailable => 2,
         }
     }
+}
+
+/// What the input did to whether the desktop's pointer shows: real touches hide it, as
+/// on a touch screen (`PROTOCOL.md`, "The mouse pointer", `shape` 0); mouse actions
+/// made of touches (a desktop without touch) move it as the mouse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pointing {
+    /// A finger touches the desktop: the pointer hides.
+    Touch,
+    /// The last finger lifted: the pointer stays hidden until the mouse moves.
+    Lifted,
+    /// The mouse moved, pressed or scrolled: the pointer shows.
+    Mouse,
 }
 
 /// What a session asks of the input.
@@ -163,12 +179,17 @@ pub struct Input {
 
 impl Input {
     /// The input thread, without devices until [`Input::set_opener`]; what the person
-    /// is to hear goes to `tell`.
-    pub fn start(tell: impl Fn(News) + Send + 'static) -> Self {
+    /// is to hear goes to `tell`, what touches and the mouse do to the pointer to
+    /// `pointing` (each change once).
+    pub fn start(
+        tell: impl Fn(News) + Send + 'static,
+        pointing: impl Fn(Pointing) + Send + 'static,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         let (end_tx, ended) = mpsc::channel();
         let shared = Arc::new(Shared::new(&REFUSED));
-        let run = Run::new(Box::new(tell), shared.clone());
+        let mut run = Run::new(Box::new(tell), shared.clone());
+        run.pointing = Box::new(pointing);
         let spawned = std::thread::Builder::new()
             .name("input".into())
             .spawn(move || {
@@ -240,6 +261,9 @@ struct Run {
     reopen: (Instant, Duration),
     held: Held,
     mice: BTreeMap<SessionId, TouchMouse>,
+    /// Where what the input does to the pointer goes, and what it said last.
+    pointing: Box<dyn Fn(Pointing) + Send>,
+    pointed: Option<Pointing>,
 }
 
 impl Run {
@@ -254,6 +278,24 @@ impl Run {
             reopen: (Instant::now(), REOPEN_FIRST),
             held: Held::default(),
             mice: BTreeMap::new(),
+            pointing: Box::new(|_| {}),
+            pointed: None,
+        }
+    }
+
+    /// Says what the input did to the pointer, where that changed.
+    fn point(&mut self, p: Pointing) {
+        if self.pointed != Some(p) {
+            self.pointed = Some(p);
+            (self.pointing)(p);
+        }
+    }
+
+    /// The fingers went with the devices (or with what held them): none hides the
+    /// pointer any more, though it stays hidden until the mouse moves.
+    fn fingers_gone(&mut self) {
+        if self.pointed == Some(Pointing::Touch) {
+            self.point(Pointing::Lifted);
         }
     }
 
@@ -316,6 +358,7 @@ impl Run {
         self.opening = None;
         self.held.clear();
         self.mice.clear();
+        self.fingers_gone();
         self.later(Instant::now());
     }
 
@@ -324,6 +367,7 @@ impl Run {
         self.opening = None;
         self.held.clear();
         self.mice.clear();
+        self.fingers_gone();
         let refused = self.shared.refused();
         self.said = refused.then_some(News::Refused);
         self.set_state(if refused { State::Refused } else { State::Fine });
@@ -528,11 +572,13 @@ impl Run {
         }
     }
 
-    /// Tells the desktop `acts`; devices that fail are gone, and what they held.
+    /// Tells the desktop `acts`; devices that fail are gone, and what they held. What
+    /// they did to the pointer is said after them.
     fn act(&mut self, acts: Vec<Act>) {
         let Some(injector) = self.injector.as_mut() else {
             return;
         };
+        let mut pointing = None;
         for a in acts {
             let done = match &a {
                 Act::To(at) => injector.pointer_to(at),
@@ -545,6 +591,16 @@ impl Run {
                 self.lost(&e);
                 return;
             }
+            pointing = match a {
+                Act::Touch(_, TouchPhase::Down | TouchPhase::Move, _) => Some(Pointing::Touch),
+                Act::Touch(..) if !self.held.touching() => Some(Pointing::Lifted),
+                // A button let go moves nothing (as when everything is let go).
+                Act::To(_) | Act::Button(_, true) | Act::Scroll(..) => Some(Pointing::Mouse),
+                Act::Touch(..) | Act::Button(_, false) | Act::Key(..) => pointing,
+            };
+        }
+        if let Some(p) = pointing {
+            self.point(p);
         }
     }
 
@@ -553,6 +609,7 @@ impl Run {
         self.injector = None;
         self.held.clear();
         self.mice.clear();
+        self.fingers_gone();
         if refused(e) {
             self.refuse(e);
         } else {
