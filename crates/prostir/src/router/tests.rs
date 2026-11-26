@@ -998,3 +998,148 @@ fn a_panel_keeps_the_pointer_and_a_scaled_picture_scales_it() {
         .collect();
     assert_eq!(sizes, [(1, 1)]);
 }
+
+/// A headset that says where it looks (feature 6).
+fn gazing() -> state::HeadsetCaps {
+    state::HeadsetCaps {
+        features: vec![state::caps::headset::GAZE],
+        ..headset()
+    }
+}
+
+/// Two streams with a frame gate each.
+fn gated(router: &Router) -> [(ScreenId, Arc<Gate>); 2] {
+    [id(0), id(1)].map(|s| {
+        router.add_stream(s, Codec::H264, format!("Prostir-{}", s.wire().0));
+        let gate = Arc::new(Gate::default());
+        router.set_gate(s, gate.clone());
+        (s, gate)
+    })
+}
+
+/// The stream looked at gets every frame, the other half; looking at the other one
+/// gives it every frame at once and keeps them for the first for 2 s. None of it opens
+/// a gate (a keyframe's frame would) or asks for a keyframe.
+#[test]
+fn the_gaze_sets_the_frame_gates() {
+    let router = Router::new();
+    let [(a, gate_a), (b, gate_b)] = gated(&router);
+    let outbox = attach(&router, 1, gazing());
+    assert_eq!(
+        (gate_a.level(), gate_b.level()),
+        (Level::Full, Level::Full),
+        "nothing said of the gaze yet"
+    );
+    router.gaze(1, Some(a));
+    assert_eq!((gate_a.level(), gate_b.level()), (Level::Full, Level::Side));
+    assert_eq!(router.priority_due(), None);
+    router.gaze(1, Some(b));
+    assert_eq!(
+        (gate_a.level(), gate_b.level()),
+        (Level::Full, Level::Full),
+        "up at once, down later"
+    );
+    let due = router.priority_due().expect("the first comes down");
+    assert!(due > Instant::now() + Duration::from_millis(1900));
+    router.priorities();
+    assert_eq!(gate_a.level(), Level::Full, "not yet");
+    assert!(!gate_a.is_open() && !gate_b.is_open());
+    assert!(sent(&outbox).is_empty(), "nothing to the headset");
+    // A new encoder's gate starts at the stream's level.
+    let again = Arc::new(Gate::default());
+    again.set_level(Level::Side);
+    router.gaze(1, None);
+    router.set_gate(a, again.clone());
+    assert_eq!(again.level(), Level::Full, "the gaze left it a moment ago");
+}
+
+/// "Focus" in every headset: 5 frames a second for the streams nobody looks at; a
+/// headset without the gaze, or one taken off and put on again, sees everything; the
+/// active monitor gets every frame.
+#[test]
+fn focus_and_headsets_that_do_not_say_where_they_look() {
+    let router = Router::new();
+    let [(a, gate_a), (b, gate_b)] = gated(&router);
+    attach(&router, 1, gazing());
+    router.set_focus_mode(1, true);
+    router.gaze(1, Some(a));
+    assert_eq!(
+        (gate_a.level(), gate_b.level()),
+        (Level::Full, Level::Glance)
+    );
+    assert_eq!(gate_b.fps_mhz(), 5_000);
+    attach(&router, 2, headset());
+    assert_eq!(gate_b.level(), Level::Full, "a headset without the gaze");
+    router.set_worn(2, false);
+    assert_eq!(
+        gate_b.level(),
+        Level::Glance,
+        "taken off, it counts for nothing"
+    );
+    router.detach(2);
+    router.set_worn(1, false);
+    router.set_worn(1, true);
+    assert_eq!(
+        gate_b.level(),
+        Level::Full,
+        "put on again: its gaze is not known"
+    );
+    router.gaze(1, Some(a));
+    assert_eq!(gate_b.level(), Level::Glance);
+    router.set_active(Some(b));
+    assert_eq!(gate_b.level(), Level::Full);
+}
+
+/// The report says what each gate let through, and when an encoder getting every
+/// frame of a busy picture takes longer than a frame of its monitor lasts.
+#[test]
+fn the_report_says_what_the_gate_held() {
+    let gate = GateStats {
+        level: Level::Side,
+        rate_mhz: 60_000,
+        fps_mhz: 30_000,
+        held: 300,
+        unchanged: 12,
+        dropped: 0,
+    };
+    assert_eq!(
+        gate.summary(),
+        "half rate 30/s, 300 frames held by rate, 12 skipped for no change, 0 dropped by a \
+         busy encoder"
+    );
+    let full = GateStats {
+        level: Level::Full,
+        fps_mhz: 60_000,
+        dropped: 40,
+        ..gate
+    };
+    let stats = StreamStats {
+        window_ms: 10_000,
+        frames: 560,
+        encode_us_avg: 20_000,
+        gate: Some(full),
+        ..StreamStats::default()
+    };
+    assert!(
+        stats.summary().ends_with(
+            "; gate: full rate 60/s, 300 frames held by rate, 12 skipped for no change, 40 \
+             dropped by a busy encoder"
+        ),
+        "{}",
+        stats.summary()
+    );
+    assert!(stats.behind(), "40 of 600 dropped");
+    let keeps_up = StreamStats {
+        gate: Some(GateStats { dropped: 2, ..full }),
+        ..stats
+    };
+    assert!(!keeps_up.behind(), "a few");
+    let slow_only = StreamStats {
+        gate: Some(GateStats { dropped: 0, ..full }),
+        ..stats
+    };
+    assert!(
+        !slow_only.behind(),
+        "slow to come out, but every frame encoded"
+    );
+}

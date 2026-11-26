@@ -30,6 +30,8 @@ use log::warn;
 use pipewire::spa::sys as ss;
 use pipewire::sys as pw;
 
+use crate::encoder::Gate as FrameGate;
+
 /// Whether a frame of a buffer came back, shared by the buffer's holder (on whatever
 /// thread GStreamer lets the frame go) and the feed.
 struct Back {
@@ -452,65 +454,117 @@ pub fn read_crop(meta: &[u8]) -> Option<Crop> {
 }
 
 /// The pictures pushed into the encoder: the last one, sent again every `every` while
-/// nothing new comes (`pipewiresrc`'s `keepalive-time`), and at once when asked.
+/// nothing new comes (`pipewiresrc`'s `keepalive-time`), and at once when asked. A new
+/// one goes when its encoder's gate lets it (see `encoder/gate.rs`): until then it
+/// waits as the last one, and a newer one takes its place. Only new pictures count
+/// for the gate: the first change after a still while goes at once, however recent
+/// the last repeat.
 pub struct Pictures {
     appsrc: gst_app::AppSrc,
     every: Duration,
+    gate: Arc<FrameGate>,
     last: Option<gst::Buffer>,
     /// When the last one goes again; none while paused.
     due: Option<Instant>,
+    /// When a new picture last went to the encoder.
+    sent: Option<Instant>,
+    /// The last one waits at the gate: it goes by itself then (a little after its
+    /// turn, see `Gate::flush_at`), or when a newer one comes at its turn.
+    held: Option<Instant>,
 }
 
 impl Pictures {
-    pub fn new(appsrc: gst_app::AppSrc, every: Duration) -> Self {
+    pub fn new(appsrc: gst_app::AppSrc, every: Duration, gate: Arc<FrameGate>) -> Self {
         Self {
             appsrc,
             every,
+            gate,
             last: None,
             due: None,
+            sent: None,
+            held: None,
         }
     }
 
-    /// A new picture, at `now`.
+    /// A new picture, at `now`: it goes now, or waits for its turn at the gate.
     pub fn push(&mut self, frame: gst::Buffer, now: Instant) {
-        let _ = self.appsrc.push_buffer(frame.clone());
         self.last = Some(frame);
+        match self.gate.turn(self.sent, now) {
+            None => self.send(now, true),
+            Some(at) => {
+                self.gate.held();
+                self.held = Some(self.gate.flush_at(at));
+            }
+        }
+    }
+
+    /// Whether a picture is there to send again (a frame of nothing new is not
+    /// encoded only then: the first one of a stream always is).
+    pub fn has_last(&self) -> bool {
+        self.last.is_some()
+    }
+
+    /// The last picture to the encoder now; `new`: one the encoder has not had.
+    fn send(&mut self, now: Instant, new: bool) {
+        if let Some(last) = self.last.clone() {
+            let _ = self.appsrc.push_buffer(last);
+        }
+        if new {
+            self.sent = Some(now);
+        }
+        self.held = None;
         self.due = Some(now + self.every);
     }
 
     /// The last picture again, the same buffer (the encoder tells it is a repeat by
-    /// its memory); whether there was one.
+    /// its memory), whatever the gate says (it was asked for); whether there was one.
+    /// One that waited at the gate goes with it as the new picture it is.
     pub fn again(&mut self, now: Instant) -> bool {
-        let Some(last) = self.last.clone() else {
+        if self.last.is_none() {
             return false;
-        };
-        let _ = self.appsrc.push_buffer(last);
-        self.due = Some(now + self.every);
+        }
+        let new = self.held.is_some();
+        self.send(now, new);
         true
     }
 
-    /// Sends the last picture again when its time came.
+    /// Sends the picture that waited at the gate once its time came (or the gate
+    /// opened), and the last picture again when its time came.
     pub fn tick(&mut self, now: Instant) {
+        if let Some(at) = self.held {
+            if self.gate.take_open() || now >= at {
+                self.send(now, true);
+            }
+            return;
+        }
         if self.due.is_some_and(|due| now >= due) {
             self.again(now);
         }
     }
 
-    /// How long until the last picture goes again; none: not before something
-    /// happens.
+    /// How long until a picture goes: the one that waits at the gate, or the last one
+    /// again; none: not before something happens. A gate that opened: now.
     pub fn wait(&self, now: Instant) -> Option<Duration> {
-        self.due.map(|due| due.saturating_duration_since(now))
+        if self.held.is_some() && self.gate.is_open() {
+            return Some(Duration::ZERO);
+        }
+        self.held
+            .or(self.due)
+            .map(|due| due.saturating_duration_since(now))
     }
 
     /// Nothing is sent again until a new picture comes or one is asked for (paused).
     pub fn rest(&mut self) {
         self.due = None;
+        self.held = None;
     }
 
     /// The last picture is let go: the stream starts over.
     pub fn forget(&mut self) {
         self.last = None;
         self.due = None;
+        self.sent = None;
+        self.held = None;
     }
 }
 
@@ -571,7 +625,7 @@ mod tests {
     fn the_last_picture_goes_again_while_still() {
         let (pipeline, appsrc, seen) = pipeline();
         let every = Duration::from_millis(2000);
-        let mut pictures = Pictures::new(appsrc, every);
+        let mut pictures = Pictures::new(appsrc, every, Arc::default());
         let t0 = Instant::now();
         assert_eq!(pictures.wait(t0), None, "nothing to send again");
         assert!(!pictures.again(t0));
@@ -608,6 +662,77 @@ mod tests {
         // Started over: the last one is gone.
         pictures.forget();
         assert!(!pictures.again(t1));
+        pipeline.set_state(gst::State::Null).unwrap();
+    }
+
+    /// Slowed by the gate, a picture that came too soon waits; the source's next one,
+    /// right at the turn, goes in its place, and with none after it the one waiting
+    /// goes a little after its turn. A repeat does not count for the gate; a keyframe
+    /// asked for (the gate opened) lets the one waiting go at once, and the last
+    /// picture asked again goes whatever the gate.
+    #[test]
+    fn the_newest_picture_waits_for_its_turn() {
+        let (pipeline, appsrc, seen) = pipeline();
+        let gate = Arc::new(FrameGate::default());
+        gate.set_level(crate::encoder::Level::Side);
+        let spacing = gate.spacing();
+        let mut pictures = Pictures::new(appsrc, Duration::from_secs(2), gate.clone());
+        let t0 = Instant::now();
+        let picture = |n: u8| gst::Buffer::from_slice([n; 4]);
+        let memory = |b: &gst::Buffer| b.peek_memory(0).as_ptr() as usize;
+        let ms = Duration::from_millis(1);
+        pictures.push(picture(1), t0);
+        assert_eq!(came(&seen, 1).len(), 1, "the first goes at once");
+        pictures.push(picture(2), t0 + ms);
+        let grace = spacing / 4;
+        assert_eq!(
+            pictures.wait(t0 + 2 * ms),
+            Some(spacing + grace - 2 * ms),
+            "a little after its turn"
+        );
+        // The loop wakes at the turn, a hair early: the one waiting stays.
+        pictures.tick(t0 + spacing - ms);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(seen.lock().unwrap().len(), 1, "not yet");
+        // The source's next frame, right at the turn, goes in its place.
+        let third = picture(3);
+        let fresh = memory(&third);
+        pictures.push(third, t0 + spacing - ms);
+        assert_eq!(
+            came(&seen, 2)[1],
+            fresh,
+            "the fresh one, not the one that waited"
+        );
+        assert_eq!(gate.take_counts().held, 1);
+        // One with no frame after it goes by itself, a little after its turn.
+        let sent = t0 + spacing - ms;
+        pictures.push(picture(4), sent + ms);
+        pictures.tick(sent + spacing);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(seen.lock().unwrap().len(), 2, "within the grace");
+        pictures.tick(sent + spacing + grace);
+        assert_eq!(came(&seen, 3).len(), 3);
+
+        // A repeat of a still screen does not count for the gate: the first change
+        // after it goes at once.
+        let t1 = t0 + Duration::from_secs(10);
+        assert!(pictures.again(t1));
+        pictures.push(picture(5), t1 + ms);
+        assert_eq!(
+            came(&seen, 5).len(),
+            5,
+            "the repeat, and the change at once"
+        );
+
+        // A keyframe asked for: the one waiting goes at once.
+        pictures.push(picture(6), t1 + 2 * ms);
+        gate.open();
+        assert_eq!(pictures.wait(t1 + 2 * ms), Some(Duration::ZERO));
+        pictures.tick(t1 + 2 * ms);
+        assert_eq!(came(&seen, 6).len(), 6);
+        // Asked again: at once, whatever the gate.
+        assert!(pictures.again(t1 + 3 * ms));
+        assert_eq!(came(&seen, 7).len(), 7);
         pipeline.set_state(gst::State::Null).unwrap();
     }
 
@@ -862,7 +987,7 @@ mod tests {
             // SAFETY: the buffers and their parts live through the test.
             unsafe { slots.add(g.ptr()) };
         }
-        let mut pictures = Pictures::new(appsrc, Duration::from_secs(1));
+        let mut pictures = Pictures::new(appsrc, Duration::from_secs(1), Arc::default());
         let sightings = super::super::meta::Sightings::default();
         let cursor = super::super::meta::tests::cursor_meta(1, (3, 4), (0, 0), None);
         let damage = super::super::meta::tests::damage_meta(&[(0, 0, 2, 1)], 4);

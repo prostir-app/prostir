@@ -12,6 +12,9 @@
 //! The mouse pointer, where the desktop tells it apart from the pictures, fans out
 //! here too (see `cursor.rs`): each headset hears where it is across the picture of a
 //! display it was told about, in a look it has.
+//!
+//! Which streams get every frame, from where the headsets look, is kept here too
+//! (`priority.rs`): the router sets each encoder's frame gate to it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -24,11 +27,15 @@ use prostir_proto::stats::{Histogram, Period};
 use prostir_proto::{Codec, HostMsg};
 
 use crate::cursor::{self, At, Pointer, Told};
-use crate::encoder::{EncoderEvent, FrameTiming};
+use crate::encoder::{EncoderEvent, FrameTiming, Gate, Level};
 use crate::events::SessionId;
 use crate::outbox::Outbox;
 use crate::platform::{CursorEvent, OutputKey};
 use crate::screen::ScreenId;
+
+mod priority;
+
+use priority::Priority;
 
 /// How often the router logs what each stream sent (see [`Router::report`]).
 const REPORT_EVERY: Duration = Duration::from_secs(10);
@@ -166,6 +173,42 @@ pub struct StreamStats {
     /// From a frame entering the converter to leaving the parser, microseconds.
     pub encode_us_avg: u32,
     pub encode_us_max: u32,
+    /// What its frame gate let through, once the encoder runs (see `encoder/gate.rs`).
+    pub gate: Option<GateStats>,
+}
+
+/// What a stream's frame gate let through over one window of the router's report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GateStats {
+    /// Its level at the end of the window.
+    pub level: Level,
+    /// The monitor's full rate, and what the level lets through, mHz.
+    pub rate_mhz: u32,
+    pub fps_mhz: u32,
+    /// Frames that waited for their turn at the gate, frames not encoded since
+    /// nothing changed, and frames dropped before the encoder, still busy with the
+    /// ones before.
+    pub held: u32,
+    pub unchanged: u32,
+    pub dropped: u32,
+}
+
+impl GateStats {
+    /// `half rate 30/s, 12 frames held by rate, 3 skipped for no change, 0 dropped by
+    /// a busy encoder`.
+    pub fn summary(&self) -> String {
+        let fps = f64::from(self.fps_mhz) / 1e3;
+        let level = match self.level {
+            Level::Full => format!("full rate {fps:.0}/s"),
+            Level::Side => format!("half rate {fps:.0}/s"),
+            Level::Glance => format!("Focus {fps:.0}/s"),
+        };
+        format!(
+            "{level}, {} frames held by rate, {} skipped for no change, {} dropped by a \
+             busy encoder",
+            self.held, self.unchanged, self.dropped
+        )
+    }
 }
 
 impl StreamStats {
@@ -187,9 +230,25 @@ impl StreamStats {
             f64::from(self.keyframe_max) / 1024.0,
             f64::from(self.encode_us_avg) / 1e3,
             f64::from(self.encode_us_max) / 1e3,
-        )
+        ) + &self
+            .gate
+            .map_or_else(String::new, |g| format!("; gate: {}", g.summary()))
+    }
+
+    /// Whether its encoder could not keep up with the frames it got: [`BEHIND_DROPS`]
+    /// or more were dropped before it, still busy with the ones before, and more than
+    /// one in twenty of all that came.
+    pub fn behind(&self) -> bool {
+        self.gate.is_some_and(|g| {
+            g.dropped >= BEHIND_DROPS
+                && u64::from(g.dropped) * 20 > u64::from(self.frames + g.dropped)
+        })
     }
 }
+
+/// Frames dropped before a busy encoder in one window of the report from which on it
+/// counts as behind (see [`StreamStats::behind`]).
+const BEHIND_DROPS: u32 = 10;
 
 /// What a stream's encoder made since the last report.
 #[derive(Debug, Default)]
@@ -239,6 +298,7 @@ impl Tally {
             sharpened: t.sharpened,
             encode_us_avg: (t.encode_us / u64::from(t.timed.max(1))) as u32,
             encode_us_max: t.encode_us_max,
+            gate: None,
         }
     }
 }
@@ -296,6 +356,11 @@ struct StreamSlot {
     /// see [`big_frame`]), so it went out coarse within one frame's budget: a still
     /// picture after it is sharpened soon (see [`Router::still_keyframes`]).
     coarse: bool,
+    /// The gate its frames go through, once its encoder runs: set to its level (see
+    /// [`Router::priorities`]).
+    gate: Option<Arc<Gate>>,
+    /// Its encoder was said to fall behind its monitor's full rate.
+    behind: bool,
 }
 
 /// A frame larger than this many frames of the stream's bitrate is big: the picture
@@ -444,9 +509,37 @@ struct RouterInner {
     /// The desktop tells the pointer apart from the pictures (PC feature 16): without
     /// it, nothing of the pointer goes to any headset.
     cursor_source: bool,
+    /// Where the headsets look, for how many frames each stream gets.
+    priority: Priority,
 }
 
 impl RouterInner {
+    /// Sets every stream's frame gate to its level now; said where it changed.
+    fn set_levels(&self, now: Instant) {
+        for (id, s) in &self.streams {
+            let Some(gate) = &s.gate else {
+                continue;
+            };
+            let (level, why) = self.priority.level(*id, now);
+            let Some(before) = gate.set_level(level) else {
+                continue;
+            };
+            // More frames: the one waiting at the gate goes now.
+            if level > before
+                && let Some(k) = &s.keyframer
+            {
+                k.speed_up();
+            }
+            let fps = f64::from(gate.fps_mhz()) / 1e3;
+            let why = why.says();
+            match level {
+                Level::Full => info!("{}: every frame, {fps:.0} a second ({why})", s.name),
+                Level::Side => info!("{}: half its frames, {fps:.0} a second ({why})", s.name),
+                Level::Glance => info!("{}: {fps:.0} frames a second, Focus ({why})", s.name),
+            }
+        }
+    }
+
     /// The streams larger than every headset decodes (none without a headset): their
     /// display stands failed, since nobody could show it.
     fn too_big_for_all(&self) -> Vec<TooBig> {
@@ -603,6 +696,7 @@ impl Router {
                 pointer: Pointer::default(),
                 cursor_apart: false,
                 cursor_source: false,
+                priority: Priority::default(),
             }),
             broken: Mutex::new(Vec::new()),
             unopened: Mutex::new(Vec::new()),
@@ -657,6 +751,9 @@ impl Router {
             };
             receiver.streams.insert(*id, delivery);
         }
+        let tells = receiver.headset.has(state::caps::headset::GAZE);
+        inner.priority.attach(session, worn, tells);
+        inner.set_levels(now);
         inner.receivers.insert(session, receiver);
         // What was found for the headsets before is looked at again with this one.
         *self.too_big.lock().unwrap() = inner.too_big_for_all();
@@ -670,6 +767,8 @@ impl Router {
     pub fn detach(&self, session: SessionId) {
         let mut inner = self.inner.lock().unwrap();
         inner.receivers.remove(&session);
+        inner.priority.detach(session);
+        inner.set_levels(Instant::now());
         *self.too_big.lock().unwrap() = inner.too_big_for_all();
         inner.cursor_follow_headsets();
     }
@@ -686,10 +785,15 @@ impl Router {
             return Vec::new();
         }
         r.worn = worn;
+        let now = Instant::now();
+        inner.priority.set_worn(session, worn);
+        inner.set_levels(now);
         if !worn {
             return Vec::new();
         }
-        let now = Instant::now();
+        let Some(r) = inner.receivers.get_mut(&session) else {
+            return Vec::new();
+        };
         let fresh = r
             .streams
             .iter_mut()
@@ -907,12 +1011,30 @@ impl Router {
             };
             let silent = std::mem::take(&mut quiet.held);
             // What each encoder made, whoever got it.
-            let encoded: Vec<(String, StreamStats)> = streams
+            let encoded: Vec<(String, StreamStats, Option<bool>)> = streams
                 .values_mut()
                 .map(|s| {
-                    let stats = s.tally.take(now);
+                    let mut stats = s.tally.take(now);
+                    stats.gate = s.gate.as_ref().map(|g| {
+                        let counts = g.take_counts();
+                        GateStats {
+                            level: g.level(),
+                            rate_mhz: g.rate_mhz(),
+                            fps_mhz: g.fps_mhz(),
+                            held: counts.held,
+                            unchanged: counts.unchanged,
+                            dropped: counts.dropped,
+                        }
+                    });
                     s.measured = Some(stats);
-                    (s.name.clone(), stats)
+                    // Said once when its encoder falls behind, once when it keeps up.
+                    let news = (stats.frames > 0)
+                        .then(|| stats.behind())
+                        .filter(|b| *b != s.behind);
+                    if let Some(b) = news {
+                        s.behind = b;
+                    }
+                    (s.name.clone(), stats, news)
                 })
                 .collect();
             let lines: Vec<Lines> = receivers
@@ -935,9 +1057,22 @@ impl Router {
             (window, encoded, silent, lines)
         };
         // Logged without the lock, which every encoded frame takes.
-        for (name, stats) in encoded {
+        for (name, stats, behind) in encoded {
             if stats.frames > 0 {
                 info!("{name}: {}", stats.summary());
+            }
+            let hz = stats.gate.map_or(0.0, |g| f64::from(g.rate_mhz) / 1e3);
+            match behind {
+                Some(true) => warn!(
+                    "{name}: the encoder dropped {} frames in {} s, still busy with the ones \
+                     before (it takes {:.1} ms a frame): it cannot keep up with the monitor at \
+                     {hz:.0} Hz",
+                    stats.gate.map_or(0, |g| g.dropped),
+                    stats.window_ms / 1000,
+                    f64::from(stats.encode_us_avg) / 1e3
+                ),
+                Some(false) => info!("{name}: the encoder keeps up with {hz:.0} Hz again"),
+                None => {}
             }
         }
         let several = lines.len() > 1;
@@ -1056,6 +1191,8 @@ impl Router {
             kbps: 0,
             sharpens: false,
             coarse: false,
+            gate: None,
+            behind: false,
         };
         inner.streams.insert(id, slot);
         for r in inner.receivers.values_mut() {
@@ -1073,11 +1210,62 @@ impl Router {
     }
 
     /// The encoder of stream `id` runs: keyframes are asked of it through `keyframer`
-    /// (see [`Router::force_keyframe`]).
+    /// (see [`Router::force_keyframe`]), and its frames go through its gate at the
+    /// stream's level.
     pub fn set_keyframer(&self, id: ScreenId, keyframer: crate::encoder::Keyframer) {
+        let gate = keyframer.gate().clone();
         if let Some(slot) = self.inner.lock().unwrap().streams.get_mut(&id) {
             slot.keyframer = Some(keyframer);
         }
+        self.set_gate(id, gate);
+    }
+
+    /// The frames of stream `id` go through `gate`, set to the stream's level now.
+    pub fn set_gate(&self, id: ScreenId, gate: Arc<Gate>) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(slot) = inner.streams.get_mut(&id) {
+            slot.gate = Some(gate);
+            slot.behind = false;
+            inner.set_levels(Instant::now());
+        }
+    }
+
+    /// The headset of `session` looks at display `at` (none: at none of this PC's):
+    /// a stream looked at gets every frame at once, one the gaze left keeps them for
+    /// 2 s (see `priority.rs`).
+    pub fn gaze(&self, session: SessionId, at: Option<ScreenId>) {
+        let mut inner = self.inner.lock().unwrap();
+        let now = Instant::now();
+        inner.priority.gaze(session, at, now);
+        inner.set_levels(now);
+    }
+
+    /// "Focus" is on in the headset of `session`, or not: where every headset on the
+    /// head has it, the streams nobody looks at get 5 frames a second.
+    pub fn set_focus_mode(&self, session: SessionId, on: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.priority.set_focus(session, on);
+        inner.set_levels(Instant::now());
+    }
+
+    /// The PC's active monitor is display `at` (none: none of them): that one
+    /// gets every frame.
+    pub fn set_active(&self, at: Option<ScreenId>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.priority.set_active(at);
+        inner.set_levels(Instant::now());
+    }
+
+    /// Sets every stream's gate to its level now: a stream the gaze left 2 s ago
+    /// goes down (see [`Router::priority_due`]).
+    pub fn priorities(&self) {
+        self.inner.lock().unwrap().set_levels(Instant::now());
+    }
+
+    /// When a stream's level next goes down by itself: the control loop wakes then
+    /// to call [`Router::priorities`].
+    pub fn priority_due(&self) -> Option<Instant> {
+        self.inner.lock().unwrap().priority.due(Instant::now())
     }
 
     /// Asks the encoder of stream `id` for a keyframe now, if it runs: from any thread,

@@ -41,6 +41,9 @@ const FRAME_RATE: i32 = 60;
 
 /// Buffers captured into in turn; the encoder holds at most a few at a time.
 const SLOTS: usize = 4;
+/// A capture that waited for its turn at the gate and whose frame was ready within
+/// this had a change waiting: one frame held by the gate.
+const HELD_READY: Duration = Duration::from_millis(25);
 /// With nothing changing on screen, the last frame is sent again this often, as
 /// PipeWire in KDE does: the session needs none of it (pings keep it), but it pushes
 /// out the one keyframe a still screen gets, and each costs an encoding here and a
@@ -125,6 +128,10 @@ struct Frame {
     y_invert: bool,
     ready: bool,
     failed: bool,
+    /// The compositor listed the parts that changed (`copy_with_damage`), and how
+    /// many pixels they cover: none listed, all of it counts as changed.
+    damaged: bool,
+    damage_area: u64,
 }
 
 #[derive(Default)]
@@ -190,6 +197,10 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
             Event::Flags {
                 flags: WEnum::Value(flags),
             } => f.y_invert = flags.contains(zwlr_screencopy_frame_v1::Flags::YInvert),
+            Event::Damage { width, height, .. } => {
+                f.damaged = true;
+                f.damage_area += u64::from(width) * u64::from(height);
+            }
             Event::Ready { .. } => f.ready = true,
             Event::Failed => f.failed = true,
             _ => {}
@@ -752,14 +763,46 @@ fn run(
     // is copied, and the encoder sees it is the picture before).
     let mut last: Option<gst::Buffer> = None;
     let mut last_push = Instant::now();
+    // When a new picture went last (a repeat does not count for the gate).
+    let mut last_new: Option<Instant> = None;
     let mut failures = 0;
+    let gate = paused.gate();
     while !stop.load(Ordering::Relaxed) {
         if paused.is_on() {
             // Asleep until resumed or stopped (see `Capture`'s drop).
             paused.wait(stop);
             continue;
         }
+        // The next frame is captured when the gate lets it go (see `encoder/gate.rs`):
+        // then it is the newest picture. It is asked for a frame of the monitor before
+        // its turn, as the compositor copies with its next frame. Asked again
+        // meanwhile, the last one goes; opened (a keyframe asked for), it goes now.
+        let mut waited = false;
+        let mut opened = gate.take_open();
+        while !opened {
+            let lead = gate.period();
+            let since = last_new.filter(|_| last.is_some());
+            let Some(at) = gate.due(since, Instant::now() + lead) else {
+                break;
+            };
+            if stop.load(Ordering::Relaxed) || paused.is_on() {
+                break;
+            }
+            waited = true;
+            paused.nap(at - lead, stop);
+            opened = gate.take_open();
+            if paused.take_again()
+                && let Some(l) = &last
+            {
+                let _ = appsrc.push_buffer(l.clone());
+                last_push = Instant::now();
+            }
+        }
+        if stop.load(Ordering::Relaxed) || paused.is_on() {
+            continue;
+        }
         state.frame = Frame::default();
+        let asked = Instant::now();
         let frame = manager.capture_output(1, &output, &qh, ());
         let deadline = Instant::now() + Duration::from_secs(2);
         while !(state.frame.described || state.frame.failed) && Instant::now() < deadline {
@@ -834,12 +877,23 @@ fn run(
             }
         }
         frame.destroy();
-        if state.frame.ready {
+        // The compositor says nothing changed: the last picture stands for it, unless
+        // a keyframe was asked for (the gate open).
+        let unchanged =
+            state.frame.damaged && state.frame.damage_area == 0 && last.is_some() && !opened;
+        if state.frame.ready && unchanged {
             failures = 0;
+            gate.unchanged();
+        } else if state.frame.ready {
+            failures = 0;
+            if waited && asked.elapsed() < HELD_READY {
+                gate.held();
+            }
             let frame = p.frame(slot, state.frame.y_invert)?;
             let _ = appsrc.push_buffer(frame.clone());
             last = Some(frame);
             last_push = Instant::now();
+            last_new = Some(last_push);
         } else if state.frame.failed {
             failures += 1;
             if failures >= 5 {

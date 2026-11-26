@@ -156,6 +156,12 @@ pub fn damage_parts(meta: &[u8]) -> impl Iterator<Item = Rect> + '_ {
         })
 }
 
+/// Whether a `SPA_META_VideoDamage` (`meta`) says nothing of the picture changed: it
+/// has room for a part and lists none. Without room it says nothing either way.
+pub fn nothing_changed(meta: &[u8]) -> bool {
+    meta.len() >= size_of::<ss::spa_meta_region>() && damage_parts(meta).next().is_none()
+}
+
 /// The metadata of one buffer, by kind.
 pub struct Metas<'a> {
     pub header: Option<&'a [u8]>,
@@ -467,6 +473,9 @@ pub mod tests {
             ])
         );
         assert_eq!(read_damage(&damage_meta(&[], 4)), Damage::None);
+        assert!(nothing_changed(&damage_meta(&[], 4)), "room, and no part");
+        assert!(!nothing_changed(&meta));
+        assert!(!nothing_changed(&[]), "no room: not said");
         // All of the room used.
         assert!(
             matches!(read_damage(&damage_meta(&[(1, 1, 2, 2); 3], 3)), Damage::Parts(p) if p.len() == 3)
