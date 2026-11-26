@@ -547,6 +547,8 @@ pub enum Action {
     #[cfg(feature = "preview")]
     DevTake(crate::interaction::Take),
     #[cfg(feature = "preview")]
+    DevMovement(crate::interaction::trial::Movement),
+    #[cfg(feature = "preview")]
     DevHandLook(crate::interaction::trial::HandLook),
     #[cfg(feature = "preview")]
     DevFx(crate::interaction::trial::FxSet),
@@ -5044,7 +5046,7 @@ fn build_dev_hands(
     wrap: Wrap<'_>,
 ) {
     use crate::interaction::Take;
-    use crate::interaction::trial::{FxSet, HandLook};
+    use crate::interaction::trial::{FxSet, HandLook, Movement};
     let l = &s.texts;
     let t = v.trial;
     segmented(
@@ -5068,18 +5070,18 @@ fn build_dev_hands(
             ),
         ],
     );
-    let note = wrap(l.t("headset-dev-monitors-note"), 17.0, w);
+    let note = wrap(l.t("headset-dev-monitors-note"), 16.0, w);
     for (k, line) in note.iter().enumerate() {
         items.push(text(
             x,
-            y - 24.0 + k as f32 * 23.0,
-            17.0,
+            y - 20.0 + k as f32 * 21.0,
+            16.0,
             false,
             MUTED,
             line,
         ));
     }
-    y += note.len() as f32 * 23.0 + 10.0;
+    y += note.len() as f32 * 21.0 + 6.0;
     let take = |label, take: Take| (label, Action::DevTake(take), t.take == take, t.monitors);
     segmented(
         items,
@@ -5092,6 +5094,32 @@ fn build_dev_hands(
             take(l.t("headset-dev-take-middle"), Take::Middle),
             take(l.t("headset-dev-take-hold"), Take::Hold),
         ],
+    );
+    let powers: Vec<String> = Movement::ALL
+        .iter()
+        .map(|m| match m {
+            Movement::AsNow => l.t("headset-dev-move-as-now").to_owned(),
+            Movement::Sphere(p) => l.f("headset-dev-move-sphere", &[("power", (*p).into())]),
+        })
+        .collect();
+    segmented(
+        items,
+        x,
+        w,
+        &mut y,
+        l.t("headset-dev-move"),
+        Movement::ALL
+            .into_iter()
+            .zip(&powers)
+            .map(|(m, label)| {
+                (
+                    label.as_str(),
+                    Action::DevMovement(m),
+                    t.movement == m,
+                    true,
+                )
+            })
+            .collect(),
     );
     let percents: Vec<String> = HandLook::ALL
         .iter()
@@ -5168,11 +5196,11 @@ fn build_dev_hands(
         None => None,
     };
     if let Some(said) = said {
-        for (k, line) in wrap(&said, 17.0, half).iter().enumerate() {
+        for (k, line) in wrap(&said, 16.0, half).iter().enumerate() {
             items.push(text(
                 x + half + 16.0,
-                y + 64.0 + k as f32 * 23.0,
-                17.0,
+                y + 60.0 + k as f32 * 21.0,
+                16.0,
                 false,
                 MUTED,
                 line,

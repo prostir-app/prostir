@@ -38,6 +38,10 @@ headset-dev-take = Узяти монітор
 headset-dev-take-fist = Кулаком
 headset-dev-take-middle = Щипком середнім
 headset-dev-take-hold = Утриманням щипка
+headset-dev-move = Монітор у руці рухається
+headset-dev-move-as-now = Як зараз
+# $power (Number): степінь відстані руки (1, 2, 3)
+headset-dev-move-sphere = Сфера, p = { $power }
 headset-dev-hand-look = Вигляд рук
 headset-dev-hand-solid = Суцільні
 # $percent (Number): наскільки непрозорі, у відсотках

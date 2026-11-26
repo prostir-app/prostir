@@ -376,7 +376,12 @@ fn main() {
             known: std::env::var("UNKNOWN_HEADSET").is_err(),
             can_reset: true,
             auto_line: 85,
-            hands: prostir::ui::DevHands::default(),
+            // FEEL=1: feel.txt read; RECORDING=1: the input being recorded.
+            hands: prostir::ui::DevHands {
+                feel: std::env::var("FEEL").is_ok().then_some((true, 3, 1)),
+                recording: std::env::var("RECORDING").is_ok().then_some(17),
+                ..prostir::ui::DevHands::default()
+            },
         }),
         texts,
         languages: languages.into(),

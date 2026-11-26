@@ -114,6 +114,7 @@ impl Scene for Model {
             monitors: t.monitors,
             take: t.take,
             hands: self.settings.hands == crate::settings::HandMode::Control,
+            movement: t.movement,
         }
     }
 

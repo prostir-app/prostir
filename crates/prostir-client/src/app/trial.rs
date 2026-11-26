@@ -50,6 +50,7 @@ impl Model {
         match action {
             Action::DevMonitors(on) => t.monitors = on,
             Action::DevTake(take) => t.take = take,
+            Action::DevMovement(movement) => t.movement = movement,
             Action::DevHandLook(look) => t.look = look,
             Action::DevFx(fx) => t.fx = fx,
             Action::DevRecord => self.start_recording(),

@@ -73,12 +73,33 @@ impl FxSet {
     }
 }
 
+/// How a monitor in a hand moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Movement {
+    /// As before step 8: along the hand's ray, the distance by the reach cubed.
+    #[default]
+    AsNow,
+    /// On a sphere round the eye, the distance by the reach to this power (see
+    /// `layout::Grab::on_sphere`).
+    Sphere(u8),
+}
+
+impl Movement {
+    pub const ALL: [Movement; 4] = [
+        Movement::AsNow,
+        Movement::Sphere(1),
+        Movement::Sphere(2),
+        Movement::Sphere(3),
+    ];
+}
+
 /// The choices of "Hands (trial)".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Trial {
     /// Monitors are touched and clicked (see `monitors`).
     pub monitors: bool,
     pub take: Take,
+    pub movement: Movement,
     pub look: HandLook,
     pub fx: FxSet,
 }

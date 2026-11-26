@@ -38,6 +38,10 @@ headset-dev-take = Take a monitor with
 headset-dev-take-fist = Fist
 headset-dev-take-middle = Middle pinch
 headset-dev-take-hold = Held pinch
+headset-dev-move = A monitor in the hand moves
+headset-dev-move-as-now = As now
+# $power (Number): the power of the reach (1, 2, 3)
+headset-dev-move-sphere = Sphere, p = { $power }
 headset-dev-hand-look = Hands look
 headset-dev-hand-solid = Solid
 # $percent (Number): how opaque, in percent

@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use glam::{Quat, Vec2, Vec3};
 
 use super::signals::{self, Gestures};
+use super::trial::Movement;
 use super::{Feel, FrameInput, Hands, Head, INDEX_TIP, Joints, Mark, Phase, Scene};
 use crate::ids::{DisplayKey, Target, Thing};
 use crate::layout::{Grab, Ray};
@@ -48,6 +49,8 @@ pub struct Modes {
     pub take: Take,
     /// Tracked hands act ("Hands: control"): only then does a fingertip touch.
     pub hands: bool,
+    /// How a monitor in a hand moves (whether or not monitors are touched).
+    pub movement: Movement,
 }
 
 /// A mouse button.
@@ -738,11 +741,8 @@ impl Hands {
                 self.hands[h].phase = Phase::Idle;
                 if let Some(grab) = start_grab(scene, p.id, ray) {
                     scene.haptic(h);
-                    self.hands[h].phase = Phase::Carry(Carry::by_ray(grab.with_reach(
-                        ray.origin,
-                        head.position,
-                        &f,
-                    )));
+                    self.hands[h].phase =
+                        Phase::Carry(Carry::by_ray(self.reach(grab, ray, head, h)));
                 }
                 return;
             }
@@ -830,7 +830,7 @@ impl Hands {
             if let Some(grab) = start_grab(scene, id, ray) {
                 scene.haptic(h);
                 self.hands[h].phase = Phase::Carry(Carry {
-                    grab: grab.with_reach(ray.origin, head.position, &f),
+                    grab: self.reach(grab, ray, head, h),
                     palm: Some(gesture),
                     turn: Quat::from_rotation_arc(palm.dir, toward),
                 });
@@ -1034,6 +1034,21 @@ impl Hands {
                     .ray
                     .map(|r| (r, self.picks[h].map_or(1.2, |p| p.hit.t).min(4.0))),
             };
+        }
+    }
+}
+
+impl Hands {
+    /// A monitor taken by hand `h` along `ray`: moved on a sphere where the modes say
+    /// so, else by the hand's reach as before step 8.
+    pub(super) fn reach(&self, grab: Grab, ray: Ray, head: Head, h: usize) -> Grab {
+        let f = &self.feel;
+        match self.m.modes.movement {
+            Movement::Sphere(p) if grab.id.display().is_some() => {
+                let shoulder = signals::shoulder(head.position, head.forward, h == 0, f);
+                grab.on_sphere(ray, head.position, shoulder, f32::from(p), f)
+            }
+            Movement::Sphere(_) | Movement::AsNow => grab.with_reach(ray.origin, head.position, f),
         }
     }
 }

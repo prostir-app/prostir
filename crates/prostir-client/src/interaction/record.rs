@@ -31,6 +31,7 @@ use crate::ui::{self, Action};
 use crate::world::{panel_height, panel_width, wrist_menu_height};
 
 use super::feel::Feel;
+use super::trial::Movement;
 
 /// The first line of a recording.
 pub const FORMAT: &str = "prostir-input 1";
@@ -188,7 +189,11 @@ impl Stage {
             Take::Hold => "hold",
         };
         let (monitors, hands) = (u8::from(m.monitors), u8::from(m.hands));
-        let _ = writeln!(out, "modes {monitors} {take} {hands}");
+        let sphere = match m.movement {
+            Movement::AsNow => 0,
+            Movement::Sphere(p) => p,
+        };
+        let _ = writeln!(out, "modes {monitors} {take} {hands} {sphere}");
         for p in &self.pieces {
             let what = match p.thing {
                 Thing::Display(id) => format!("display {id}"),
@@ -233,6 +238,10 @@ impl Stage {
                         _ => Take::Hold,
                     };
                     stage.modes.hands = words.next() == Some("1");
+                    stage.modes.movement = match words.next().and_then(|w| w.parse().ok()) {
+                        Some(p @ 1..=9) => Movement::Sphere(p),
+                        _ => Movement::AsNow,
+                    };
                 }
                 Some(kind @ ("display" | "keyboard")) => {
                     let thing = if kind == "display" {

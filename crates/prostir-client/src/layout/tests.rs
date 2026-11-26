@@ -2549,3 +2549,28 @@ fn a_monitor_over_the_head_is_out_of_view() {
     assert_eq!(alone_out_of_view(&p, &m, (center, 0.0), &rows), [9]);
     assert!(in_view(&p[&0], (center, 0.0)));
 }
+
+/// A fingertip against a flat and a curved monitor: in front, behind, beside it; on a
+/// curve, measured from the arc, not the chord.
+#[test]
+fn a_point_against_a_monitor() {
+    let head = Vec3::new(0.0, 1.6, 0.0);
+    let at = Vec3::new(0.0, 1.6, -1.0);
+    let p = Placement {
+        position: at,
+        rotation: facing(at, head),
+        width: 1.0,
+    };
+    for curve in [None, Some(1.0)] {
+        // A curve's middle is behind the chord's.
+        let sag = curve.map_or(0.0, |r: f32| r - (r * r - 0.25).sqrt());
+        let a = against(&p, 0.6, curve, at + Vec3::new(0.0, 0.1, 0.05)).expect("over it");
+        assert!((a.z - 0.05 - sag).abs() < 1e-3, "{}", a.z);
+        assert!((a.local.y - 0.1).abs() < 1e-3);
+        assert!(a.point.distance(at + Vec3::new(0.0, 0.1, -sag)) < 1e-3);
+        assert!(a.normal.dot(Vec3::Z) > 0.99);
+        let behind = against(&p, 0.6, curve, at + Vec3::new(0.1, 0.0, -0.02 - sag));
+        assert!(behind.expect("over it").z < 0.0);
+        assert!(against(&p, 0.6, curve, at + Vec3::new(0.0, 0.5, 0.02)).is_none());
+    }
+}

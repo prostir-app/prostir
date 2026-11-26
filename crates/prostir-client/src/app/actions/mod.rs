@@ -124,6 +124,7 @@ impl Model {
             #[cfg(feature = "preview")]
             Action::DevMonitors(_)
             | Action::DevTake(_)
+            | Action::DevMovement(_)
             | Action::DevHandLook(_)
             | Action::DevFx(_)
             | Action::DevRecord

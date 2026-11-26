@@ -132,6 +132,7 @@ impl Script {
             monitors: true,
             take,
             hands: true,
+            ..Modes::default()
         };
         self
     }
@@ -710,4 +711,83 @@ fn a_recording_stops_at_its_time() {
     assert!(r.over(start + RECORD_FOR));
     assert_eq!(r.frames(), (RECORD_FOR.as_millis() / 8) as u32);
     assert_eq!(r.bytes.capacity(), room, "no more memory taken");
+}
+
+/// Each frame of `script` played against the stage, `look` asked of the hands after
+/// each: what it said, frame by frame.
+fn watch<T>(script: &Script, look: impl Fn(&super::super::Hands) -> T) -> Vec<T> {
+    let start = Instant::now();
+    let mut hands = super::super::Hands::new();
+    let mut stage = stage();
+    stage.modes = script.modes;
+    let mut menus = StageMenus;
+    script
+        .frames
+        .iter()
+        .map(|(t, input)| {
+            let now = start + *t;
+            stage.at(start, now);
+            hands.buttons(now, input, &mut stage);
+            hands.step(now, input, &mut stage, &mut menus);
+            look(&hands)
+        })
+        .collect()
+}
+
+/// A hand's ray goes as its fingertip comes nearer a monitor than 15 cm and comes back
+/// only past 20 cm (hysteresis); with step 8's modes off it never goes.
+#[test]
+fn the_ray_gives_way_to_touch_near_a_monitor() {
+    let palm_for = |tip: Vec3| tip - Vec3::new(0.025, 0.0, -0.1);
+    let mut s = Script::new();
+    s.monitors(Take::Hold);
+    // In and out again, 1 cm a frame, with the runtime's ray along the finger.
+    let zs: Vec<f32> = (0..=25)
+        .map(|i| 0.30 - 0.01 * i as f32)
+        .chain((0..=25).map(|i| 0.05 + 0.01 * i as f32))
+        .collect();
+    for &z in &zs {
+        let tip = before_near(z);
+        s.pose(1, palm_for(tip), Pose::Point);
+        s.ray_from(1, palm_for(tip), before_near(0.0)).frames(1);
+    }
+    let shown = watch(&s, |h| h.ray(1).is_some());
+    let first = |z: f32| {
+        let i = zs.iter().position(|v| (v - z).abs() < 1e-4).expect("a z");
+        shown[i]
+    };
+    assert!(first(0.30) && first(0.16), "far: the ray");
+    assert!(!first(0.14) && !first(0.05), "near: touch");
+    let back = zs.len()
+        - 1
+        - zs.iter()
+            .rev()
+            .position(|v| (v - 0.18).abs() < 1e-4)
+            .expect("z");
+    assert!(!shown[back], "18 cm on the way back: still touch");
+    assert!(*shown.last().expect("frames"), "30 cm: the ray again");
+    s.modes = Modes::default();
+    assert!(
+        watch(&s, |h| h.ray(1).is_some()).iter().all(|&r| r),
+        "modes off"
+    );
+}
+
+/// The ray on a monitor is the PC's pointer: the mouse follows it, and only the hand
+/// that pressed last moves it.
+#[test]
+fn one_pointer_follows_the_hand_that_pressed_last() {
+    let mut s = Script::new();
+    s.monitors(Take::Hold);
+    s.ray_from(0, Vec3::new(-0.2, 1.3, -0.25), monitor(1));
+    s.ray_from(1, Vec3::new(0.2, 1.3, -0.25), monitor(2));
+    s.frames(2);
+    // The left one presses: from then on it moves the mouse, the right one only points.
+    s.select(0, 1.0).frames(2).select(0, 0.0).frames(2);
+    s.turn(1, 5, 1.0);
+    let rec = Recording::read(&s.recording()).expect("read");
+    let journal = replay(&rec, Instant::now());
+    let moves: Vec<&String> = journal.iter().filter(|l| l.contains("mouse")).collect();
+    let last = moves.last().expect("the mouse moved");
+    assert!(last.contains("display 1"), "{journal:#?}");
 }

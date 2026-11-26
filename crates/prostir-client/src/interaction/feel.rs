@@ -78,6 +78,9 @@ feel! {
     near_take_m: 0.35, 0.0, 2.0;
     /// A hand's reach moves what it holds by the reach to this power.
     reach_power: 3.0, 0.5, 6.0;
+    /// Moving on a sphere (to try): reaching in or out less than this does not change
+    /// the distance.
+    reach_dead_m: 0.02, 0.0, 0.2;
     /// What a hand holds is never nearer than this.
     distance_min_m: 0.3, 0.1, 2.0;
     /// Nor further than this.
