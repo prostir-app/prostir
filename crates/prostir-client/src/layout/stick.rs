@@ -534,7 +534,7 @@ pub fn stick<K: Key>(
     id: K,
     scratch: &mut StickScratch<K>,
 ) -> Option<Stick<K>> {
-    stick_group(placements, monitors, center, id, &[], scratch)
+    stick_group(placements, monitors, center, id, &[], Some(&[]), scratch)
 }
 
 /// The magnet for monitor `id` carried with `followers`, a group glued to it (see
@@ -542,14 +542,18 @@ pub fn stick<K: Key>(
 /// one piece, each of it tried against the monitors it comes near (the nearest seam
 /// wins). Every one of the group then stands clear of the others as [`stick`] keeps a
 /// single one: through none, seen over or behind none, facing the eye; nor does the
-/// group change size. With no followers, [`stick`]. Worked out in `scratch`; allocates
-/// nothing once it is large enough.
+/// group change size. With no followers, [`stick`], which gives `id` its neighbour's
+/// size only where `size_from` says so: `Some(except)`, from a neighbour not among
+/// `except`; `None`, never (a monitor resized or not moved by the hand keeps its size).
+/// Worked out in `scratch`; allocates nothing once it is large enough.
+#[allow(clippy::too_many_arguments)]
 pub fn stick_group<K: Key>(
     placements: &HashMap<K, Placement>,
     monitors: &[(K, u32, u32)],
     center: (Vec3, f32),
     id: K,
     followers: &[K],
+    size_from: Option<&[K]>,
     scratch: &mut StickScratch<K>,
 ) -> Option<Stick<K>> {
     let frame = Frame::upright(center.0, center.1);
@@ -565,7 +569,7 @@ pub fn stick_group<K: Key>(
     parts(placements, monitors, all);
     let anchor = *all.iter().find(|m| m.0 == id)?;
     if followers.is_empty() {
-        return stick_one(anchor, all, near, &frame, monitors, true, &|_| true).map(|s| s.0);
+        return stick_one(anchor, all, near, &frame, monitors, size_from, &|_| true).map(|s| s.0);
     }
     rest.clear();
     moving.clear();
@@ -603,7 +607,7 @@ pub fn stick_group<K: Key>(
                         })
                 })
         };
-        if let Some((s, gap)) = stick_one(g, alone, near, &frame, monitors, false, &clear)
+        if let Some((s, gap)) = stick_one(g, alone, near, &frame, monitors, None, &clear)
             && best.as_ref().is_none_or(|b| gap < b.1)
         {
             let placement = carried_with(&anchor.1, &g.1, &s.placement);
@@ -614,15 +618,15 @@ pub fn stick_group<K: Key>(
 }
 
 /// [`stick`] for `m` among `all` (it may be among them), with its neighbour's size
-/// where `sized`, where `clear` says the rest of what moves with it may go: the stick
-/// and how far apart the two were as seen.
+/// where `size_from` lets it (see [`stick_group`]), where `clear` says the rest of what
+/// moves with it may go: the stick and how far apart the two were as seen.
 fn stick_one<K: Key>(
     m: Part<K>,
     all: &[Part<K>],
     near: &mut Vec<(Part<K>, Beside)>,
     frame: &Frame,
     monitors: &[(K, u32, u32)],
-    sized: bool,
+    size_from: Option<&[K]>,
     clear: &dyn Fn(&Placement) -> bool,
 ) -> Option<(Stick<K>, f32)> {
     let eye = frame.eye;
@@ -633,7 +637,7 @@ fn stick_one<K: Key>(
             continue;
         }
         // Its neighbour's size first, where it is near it; else its own.
-        let size = if sized {
+        let size = if size_from.is_some_and(|except| !except.contains(&n.0)) {
             matched(&m, &n, b.across)
         } else {
             None
@@ -684,17 +688,19 @@ pub fn stick_on_wall<K: Key>(
     id: K,
     scratch: &mut StickScratch<K>,
 ) -> Option<Stick<K>> {
-    stick_group_on_wall(placements, monitors, center, id, &[], scratch)
+    stick_group_on_wall(placements, monitors, center, id, &[], Some(&[]), scratch)
 }
 
 /// [`stick_group`] on a wall: the group moved in the wall's plane, on top of none of
-/// the monitors that stay. Worked out in `scratch`.
+/// the monitors that stay, `size_from` as there. Worked out in `scratch`.
+#[allow(clippy::too_many_arguments)]
 pub fn stick_group_on_wall<K: Key>(
     placements: &HashMap<K, Placement>,
     monitors: &[(K, u32, u32)],
     center: (Vec3, f32),
     id: K,
     followers: &[K],
+    size_from: Option<&[K]>,
     scratch: &mut StickScratch<K>,
 ) -> Option<Stick<K>> {
     let unturn = Quat::from_rotation_y(-center.1);
@@ -725,10 +731,10 @@ pub fn stick_group_on_wall<K: Key>(
         }
     }
     let anchor = *wall_moving.iter().find(|m| m.0 == id)?;
-    let sized = followers.is_empty();
+    let size_from = size_from.filter(|_| followers.is_empty());
     let mut best: Option<(Stick<K>, f32)> = None;
     for &g in wall_moving.iter() {
-        let Some(w) = on_wall(g, wall_rest, sized) else {
+        let Some(w) = on_wall(g, wall_rest, size_from) else {
             continue;
         };
         let by = w.at - g.1;
@@ -783,8 +789,12 @@ struct OnWallStick<K> {
 }
 
 /// Where `m` on a wall sticks to the nearest of `others` (it is not among them), with
-/// its neighbour's size where `sized` (see [`matched`]).
-fn on_wall<K: Key>(m: OnWall<K>, others: &[OnWall<K>], sized: bool) -> Option<OnWallStick<K>> {
+/// its neighbour's size where `size_from` lets it (see [`stick_group`], [`matched`]).
+fn on_wall<K: Key>(
+    m: OnWall<K>,
+    others: &[OnWall<K>],
+    size_from: Option<&[K]>,
+) -> Option<OnWallStick<K>> {
     let (_, mut at, mut mw, mut mh) = m;
     let sep = |o: &OnWall<K>| {
         let (gx, gy) = wall_gaps(at, mw, mh, o.1, o.2, o.3);
@@ -802,7 +812,7 @@ fn on_wall<K: Key>(m: OnWall<K>, others: &[OnWall<K>], sized: bool) -> Option<On
     }
     let (gx, gy) = wall_gaps(at, mw, mh, n.1, n.2, n.3);
     let across = gx > gy;
-    if sized {
+    if size_from.is_some_and(|except| !except.contains(&n.0)) {
         let as_part = |(k, at, w, h): OnWall<K>| {
             (
                 k,

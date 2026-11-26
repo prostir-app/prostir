@@ -400,7 +400,8 @@ impl Trial {
             })
             .collect();
         let eye = self.sim.world.center.0;
-        let troubles = moved.iter().any(|(p, ph)| {
+        // The anchor as the hand drops it: the rest of the group goes where the room lets it.
+        let troubles = moved.iter().take(1).any(|(p, ph)| {
             others.iter().any(|(q, qh)| {
                 cut(p, *ph, q, *qh)
                     || hidden_by(eye, (p, *ph), (q, *qh)) > HIDDEN
@@ -510,11 +511,22 @@ impl Trial {
         Some("line up".into())
     }
 
+    /// Laid out by `preset` (once: chosen again, it is the same).
+    fn preset(&mut self, preset: Preset) -> Option<String> {
+        let sim = &mut self.sim;
+        if sim.s.preset == preset {
+            return None;
+        }
+        sim.s.preset = preset;
+        sim.world.preset_chosen(&sim.s, sim.now);
+        Some(format!("{preset:?}"))
+    }
+
     /// A random monitor carried by hand round the eye, nearer or further, in small
     /// steps, then let go with the magnet on (step 8.5): the anchor of a group carries
     /// it, each of it standing to the anchor as it stood, through the drag and the
-    /// magnet (its seams kept; what is not kept goes into `torn`). A carry that cuts
-    /// into or hides another as dragged is put back: where a hand puts them is its own.
+    /// magnet (its seams kept; what is not kept goes into `torn`). A carry whose anchor
+    /// cuts into or hides another as dragged is put back: where a hand puts it is its own.
     fn carry(&mut self, rng: &mut Lcg) -> Option<String> {
         let ms = self.monitors();
         let m = ms[rng.below(ms.len())];
@@ -523,6 +535,8 @@ impl Trial {
         sim.s.magnet = true;
         sim.s.move_all = false;
         let from = sim.world.hold(Thing::Display(k(m)), &sim.s)?;
+        // As taken (a monitor still easing goes on from where it is drawn).
+        let held_at = sim.world.placements.clone();
         let group: Vec<u32> = sim.world.groups.iter().flatten().map(|f| f.id.0).collect();
         let eye = sim.head.0;
         let (yaw, pitch) = ((rng.f() - 0.5) * 1.2, (rng.f() - 0.5) * 0.5);
@@ -547,8 +561,10 @@ impl Trial {
             let q = *w.placement(k(n))?;
             Some((q, self.height(n, &q)))
         };
+        // Only where the hand put the anchor: what it carries along is the app's.
         let troubles = moved
             .iter()
+            .take(1)
             .filter_map(|&a| shown(a, &self.sim.world))
             .any(|(p, ph)| {
                 self.list
@@ -576,11 +592,15 @@ impl Trial {
         };
         let (a0, a1) = (from, *self.sim.world.placement(k(m))?);
         for &f in &group {
-            let (Some(f0), Some(f1)) = (before.get(&k(f)), self.sim.world.placement(k(f))) else {
+            let (Some(f0), Some(f1)) = (held_at.get(&k(f)), self.sim.world.placement(k(f))) else {
                 continue;
             };
             let ((o0, t0), (o1, t1)) = (to_anchor(&a0, f0), to_anchor(&a1, f1));
-            let apart = o0.distance(o1).max(t0.angle_between(t1));
+            // The turn as how far its sides went (acos of a dot near 1 is all noise).
+            let turned = (t0 * Vec3::X)
+                .distance(t1 * Vec3::X)
+                .max((t0 * Vec3::Y).distance(t1 * Vec3::Y));
+            let apart = o0.distance(o1).max(turned);
             if apart > 1e-3 {
                 self.torn.push((m, f, apart));
             }
@@ -625,6 +645,9 @@ enum Step {
     LineUp,
     PcDisplays,
     Carry,
+    /// Laid out on a wall, or lying down (overhead).
+    Wall,
+    Overhead,
 }
 
 /// `cases` random desks of two to four monitors (the same every run), each through six
@@ -669,6 +692,8 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
                 Step::LineUp => desk.line_up(),
                 Step::PcDisplays => desk.show_pc_displays(&mut rng),
                 Step::Carry => desk.carry(&mut rng),
+                Step::Wall => desk.preset(Preset::Wall),
+                Step::Overhead => desk.preset(Preset::Overhead),
             };
             let Some(step) = step else { continue };
             desk.sim.after(1000);
@@ -733,6 +758,10 @@ fn groups_carried_keep_their_seams_on_many_desks() {
     for ppd in [None, Some(25.0), Some(20.0)] {
         holds_through_on(ppd, &SIZES, &[Step::Carry, Step::Drop], 500);
         holds_through_on(ppd, &WIDE, &[Step::Carry, Step::Drop], 200);
+    }
+    // On a wall, and lying down (overhead), groups carried the same.
+    for preset in [Step::Wall, Step::Overhead] {
+        holds_through(&[preset, Step::Carry, Step::Carry], 200);
     }
 }
 
@@ -808,13 +837,12 @@ fn the_pcs_displays_move_as_one_group() {
     holds_through(&[Step::Swap, Step::Refit, Step::PcDisplays], 300);
 }
 
-/// Everything that changes the arrangement, in any order. Not yet: "Line up" still
-/// makes cuts on some of these desks (about one in twenty): the PC's own displays, which
-/// go along with the first of them, go into a monitor lined up next to them; and after
-/// monitors were added and moved by hand, rows pushed clear go into another row
-/// (`prostir_layout::tidy`).
+/// Everything that changes the arrangement, in any order. No cuts any more on these
+/// desks (step 8.5: "Line up" on the cone, and no seam closed through the row before).
+/// Not yet: on two of the 300, a monitor added next to the PC's own displays is seen
+/// behind one of them (14 % and 34 %), apart from it in the room.
 #[test]
-#[ignore = "known: Line up with the PC's displays, and after monitors added by hand"]
+#[ignore = "known: a monitor added next to the PC's displays is seen behind one of them"]
 fn no_arrangement_step_cuts_one_display_into_another() {
     holds_through(
         &[
@@ -828,6 +856,26 @@ fn no_arrangement_step_cuts_one_display_into_another() {
         ],
         300,
     );
+}
+
+/// The desk CI found (25 pixels a degree: 1920x1080, two 5120x1440 and a 2560x1440
+/// laid out "1:1"): "Line up" put the first two into each other. It straightens a row
+/// on its cone now, and never closes a seam with a row through the one before it
+/// (`prostir_layout::tidy`).
+#[test]
+fn line_up_of_two_wide_ones_at_one_to_one_cuts_nothing() {
+    let mut desk = Trial::of_on(
+        &[(1920, 1080), (5120, 1440), (2560, 1440), (5120, 1440)],
+        &SIZES,
+        Some(25.0),
+    );
+    assert_eq!(desk.cutting(), [], "laid out");
+    desk.line_up();
+    desk.sim.after(1000);
+    assert_eq!(desk.cutting(), [], "lined up");
+    desk.line_up();
+    desk.sim.after(1000);
+    assert_eq!(desk.cutting(), [], "lined up again");
 }
 
 /// Each step on its own with monitors far wider than the circle (5120x1440) among

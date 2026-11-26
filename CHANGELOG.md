@@ -269,13 +269,18 @@
   it takes that one alone, and the other hand can take one out of a group the first
   hand carries. A group let go next to another monitor sticks to it as one piece,
   never into or over a monitor.
-- A monitor let go beside one of nearly its size (less than 15 % apart) takes its
+- A monitor you carry to one of nearly its size (less than 15 % apart) takes its
   height, or above or below it its width; while you carry it, its outline at that size
-  shows where it goes.
+  shows where it goes. A monitor you resized, took and let go where it stands, or moved
+  along those it was glued to keeps its size, and so do the PC's own displays.
 - "Drag: Locked" on the Monitors page, `prostir ctl lock on|off` (the D-Bus `Lock` and
-  the MCP `lock`) keep the monitors where they are: no hand or controller takes one, and
-  the headset says so. The menu and the keyboard window are taken still, and a layout,
-  "Line up" and "Reset" still move the monitors. Off by default.
+  the MCP `lock`) keep the monitors where they are: no hand or controller moves one, a
+  monitor in a hand is let go, and the headset says so. The menu and the keyboard window
+  still move, and a layout, "Line up" and "Reset" still move the monitors. Off by
+  default.
+- "Line up" no longer puts monitors into each other: a row leaned back stands with the
+  edges nearer you meeting, and a row is never closed onto the row before it through
+  one of its monitors.
 
 ### Settings
 

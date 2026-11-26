@@ -601,6 +601,7 @@ fn a_group_sticks_as_one_piece() {
         (Vec3::ZERO, 0.0),
         far,
         &[next],
+        None,
         &mut StickScratch::default(),
     )
     .expect("sticks");

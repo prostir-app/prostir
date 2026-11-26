@@ -51,6 +51,10 @@ impl Model {
             Action::Lock(on) => {
                 self.settings.locked = on;
                 self.saves.mark(persist::File::Settings);
+                // Locked while a hand carries a monitor: it is let go where it is.
+                if on {
+                    self.world.let_go_monitors(&self.settings, self.now);
+                }
             }
             Action::Follow(on) => {
                 self.settings.follow = on;

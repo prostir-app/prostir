@@ -1278,6 +1278,102 @@ fn the_other_hand_pulls_one_out_of_the_group() {
     }
 }
 
+/// The magnet gives a monitor its neighbour's size (step 8.5) only when the hand moved
+/// it there: taken and let go where it stands, or resized with both hands, it keeps
+/// its own, and a row never creeps to the size of one of it.
+#[test]
+fn the_magnet_resizes_only_a_monitor_moved_to_its_neighbour() {
+    let mut sim = Sim::at_desk();
+    let eye = sim.head.0;
+    let all = group_of(&mut sim, k(1));
+    let anchor = sim.world.anchor_of(&all).unwrap();
+    let id = *all.iter().find(|id| **id != anchor).unwrap();
+    let standard = sim.place(id).width;
+    // Resized with both hands, 8 % wider (its neighbours' size is within 15 %).
+    sim.world.hold(Thing::Display(id), &sim.s).unwrap();
+    sim.world.resize_start(id).unwrap();
+    sim.world.resize(&sim.s, standard * 1.08, eye);
+    sim.world.resize_end();
+    sim.world.let_go(Thing::Display(id), &sim.s, sim.now);
+    sim.settled();
+    let wider = sim.place(id).width;
+    assert!((wider - standard * 1.08).abs() < 1e-4, "kept: {wider}");
+    // Taken and let go where it stands, again and again: as it is.
+    for _ in 0..3 {
+        sim.world.hold(Thing::Display(id), &sim.s).unwrap();
+        sim.world.let_go(Thing::Display(id), &sim.s, sim.now);
+        sim.settled();
+        assert!((sim.place(id).width - wider).abs() < 1e-4, "in place");
+    }
+    for other in all.iter().filter(|o| **o != id) {
+        assert!(
+            (sim.place(*other).width - standard).abs() < 1e-4,
+            "the row as it was"
+        );
+    }
+    // Moved along the row it is glued to: its own size still.
+    let home = sim.place(id);
+    let mut p = home;
+    p.position.y += 0.03;
+    sim.world.hold(Thing::Display(id), &sim.s).unwrap();
+    sim.world.drag(&sim.s, Thing::Display(id), p, eye);
+    sim.world.let_go(Thing::Display(id), &sim.s, sim.now);
+    sim.settled();
+    assert!((sim.place(id).width - wider).abs() < 1e-4, "glued already");
+    // Taken away from the row, then back next to it: their size.
+    p.position.y += 1.2;
+    sim.world.hold(Thing::Display(id), &sim.s).unwrap();
+    sim.world.drag(&sim.s, Thing::Display(id), p, eye);
+    sim.world.let_go(Thing::Display(id), &sim.s, sim.now);
+    sim.settled();
+    sim.world.hold(Thing::Display(id), &sim.s).unwrap();
+    p.position.y = home.position.y + 0.02;
+    sim.world.drag(&sim.s, Thing::Display(id), p, eye);
+    assert!(sim.world.let_go(Thing::Display(id), &sim.s, sim.now));
+    assert!(
+        (sim.place(id).width - standard).abs() < 1e-3,
+        "their size: {}",
+        sim.place(id).width
+    );
+}
+
+/// A group carried never takes one of it into a monitor outside it: where one would
+/// go through it, the group stays where it was (step 8.5).
+#[test]
+fn a_group_carried_goes_into_no_other_monitor() {
+    let mut sim = Sim::at_desk();
+    let eye = sim.head.0;
+    let all = group_of(&mut sim, k(1));
+    let anchor = sim.world.anchor_of(&all).unwrap();
+    let others: Vec<DisplayKey> = all.iter().copied().filter(|id| *id != anchor).collect();
+    let (out, under) = (others[0], others[1]);
+    // One of the row taken out of it, a metre over another of it: where that one goes
+    // when the row is carried up.
+    let mut lifted = sim.place(under);
+    lifted.position.y += 1.0;
+    sim.world.placements.insert(out, lifted);
+    sim.settled();
+    let was = sim.places();
+    sim.world.hold(Thing::Display(anchor), &sim.s).unwrap();
+    let carried: Vec<DisplayKey> = sim.world.groups.iter().flatten().copied().collect();
+    assert!(carried.contains(&under) && !carried.contains(&out));
+    let mut p = was[&anchor];
+    for _ in 0..20 {
+        p.position.y += 0.05;
+        sim.world.drag(&sim.s, Thing::Display(anchor), p, eye);
+    }
+    sim.world.let_go(Thing::Display(anchor), &sim.s, sim.now);
+    let o = sim.place(out);
+    let h = |p: &Placement| p.width * 1440.0 / 2560.0;
+    for f in &carried {
+        let q = sim.place(*f);
+        assert!(
+            !layout::cuts(&q, h(&q), &o, h(&o)),
+            "{f:?} went into {out:?}"
+        );
+    }
+}
+
 /// Locked (step 8.5): no monitor is taken by a hand, the menu and the keyboard window
 /// are, and "Line up" from the menu moves monitors still.
 #[test]

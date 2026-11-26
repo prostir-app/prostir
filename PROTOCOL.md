@@ -1272,7 +1272,7 @@ without it.
 | 11 | `ResetArrangement` | | The monitors as the chosen preset places them, in front of the user, at their standard size (cinema makes its view anew); answered after they moved. |
 | 12 | `NoLimits` | `on:bool` | "No limits" (changes `Prefs`). |
 | 13 | `RenameProfile` | `profile:str(64), name:str(64)` | Gives profile `profile` (named as for `Profile`) the name `name`, on one line, without spaces around it or characters that turn text around; an empty one gives it back its number (`NO_SUCH_PROFILE`; `BAD_ARGUMENT` for a number only, which names a profile by its place; `NOT_ALLOWED` from a host the headset's menu does not act on). The headset's `Profiles` part shows it before the answer. From 0.2.0 step 7.10; an older headset answers `UNSUPPORTED`. |
-| 16 | `Lock` | `on:bool` | "Locked" on or off: the monitors stay where they are, and no hand or controller takes one (the menu and the keyboard window are taken still); a layout, "Line up", "Reset" and the PC's commands still move them. Off until turned on, kept by the headset. From 0.2.0 step 8.5; an older headset answers `UNSUPPORTED`. |
+| 16 | `Lock` | `on:bool` | "Locked" on or off: the monitors stay where they are, and no hand or controller moves a monitor (the menu and the keyboard window still move; a monitor in a hand is let go); a layout, "Line up", "Reset" and the PC's commands still move them. Off until turned on, kept by the headset. From 0.2.0 step 8.5; an older headset answers `UNSUPPORTED`. |
 
 Kind 9 is retired (`RETIRED_COMMAND_KINDS`): it set the headset's microphone switch in
 development builds, and is never used again. The switch is the user's, changed only in

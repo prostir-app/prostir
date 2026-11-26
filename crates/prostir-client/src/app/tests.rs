@@ -422,21 +422,24 @@ fn reset_puts_the_arrangement_back() {
     assert!(laid_out(&here(&sim)));
 }
 
-/// "Locked" (step 8.5), off at first: from the PC (command 16) on, answered done and
-/// kept in the settings; a hand then takes no monitor and the user is told why, the
-/// menu is taken still; choosing how a hand moves monitors in the menu unlocks them,
-/// and the PC turns it off too.
+/// "Locked" (step 8.5), off at first: from the PC (command 16) on, answered done, the
+/// monitor a hand carries let go, and kept in the settings; a hand then takes no
+/// monitor and the user is told why, the menu is taken still; choosing how a hand
+/// moves monitors in the menu unlocks them, and the PC turns it off too.
 #[test]
 fn locked_from_the_pc_and_the_menu() {
     use crate::interaction::Scene as _;
     let mut sim = Sim::new();
     sim.connect(&[1, 2]);
     assert!(!sim.m.settings().locked, "off at first");
+    // Locked while a hand carries a monitor: it is let go.
+    assert!(sim.m.hold(Thing::Display(k(2))).is_some());
     sim.take();
     sim.command(16, Command::Lock { on: true });
     let fx = sim.take();
     assert_eq!(reply_of(&fx, 16), Some(&Outcome::Done));
     assert!(sim.m.settings().locked);
+    assert!(!sim.m.holds(Thing::Display(k(2))), "let go");
     let mut text = String::new();
     sim.m.write_file(persist::File::Settings, &mut text);
     assert!(text.contains("locked on"), "kept: {text}");
