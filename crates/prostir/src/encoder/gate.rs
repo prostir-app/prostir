@@ -25,7 +25,7 @@ pub enum Level {
     Glance,
     /// Nobody looks at it: half its monitor's rate.
     Side,
-    /// Every frame: looked at, the active window's, or nothing known of the gaze.
+    /// Every frame: looked at, the active monitor, or nothing known of the gaze.
     Full,
 }
 
@@ -35,9 +35,13 @@ pub const GLANCE_FPS: u32 = 5;
 /// The rate a monitor counts at before its encoder said one, mHz.
 const DEFAULT_RATE_MHZ: u32 = 60_000;
 
-/// A frame that comes this much of its wait early passes: a source's frames come with
-/// a little jitter, and one a hair early would wait for nothing.
+/// A frame that comes this much of its spacing early passes: a source's frames come
+/// with a little jitter, and one a hair early would wait for nothing.
 const EARLY_PART: u32 = 8;
+/// A frame that waits goes by itself only this much of its spacing after its turn: a
+/// frame of the source due at the turn then goes in its place, fresher by a frame of
+/// the source (a loop that wakes a hair early would send the older one).
+const GRACE_PART: u32 = 4;
 
 impl Level {
     fn from_u8(n: u8) -> Self {
@@ -70,6 +74,8 @@ pub struct Gate {
     held: AtomicU32,
     /// Frames not encoded because nothing on the picture changed, since then.
     unchanged: AtomicU32,
+    /// Frames dropped before the encoder, which was still busy with the one before.
+    dropped: AtomicU32,
 }
 
 impl Default for Gate {
@@ -80,6 +86,7 @@ impl Default for Gate {
             open: AtomicBool::new(false),
             held: AtomicU32::new(0),
             unchanged: AtomicU32::new(0),
+            dropped: AtomicU32::new(0),
         }
     }
 }
@@ -92,13 +99,17 @@ pub struct Counts {
     pub held: u32,
     /// Frames not encoded: the picture had not changed.
     pub unchanged: u32,
+    /// Frames dropped before the encoder, still busy with the one before.
+    pub dropped: u32,
 }
 
 impl Gate {
-    /// The level from now on; whether it changed. Asks for no keyframe: a frame
-    /// waiting goes at its turn under the new level.
-    pub fn set_level(&self, level: Level) -> bool {
-        self.level.swap(level.as_u8(), Ordering::Relaxed) != level.as_u8()
+    /// The level from now on; the one before when it changed. Asks for no keyframe: a
+    /// frame waiting goes at its turn under the new level (see `Pause::open_gate` for
+    /// one that is to go at once).
+    pub fn set_level(&self, level: Level) -> Option<Level> {
+        let before = Level::from_u8(self.level.swap(level.as_u8(), Ordering::Relaxed));
+        (before != level).then_some(before)
     }
 
     pub fn level(&self) -> Level {
@@ -136,6 +147,11 @@ impl Gate {
         }
     }
 
+    /// How long a frame of the monitor at its full rate lasts.
+    pub fn period(&self) -> Duration {
+        Duration::from_micros(1_000_000_000 / u64::from(self.rate_mhz()))
+    }
+
     /// The shortest time between two frames now; none at the full rate.
     pub fn spacing(&self) -> Duration {
         match self.level() {
@@ -155,17 +171,34 @@ impl Gate {
         self.open.load(Ordering::Relaxed)
     }
 
-    /// The turn of a frame there at `now`, the last having gone at `last`: `None` when
-    /// it goes now (then the gate is no longer open), else when it may go. Counts
-    /// nothing (see [`Gate::held`]).
-    pub fn turn(&self, last: Option<Instant>, now: Instant) -> Option<Instant> {
-        if self.open.swap(false, Ordering::Relaxed) {
-            return None;
-        }
+    /// Whether the gate was open; it is not any more.
+    pub fn take_open(&self) -> bool {
+        self.open.swap(false, Ordering::Relaxed)
+    }
+
+    /// When a frame there at `now` may go by the spacing alone, the last new picture
+    /// having gone at `last`: `None` now (it comes `spacing / 8` early or less). Not
+    /// whether the gate is open (see [`Gate::turn`]).
+    pub fn due(&self, last: Option<Instant>, now: Instant) -> Option<Instant> {
         let spacing = self.spacing();
         let at = last? + spacing;
-        // A frame there `spacing / 8` early or less goes now.
         (now + spacing / EARLY_PART < at).then_some(at)
+    }
+
+    /// The turn of a frame there at `now`, the last new picture having gone at
+    /// `last`: `None` when it goes now (then the gate is no longer open), else when it
+    /// may go. Counts nothing (see [`Gate::held`]).
+    pub fn turn(&self, last: Option<Instant>, now: Instant) -> Option<Instant> {
+        if self.take_open() {
+            return None;
+        }
+        self.due(last, now)
+    }
+
+    /// When a frame that waits for the turn `at` goes by itself: a little after it,
+    /// so a frame of the source due then goes in its place (see [`GRACE_PART`]).
+    pub fn flush_at(&self, at: Instant) -> Instant {
+        at + self.spacing() / GRACE_PART
     }
 
     /// A frame did not pass when it came: counted.
@@ -178,11 +211,17 @@ impl Gate {
         self.unchanged.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A frame was dropped before the encoder, still busy: counted.
+    pub fn dropped(&self) {
+        self.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// What it counted since this was last asked, counted anew from now.
     pub fn take_counts(&self) -> Counts {
         Counts {
             held: self.held.swap(0, Ordering::Relaxed),
             unchanged: self.unchanged.swap(0, Ordering::Relaxed),
+            dropped: self.dropped.swap(0, Ordering::Relaxed),
         }
     }
 }
@@ -204,8 +243,9 @@ mod tests {
         );
         assert_eq!(gate.spacing(), Duration::ZERO);
         assert_eq!(gate.fps_mhz(), 60_000, "60 Hz before the encoder said");
-        assert!(gate.set_level(Level::Side));
-        assert!(!gate.set_level(Level::Side), "no change");
+        assert_eq!(gate.set_level(Level::Side), Some(Level::Full));
+        assert_eq!(gate.set_level(Level::Side), None, "no change");
+        assert_eq!(gate.period(), Duration::from_micros(16_666));
         assert_eq!(gate.fps_mhz(), 30_000);
         assert_eq!(gate.spacing(), Duration::from_micros(33_333));
         gate.set_rate(120, 1);
@@ -252,6 +292,8 @@ mod tests {
         // A frame a hair early goes too: the source's jitter.
         assert_eq!(gate.turn(Some(last), last + spacing - MS), None);
         assert!(gate.turn(Some(last), last + spacing / 2).is_some());
+        // One that waits goes by itself a quarter of the spacing after its turn.
+        assert_eq!(gate.flush_at(last + spacing), last + spacing + spacing / 4);
     }
 
     /// Opened (a keyframe asked for), the next frame goes at once, at any level, and
@@ -279,11 +321,13 @@ mod tests {
         gate.held();
         gate.held();
         gate.unchanged();
+        gate.dropped();
         assert_eq!(
             gate.take_counts(),
             Counts {
                 held: 2,
-                unchanged: 1
+                unchanged: 1,
+                dropped: 1
             }
         );
         assert_eq!(gate.take_counts(), Counts::default());

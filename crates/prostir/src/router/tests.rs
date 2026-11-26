@@ -1055,7 +1055,7 @@ fn the_gaze_sets_the_frame_gates() {
 
 /// "Focus" in every headset: 5 frames a second for the streams nobody looks at; a
 /// headset without the gaze, or one taken off and put on again, sees everything; the
-/// active window's monitor gets every frame.
+/// active monitor gets every frame.
 #[test]
 fn focus_and_headsets_that_do_not_say_where_they_look() {
     let router = Router::new();
@@ -1100,43 +1100,46 @@ fn the_report_says_what_the_gate_held() {
         fps_mhz: 30_000,
         held: 300,
         unchanged: 12,
+        dropped: 0,
     };
     assert_eq!(
         gate.summary(),
-        "half rate 30/s, 300 frames held by rate, 12 skipped for no change"
+        "half rate 30/s, 300 frames held by rate, 12 skipped for no change, 0 dropped by a \
+         busy encoder"
     );
+    let full = GateStats {
+        level: Level::Full,
+        fps_mhz: 60_000,
+        dropped: 40,
+        ..gate
+    };
     let stats = StreamStats {
         window_ms: 10_000,
-        frames: 600,
+        frames: 560,
         encode_us_avg: 20_000,
-        gate: Some(GateStats {
-            level: Level::Full,
-            fps_mhz: 60_000,
-            ..gate
-        }),
+        gate: Some(full),
         ..StreamStats::default()
     };
     assert!(
-        stats
-            .summary()
-            .ends_with("; gate: full rate 60/s, 300 frames held by rate, 12 skipped for no change"),
+        stats.summary().ends_with(
+            "; gate: full rate 60/s, 300 frames held by rate, 12 skipped for no change, 40 \
+             dropped by a busy encoder"
+        ),
         "{}",
         stats.summary()
     );
-    assert!(stats.behind(), "20 ms a frame at 60 Hz");
+    assert!(stats.behind(), "40 of 600 dropped");
     let keeps_up = StreamStats {
-        encode_us_avg: 15_000,
+        gate: Some(GateStats { dropped: 2, ..full }),
         ..stats
     };
-    assert!(!keeps_up.behind());
-    let still = StreamStats {
-        frames: 50,
+    assert!(!keeps_up.behind(), "a few");
+    let slow_only = StreamStats {
+        gate: Some(GateStats { dropped: 0, ..full }),
         ..stats
     };
-    assert!(!still.behind(), "a still picture: no matter");
-    let side = StreamStats {
-        gate: Some(gate),
-        ..stats
-    };
-    assert!(!side.behind(), "fewer frames than its rate by the gate");
+    assert!(
+        !slow_only.behind(),
+        "slow to come out, but every frame encoded"
+    );
 }

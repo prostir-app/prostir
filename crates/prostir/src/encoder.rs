@@ -799,6 +799,18 @@ impl Encoder {
         {
             draw_time_code(&pad);
         }
+        // What the capture follows: the pause, and the gate of the frames.
+        let paused = Arc::new(Pause::default());
+        // The queue before the encoder is full when a frame comes: the encoder is
+        // still busy with the frames before, and the oldest is dropped (a frame of a
+        // monitor faster than the encoder).
+        if let Some(queue) = pipeline.by_name(&queue_name(input)) {
+            let gate = paused.gate().clone();
+            queue.connect("overrun", false, move |_| {
+                gate.dropped();
+                None
+            });
+        }
         let devices = gpu.share_with(&pipeline);
 
         let on_event = Arc::new(on_event);
@@ -808,8 +820,6 @@ impl Encoder {
         let last_size = Mutex::new((0u32, 0u32));
         let tuning = Arc::new(Mutex::new(Tuning::new(cfg)));
         let probe = Arc::new(Mutex::new(Probe::default()));
-        // What the capture follows: the pause, and the gate of the frames.
-        let paused = Arc::new(Pause::default());
         // Frames enter the encoder in order and (no B-frames) leave in order, so a FIFO
         // of arrival times pairs them up despite the encoder rewriting timestamps.
         if let Some(pad) = pipeline
@@ -1293,7 +1303,7 @@ impl std::fmt::Debug for Told {
 impl Pause {
     /// Whether the capture is to send its last picture again now; it is asked once.
     #[cfg_attr(
-        feature = "fake-desktop",
+        all(feature = "fake-desktop", not(test)),
         expect(dead_code, reason = "the fake desktop pushes no frames")
     )]
     pub fn take_again(&self) -> bool {
@@ -1376,7 +1386,7 @@ impl Pause {
     /// Sleeps until `until` (a frame's turn at the gate), or until the gate opens, a
     /// picture is asked again, the encoder pauses, or it is woken with `stop` set.
     #[cfg_attr(
-        feature = "fake-desktop",
+        all(feature = "fake-desktop", not(test)),
         expect(dead_code, reason = "the fake desktop pushes no frames")
     )]
     pub fn nap(&self, until: Instant, stop: &AtomicBool) {
@@ -1428,6 +1438,12 @@ impl Keyframer {
         self.pause.gate()
     }
 
+    /// Its stream got a level with more frames: the frame waiting at the gate goes
+    /// now, and a capture that waits for its turn hears so. Asks for no keyframe.
+    pub fn speed_up(&self) {
+        self.pause.open_gate();
+    }
+
     /// The source is to send its picture again at once (a keyframe asked of a still
     /// screen comes with the next frame): a capture pushing its own frames does so.
     pub fn picture_again(&self) {
@@ -1438,13 +1454,14 @@ impl Keyframer {
 /// Asks the encoder of `sink` for a keyframe, which comes with the next frame: that one
 /// passes the gate of `pause` at once.
 fn request_keyframe(sink: &gst_app::AppSink, pause: &Pause) {
-    pause.open_gate();
     let event = gst_video::UpstreamForceKeyUnitEvent::builder()
         .all_headers(true)
         .build();
     if let Some(pad) = sink.static_pad("sink") {
         pad.push_event(event);
     }
+    // Only once the encoder was asked: the frame let through is the keyframe's.
+    pause.open_gate();
 }
 
 impl Drop for Encoder {
@@ -1661,6 +1678,42 @@ mod pause {
         pause.wake();
         assert!(ends(stopped), "woken to stop");
         assert!(pause.is_on(), "still paused, only woken");
+    }
+
+    /// A resume, a picture asked again and a keyframe asked for each let the next
+    /// frame through the gate at once, at any level, and wake a capture that waits
+    /// for its turn.
+    #[test]
+    fn a_resume_and_a_keyframe_open_the_gate() {
+        let pause = Arc::new(Pause::default());
+        pause.gate().set_level(super::Level::Glance);
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_millis(1);
+        assert!(pause.gate().turn(Some(t0), later).is_some(), "200 ms apart");
+        pause.set(true);
+        pause.set(false);
+        assert_eq!(pause.gate().turn(Some(t0), later), None, "resumed");
+        pause.picture_again();
+        assert!(pause.take_again());
+        assert_eq!(pause.gate().turn(Some(t0), later), None, "asked again");
+        // A capture napping until its turn, 10 s away, wakes when the gate opens.
+        let napper = {
+            let pause = pause.clone();
+            std::thread::spawn(move || {
+                pause.nap(
+                    Instant::now() + Duration::from_secs(10),
+                    &AtomicBool::new(false),
+                );
+            })
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        pause.open_gate();
+        let until = Instant::now() + Duration::from_secs(5);
+        while !napper.is_finished() {
+            assert!(Instant::now() < until, "the nap goes on");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(pause.gate().take_open());
     }
 }
 

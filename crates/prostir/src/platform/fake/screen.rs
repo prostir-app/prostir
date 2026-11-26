@@ -245,7 +245,7 @@ mod imp {
         /// never comes in its memory, so the encoder tells a new one from the same
         /// one sent again.
         last: Option<gst::Buffer>,
-        /// When a picture went last, for the gate.
+        /// When a new picture went last, for the gate (a repeat does not count).
         went: Option<std::time::Instant>,
         /// The change last counted as held by the gate.
         held: Option<u64>,
@@ -489,9 +489,9 @@ mod imp {
                 let (woken, waited) = screen.changed.wait_timeout(changes, every).unwrap();
                 changes = woken;
                 if waited.timed_out() {
-                    let mut state = self.state.lock().unwrap();
+                    // A repeat does not count for the gate: only new pictures do.
+                    let state = self.state.lock().unwrap();
                     if let (false, Some(last)) = (state.flushing, state.last.clone()) {
-                        state.went = Some(std::time::Instant::now());
                         return Ok(gst_base::subclass::base_src::CreateSuccess::NewBuffer(last));
                     }
                 }

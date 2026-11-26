@@ -137,3 +137,73 @@ fn the_pc_takes_the_gaze_and_logs_it() {
     pc.wait_log(SOON, "gaze: the headset looks at none of the displays");
     pc.quit();
 }
+
+/// When each of `ids` next gets a keyframe (more than `before`), taking what comes
+/// for up to `within`.
+fn keyframes_at(
+    headset: &mut FakeHeadset,
+    ids: &[DisplayId],
+    before: &[u64],
+    within: Duration,
+) -> Vec<Instant> {
+    let until = Instant::now() + within;
+    let mut at: Vec<Option<Instant>> = vec![None; ids.len()];
+    while at.iter().any(Option::is_none) {
+        let left = until.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "no keyframe of every monitor within {within:?}"
+        );
+        headset.recv(left.min(Duration::from_millis(5))).unwrap();
+        for (i, id) in ids.iter().enumerate() {
+            if at[i].is_none() && got(headset, *id).1 > before[i] {
+                at[i] = Some(Instant::now());
+            }
+        }
+    }
+    at.into_iter().flatten().collect()
+}
+
+/// With "Focus" on, the monitor nobody looks at gets 5 frames a second, one every
+/// 200 ms; yet a keyframe asked of it comes at once, not at its next turn (resuming
+/// opens the gate the same way: see `encoder.rs`, `a_resume_and_a_keyframe_open_the_gate`).
+#[test]
+fn a_keyframe_of_a_monitor_in_focus_mode_is_not_held() {
+    let options = Options {
+        fps: 30,
+        ..Options::default()
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("gaze-focus", &options);
+    let order = headset.view().order();
+    let (a, b) = (order[0], order[1]);
+    let name_b = headset.view().streams[&b].name.clone();
+    let focus = prostir_proto::state::Prefs {
+        focus_mode: true,
+        ..prostir_proto::state::Prefs::default()
+    };
+    headset.send(&ClientMsg::Prefs { part: focus }).unwrap();
+    look_at(&mut headset, Some(a));
+    pc.wait_log(SOON, &format!("{name_b}: 5 frames a second, Focus"));
+    headset.take_for(Duration::from_millis(500)).unwrap();
+
+    // Asked a few times, more than 300 ms apart (the PC asks at most that often).
+    let mut took = Vec::new();
+    for _ in 0..5 {
+        let generation = headset.view().streams[&b].generation;
+        let before = got(&headset, b).1;
+        let asked = Instant::now();
+        headset
+            .send(&ClientMsg::RequestKeyframe { id: b, generation })
+            .unwrap();
+        let at = keyframes_at(&mut headset, &[b], &[before], SOON);
+        took.push(at[0] - asked);
+        headset.take_for(Duration::from_millis(400)).unwrap();
+    }
+    took.sort();
+    eprintln!("keyframes of the monitor at 5 frames a second came after {took:?}");
+    assert!(
+        took[2] < Duration::from_millis(120),
+        "a keyframe waited for its turn: {took:?}"
+    );
+    pc.quit();
+}

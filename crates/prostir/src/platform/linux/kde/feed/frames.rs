@@ -456,7 +456,9 @@ pub fn read_crop(meta: &[u8]) -> Option<Crop> {
 /// The pictures pushed into the encoder: the last one, sent again every `every` while
 /// nothing new comes (`pipewiresrc`'s `keepalive-time`), and at once when asked. A new
 /// one goes when its encoder's gate lets it (see `encoder/gate.rs`): until then it
-/// waits as the last one, and a newer one takes its place.
+/// waits as the last one, and a newer one takes its place. Only new pictures count
+/// for the gate: the first change after a still while goes at once, however recent
+/// the last repeat.
 pub struct Pictures {
     appsrc: gst_app::AppSrc,
     every: Duration,
@@ -464,9 +466,10 @@ pub struct Pictures {
     last: Option<gst::Buffer>,
     /// When the last one goes again; none while paused.
     due: Option<Instant>,
-    /// When a picture last went to the encoder.
+    /// When a new picture last went to the encoder.
     sent: Option<Instant>,
-    /// The last one waits for its turn at the gate, until then.
+    /// The last one waits at the gate: it goes by itself then (a little after its
+    /// turn, see `Gate::flush_at`), or when a newer one comes at its turn.
     held: Option<Instant>,
 }
 
@@ -487,10 +490,10 @@ impl Pictures {
     pub fn push(&mut self, frame: gst::Buffer, now: Instant) {
         self.last = Some(frame);
         match self.gate.turn(self.sent, now) {
-            None => self.send(now),
+            None => self.send(now, true),
             Some(at) => {
                 self.gate.held();
-                self.held = Some(at);
+                self.held = Some(self.gate.flush_at(at));
             }
         }
     }
@@ -501,32 +504,36 @@ impl Pictures {
         self.last.is_some()
     }
 
-    /// The last picture to the encoder now.
-    fn send(&mut self, now: Instant) {
+    /// The last picture to the encoder now; `new`: one the encoder has not had.
+    fn send(&mut self, now: Instant, new: bool) {
         if let Some(last) = self.last.clone() {
             let _ = self.appsrc.push_buffer(last);
         }
-        self.sent = Some(now);
+        if new {
+            self.sent = Some(now);
+        }
         self.held = None;
         self.due = Some(now + self.every);
     }
 
     /// The last picture again, the same buffer (the encoder tells it is a repeat by
     /// its memory), whatever the gate says (it was asked for); whether there was one.
+    /// One that waited at the gate goes with it as the new picture it is.
     pub fn again(&mut self, now: Instant) -> bool {
         if self.last.is_none() {
             return false;
         }
-        self.send(now);
+        let new = self.held.is_some();
+        self.send(now, new);
         true
     }
 
-    /// Sends the picture that waited at the gate once its turn came (or the gate
+    /// Sends the picture that waited at the gate once its time came (or the gate
     /// opened), and the last picture again when its time came.
     pub fn tick(&mut self, now: Instant) {
-        if self.held.is_some() {
-            if self.gate.turn(self.sent, now).is_none() {
-                self.send(now);
+        if let Some(at) = self.held {
+            if self.gate.take_open() || now >= at {
+                self.send(now, true);
             }
             return;
         }
@@ -658,9 +665,11 @@ mod tests {
         pipeline.set_state(gst::State::Null).unwrap();
     }
 
-    /// Slowed by the gate, a picture that came too soon waits, a newer one takes its
-    /// place, and the newest goes at its turn; a keyframe asked for (the gate opened)
-    /// lets it go at once, and the last picture asked again goes whatever the gate.
+    /// Slowed by the gate, a picture that came too soon waits; the source's next one,
+    /// right at the turn, goes in its place, and with none after it the one waiting
+    /// goes a little after its turn. A repeat does not count for the gate; a keyframe
+    /// asked for (the gate opened) lets the one waiting go at once, and the last
+    /// picture asked again goes whatever the gate.
     #[test]
     fn the_newest_picture_waits_for_its_turn() {
         let (pipeline, appsrc, seen) = pipeline();
@@ -670,35 +679,60 @@ mod tests {
         let mut pictures = Pictures::new(appsrc, Duration::from_secs(2), gate.clone());
         let t0 = Instant::now();
         let picture = |n: u8| gst::Buffer::from_slice([n; 4]);
+        let memory = |b: &gst::Buffer| b.peek_memory(0).as_ptr() as usize;
+        let ms = Duration::from_millis(1);
         pictures.push(picture(1), t0);
         assert_eq!(came(&seen, 1).len(), 1, "the first goes at once");
-        let ms = Duration::from_millis(1);
         pictures.push(picture(2), t0 + ms);
-        pictures.push(picture(3), t0 + 2 * ms);
+        let grace = spacing / 4;
         assert_eq!(
             pictures.wait(t0 + 2 * ms),
-            Some(spacing - 2 * ms),
-            "its turn"
+            Some(spacing + grace - 2 * ms),
+            "a little after its turn"
         );
-        pictures.tick(t0 + 3 * ms);
+        // The loop wakes at the turn, a hair early: the one waiting stays.
+        pictures.tick(t0 + spacing - ms);
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(seen.lock().unwrap().len(), 1, "not yet");
-        pictures.tick(t0 + spacing);
-        let frames = came(&seen, 2);
-        assert_eq!(frames.len(), 2, "the newest went at its turn");
-        assert_eq!(gate.take_counts().held, 2);
-        assert_eq!(pictures.wait(t0 + spacing), Some(Duration::from_secs(2)));
+        // The source's next frame, right at the turn, goes in its place.
+        let third = picture(3);
+        let fresh = memory(&third);
+        pictures.push(third, t0 + spacing - ms);
+        assert_eq!(
+            came(&seen, 2)[1],
+            fresh,
+            "the fresh one, not the one that waited"
+        );
+        assert_eq!(gate.take_counts().held, 1);
+        // One with no frame after it goes by itself, a little after its turn.
+        let sent = t0 + spacing - ms;
+        pictures.push(picture(4), sent + ms);
+        pictures.tick(sent + spacing);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(seen.lock().unwrap().len(), 2, "within the grace");
+        pictures.tick(sent + spacing + grace);
+        assert_eq!(came(&seen, 3).len(), 3);
+
+        // A repeat of a still screen does not count for the gate: the first change
+        // after it goes at once.
+        let t1 = t0 + Duration::from_secs(10);
+        assert!(pictures.again(t1));
+        pictures.push(picture(5), t1 + ms);
+        assert_eq!(
+            came(&seen, 5).len(),
+            5,
+            "the repeat, and the change at once"
+        );
 
         // A keyframe asked for: the one waiting goes at once.
-        let t1 = t0 + spacing + ms;
-        pictures.push(picture(4), t1);
+        pictures.push(picture(6), t1 + 2 * ms);
         gate.open();
-        assert_eq!(pictures.wait(t1), Some(Duration::ZERO));
-        pictures.tick(t1);
-        assert_eq!(came(&seen, 3).len(), 3);
+        assert_eq!(pictures.wait(t1 + 2 * ms), Some(Duration::ZERO));
+        pictures.tick(t1 + 2 * ms);
+        assert_eq!(came(&seen, 6).len(), 6);
         // Asked again: at once, whatever the gate.
-        assert!(pictures.again(t1 + ms));
-        assert_eq!(came(&seen, 4).len(), 4);
+        assert!(pictures.again(t1 + 3 * ms));
+        assert_eq!(came(&seen, 7).len(), 7);
         pipeline.set_state(gst::State::Null).unwrap();
     }
 

@@ -763,6 +763,8 @@ fn run(
     // is copied, and the encoder sees it is the picture before).
     let mut last: Option<gst::Buffer> = None;
     let mut last_push = Instant::now();
+    // When a new picture went last (a repeat does not count for the gate).
+    let mut last_new: Option<Instant> = None;
     let mut failures = 0;
     let gate = paused.gate();
     while !stop.load(Ordering::Relaxed) {
@@ -772,15 +774,23 @@ fn run(
             continue;
         }
         // The next frame is captured when the gate lets it go (see `encoder/gate.rs`):
-        // then it is the newest picture. Asked again meanwhile, the last one goes.
+        // then it is the newest picture. It is asked for a frame of the monitor before
+        // its turn, as the compositor copies with its next frame. Asked again
+        // meanwhile, the last one goes; opened (a keyframe asked for), it goes now.
         let mut waited = false;
-        let opened = gate.is_open();
-        while let Some(at) = gate.turn(last.is_some().then_some(last_push), Instant::now()) {
+        let mut opened = gate.take_open();
+        while !opened {
+            let lead = gate.period();
+            let since = last_new.filter(|_| last.is_some());
+            let Some(at) = gate.due(since, Instant::now() + lead) else {
+                break;
+            };
             if stop.load(Ordering::Relaxed) || paused.is_on() {
                 break;
             }
             waited = true;
-            paused.nap(at, stop);
+            paused.nap(at - lead, stop);
+            opened = gate.take_open();
             if paused.take_again()
                 && let Some(l) = &last
             {
@@ -869,11 +879,8 @@ fn run(
         frame.destroy();
         // The compositor says nothing changed: the last picture stands for it, unless
         // a keyframe was asked for (the gate open).
-        let unchanged = state.frame.damaged
-            && state.frame.damage_area == 0
-            && last.is_some()
-            && !opened
-            && !gate.is_open();
+        let unchanged =
+            state.frame.damaged && state.frame.damage_area == 0 && last.is_some() && !opened;
         if state.frame.ready && unchanged {
             failures = 0;
             gate.unchanged();
@@ -886,6 +893,7 @@ fn run(
             let _ = appsrc.push_buffer(frame.clone());
             last = Some(frame);
             last_push = Instant::now();
+            last_new = Some(last_push);
         } else if state.frame.failed {
             failures += 1;
             if failures >= 5 {

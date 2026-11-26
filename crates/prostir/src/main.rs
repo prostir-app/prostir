@@ -455,7 +455,7 @@ impl Brain {
         };
         if clocks.focus(now) {
             self.focus = displays.active_output();
-            // The monitor with the active window gets every frame.
+            // The active monitor (the mouse or the focused window) gets every frame.
             displays.router.set_active(self.focus);
             displays.look_at_focus();
             for s in self.sessions.values_mut() {

@@ -1,9 +1,9 @@
 //! Which streams get every frame and which fewer, from where the headsets look (their
-//! `Gaze`), the PC's active window and "Focus" in the headsets: a state machine with
-//! the time given, which the router asks for each stream's level and sets the stream's
-//! frame gate to (see `encoder/gate.rs`).
+//! `Gaze`), the PC's active monitor (with the mouse or the focused window) and "Focus"
+//! in the headsets: a state machine with the time given, which the router asks for
+//! each stream's level and sets the stream's frame gate to (see `encoder/gate.rs`).
 //!
-//! - A stream looked at, or with the PC's active window, gets every frame; so does
+//! - A stream looked at, or the PC's active monitor, gets every frame; so does
 //!   every stream while nothing is known of the gaze (a headset that does not say
 //!   where it looks, or has not said yet). The others get half their monitor's rate,
 //!   or 5 frames a second where every headset on the head has "Focus" on.
@@ -76,7 +76,7 @@ pub enum Why {
     Looked,
     /// The gaze left it less than [`HOLD`] ago.
     JustLeft,
-    /// The PC's active window is on it.
+    /// It is the PC's active monitor (the mouse or the focused window is on it).
     Active,
     /// Nothing is known of where a headset looks, or none is on the head.
     Unknown,
@@ -89,18 +89,18 @@ impl Why {
         match self {
             Self::Looked => "looked at",
             Self::JustLeft => "looked at a moment ago",
-            Self::Active => "the active window is on it",
+            Self::Active => "the active monitor",
             Self::Unknown => "where the headset looks is not known",
             Self::Aside => "nobody looks at it",
         }
     }
 }
 
-/// The headsets' gaze and the active window, for the levels of the streams.
+/// The headsets' gaze and the active monitor, for the levels of the streams.
 #[derive(Debug, Default)]
 pub struct Priority {
     headsets: BTreeMap<SessionId, Look>,
-    /// The display with the PC's active window.
+    /// The PC's active monitor.
     active: Option<ScreenId>,
 }
 
@@ -161,7 +161,7 @@ impl Priority {
         h.gaze = gaze;
     }
 
-    /// The PC's active window is on display `at` (none: on none of them).
+    /// The PC's active monitor is display `at` (none: none of them).
     pub fn set_active(&mut self, at: Option<ScreenId>) {
         self.active = at;
     }
@@ -269,7 +269,7 @@ mod tests {
     }
 
     /// Looking at none of the displays (the menu, another PC): every stream goes down
-    /// after 2 s, but the one with the active window.
+    /// after 2 s, but the active monitor.
     #[test]
     fn looking_away_then_all_down_but_the_active_window() {
         let mut p = one();

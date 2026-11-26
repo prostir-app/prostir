@@ -185,14 +185,17 @@ pub struct GateStats {
     /// The monitor's full rate, and what the level lets through, mHz.
     pub rate_mhz: u32,
     pub fps_mhz: u32,
-    /// Frames that waited for their turn at the gate, and frames not encoded since
-    /// nothing changed.
+    /// Frames that waited for their turn at the gate, frames not encoded since
+    /// nothing changed, and frames dropped before the encoder, still busy with the
+    /// ones before.
     pub held: u32,
     pub unchanged: u32,
+    pub dropped: u32,
 }
 
 impl GateStats {
-    /// `half rate 30/s, 12 frames held by rate, 3 skipped for no change`.
+    /// `half rate 30/s, 12 frames held by rate, 3 skipped for no change, 0 dropped by
+    /// a busy encoder`.
     pub fn summary(&self) -> String {
         let fps = f64::from(self.fps_mhz) / 1e3;
         let level = match self.level {
@@ -201,8 +204,9 @@ impl GateStats {
             Level::Glance => format!("Focus {fps:.0}/s"),
         };
         format!(
-            "{level}, {} frames held by rate, {} skipped for no change",
-            self.held, self.unchanged
+            "{level}, {} frames held by rate, {} skipped for no change, {} dropped by a \
+             busy encoder",
+            self.held, self.unchanged, self.dropped
         )
     }
 }
@@ -231,21 +235,20 @@ impl StreamStats {
             .map_or_else(String::new, |g| format!("; gate: {}", g.summary()))
     }
 
-    /// Whether its encoder took longer for a frame than a frame of its monitor lasts
-    /// at its full rate, while getting every frame of a busy picture (more than a
-    /// quarter of that rate): it cannot keep up with the monitor.
+    /// Whether its encoder could not keep up with the frames it got: [`BEHIND_DROPS`]
+    /// or more were dropped before it, still busy with the ones before, and more than
+    /// one in twenty of all that came.
     pub fn behind(&self) -> bool {
-        let Some(g) = self
-            .gate
-            .filter(|g| g.level == Level::Full && g.rate_mhz > 0)
-        else {
-            return false;
-        };
-        let secs = (f64::from(self.window_ms) / 1e3).max(1e-3);
-        let busy = f64::from(self.frames) / secs > f64::from(g.rate_mhz) / 4e3;
-        busy && u64::from(self.encode_us_avg) * u64::from(g.rate_mhz) > 1_000_000_000
+        self.gate.is_some_and(|g| {
+            g.dropped >= BEHIND_DROPS
+                && u64::from(g.dropped) * 20 > u64::from(self.frames + g.dropped)
+        })
     }
 }
+
+/// Frames dropped before a busy encoder in one window of the report from which on it
+/// counts as behind (see [`StreamStats::behind`]).
+const BEHIND_DROPS: u32 = 10;
 
 /// What a stream's encoder made since the last report.
 #[derive(Debug, Default)]
@@ -518,8 +521,14 @@ impl RouterInner {
                 continue;
             };
             let (level, why) = self.priority.level(*id, now);
-            if !gate.set_level(level) {
+            let Some(before) = gate.set_level(level) else {
                 continue;
+            };
+            // More frames: the one waiting at the gate goes now.
+            if level > before
+                && let Some(k) = &s.keyframer
+            {
+                k.speed_up();
             }
             let fps = f64::from(gate.fps_mhz()) / 1e3;
             let why = why.says();
@@ -1014,6 +1023,7 @@ impl Router {
                             fps_mhz: g.fps_mhz(),
                             held: counts.held,
                             unchanged: counts.unchanged,
+                            dropped: counts.dropped,
                         }
                     });
                     s.measured = Some(stats);
@@ -1054,9 +1064,11 @@ impl Router {
             let hz = stats.gate.map_or(0.0, |g| f64::from(g.rate_mhz) / 1e3);
             match behind {
                 Some(true) => warn!(
-                    "{name}: the encoder takes {:.1} ms a frame, longer than a frame of the \
-                     monitor at {hz:.0} Hz lasts: it cannot keep up with the monitor's full \
-                     rate",
+                    "{name}: the encoder dropped {} frames in {} s, still busy with the ones \
+                     before (it takes {:.1} ms a frame): it cannot keep up with the monitor at \
+                     {hz:.0} Hz",
+                    stats.gate.map_or(0, |g| g.dropped),
+                    stats.window_ms / 1000,
                     f64::from(stats.encode_us_avg) / 1e3
                 ),
                 Some(false) => info!("{name}: the encoder keeps up with {hz:.0} Hz again"),
@@ -1236,7 +1248,7 @@ impl Router {
         inner.set_levels(Instant::now());
     }
 
-    /// The PC's active window is on display `at` (none: on none of them): that one
+    /// The PC's active monitor is display `at` (none: none of them): that one
     /// gets every frame.
     pub fn set_active(&self, at: Option<ScreenId>) {
         let mut inner = self.inner.lock().unwrap();
