@@ -1485,7 +1485,8 @@ While the pointer is apart, the host sends:
   number).
 
 Which desktops tell the pointer apart is the host's (implementation-defined; the
-current host: KDE Plasma. On Hyprland the pointer stays in the pictures for now: its
+current host: KDE Plasma, and Sway 1.11+ and other wlroots compositors that offer
+ext-image-copy-capture cursor sessions. On Hyprland the pointer stays in the pictures for now: its
 pointer sessions do not yet give clear pictures of it, so the host does not name
 feature 16 there).
 
