@@ -14,6 +14,7 @@ mod errors;
 mod events;
 mod find;
 mod i18n;
+mod input;
 mod layout;
 mod listen;
 mod local;

@@ -222,6 +222,11 @@ pc-session-the-headset-does-not-answer = Шолом не відповідає
 pc-session-the-headset-disconnected = Шолом відключився
 pc-session-the-desktop-does-not-respond = Стільниця не відповідає
 
+## src/input/mod.rs
+
+pc-input-not-allowed = Керувати мишею з шолома на цьому ПК не дозволено. Дозволити знову можна після перезапуску Prostir.
+pc-input-unavailable = Стільниця ПК не дала Prostir керувати мишею. Кліки з шолома поки не діють.
+
 ## src/wake.rs
 
 pc-wake-new-headset-nearby = Новий шолом поруч

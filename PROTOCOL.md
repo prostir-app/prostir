@@ -810,6 +810,7 @@ the table says. A new value later comes with a capability and a fallback of its 
 | 12 | the camera | | |
 | 13 | poses | | |
 | 14 | takes `Gaze` (see [Gaze](#gaze)) | | |
+| 15 | takes mouse buttons, the wheel and touches (see [Input from the headset](#input-from-the-headset)), named only to a headset with the input right | | |
 | 16 | tells the mouse pointer apart from the pictures (see [The mouse pointer](#the-mouse-pointer)) | | |
 | 17 | changes a monitor's scale in place; "Auto" (see [Scale in place and Auto](#scale-in-place-and-auto)) | | |
 
@@ -828,6 +829,7 @@ the table says. A new value later comes with a capability and a fallback of its 
 | `Gaze` | | host 14 | the headset sends none |
 | `Frame` rows | bottom first | headset 9, on every headset with a session | top first |
 | `Command` | | headset 1 | no commands |
+| `MouseButton`, `MouseScroll`, `Touch` (and `Button`, `TouchPhase`) | all | host 15 | the headset sends none of them; `MouseTo` alone moves the mouse (host 1) |
 | `CursorShape`, `CursorAt` | | host 16, and headset 10 named by every headset with a session | the pointer is in the pictures, as in every older build (see [The mouse pointer](#the-mouse-pointer)) |
 
 Soft values need no capability: `role`, `permission` and `os` read an unknown value as
@@ -856,7 +858,7 @@ go to the main headset, else to the first connected.
 | `AddDisplay`, `RemoveDisplay`, `SetDisplays`, `SetPrimary`, `ShowPhysical`, `SetScale`, `SetScaleAuto`, `SetEncoding`, `SetSound` | changes |
 | `AutoScale` | changes, and the main headset (a guest's gets `NOT_ALLOWED`) |
 | `DetachWindow` | changes and private |
-| `WindowHere`, `MouseTo`, `Prefs.gaze_mouse_ms` | input |
+| `WindowHere`, `MouseTo`, `MouseButton`, `MouseScroll`, `Touch`, `Prefs.gaze_mouse_ms` | input |
 | `Screenshot`, `Prefs.notifications` | private |
 | `FindMouse`, `RequestKeyframe` | nothing (keyframes at most every 300 ms for a display, from all sessions together) |
 | `Gaze` | nothing, and the headset sends it only to a host that listed feature 14 |
@@ -1130,6 +1132,9 @@ are marked as such (their bytes never change). "Part" marks a part of the state 
 | 131 | `Request` | `req:u32, kind:u8, fields` | A change of the host's state (see [Requests](#requests)). |
 | 132 | `Reply` | `req:u32, outcome:Outcome` | The answer to the host's `Command` `req`, after the parts it changed. |
 | 124 | `MouseTo` | `id:DisplayId, u:u16, v:u16` | Put the mouse on display `id`, at `u`, `v` across its picture (0 to 65535). |
+| 145 | `MouseButton` | `id:DisplayId, u:u16, v:u16, button:Button, down:bool` | Mouse button `button` down or up, the mouse at `u`, `v` across display `id` first. Only to a host with feature 15 (see [Input from the headset](#input-from-the-headset)). |
+| 146 | `MouseScroll` | `id:DisplayId, dx:i32, dy:i32` | The wheel turned over display `id`, where the mouse is, in 1/120 of a notch: `dy` above 0 scrolls down, `dx` above 0 right. Only to a host with feature 15. |
+| 147 | `Touch` | `id:DisplayId, slot:u8, u:u16, v:u16, phase:TouchPhase` | Finger `slot` (from 0, one number for each finger touching at once) at `u`, `v` across display `id`. Only to a host with feature 15. |
 | 102 | `RequestKeyframe` | `id:DisplayId, generation:u32` | The decoder lost frames of this generation: a keyframe, please. |
 | 103 | `FrameShown` | `id:DisplayId, generation:u32, seq:u32` | The decoder handed frame `seq` of this generation to the compositor. |
 | 128 | `Ping` | `seq:u32` | As the host's. |
@@ -1151,6 +1156,8 @@ are marked as such (their bytes never change). "Part" marks a part of the state 
 | `DisplayState` | `0 Starting`, `1 Running`, `2 Failed{error:ErrorCode, detail:str(512)}`, `3 Absent` | `Failed`: it could not start, keeps its place and is tried again. `Absent`: a display of the PC known but not connected now (the lid closed, the cable out); it keeps its number and place. |
 | `Wanted` | `bitrate:u16, codec:opt<Codec>, software:bool, sharp:bool` | Mbit/s for each monitor; the codec chosen (none: one this headset does not decode); on the CPU; the slower preset for clearer small text. |
 | `Codec` | `0 H264`, `1 H265`, `2 Av1` | |
+| `Button` | `0 Left`, `1 Right`, `2 Middle`, `3 Back`, `4 Forward` | A mouse button. |
+| `TouchPhase` | `0 Down`, `1 Move`, `2 Up`, `3 Cancel` | `Up`: the finger lifted, and what it did counts; `Cancel`: gone without counting (the hand lost, the finger through the display). |
 | `MicDevice` | `0 Off`, `1 Ready`, `2 Failed{error:ErrorCode, detail:str(512)}` | The virtual microphone programs on the PC record from. |
 | `UpKind` | `0 Mic`, `1 Camera`, `2 Poses` | |
 | `UpFormat` | `0 Pcm16{rate:u32, channels:u8}`, `1 Video{codec:Codec, w:u32, h:u32}`, `2 Poses{hz:u8}` | The microphone: 48000 Hz, 1 or 2 channels. |
@@ -1265,6 +1272,7 @@ without it.
 | 11 | `ResetArrangement` | | Reset the arrangement (`UNSUPPORTED` in the current client). |
 | 12 | `NoLimits` | `on:bool` | "No limits" (changes `Prefs`). |
 | 13 | `RenameProfile` | `profile:str(64), name:str(64)` | Gives profile `profile` (named as for `Profile`) the name `name`, on one line, without spaces around it or characters that turn text around; an empty one gives it back its number (`NO_SUCH_PROFILE`; `BAD_ARGUMENT` for a number only, which names a profile by its place; `NOT_ALLOWED` from a host the headset's menu does not act on). The headset's `Profiles` part shows it before the answer. From 0.2.0 step 7.10; an older headset answers `UNSUPPORTED`. |
+| 16 | `Lock` | `on:bool` | "Locked" on or off: the monitors stay where they are (from 0.2.0 step 8; `UNSUPPORTED` in the current client until its step). |
 
 Kind 9 is retired (`RETIRED_COMMAND_KINDS`): it set the headset's microphone switch in
 development builds, and is never used again. The switch is the user's, changed only in
@@ -1474,6 +1482,38 @@ The headset draws the look over the display at that point, the size it has in th
 picture (`w` pixels of the picture's width), and hides it with the display. It can
 draw the pointer where its own `MouseTo` sent it until `CursorAt` catches up
 (implementation-defined; the current client: 200 ms after its last `MouseTo`).
+
+### Input from the headset
+
+A host that can make input on its desktop names feature 1 (`MouseTo` moves the mouse)
+and, to a headset with the input right, feature 15: then the headset may send mouse
+buttons (`MouseButton`), the wheel (`MouseScroll`) and fingers on a display (`Touch`),
+in the same lane as `MouseTo` and in the order they happen. Points are pixels of the
+display's picture as in `MouseTo` and `CursorAt`.
+
+- **Buttons.** `MouseButton` moves the mouse to its point, then presses or lets go.
+  A press of a button already down, or a release of one not down, changes nothing.
+- **The wheel** turns where the mouse is, in 1/120 of a notch, so a smooth scroll
+  sends parts of one. A desktop without finer steps takes whole notches and keeps
+  what is left for the next (implementation-defined).
+- **Fingers.** `Down`, any number of `Move`, then `Up` or `Cancel`, each finger by its
+  `slot`; a slot is free again after `Up` or `Cancel`. Where the desktop has touch,
+  the host makes touches of them, and the programs on the PC tap, scroll and hold by
+  themselves. Where it has none, the host makes mouse actions of the first finger
+  (implementation-defined; the current host: a tap is a left click, moving at once
+  scrolls with the finger and goes on a little after it lifts, holding still for
+  0.6 s a right click, holding and then moving drags with the left button). Other
+  fingers wait for gestures of their own (later).
+- **Nothing stays pressed.** The host lets go of everything a headset holds (buttons,
+  fingers) when its session ends, when it says it is not worn, and when it says
+  nothing at all for 2 s while it holds something: a headset holding a button or a
+  finger still sends where it is (`MouseTo` or `Touch` `Move`) at least once a
+  second.
+- **The desktop asks first** where it does (KDE Plasma and GNOME, through the
+  RemoteDesktop portal): once, the first time input is needed, and it keeps the
+  answer. Until then input goes nowhere. Where the person says no, the host sends a
+  `Problem` with `NOT_ALLOWED` and does not ask again until it starts again; where the
+  desktop's input does not open, a `Problem` with `DESKTOP`.
 
 ### Sound
 

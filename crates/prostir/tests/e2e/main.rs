@@ -15,6 +15,7 @@ mod gaze;
 mod goodbye;
 mod headset_net;
 mod headsets;
+mod input;
 mod keyframes;
 mod link;
 mod mcp;

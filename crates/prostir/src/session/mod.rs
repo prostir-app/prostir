@@ -531,6 +531,7 @@ impl Session {
     pub fn finish(mut self, goodbye: Option<PcGoodbye>, displays: &Displays) -> Option<Closing> {
         self.end();
         displays.router.detach(self.id);
+        displays.input(crate::input::Ev::Release { from: self.id });
         let closing = Closing {
             id: self.id,
             until: Instant::now() + GOODBYE_WAIT,

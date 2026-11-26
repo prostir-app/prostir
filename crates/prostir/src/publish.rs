@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use prostir_proto::state::{
     self, Access, DisplayId, Focus, HeadsetCaps, HeadsetState, HostCaps, Limits, Mode, PcInfo,
-    PcState, Prefs, SoundFrom, UpKind, UpWanted, caps, clip,
+    PcState, Prefs, SoundFrom, UpKind, UpWanted, caps, clip, perms,
 };
 use prostir_proto::wire::WireError;
 use prostir_proto::{Codec, HostMsg};
@@ -137,7 +137,7 @@ impl Publisher {
         PcState {
             scale_auto,
             info: Some(pc_info(src.displays)),
-            caps: Some(host_caps(src.displays, src.volume)),
+            caps: Some(host_caps(src.displays, src.volume, self.access)),
             access: Some(self.access),
             limits: Some(self.limits(src.displays, src.no_limits)),
             encoding: Some(src.displays.encoding_part(src.wanted, headset)),
@@ -223,8 +223,8 @@ fn keep_scales_of_every_size(
         .retain(|s| sizes.iter().all(|m| scales_for(m.w, m.h).allows(*s)));
 }
 
-/// What this PC can do.
-fn host_caps(displays: &Displays, volume: bool) -> HostCaps {
+/// What this PC can do, for a headset with `access`.
+fn host_caps(displays: &Displays, volume: bool, access: Access) -> HostCaps {
     let mut features = vec![
         caps::pc::MIC,
         caps::pc::WINDOWS,
@@ -237,8 +237,13 @@ fn host_caps(displays: &Displays, volume: bool) -> HostCaps {
         // Takes the headset's `Gaze` (for now it only writes it in its log).
         caps::pc::GAZE,
     ];
-    if displays.moves_mouse() {
+    let injects = displays.injects();
+    if injects.pointer {
         features.push(caps::pc::MOVE_MOUSE);
+        // Clicks, the wheel and touches: only where the headset may use them.
+        if access.may(perms::INPUT) {
+            features.push(caps::pc::INPUT);
+        }
     }
     if displays.scales_in_place() {
         features.push(caps::pc::SCALE_IN_PLACE);

@@ -36,6 +36,7 @@
 
 pub mod discovery;
 pub mod handshake;
+pub mod input;
 pub mod link;
 pub mod packet;
 pub mod request;
@@ -48,6 +49,7 @@ pub mod wire;
 
 use std::io::{self, Read, Write};
 
+use input::{Button, TouchPhase};
 use link::RecordReceiver;
 use packet::{Assembler, Encoded, Limits, Message};
 use request::{Asked, Command, Outcome, Request};
@@ -467,6 +469,32 @@ wire_enum! {
         132 => Reply { req: ReqId, outcome: Outcome },
         /// Put the mouse on display `id`, at `u`/`v` across its image (0..=65535).
         124 => MouseTo { id: DisplayId, u: u16, v: u16 },
+        /// Mouse button `button` pressed (`down`) or let go with the mouse on display
+        /// `id` at `u`/`v` (as in [`ClientMsg::MouseTo`]): the PC moves it there first.
+        /// Only to a PC that names feature 15, in the same lane as `MouseTo` (from 0.2.0
+        /// step 8; an older PC skips it).
+        145 => MouseButton {
+            id: DisplayId,
+            u: u16,
+            v: u16,
+            button: Button,
+            down: bool,
+        },
+        /// The wheel turned with the mouse on display `id`, in 1/120 of a notch
+        /// ([`input::SCROLL_NOTCH`]): `dy` above 0 scrolls down, `dx` above 0 right.
+        /// Only to a PC that names feature 15.
+        146 => MouseScroll { id: DisplayId, dx: i32, dy: i32 },
+        /// Finger `slot` (from 0, one number for each finger touching at once) on display
+        /// `id` at `u`/`v` (as in [`ClientMsg::MouseTo`]). Only to a PC that names
+        /// feature 15; where the PC's desktop has no touch, the PC makes mouse actions of
+        /// it.
+        147 => Touch {
+            id: DisplayId,
+            slot: u8,
+            u: u16,
+            v: u16,
+            phase: TouchPhase,
+        },
         /// The decoder lost frames of this generation: a keyframe, please.
         102 => RequestKeyframe { id: DisplayId, generation: Gen },
         /// The decoder handed frame `seq` of this generation to the compositor.

@@ -35,6 +35,8 @@
 //!   that pixel of the output's picture; `cursor-hide`: it is hidden (until the next
 //!   look). Only with `PROSTIR_FAKE_CURSOR=1`, where the desktop tells the pointer
 //!   apart from the pictures; said to the core only while it asks for that;
+//! - `input-refuse`, `input-close`: the person does not allow the virtual input the
+//!   next time it opens; the desktop closes it (see `input.rs`);
 //! - `hang make 20`, `hang place 20`, `hang encoder-stop 20`, `hang sound-start 20`:
 //!   the next monitor made, layout placed, encoder stopped or sound to the headset
 //!   started takes that many seconds, as a desktop, a driver or a sound system that
@@ -60,9 +62,9 @@ use super::screen::{self, Picture, Screen};
 use crate::encoder::{Encoder, Input};
 use crate::platform::{
     AddModel, Cursor, CursorEvent, CursorImage, CursorSink, CursorSource, DeskPlan, Desktop,
-    DesktopCaps, FrameSource, Geometry, GpuDevices, Memory, Origin, Output, OutputHealth,
-    OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec, Windows, needs_scale,
-    scale_of,
+    DesktopCaps, FrameSource, Geometry, GpuDevices, Injects, Memory, OpenInput, Origin, Output,
+    OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec, Windows,
+    needs_scale, scale_of,
 };
 
 /// A display of the fake PC itself, and whether it is plugged in.
@@ -237,6 +239,8 @@ pub struct FakeDesktop {
     broken: Vec<u32>,
     /// The pointer told apart from the pictures (`PROSTIR_FAKE_CURSOR=1`).
     cursor: Option<FakeCursor>,
+    /// Its virtual input (`PROSTIR_FAKE_INPUT`).
+    input: Option<Arc<dyn OpenInput>>,
 }
 
 impl FakeDesktop {
@@ -276,6 +280,7 @@ impl FakeDesktop {
         *PHYSICAL.lock().unwrap() = physical;
         let cursor = std::env::var_os("PROSTIR_FAKE_CURSOR").is_some_and(|v| v == "1");
         *POINTER.lock().unwrap() = cursor.then(FakePointer::default);
+        let input = super::input::asked()?;
         let layout = Layout::default();
         *LAYOUT.lock().unwrap() = Some(layout.clone());
         static WATCHED: Once = Once::new();
@@ -293,7 +298,7 @@ impl FakeDesktop {
                 // one monitor comes from its own stream.
                 screenshot_one_output: std::env::var_os("PROSTIR_FAKE_SCREENSHOT")
                     .is_none_or(|v| v != "stream"),
-                moves_pointer: false,
+                injects: input.as_ref().map_or(Injects::NONE, |(i, _)| *i),
                 cleans_up_after_crash: true,
             },
             layout,
@@ -302,6 +307,7 @@ impl FakeDesktop {
             slow: Duration::from_millis(slow),
             broken,
             cursor: cursor.then_some(FakeCursor),
+            input: input.map(|(_, open)| open),
         })
     }
 }
@@ -464,6 +470,10 @@ impl Desktop for FakeDesktop {
 
     fn pointer(&mut self) -> Option<&mut dyn Pointer> {
         None
+    }
+
+    fn input(&mut self) -> Option<Arc<dyn OpenInput>> {
+        self.input.clone()
     }
 
     fn cursor(&mut self) -> Option<&mut dyn CursorSource> {
@@ -772,6 +782,16 @@ fn command(line: &str) -> Result<()> {
             std::thread::sleep(Duration::from_millis(30));
         }
         info!("fake desktop: {name} changed {times} times");
+        return Ok(());
+    }
+    if let ["input-refuse"] = words[..] {
+        super::input::refuse_next();
+        info!("fake desktop: the person will not allow the virtual input");
+        return Ok(());
+    }
+    if let ["input-close"] = words[..] {
+        super::input::close();
+        info!("fake desktop: closing the virtual input");
         return Ok(());
     }
     if let ["refuse-scale"] = words[..] {

@@ -63,8 +63,10 @@ pub fn what_to_do(
         Command::LineUp => Does::Act(Action::Tidy),
         Command::ShowMouse => Does::Act(Action::FindMouse),
         Command::Follow { on } => Does::Act(Action::Follow(*on)),
-        // Comes with the arrangement's own step.
-        Command::ResetArrangement => Does::Fail(ErrorCode::UNSUPPORTED, String::new()),
+        // Come with the arrangement's own steps.
+        Command::ResetArrangement | Command::Lock { .. } => {
+            Does::Fail(ErrorCode::UNSUPPORTED, String::new())
+        }
         Command::NoLimits { on } => Does::Act(Action::NoLimits(*on)),
     }
 }
