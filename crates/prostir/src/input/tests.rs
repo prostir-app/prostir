@@ -106,6 +106,7 @@ fn at(x: f64) -> Spot {
         output: OutputKey::new("Fake-1"),
         rect,
         desk: rect,
+        open: crate::platform::Sides::default(),
         x,
         y: 10.0,
     }
@@ -183,6 +184,44 @@ fn the_first_event_opens_the_devices() {
         told(&o),
         ["to 5,10", "Left down", "to 5,10", "Left up", "scroll 0,120"]
     );
+}
+
+/// The mouse put on the last pixel of an open side is pushed on towards it, by moves
+/// relative to where it is, as the time comes; one put elsewhere is not.
+#[test]
+fn the_mouse_at_an_open_edge_is_pushed_on() {
+    let o = opener(true, false);
+    let mut run = opened(&o);
+    let edge = |x| Spot {
+        open: crate::platform::Sides {
+            right: true,
+            ..Default::default()
+        },
+        ..at(x)
+    };
+    let now = Instant::now();
+    run.event(
+        Ev::To {
+            from: 1,
+            at: edge(639.0),
+        },
+        now,
+    );
+    run.tick(now);
+    assert_eq!(told(&o), ["to 639,10"], "not at once");
+    for i in 1..=6 {
+        run.tick(now + edge::PUSH_EVERY * i);
+    }
+    assert_eq!(told(&o), ["by 4,0"; 4]);
+    run.event(
+        Ev::To {
+            from: 1,
+            at: edge(600.0),
+        },
+        now,
+    );
+    run.tick(now + edge::PUSH_EVERY * 2);
+    assert_eq!(told(&o), ["to 600,10"]);
 }
 
 /// A session that ends, or falls silent for 2 s, while it holds a button and a

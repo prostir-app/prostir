@@ -27,9 +27,7 @@ impl Displays {
         }
         let rect = self.desk_rect(id)?;
         let output = OutputKey::new(self.output_of(id)?);
-        let at = |start: i32, len: u32, f: u16| {
-            f64::from(start) + f64::from(len.saturating_sub(1)) * f64::from(f) / 65535.0
-        };
+        let at = crate::cursor::point_of;
         let desk = self.on_desk.values().fold(rect, |all, r| {
             let (x, y) = (all.x.min(r.x), all.y.min(r.y));
             let right = (all.x + all.w as i32).max(r.x + r.w as i32);
@@ -47,6 +45,7 @@ impl Displays {
             output,
             rect,
             desk,
+            open: Sides::open(rect, self.on_desk.values().copied()),
         })
     }
 

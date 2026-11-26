@@ -244,6 +244,7 @@ mod tests {
             output: OutputKey::new("Fake-1"),
             rect,
             desk: rect,
+            open: crate::platform::Sides::default(),
             x,
             y: 0.0,
         }

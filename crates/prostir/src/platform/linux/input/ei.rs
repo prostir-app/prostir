@@ -410,6 +410,7 @@ mod tests {
             output: OutputKey::new("Virtual-Prostir-1"),
             rect,
             desk: rect,
+            open: crate::platform::Sides::default(),
             x,
             y,
         }

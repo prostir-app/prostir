@@ -23,7 +23,7 @@ use crate::events::EventSink;
 use crate::platform::audio::{self, MicIn};
 use crate::platform::sound::{MicAvailability, OutputDevice, Route, SoundStatus};
 use crate::platform::{
-    DesktopCaps, MonitorSpec, OutputKey, PhysicalDisplay, Scales, Spot, WindowList,
+    DesktopCaps, MonitorSpec, OutputKey, PhysicalDisplay, Scales, Sides, Spot, WindowList,
 };
 use crate::router::Router;
 use crate::screen::{Screen, ScreenId, ScreenKind, ScreenState};

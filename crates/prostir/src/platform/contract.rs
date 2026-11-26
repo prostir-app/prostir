@@ -432,14 +432,51 @@ impl std::error::Error for InputStopped {}
 
 /// A point of the desktop for the mouse or a finger: `x`, `y` in logical pixels of the
 /// desktop (with their fractions), on output `output`, which is at `rect`; `desk` holds
-/// every output, for a device that spans them all.
+/// every output, for a device that spans them all. `open`: the sides of the output no
+/// other output is against, where the desktop has its screen edges.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spot {
     pub output: OutputKey,
     pub rect: DeskRect,
     pub desk: DeskRect,
+    pub open: Sides,
     pub x: f64,
     pub y: f64,
+}
+
+/// The sides of an output, each one or not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Sides {
+    pub left: bool,
+    pub right: bool,
+    pub top: bool,
+    pub bottom: bool,
+}
+
+impl Sides {
+    /// The sides of `rect` no rectangle of `others` is against (touching it along any
+    /// length), as KWin finds its screen edges; `rect` itself among them counts not.
+    pub fn open(rect: DeskRect, others: impl IntoIterator<Item = DeskRect>) -> Self {
+        let (l, t) = (i64::from(rect.x), i64::from(rect.y));
+        let (r, b) = (l + i64::from(rect.w), t + i64::from(rect.h));
+        let mut open = Self {
+            left: true,
+            right: true,
+            top: true,
+            bottom: true,
+        };
+        for o in others.into_iter().filter(|o| *o != rect) {
+            let (ol, ot) = (i64::from(o.x), i64::from(o.y));
+            let (or, ob) = (ol + i64::from(o.w), ot + i64::from(o.h));
+            let rows = t < ob && b > ot;
+            let columns = l < or && r > ol;
+            open.left &= !(rows && or == l);
+            open.right &= !(rows && ol == r);
+            open.top &= !(columns && ob == t);
+            open.bottom &= !(columns && ot == b);
+        }
+        open
+    }
 }
 
 impl Spot {
