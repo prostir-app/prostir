@@ -296,7 +296,14 @@ pub struct DevHands {
     /// What reading `feel.txt` came to: found, the numbers changed, the lines not
     /// taken (`None`: not read yet).
     pub feel: Option<(bool, u8, u8)>,
+    /// Which of its [`DEV_HANDS_PAGES`] pages is shown (the monitors; how things look
+    /// and the input).
+    pub page: u8,
 }
+
+/// How many pages "Hands (trial)" has.
+#[cfg(feature = "preview")]
+pub const DEV_HANDS_PAGES: usize = 2;
 
 /// Which control asked the PC for something: its answer is said under the button pressed
 /// for it (see `note::Notes::asked`).
@@ -573,6 +580,9 @@ pub enum Action {
     /// "Hands (trial)": `feel.txt` read again.
     #[cfg(feature = "preview")]
     DevReadFeel,
+    /// "Hands (trial)": show this page of it (see [`DevHands::page`]).
+    #[cfg(feature = "preview")]
+    DevHandsPage(u8),
     Close,
 }
 
@@ -3446,6 +3456,33 @@ fn segmented(
     *y += 48.0 + 40.0;
 }
 
+/// [`segmented`] in rows of at most `per`, the buttons of a shorter last row as wide
+/// as those of a full one.
+#[cfg(feature = "preview")]
+fn segmented_rows(
+    items: &mut Vec<Item>,
+    x: f32,
+    w: f32,
+    y: &mut f32,
+    title: &str,
+    options: Vec<(&str, Action, bool, bool)>,
+    per: usize,
+) {
+    for (i, row) in options.chunks(per.max(1)).enumerate() {
+        let k = row.len() as f32;
+        let full = per as f32;
+        let width = k * (w - 10.0 * (full - 1.0)) / full + 10.0 * (k - 1.0);
+        segmented(
+            items,
+            x,
+            width,
+            y,
+            if i == 0 { title } else { "" },
+            row.to_vec(),
+        );
+    }
+}
+
 /// Add a monitor, layout, curve.
 fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, mut y: f32) -> f32 {
     let l = &s.texts;
@@ -5094,13 +5131,42 @@ fn build_dev_hands(
     items: &mut Vec<Item>,
     x: f32,
     w: f32,
+    y: f32,
+    wrap: Wrap<'_>,
+) {
+    let l = &s.texts;
+    let t = v.trial;
+    let page = usize::from(v.page) % DEV_HANDS_PAGES;
+    // Two pages: it does not fit in one.
+    pager(
+        items,
+        l,
+        (x + w, y - 7.0),
+        (page, DEV_HANDS_PAGES),
+        Action::DevHandsPage,
+    );
+    if page == 0 {
+        dev_hands_monitors(s, t, items, x, w, y, wrap);
+    } else {
+        dev_hands_look(s, v, items, x, w, y, wrap);
+    }
+}
+
+/// "Hands (trial)", its first page: monitors touched and clicked, how a hand takes
+/// one and how it moves in the hand.
+#[cfg(feature = "preview")]
+fn dev_hands_monitors(
+    s: &UiState,
+    t: crate::interaction::trial::Trial,
+    items: &mut Vec<Item>,
+    x: f32,
+    w: f32,
     mut y: f32,
     wrap: Wrap<'_>,
 ) {
     use crate::interaction::Take;
-    use crate::interaction::trial::{FxSet, HandLook, Movement};
+    use crate::interaction::trial::Movement;
     let l = &s.texts;
-    let t = v.trial;
     segmented(
         items,
         x,
@@ -5154,7 +5220,7 @@ fn build_dev_hands(
             Movement::Sphere(p) => l.f("headset-dev-move-sphere", &[("power", (*p).into())]),
         })
         .collect();
-    segmented(
+    segmented_rows(
         items,
         x,
         w,
@@ -5172,7 +5238,25 @@ fn build_dev_hands(
                 )
             })
             .collect(),
+        2,
     );
+}
+
+/// "Hands (trial)", its second page: how the hands and the effects look, the input
+/// recorded, `feel.txt`.
+#[cfg(feature = "preview")]
+fn dev_hands_look(
+    s: &UiState,
+    v: DevHands,
+    items: &mut Vec<Item>,
+    x: f32,
+    w: f32,
+    mut y: f32,
+    wrap: Wrap<'_>,
+) {
+    use crate::interaction::trial::{FxSet, HandLook};
+    let l = &s.texts;
+    let t = v.trial;
     let percents: Vec<String> = HandLook::ALL
         .iter()
         .map(|look| match look {
@@ -5181,7 +5265,7 @@ fn build_dev_hands(
             HandLook::Tips => l.t("headset-dev-hand-tips").to_owned(),
         })
         .collect();
-    segmented(
+    segmented_rows(
         items,
         x,
         w,
@@ -5199,6 +5283,7 @@ fn build_dev_hands(
                 )
             })
             .collect(),
+        3,
     );
     let models = |label, own: bool| (label, Action::DevOwnModels(own), t.own_models == own, true);
     segmented(
@@ -5848,11 +5933,15 @@ mod tests {
     }
 
     /// "For development", where the build has it.
-    fn dev_tab() -> Option<Tab> {
+    /// The preview build's own pages ("For development", "Hands (trial)").
+    fn dev_tab() -> Vec<Tab> {
         #[cfg(feature = "preview")]
-        return Some(Tab::Settings(Section::Dev));
+        return vec![
+            Tab::Settings(Section::Dev),
+            Tab::Settings(Section::DevHands),
+        ];
         #[cfg(not(feature = "preview"))]
-        None
+        Vec::new()
     }
 
     pub fn sample_state() -> UiState {
@@ -6676,6 +6765,17 @@ mod tests {
                             .collect();
                         many.language_page = page;
                         states.push(many);
+                    }
+                }
+                // Every page of "Hands (trial)".
+                #[cfg(feature = "preview")]
+                if tab == Tab::Settings(Section::DevHands) {
+                    for page in 1..DEV_HANDS_PAGES {
+                        let mut other = st.clone();
+                        if let Some(dev) = other.dev.as_mut() {
+                            dev.hands.page = u8::try_from(page).unwrap_or(0);
+                        }
+                        states.push(other);
                     }
                 }
                 // Many paired PCs.

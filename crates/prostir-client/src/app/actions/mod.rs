@@ -131,7 +131,8 @@ impl Model {
             | Action::DevFx(_)
             | Action::DevOwnModels(_)
             | Action::DevRecord
-            | Action::DevReadFeel => self.act_dev_input(action),
+            | Action::DevReadFeel
+            | Action::DevHandsPage(_) => self.act_dev_input(action),
         }
         self.world_done();
     }
