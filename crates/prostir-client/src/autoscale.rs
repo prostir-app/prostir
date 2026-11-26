@@ -336,6 +336,10 @@ pub fn group(monitors: &mut [Monitor], glued: impl Fn(DisplayKey, DisplayKey) ->
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test's own starting time; the code under test takes the time as a parameter"
+)]
 mod tests {
     use super::*;
     use prostir_proto::state::DisplayId;
@@ -370,7 +374,7 @@ mod tests {
         assert_eq!(at(1.6), 100);
         assert_eq!(at(0.3), 200);
         assert_eq!(smallest(0.7, &[50, 75], LINE), None);
-        // Without 150 % (Hyprland and 2560x1440): the next one up.
+        // Without 150 % (a PC that does not give it every size): the next one up.
         assert_eq!(smallest(0.59, &[100, 125, 200], LINE), Some(200));
     }
 

@@ -227,17 +227,18 @@ fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
         .iter()
         .position(|sc| *sc == d.mode.scale)
         .unwrap_or(usize::MAX);
-    let mut chosen = None;
-    if wide {
+    let chosen = if wide {
         text(ui, tk.t("window-mon-scale-percent"), tk.body_m(), p.text);
         ui.add_space(tk.th.shape.spacing * 0.5);
         let within = ui.available_width();
-        chosen = w::segmented_within(ui, tk, &labels, current, can, within);
+        w::segmented_within(ui, tk, &labels, current, can, within)
     } else {
+        let mut chosen = None;
         w::row(ui, tk, &tk.t("window-mon-scale"), None, |ui| {
             chosen = w::segmented(ui, tk, &labels, current, can);
         });
-    }
+        chosen
+    };
     if let Some(i) = chosen {
         v.out.push(Action::Send(Request::SetScale {
             id: d.id,

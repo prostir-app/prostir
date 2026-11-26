@@ -284,7 +284,7 @@ mod tests {
         // Hyprland: whole logical pixels for every size, so no 150 % (2560x1440).
         let mut hyprland = l.clone();
         keep_scales_of_every_size(&mut hyprland, |w, h| {
-            let whole = |px: u32, p: u16| (px * 100) % u32::from(p) == 0;
+            let whole = |px: u32, p: u16| (px * 100).is_multiple_of(u32::from(p));
             Scales::Steps(
                 [100, 125, 150, 175, 200]
                     .into_iter()

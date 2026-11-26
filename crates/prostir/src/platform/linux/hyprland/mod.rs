@@ -762,7 +762,7 @@ impl Desktop for Hyprland {
 /// (2560x1440 at 150 % would be 1706.67 wide, which Hyprland does not take; 125 % and
 /// 200 % it does). A step of 5 % is a whole number of KWin's and Wayland's 1/120.
 pub fn whole_pixel_scales(w: u32, h: u32) -> Scales {
-    let whole = |px: u32, percent: u32| (px * 100) % percent == 0;
+    let whole = |px: u32, percent: u32| (px * 100).is_multiple_of(percent);
     Scales::Steps(
         (10..=80)
             .map(|fives| fives * 5)
