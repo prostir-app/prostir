@@ -171,6 +171,11 @@ pub struct Session {
     volume: Option<(SinkVolume, PcVolume)>,
     /// Up streams the headset started, which its reader takes (see `ups.rs`).
     ups: Arc<ups::Ups>,
+    /// It tried to use the mouse without the right since the control loop last looked
+    /// (see `allow_input`).
+    wants_input: bool,
+    /// The log said it has no right to the mouse.
+    no_input_said: bool,
 }
 
 /// A session that said goodbye: the headset has a moment to read it and close the
@@ -328,6 +333,8 @@ impl Session {
             last_command: 0,
             volume: None,
             ups,
+            wants_input: false,
+            no_input_said: false,
         };
         // One volume for the PC's slider and the headset's buttons, where both can.
         if session.publisher.caps().has(caps::headset::VOLUME) {
@@ -528,6 +535,20 @@ impl Session {
         // The PC's sound does not jump to this headset's level: the headset is asked
         // to take the PC's.
         self.take_pc_volume();
+    }
+
+    /// Its line in `settings.txt` changed (the input right given or taken at the PC):
+    /// its rights from now on. Its `Access` and the PC's capabilities go out with the
+    /// next pass.
+    pub fn set_configured(&mut self, configured: Access) {
+        self.configured = configured;
+        self.publisher.access = access_in(configured, self.standing.main);
+        self.no_input_said = false;
+    }
+
+    /// Whether it tried to use the mouse without the right since the last look.
+    pub fn take_input_wish(&mut self) -> bool {
+        std::mem::take(&mut self.wants_input)
     }
 
     /// Ends the session. With `goodbye` the headset is told why and gets a moment to

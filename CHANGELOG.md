@@ -332,6 +332,24 @@
   feature (`--no-default-features --features desktop`), and the window never asks. The answer is kept in `settings.txt`
   (`count unasked`, `yes` or `no`) and is in the local API's state (`counting`).
 
+### The mouse and keyboard only with your yes
+
+- A headset no longer controls the PC's mouse and keyboard until you allow it on the
+  PC: its clicks, the wheel, touches, the mouse following your gaze and moving a window
+  to a monitor. The first time a headset tries, the PC asks once, in a notification
+  ("Quest 3 wants to control the mouse and keyboard on this PC. Allow?", Allow or Not
+  now), in the tray and on the Headsets page of the settings window. Allow keeps the
+  answer in `settings.txt` for that headset; Not now is not asked again until Prostir
+  starts again. The switch "Mouse and keyboard control" for each headset on the
+  Headsets page, and `prostir ctl input on|off HEADSET`, change it at any time, and the
+  headset follows at once. An AI agent over MCP can turn it off but never on.
+- In the headset, a press on a monitor of a PC that has not allowed it says once where
+  to turn it on.
+- **Existing pairings lose the mouse and keyboard after this update until you allow
+  them**: a headset without an `access` line in `settings.txt` now has every right but
+  `input` and `clipboard`. A headset with an `access` line keeps exactly the rights its
+  line names.
+
 ### Nothing runs while the headset is off
 
 - Prostir starts with the system by default: its first start turns that on, and

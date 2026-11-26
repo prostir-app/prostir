@@ -348,8 +348,9 @@ fn files_round_trip_and_keep_unknown_lines() {
     assert_eq!(next, None);
 }
 
-/// Each headset's rights: a line for a headset with other rights than all; one
-/// without a line is the main one with every right.
+/// Each headset's rights: a line for a headset with other rights than those of one
+/// without a line, which is the main one with every right but input and the
+/// clipboard.
 #[test]
 fn rights_are_kept_by_headset() {
     let key = [0xab; 32];
@@ -358,7 +359,17 @@ fn rights_are_kept_by_headset() {
     assert!(kept.unknown.is_empty());
     let a = s.access_of(&key);
     assert!(!a.is_main() && a.may(perms::INPUT | perms::MIC) && !a.may(perms::CHANGES));
-    assert_eq!(s.access_of(&[1; 32]), Access::MAIN);
+    let unlisted = s.access_of(&[1; 32]);
+    assert_eq!(unlisted, settings::UNLISTED);
+    assert!(unlisted.is_main());
+    assert!(unlisted.may(perms::MIC | perms::CAMERA | perms::CHANGES | perms::PRIVATE));
+    assert!(!unlisted.may(perms::INPUT) && !unlisted.may(perms::CLIPBOARD));
+    // A line written before (every right named) stays as it is.
+    let all = format!(
+        "access {} main input mic camera clipboard changes private",
+        "ab".repeat(32)
+    );
+    assert_eq!(parse_settings(&all).0.access_of(&key), Access::MAIN);
     assert!(
         settings_text(&s, &kept).contains(&format!("access {} guest input mic\n", "ab".repeat(32)))
     );
@@ -631,5 +642,55 @@ fn when_each_headset_was_seen_is_kept() {
     assert_eq!(text, format!("seen {} 300 0.2.0-dev+p6\n", hex(&a)));
     let odd = format!("seen nothex 1\nseen {} soon\nwhatever\n", hex(&a));
     assert!(parse_seen_headsets(&odd).is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The input right as the person at the PC gives it: a headset without a line gets
+/// one with its other rights as they were, and taking the right back keeps the line;
+/// asking for what it has already changes nothing.
+#[test]
+fn the_input_right_goes_into_the_headsets_line() {
+    let key = [0xcd; 32];
+    let mut s = Settings::default();
+    assert!(!s.set_input(&key, false), "off already");
+    assert!(s.access.is_empty(), "nothing written");
+    assert!(s.set_input(&key, true));
+    assert!(!s.set_input(&key, true));
+    let text = settings_text(&s, &Kept::default());
+    let line = format!(
+        "access {} main input mic camera changes private\n",
+        "cd".repeat(32)
+    );
+    assert!(text.contains(&line), "{text}");
+    let (again, _) = parse_settings(&text);
+    assert!(again.access_of(&key).may(perms::INPUT) && again.access_of(&key).is_main());
+    assert!(!again.access_of(&key).may(perms::CLIPBOARD));
+    assert!(s.set_input(&key, false));
+    assert_eq!(s.access_of(&key), settings::UNLISTED);
+    // A guest keeps its role and its other rights.
+    let (mut guest, _) = parse_settings(&format!("access {} guest mic", "cd".repeat(32)));
+    assert!(guest.set_input(&key, true));
+    let a = guest.access_of(&key);
+    assert!(!a.is_main() && a.perms == perms::INPUT | perms::MIC);
+}
+
+/// Allowed at the PC, the input right is in `settings.txt` for the next start; a
+/// headset whose line is mistyped keeps it as it was (and no rights).
+#[test]
+fn the_input_right_is_saved() {
+    let dir = temp_dir("input-right");
+    let typo = format!("access {} main inptu", "ee".repeat(32));
+    std::fs::write(dir.join("settings.txt"), format!("{typo}\n")).unwrap();
+    let mut store = Store::open(Some(dir.clone()), Run::default());
+    assert_eq!(store.set_input(&[0xee; 32], true), None);
+    assert_eq!(store.set_input(&[0xab; 32], true), Some(true));
+    assert_eq!(store.set_input(&[0xab; 32], true), Some(false));
+    store.close();
+    let again = Store::open(Some(dir.clone()), Run::default());
+    assert!(again.wanted().access_of(&[0xab; 32]).may(perms::INPUT));
+    assert_eq!(again.wanted().access_of(&[0xee; 32]).perms, 0);
+    let text = std::fs::read_to_string(dir.join("settings.txt")).unwrap();
+    assert!(text.contains(&format!("{typo}\n")), "{text}");
+    again.close();
     let _ = std::fs::remove_dir_all(dir);
 }

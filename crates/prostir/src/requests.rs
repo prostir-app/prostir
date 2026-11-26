@@ -77,6 +77,11 @@ fn needs(request: &Request) -> u32 {
     }
 }
 
+/// Whether `request` needs the input right (the person at the PC is asked for it).
+pub fn needs_input(request: &Request) -> bool {
+    needs(request) & perms::INPUT != 0
+}
+
 /// Carries out `request` for `asker`: its outcome.
 pub fn handle(
     request: Request,
