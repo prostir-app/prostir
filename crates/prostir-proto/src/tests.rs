@@ -1268,6 +1268,13 @@ fn input_from_the_headset_is_additive() {
         assert!(!RETIRED_CLIENT_TAGS.contains(&tag));
         assert_eq!(read_client(&client_bytes(msg)).unwrap(), *msg);
     }
+    let to = ClientMsg::MouseTo {
+        id: DisplayId(1),
+        u: 2,
+        v: 3,
+    };
+    let tags = [&to, &button, &scroll, &touch].map(ClientMsg::wire_tag);
+    assert_eq!(tags, ClientMsg::INPUT_TAGS);
     // id, u, v, then a button numbered 9.
     let mut bytes = client_bytes(&button);
     let at = bytes.len() - 2;
@@ -1276,6 +1283,27 @@ fn input_from_the_headset_is_additive() {
     let mut bytes = client_bytes(&touch);
     *bytes.last_mut().unwrap() = 4;
     assert!(read_client(&bytes).is_err());
+}
+
+/// A message encoded into the body of one sent before is the same message, in that
+/// body's memory.
+#[test]
+fn encoding_into_a_used_body_is_the_same() {
+    let touch = ClientMsg::Touch {
+        id: DisplayId(7),
+        slot: 1,
+        u: 40_000,
+        v: 9,
+        phase: TouchPhase::Move,
+    };
+    let fresh = touch.clone().encode().unwrap();
+    let mut used = Vec::with_capacity(64);
+    used.extend_from_slice(b"what an earlier message was");
+    let at = used.as_ptr();
+    let again = touch.encode_into(used).unwrap();
+    assert_eq!(again, fresh);
+    let body = again.into_body();
+    assert_eq!(body.as_ptr(), at, "the same memory");
 }
 
 /// A small random number generator, the same numbers on every run.

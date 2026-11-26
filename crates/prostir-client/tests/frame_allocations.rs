@@ -7,8 +7,10 @@
 //! anew only when what it shows changed. Pointing about the menu's picture, once each
 //! button was pointed at, draws nothing and takes no memory. Step 8's hands (the
 //! preview build's trial): a fingertip touching a monitor, the ray as the mouse with
-//! `MouseTo` each frame, a fist carrying a monitor past its neighbour (the magnet),
-//! the ray giving way to touch and back, the input recorded, all take none.
+//! `MouseTo` each frame, a trigger clicking, holding and its stick scrolling (every
+//! message of the input queued for the PC as the shell queues them), a fist carrying a
+//! monitor past its neighbour (the magnet), the ray giving way to touch and back, the
+//! input recorded, all take none.
 //!
 //! On the desktop only: the app built for Android has its own counting allocator, and
 //! a program has one.
@@ -32,11 +34,13 @@ use prostir::lang::{self, LangState};
 use prostir::layers::{self, Plan, Ready};
 use prostir::layout::{Desk, Placement, Ray};
 use prostir::net::NetEvent;
+use prostir::outbox::{Lanes, Outbox};
 use prostir::platform::store::Store as _;
 use prostir::session::NetCmd;
 use prostir::settings::Settings;
 use prostir::ui::Action;
 use prostir::view::View;
+use prostir_proto::link::{LinkInfo, RecordSender};
 use prostir_proto::state::{
     Display, DisplayId, DisplayKind, DisplayState, Displays, HostCaps, Mode, permission,
 };
@@ -147,6 +151,29 @@ struct Loop {
     mouse_tos: u64,
     pressed: u64,
     rays: (u64, u64),
+    /// Step 8.4b: the input's messages queued for the PC as the shell queues them (see
+    /// [`Loop::queue`]), and how many of each: buttons, scrolls, touches.
+    outbox: Outbox,
+    lanes: Lanes,
+    clicks: u64,
+    scrolls: u64,
+    touches: u64,
+}
+
+/// The network, taking whatever it is given.
+struct Sink;
+
+impl RecordSender for Sink {
+    fn send(&mut self, _: &[&[u8]]) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn finish(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn set_pace(&mut self, _: u64) {}
+    fn link_info(&mut self) -> Option<LinkInfo> {
+        None
+    }
 }
 
 /// What the shell has for the layers: every picture drawn.
@@ -202,6 +229,27 @@ impl Loop {
             .iter()
             .filter(|e| matches!(e, Effect::Send(_, ClientMsg::MouseTo { .. })))
             .count() as u64;
+        self.queue();
+    }
+
+    /// The input's messages among the effects queued for the PC, as the shell queues
+    /// them, and sent on (here, on this thread: counted too).
+    fn queue(&mut self) {
+        for e in &self.fx {
+            let Effect::Send(_, msg) = e else { continue };
+            match msg {
+                ClientMsg::MouseButton { .. } => self.clicks += 1,
+                ClientMsg::MouseScroll { .. } => self.scrolls += 1,
+                ClientMsg::Touch { .. } => self.touches += 1,
+                ClientMsg::MouseTo { .. } => {}
+                _ => continue,
+            }
+            self.outbox.push(msg.clone()).expect("queued");
+            let pick = self.outbox.next(&mut self.lanes).expect("open");
+            if let Some(sent) = self.lanes.send(pick, &mut Sink).expect("sent") {
+                self.outbox.sent(sent);
+            }
+        }
     }
 
     fn handle(&mut self, event: Event) {
@@ -391,6 +439,11 @@ fn connected(layers_max: u8) -> Loop {
         mouse_tos: 0,
         pressed: 0,
         rays: (0, 0),
+        outbox: Outbox::default(),
+        lanes: Lanes::default(),
+        clicks: 0,
+        scrolls: 0,
+        touches: 0,
     };
     l.now += Duration::from_millis(1);
     l.m.tick(l.now, &FrameInput::hidden(None));
@@ -831,9 +884,12 @@ fn step_8s_hands_take_no_memory() {
         features: vec![
             prostir_proto::state::caps::pc::GAZE,
             prostir_proto::state::caps::pc::MOVE_MOUSE,
+            prostir_proto::state::caps::pc::INPUT,
         ],
     };
     l.handle(Event::Net(NetEvent::Part(PC, HostMsg::HostCaps { part })));
+    let part = prostir_proto::state::Access::MAIN;
+    l.handle(Event::Net(NetEvent::Part(PC, HostMsg::Access { part })));
     for action in [
         Action::Hands(HandMode::Control),
         Action::DevMonitors(true),
@@ -858,6 +914,7 @@ fn step_8s_hands_take_no_memory() {
     };
     assert_eq!(l.measure_with(300, touch), 0, "touching a monitor");
     assert!(l.pressed > 30, "pressed in {} frames", l.pressed);
+    assert!(l.touches > 10, "touches sent: {}", l.touches);
 
     // The ray as the mouse: a controller's, a little further each frame.
     let target = one.position;
@@ -879,6 +936,33 @@ fn step_8s_hands_take_no_memory() {
         "MouseTo {} times",
         l.mouse_tos - sent
     );
+
+    // A controller's trigger on the monitor: clicks, drags and holds (its place said
+    // again while held), and its stick scrolls between the presses.
+    let press = |i: u32| {
+        let t = target + Vec3::new((i as f32 * 0.02).sin() * 0.1, 0.0, 0.0);
+        let at = i % 80;
+        let select = Button {
+            down: at < 60,
+            pressed: at == 0,
+            released: at == 60,
+        };
+        let stick = glam::Vec2::new(0.0, if at < 60 { 0.0 } else { 0.9 });
+        (
+            HandState {
+                ray: ray_at(if (20..50).contains(&at) { target } else { t }),
+                select,
+                stick,
+                ..HandState::default()
+            },
+            None,
+        )
+    };
+    let (clicks, scrolls, tos) = (l.clicks, l.scrolls, l.mouse_tos);
+    assert_eq!(l.measure_with(300, press), 0, "clicks, holds and scrolls");
+    assert!(l.clicks - clicks >= 6, "buttons {}", l.clicks - clicks);
+    assert!(l.scrolls - scrolls >= 3, "scrolls {}", l.scrolls - scrolls);
+    assert!(l.mouse_tos - tos > 50, "MouseTo {}", l.mouse_tos - tos);
 
     // The ray gives way to touch and comes back, the fingertip 30 to 5 cm away.
     let switch = |i: u32| {

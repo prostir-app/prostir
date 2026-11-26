@@ -89,6 +89,8 @@ reis = { version = "0.7", optional = true }
 prostir-testkit.workspace = true
 # The headset app's network code, run against the PC app in the end-to-end tests.
 headset = { package = "prostir-client", path = "../prostir-client" }
+# Points across a monitor's picture, as the headset app's hands give them.
+glam.workspace = true
 
 # Packages built in the release workflow: `cargo deb -p prostir` and
 # `cargo generate-rpm -p crates/prostir`, after scripts/package-release.sh (which writes

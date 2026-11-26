@@ -13,6 +13,7 @@ mod encoders;
 mod failures;
 mod gaze;
 mod goodbye;
+mod headset_input;
 mod headset_net;
 mod headsets;
 mod input;

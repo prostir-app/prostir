@@ -16,7 +16,7 @@ use crate::pc::{Options, Pc, TestDir};
 use crate::{SOON, START, connect, session};
 
 /// The PC with the fake desktop's input, with touch (`touch`) or without (`mouse`).
-fn with_input(kind: &str) -> Options {
+pub(crate) fn with_input(kind: &str) -> Options {
     Options {
         env: vec![("PROSTIR_FAKE_INPUT".into(), kind.into())],
         ..Options::default()
@@ -24,7 +24,7 @@ fn with_input(kind: &str) -> Options {
 }
 
 /// The display streaming `w` pixels wide (`Fake-1` is 640, `Fake-2` 480).
-fn display_of_width(headset: &FakeHeadset, w: u32) -> DisplayId {
+pub(crate) fn display_of_width(headset: &FakeHeadset, w: u32) -> DisplayId {
     *headset
         .view()
         .streams
@@ -56,7 +56,7 @@ fn touch(id: DisplayId, slot: u8, u: u16, v: u16, phase: TouchPhase) -> ClientMs
 
 /// The first event opens the desktop's devices (and goes nowhere): sent, and waited
 /// for.
-fn open_input(pc: &mut Pc, headset: &mut FakeHeadset, id: DisplayId) {
+pub(crate) fn open_input(pc: &mut Pc, headset: &mut FakeHeadset, id: DisplayId) {
     headset
         .send(&ClientMsg::MouseTo { id, u: 0, v: 0 })
         .unwrap();
@@ -64,7 +64,7 @@ fn open_input(pc: &mut Pc, headset: &mut FakeHeadset, id: DisplayId) {
 }
 
 /// Waits for each of `lines`, in this order, after the `skip` lines of the first.
-fn in_order(pc: &mut Pc, lines: &[&str]) {
+pub(crate) fn in_order(pc: &mut Pc, lines: &[&str]) {
     let mut last = 0;
     for line in lines {
         let found = pc.wait_log(SOON, &format!("fake desktop: {line}"));

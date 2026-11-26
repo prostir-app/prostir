@@ -18,6 +18,7 @@ mod actions;
 mod auto;
 mod gaze;
 mod hands;
+mod pc_input;
 mod session;
 #[cfg(test)]
 mod tests;
@@ -537,6 +538,9 @@ pub struct Model {
     /// When a hand last acted on a PC's monitor (step 8): the mouse following the gaze
     /// waits a moment after.
     pc_acted: Option<Instant>,
+    /// What the hands hold pressed on a PC (said again while it stays, see
+    /// `pc_input`).
+    held: pc_input::Held,
     /// "Hands (trial)" of "For development".
     #[cfg(feature = "preview")]
     dev_input: trial::DevInput,
@@ -657,6 +661,7 @@ impl Model {
             looked_monitor: None,
             feel: Feel::DEFAULT,
             pc_acted: None,
+            held: pc_input::Held::default(),
             #[cfg(feature = "preview")]
             dev_input: trial::DevInput::default(),
         };
@@ -1010,6 +1015,8 @@ impl Model {
         if self.effects.len() != before {
             self.rev += 1;
         }
+        // What stays pressed on a PC is said again (nothing the menu shows).
+        self.keep_held(now);
         self.saves_told();
         // Another language chosen (or the PC's changed): loaded on the system thread,
         // the menu keeps the one it has until then.
