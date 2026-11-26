@@ -213,8 +213,9 @@ pub struct EncoderConfig {
     pub large_kbps: Option<u32>,
     pub backend: Backend,
     /// The slower VA-API preset (`target-usage` 4): clearer small text at the same
-    /// bitrate, for longer encoding. `Some(true)` for every picture, `Some(false)` for
-    /// none, `None` by the size of the picture (see [`slow_fits`]).
+    /// bitrate, for longer encoding. `Some(true)` and `Some(false)` as the person
+    /// chose, for every picture; `None`: on, until a stream keeps dropping frames with
+    /// it (see [`Keyframer::slow_down`]).
     pub sharp: Option<bool>,
     /// The picture's rows bottom first, for headsets whose compositor shows a stream's
     /// rows the other way round (they name `caps::headset::ROWS_UP`): turned over in
@@ -255,34 +256,25 @@ impl EncoderConfig {
         }
     }
 
-    /// VA-API `target-usage` for a picture of `size` (not known yet: none): 4 is
-    /// clearer, 6 is faster.
-    pub fn target_usage(&self, size: Option<(u32, u32)>) -> u32 {
-        target_usage(self.sharp, size)
+    /// VA-API `target-usage`: 4 is clearer, 6 is faster.
+    pub fn target_usage(&self) -> u32 {
+        target_usage(self.sharp)
     }
 }
 
-/// VA-API `target-usage` for a picture of `size` with the slower preset as `sharp`
-/// says (see [`EncoderConfig::sharp`]).
-pub fn target_usage(sharp: Option<bool>, size: Option<(u32, u32)>) -> u32 {
-    if sharp.unwrap_or_else(|| size.is_none_or(slow_fits)) {
-        4
-    } else {
-        6
-    }
+/// VA-API `target-usage` with the slower preset as `sharp` says (see
+/// [`EncoderConfig::sharp`]), before a stream fell back to the faster one.
+pub fn target_usage(sharp: Option<bool>) -> u32 {
+    if sharp.unwrap_or(true) { 4 } else { 6 }
 }
 
-/// The pixels of the smallest picture the slower preset is not used for by default.
-const SLOW_UP_TO: u64 = 2560 * 1440;
+/// The pixels of the smallest picture that streams at the larger bitrate (see
+/// [`EncoderConfig::large_kbps`]).
+const LARGE_FROM: u64 = 2560 * 1440;
 
-/// Whether the slower preset is used by default for a picture of `(w, h)`: below
-/// 2560x1440. Measured here (Meteor Lake, iHD 26.3, HEVC at 30 Mbit/s, from the
-/// converter to the parser, every monitor moving at 60 frames a second): 1920x1080
-/// takes 8 to 9 ms a frame with `target-usage` 6 and 11.5 to 13 with 4, three of them
-/// 12 and 12.5 to 16; 2560x1440 takes 15 to 16 ms with 6 and 17.5 to 18.5 with 4, over
-/// the 16.7 ms of a frame, three of them 20 to 21 and 27.5 to 28.5.
-pub fn slow_fits((w, h): (u32, u32)) -> bool {
-    u64::from(w) * u64::from(h) < SLOW_UP_TO
+/// Whether a picture of `(w, h)` is 2560x1440 or more.
+pub fn is_large((w, h): (u32, u32)) -> bool {
+    u64::from(w) * u64::from(h) >= LARGE_FROM
 }
 
 pub enum EncoderEvent {
@@ -433,6 +425,9 @@ struct Tuning {
     /// What its encoder has now.
     kbps: u32,
     target_usage: u32,
+    /// The stream kept dropping frames with the slower preset and went to the faster
+    /// one (see [`Tuning::slow_down`]), until the person chooses again.
+    slowed: bool,
     /// On VA-API, where the preset is.
     va: bool,
 }
@@ -446,7 +441,8 @@ impl Tuning {
             sharp: cfg.sharp,
             size: None,
             kbps: cfg.bitrate_kbps,
-            target_usage: cfg.target_usage(None),
+            target_usage: cfg.target_usage(),
+            slowed: false,
         }
     }
 
@@ -458,10 +454,32 @@ impl Tuning {
         self.va && self.target_usage == 4
     }
 
+    /// The preset it is to have now.
+    fn preset(&self) -> u32 {
+        if self.slowed {
+            6
+        } else {
+            target_usage(self.sharp)
+        }
+    }
+
+    /// The stream keeps dropping frames with the slower preset: it takes the faster
+    /// one from now on (until the person chooses again, see [`Encoder::set_sharp`]).
+    /// Not when the person chose the slower one (that choice stands), when it runs
+    /// the faster one already, or on an encoder without the presets. Whether it did;
+    /// the encoder is then tuned (see [`Tuning::apply`]).
+    fn slow_down(&mut self) -> bool {
+        if !self.sharpens() || self.slowed || self.sharp == Some(true) {
+            return false;
+        }
+        self.slowed = true;
+        true
+    }
+
     /// The bitrate for the picture's size now.
     fn kbps_for_size(&self) -> u32 {
         match (self.large_kbps, self.size) {
-            (Some(large), Some(size)) if !slow_fits(size) => large,
+            (Some(large), Some(size)) if is_large(size) => large,
             _ => self.small_kbps,
         }
     }
@@ -476,7 +494,7 @@ impl Tuning {
             enc.set_property("bitrate", kbps);
             kbps
         });
-        let target_usage = target_usage(self.sharp, self.size);
+        let target_usage = self.preset();
         if target_usage == self.target_usage || enc.find_property("target-usage").is_none() {
             return (false, rate);
         }
@@ -577,7 +595,7 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
                  key-int-max={VA_GOP} b-frames=0 ref-frames=1 target-usage={}",
                 cfg.va_flip(),
                 cfg.bitrate_kbps,
-                cfg.target_usage(None)
+                cfg.target_usage()
             ),
             "h264parse config-interval=-1",
             "video/x-h264,stream-format=byte-stream,alignment=au",
@@ -588,7 +606,7 @@ fn encoding(input: &Input, cfg: &EncoderConfig) -> Result<String> {
                  key-int-max={VA_GOP} b-frames=0 ref-frames=1 target-usage={}",
                 cfg.va_flip(),
                 cfg.bitrate_kbps,
-                cfg.target_usage(None)
+                cfg.target_usage()
             ),
             "h265parse config-interval=-1",
             "video/x-h265,stream-format=byte-stream,alignment=au",
@@ -1200,10 +1218,11 @@ impl Encoder {
     }
 
     /// Its bitrate now, kbit/s, and whether a keyframe of a still picture is sharper
-    /// than a big frame (VA-API's slower preset).
-    pub fn tuned(&self) -> (u32, bool) {
+    /// than a big frame (VA-API's slower preset), and whether it fell back to the faster
+    /// preset for dropping frames.
+    pub fn tuned(&self) -> (u32, bool, bool) {
         let tuning = self.tuning.lock().unwrap();
-        (tuning.kbps, tuning.sharpens())
+        (tuning.kbps, tuning.sharpens(), tuning.slowed)
     }
 
     /// Switches the VA-API speed/quality preset on the fly (no effect on x264), as
@@ -1212,6 +1231,7 @@ impl Encoder {
         let changed = {
             let mut tuning = self.tuning.lock().unwrap();
             tuning.sharp = sharp;
+            tuning.slowed = false;
             self.pipeline
                 .by_name("enc")
                 .is_some_and(|enc| tuning.apply(&enc).0)
@@ -1266,6 +1286,8 @@ impl Encoder {
         Keyframer {
             sink: self.sink.clone(),
             pause: self.paused.clone(),
+            pipeline: self.pipeline.downgrade(),
+            tuning: self.tuning.clone(),
         }
     }
 }
@@ -1425,6 +1447,8 @@ impl Pause {
 pub struct Keyframer {
     sink: gst_app::AppSink,
     pause: Arc<Pause>,
+    pipeline: gst::glib::WeakRef<gst::Pipeline>,
+    tuning: Arc<Mutex<Tuning>>,
 }
 
 impl Keyframer {
@@ -1436,6 +1460,25 @@ impl Keyframer {
     /// The gate of its frames.
     pub fn gate(&self) -> &Arc<Gate> {
         self.pause.gate()
+    }
+
+    /// The stream keeps dropping frames with the slower preset: it takes the faster
+    /// one, at the keyframe asked for now. Whether it did: not when the person chose
+    /// the slower preset, or it is the faster one already.
+    pub fn slow_down(&self) -> bool {
+        let Some(enc) = self.pipeline.upgrade().and_then(|p| p.by_name("enc")) else {
+            return false;
+        };
+        let mut tuning = self.tuning.lock().unwrap();
+        if !tuning.slow_down() {
+            return false;
+        }
+        let changed = tuning.apply(&enc).0;
+        drop(tuning);
+        if changed {
+            self.ask();
+        }
+        changed
     }
 
     /// Its stream got a level with more frames: the frame waiting at the gate goes
@@ -1858,21 +1901,69 @@ mod tests {
         );
     }
 
-    /// The slower preset as chosen for every picture; not chosen, for pictures smaller
-    /// than 2560x1440 (portrait too), and before the size is known.
+    /// The slower preset for every picture, of every size (2560x1440 and larger too),
+    /// unless chosen off.
     #[test]
-    fn the_slower_preset_by_size() {
-        use super::target_usage;
-        for size in [None, Some((1920, 1080)), Some((2560, 1440))] {
-            assert_eq!(target_usage(Some(true), size), 4);
-            assert_eq!(target_usage(Some(false), size), 6);
+    fn the_slower_preset_for_every_size() {
+        use super::{Backend, EncoderConfig, Tuning, target_usage};
+        assert_eq!(target_usage(Some(true)), 4);
+        assert_eq!(target_usage(Some(false)), 6);
+        assert_eq!(target_usage(None), 4);
+        for (sharp, usage) in [(None, 4), (Some(true), 4), (Some(false), 6)] {
+            let cfg = EncoderConfig {
+                codec: prostir_proto::Codec::H265,
+                bitrate_kbps: 30_000,
+                large_kbps: None,
+                backend: Backend::Va,
+                sharp,
+                rows_up: false,
+            };
+            for size in [
+                None,
+                Some((1920, 1080)),
+                Some((2560, 1440)),
+                Some((3840, 2160)),
+            ] {
+                let mut tuning = Tuning::new(&cfg);
+                tuning.size = size;
+                assert_eq!(tuning.preset(), usage, "{sharp:?} {size:?}");
+                // A keyframe of a still picture is refined early with the slower one,
+                // whatever the size.
+                assert_eq!(tuning.sharpens(), usage == 4, "{sharp:?} {size:?}");
+            }
         }
-        assert_eq!(target_usage(None, None), 4);
-        assert_eq!(target_usage(None, Some((1920, 1080))), 4);
-        assert_eq!(target_usage(None, Some((1920, 1200))), 4);
-        for big in [(2560, 1440), (1440, 2560), (3440, 1440), (3840, 2160)] {
-            assert_eq!(target_usage(None, Some(big)), 6, "{big:?}");
-        }
+    }
+
+    /// A stream that keeps dropping frames with the slower preset goes to the faster
+    /// one, once; not when the person chose the slower one, nor on another encoder;
+    /// a new choice (see `Encoder::set_sharp`) lifts it.
+    #[test]
+    fn the_faster_preset_after_dropped_frames() {
+        use super::{Backend, EncoderConfig, Tuning};
+        let cfg = |backend, sharp| EncoderConfig {
+            codec: prostir_proto::Codec::H265,
+            bitrate_kbps: 30_000,
+            large_kbps: None,
+            backend,
+            sharp,
+            rows_up: false,
+        };
+        let mut tuning = Tuning::new(&cfg(Backend::Va, None));
+        assert!(tuning.sharpens() && tuning.slow_down());
+        assert!(tuning.slowed && tuning.preset() == 6);
+        assert!(!tuning.slow_down(), "once");
+        // The encoder took it: it no longer refines still pictures early.
+        tuning.target_usage = 6;
+        assert!(!tuning.sharpens() && !tuning.slow_down());
+        tuning.slowed = false;
+        assert_eq!(tuning.preset(), 4, "chosen again");
+        let mut chosen = Tuning::new(&cfg(Backend::Va, Some(true)));
+        assert!(!chosen.slow_down(), "the person's choice stands");
+        assert_eq!(chosen.preset(), 4);
+        let mut off = Tuning::new(&cfg(Backend::Va, Some(false)));
+        assert!(!off.slow_down());
+        let mut x264 = Tuning::new(&cfg(Backend::X264, None));
+        assert!(!x264.slow_down());
     }
 
     /// The bitrate of a large picture where another, from when its size is known.

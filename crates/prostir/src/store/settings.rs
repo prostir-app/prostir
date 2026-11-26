@@ -13,9 +13,9 @@ pub struct Settings {
     /// [`USB_LARGE`] over USB.
     pub bitrate_chosen: bool,
     /// The clearer-text encoder preset (VA-API's `target-usage` 4), as chosen: on or
-    /// off for every monitor. Not chosen (`None`, written as no line): on for monitors
-    /// smaller than 2560x1440, where it keeps text far clearer at the same bitrate
-    /// within the time of a frame (see `encoder::slow_fits`).
+    /// off for every monitor. Not chosen (`None`, written as no line): on for every
+    /// monitor, where it keeps text far clearer at the same bitrate; a stream that keeps
+    /// dropping frames with it goes to the faster setting (see `Keyframer::slow_down`).
     pub sharp: Option<bool>,
     pub codec: Codec,
     /// Encode on the CPU.
@@ -40,7 +40,7 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Whether clearer text shows as on: chosen so, or not chosen (on where it fits).
+    /// Whether clearer text shows as on: chosen so, or not chosen (on).
     pub fn clear_text(&self) -> bool {
         self.sharp.unwrap_or(true)
     }

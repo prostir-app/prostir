@@ -100,6 +100,7 @@ impl Displays {
                     hardware: e.hardware,
                     copies: e.copies,
                     note: e.note.clone(),
+                    slowed: self.router.slowed(s.id),
                     stats: self.router.stream_stats(s.id),
                 })
             })
