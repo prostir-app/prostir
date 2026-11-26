@@ -6,6 +6,8 @@
 
 use std::time::Duration;
 
+use prostir_proto::ClientMsg;
+use prostir_proto::input::TouchPhase;
 use prostir_proto::state::{DisplayId, HeadsetState, caps};
 use prostir_testkit::{CursorAt, FakeHeadset, Keys, View};
 
@@ -196,4 +198,91 @@ fn a_headset_that_does_not_draw_the_pointer_gets_none() {
     assert!(view.cursor_at.is_empty() && view.cursor_shapes.is_empty());
     assert!(pc.lines("the pointer apart").is_empty());
     pc.quit();
+}
+
+/// A finger on a desktop with touch hides the pointer, as a touch screen does: the
+/// headset hears `shape` 0 from the finger down, still once it lifts, and the look
+/// again when the mouse moves (the desktop's move after the lift, the headset's own
+/// `MouseTo`). On a desktop without touch the finger is the mouse: the pointer never
+/// hides.
+#[test]
+fn touches_hide_the_pointer_until_the_mouse_moves() {
+    for kind in ["touch", "mouse"] {
+        let dir = TestDir::new(&format!("cursor-touch-{kind}"));
+        dir.save_screens("next 200\nrow\nscreen 0 640x360\nscreen 1 480x272\n");
+        dir.save_settings("mirror off\n");
+        let mut keys = dir.pair();
+        let mut options = crate::input::with_input(kind);
+        options.env.push(("PROSTIR_FAKE_CURSOR".into(), "1".into()));
+        let mut pc = Pc::start(&dir, &options);
+        let mut headset = showing(&pc, &mut keys, &drawing());
+        pc.wait_log(SOON, "fake desktop: the pointer apart from the pictures");
+        let one = display_of_width(headset.view(), 640);
+        pc.desktop("cursor-shape 32 32 4 2 200\ncursor-move Fake-1 100 50");
+        headset
+            .wait(SOON, "the pointer's look", |v| !v.cursor_shapes.is_empty())
+            .unwrap();
+        let shown = CursorAt {
+            display: Some(one),
+            u: 10_256,
+            v: 9_128,
+            shape: headset.view().cursor_shapes[0].0,
+        };
+        wait_at(&mut headset, shown, "shown");
+        crate::input::open_input(&mut pc, &mut headset, one);
+        let touch = |phase| ClientMsg::Touch {
+            id: one,
+            slot: 1,
+            u: 10_256,
+            v: 9_128,
+            phase,
+        };
+        let before = headset.view().cursor_at.len();
+        headset.send(&touch(TouchPhase::Down)).unwrap();
+        headset.send(&touch(TouchPhase::Up)).unwrap();
+        if kind == "mouse" {
+            pc.wait_log(SOON, "fake desktop: button Left up");
+            headset.take_for(Duration::from_millis(500)).unwrap();
+            let since = &headset.view().cursor_at[before..];
+            assert!(
+                since.iter().all(|a| a.shape != 0),
+                "never hidden: {since:?}"
+            );
+            pc.quit();
+            continue;
+        }
+        let hidden = CursorAt { shape: 0, ..shown };
+        wait_at(&mut headset, hidden, "hidden by the finger");
+        pc.wait_log(SOON, "fake desktop: touch 0 Up");
+        headset.take_for(Duration::from_millis(500)).unwrap();
+        assert_eq!(last(headset.view()), Some(hidden), "still, once lifted");
+        // The mouse moved on the desktop.
+        pc.desktop("cursor-move Fake-1 200 100");
+        headset
+            .wait(SOON, "shown again", |v| {
+                last(v).is_some_and(|a| a.shape == shown.shape && a.u != shown.u)
+            })
+            .unwrap();
+        // Again, then the headset's own mouse.
+        headset.send(&touch(TouchPhase::Down)).unwrap();
+        headset
+            .wait(SOON, "hidden again", |v| {
+                last(v).is_some_and(|a| a.shape == 0)
+            })
+            .unwrap();
+        headset.send(&touch(TouchPhase::Cancel)).unwrap();
+        headset
+            .send(&ClientMsg::MouseTo {
+                id: one,
+                u: 10_256,
+                v: 9_128,
+            })
+            .unwrap();
+        headset
+            .wait(SOON, "shown by the mouse", |v| {
+                last(v).is_some_and(|a| a.shape == shown.shape)
+            })
+            .unwrap();
+        pc.quit();
+    }
 }

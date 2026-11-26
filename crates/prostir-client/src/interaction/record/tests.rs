@@ -991,3 +991,179 @@ fn turning_the_modes_off_mid_press_lets_go() {
     );
     assert!(!busy.get(), "busy after the modes went off");
 }
+
+/// Where a fingertip is `x` to the side of and `z` in front of the middle of the
+/// monitor within reach (3).
+fn beside_near(x: f32, z: f32) -> Vec3 {
+    let p = stage()
+        .piece(Thing::Display(display(3)))
+        .expect("on the stage")
+        .place;
+    p.position + p.rotation * Vec3::new(x, 0.0, z)
+}
+
+/// Hand `h` posed pointing, its fingertip from `from` to `to` in `n` frames.
+fn point_to(s: &mut Script, h: usize, n: u32, from: Vec3, to: Vec3) {
+    for i in 1..=n {
+        let tip = from.lerp(to, i as f32 / n as f32);
+        s.pose(h, tip - Vec3::new(0.025, 0.0, -0.1), Pose::Point)
+            .frames(1);
+    }
+}
+
+/// The lines of `journal` from `t` on (a line starts with its time in seconds).
+fn from_time(journal: &[String], t: Duration) -> Vec<&String> {
+    journal
+        .iter()
+        .filter(|l| {
+            let at: f32 = l
+                .split(['.', ' '])
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(".")
+                .parse()
+                .expect("a time");
+            at + 1e-4 >= t.as_secs_f32()
+        })
+        .collect()
+}
+
+/// A hand lost in the middle of a touch: back within a moment (150 ms), the touch goes
+/// on and lifts as a tap; lost for longer, it is cancelled there, never a tap.
+#[test]
+fn a_touch_waits_a_moment_for_a_lost_hand_then_is_cancelled() {
+    for (lost, tap) in [(5, true), (20, false)] {
+        let mut s = Script::new();
+        s.monitors(Take::Hold);
+        point_to(&mut s, 1, 10, before_near(0.14), before_near(-0.004));
+        s.joints(1, None).frames(lost);
+        point_to(&mut s, 1, 2, before_near(-0.004), before_near(-0.004));
+        point_to(&mut s, 1, 6, before_near(-0.004), before_near(0.08));
+        let journal = replay(
+            &Recording::read(&s.recording()).expect("read"),
+            Instant::now(),
+        );
+        let has = |what: &str| journal.iter().any(|l| l.contains(what));
+        assert!(has("touch down display 3 slot 1"), "{journal:#?}");
+        assert_eq!(has("touch up"), tap, "lost {lost} frames: {journal:#?}");
+        assert_eq!(
+            has("touch cancel"),
+            !tap,
+            "lost {lost} frames: {journal:#?}"
+        );
+        let downs = journal.iter().filter(|l| l.contains("touch down")).count();
+        assert_eq!(downs, 1, "no second touch as it comes back: {journal:#?}");
+    }
+}
+
+/// A pinch held on the monitor within reach while the fingertip comes nearer than
+/// 15 cm: the ray stays until the pinch is let go (a click, at its point), and only
+/// then gives way to touch.
+#[test]
+fn the_ray_gives_way_to_touch_only_once_let_go() {
+    let mut s = Script::new();
+    // A fist takes: a pinch held still is no take.
+    s.monitors(Take::Fist);
+    let ray_on = |s: &mut Script, z: f32| {
+        let palm = before_near(z) - Vec3::new(0.025, 0.0, -0.1);
+        s.pose(1, palm, Pose::Open)
+            .ray_from(1, palm, before_near(0.0));
+    };
+    ray_on(&mut s, 0.30);
+    s.frames(3).select(1, 1.0).frames(2);
+    let pressed = s.frames.len();
+    for i in 0..=12 {
+        ray_on(&mut s, 0.30 - 0.02 * i as f32);
+        s.frames(1);
+    }
+    let held = s.frames.len();
+    s.select(1, 0.0).frames(1).frames(3);
+    let shown = watch(&s, |h| h.ray(1).is_some());
+    assert!(
+        shown[pressed..held].iter().all(|&r| r),
+        "the ray while pressed: {shown:?}"
+    );
+    assert!(!*shown.last().expect("frames"), "touch once let go");
+    let journal = replay(
+        &Recording::read(&s.recording()).expect("read"),
+        Instant::now(),
+    );
+    let text = journal.join("\n");
+    assert!(
+        text.contains("left down display 3") && text.contains("left up display 3"),
+        "{text}"
+    );
+    assert!(!text.contains("touch"), "{text}");
+}
+
+/// One finger touches at a time: the other hand's fingertip crossing the surface while
+/// the first one touches only hovers; once the first lifts, it touches, with its own
+/// slot.
+#[test]
+fn one_finger_touches_at_a_time() {
+    let mut s = Script::new();
+    s.monitors(Take::Hold);
+    let (right, left) = (|z| beside_near(0.1, z), |z| beside_near(-0.1, z));
+    point_to(&mut s, 1, 10, right(0.14), right(-0.004));
+    point_to(&mut s, 0, 10, left(0.14), left(-0.004));
+    // The right one lifts; the left one comes out and in again.
+    point_to(&mut s, 1, 6, right(-0.004), right(0.3));
+    point_to(&mut s, 0, 4, left(-0.004), left(0.04));
+    point_to(&mut s, 0, 4, left(0.04), left(-0.004));
+    point_to(&mut s, 0, 6, left(-0.004), left(0.3));
+    let journal = replay(
+        &Recording::read(&s.recording()).expect("read"),
+        Instant::now(),
+    );
+    let downs: Vec<&String> = journal
+        .iter()
+        .filter(|l| l.contains("touch down"))
+        .collect();
+    assert_eq!(downs.len(), 2, "{journal:#?}");
+    assert!(downs[0].contains("slot 1"), "{journal:#?}");
+    assert!(downs[1].contains("slot 0"), "{journal:#?}");
+    let first_up = journal
+        .iter()
+        .position(|l| l.contains("touch up display 3 slot 1"))
+        .expect("the right one lifts");
+    let second_down = journal
+        .iter()
+        .position(|l| l.contains("touch down display 3 slot 0"))
+        .expect("the left one touches");
+    assert!(first_up < second_down, "{journal:#?}");
+}
+
+/// The hand that touched last keeps the PC's pointer while its fingertip stays near
+/// (its ray off): the other hand's ray passing over a monitor does not move the mouse
+/// until that hand goes back past 20 cm.
+#[test]
+fn a_hand_that_touched_keeps_the_pointer_while_near() {
+    let mut s = Script::new();
+    s.monitors(Take::Hold);
+    point_to(&mut s, 1, 10, before_near(0.14), before_near(-0.004));
+    point_to(&mut s, 1, 4, before_near(-0.004), before_near(0.08));
+    // A controller in the left hand, its ray across monitor 1.
+    s.ray(0, monitor(1)).frames(2);
+    s.turn(0, 20, 0.5);
+    let back = s.t;
+    point_to(&mut s, 1, 6, before_near(0.08), before_near(0.3));
+    s.turn(0, 10, 0.5);
+    let journal = replay(
+        &Recording::read(&s.recording()).expect("read"),
+        Instant::now(),
+    );
+    assert!(
+        journal.iter().any(|l| l.contains("touch up display 3")),
+        "{journal:#?}"
+    );
+    let mouse: Vec<&String> = journal.iter().filter(|l| l.contains("mouse")).collect();
+    assert!(
+        !mouse.is_empty(),
+        "the ray moves it in the end: {journal:#?}"
+    );
+    let later = from_time(&journal, back);
+    assert!(
+        mouse.iter().all(|l| later.contains(l)),
+        "moved before the hand went back: {journal:#?}"
+    );
+}

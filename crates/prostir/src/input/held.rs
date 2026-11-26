@@ -157,6 +157,14 @@ impl Held {
         act
     }
 
+    /// Finger `slot` of session `from` lifted without counting where it last was (its
+    /// display gone): what the desktop is told, if it was down.
+    pub fn lift(&mut self, from: SessionId, slot: u8) -> Option<Act> {
+        let (id, at) = self.by.get_mut(&from)?.touches.remove(&slot)?;
+        self.forget_empty(from);
+        Some(Act::Touch(id, TouchPhase::Cancel, at))
+    }
+
     fn forget_empty(&mut self, from: SessionId) {
         if self.by.get(&from).is_some_and(Holding::is_empty) {
             self.by.remove(&from);
@@ -206,6 +214,11 @@ impl Held {
     /// Whether anything is held.
     pub fn any(&self) -> bool {
         !self.by.is_empty()
+    }
+
+    /// Whether a finger of any session touches the desktop.
+    pub fn touching(&self) -> bool {
+        self.by.values().any(|h| !h.touches.is_empty())
     }
 
     /// The desktop's devices are gone, and what they held with them.
