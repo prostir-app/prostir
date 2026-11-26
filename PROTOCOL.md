@@ -734,7 +734,7 @@ one `Open` or `Snapshot` (of the same kind, for the parts kept per kind) is an e
 
 | Side | Parts | Kept |
 |---|---|---|
-| Host | `Displays`, `PcInfo`, `HostCaps`, `Access`, `Limits`, `Encoding`, `Sound`, `UpWanted`, `Focus`, `SoundFrom` | one of each; `UpWanted` one per kind |
+| Host | `Displays`, `PcInfo`, `HostCaps`, `Access`, `Limits`, `ScaleAuto`, `Encoding`, `Sound`, `UpWanted`, `Focus`, `SoundFrom` | one of each; `UpWanted` one per kind |
 | Headset | `HeadsetCaps`, `DecoderPixels`, `Prefs`, `Presence`, `Battery`, `Volume`, `UpState`, `Profiles` | one of each; `UpState` one per kind |
 
 `HeadsetCaps` is always in `Open`, and `HostCaps` in `Snapshot`; neither changes in a
@@ -811,6 +811,7 @@ the table says. A new value later comes with a capability and a fallback of its 
 | 13 | poses | | |
 | 14 | takes `Gaze` (see [Gaze](#gaze)) | | |
 | 16 | tells the mouse pointer apart from the pictures (see [The mouse pointer](#the-mouse-pointer)) | | |
+| 17 | changes a monitor's scale in place; "Auto" (see [Scale in place and Auto](#scale-in-place-and-auto)) | | |
 
 | Enum | Value | Needs | Without it |
 |---|---|---|---|
@@ -852,7 +853,8 @@ go to the main headset, else to the first connected.
 
 | What | Needs |
 |---|---|
-| `AddDisplay`, `RemoveDisplay`, `SetDisplays`, `SetPrimary`, `ShowPhysical`, `SetEncoding`, `SetSound` | changes |
+| `AddDisplay`, `RemoveDisplay`, `SetDisplays`, `SetPrimary`, `ShowPhysical`, `SetScale`, `SetScaleAuto`, `SetEncoding`, `SetSound` | changes |
+| `AutoScale` | changes, and the main headset (a guest's gets `NOT_ALLOWED`) |
 | `DetachWindow` | changes and private |
 | `WindowHere`, `MouseTo`, `Prefs.gaze_mouse_ms` | input |
 | `Screenshot`, `Prefs.notifications` | private |
@@ -1082,6 +1084,7 @@ are marked as such (their bytes never change). "Part" marks a part of the state 
 | 16 | `Focus` | `display:opt<DisplayId>` | Part. The display the mouse is on; none: none of them. |
 | 23 | `SoundFrom` | `display:opt<DisplayId>` | Part, while `Prefs.sound_from_screen` is on. The display whose window plays the sound; none: not known. |
 | 40 | `UpWanted` | `kind:UpKind, on:bool` | Part, one per kind. A program on the PC records from the headset's microphone now: the headset streams it while its own switch is on. |
+| 44 | `ScaleAuto` | `auto:list<DisplayId>(max 32)` | Part, from a host with feature 17 (an older headset skips it). The virtual monitors in "Auto": their scale is the main headset's choice (see [Scale in place and Auto](#scale-in-place-and-auto)). Never a display of the PC or a window panel. |
 | 39 | `VolumeAsk` | `level:u8, muted:bool, seen:u32, ask:u32` | The PC's slider moved: take this level (see [Volume](#volume)). |
 | 29 | `Reply` | `req:u32, outcome:Outcome` | The answer to the headset's `Request` `req`, after the parts it changed. |
 | 30 | `Command` | `req:u32, kind:u8, fields` | Something the PC asks the headset to do (see [Commands](#commands)). Only to a headset with feature 1. |
@@ -1190,13 +1193,17 @@ headset shows the laptop's own panel (`builtin`) by its own words for it.
 | 10 | `WindowHere` | `id:DisplayId` | `Done` | input | `NO_WINDOW`, `UNKNOWN_DISPLAY` |
 | 11 | `Screenshot` | `id:DisplayId` | `Saved` | private | `CAPTURE` |
 | 12 | `FindMouse` | | `Pointer` | none | `NOT_ON_DISPLAYS` |
-| 13 | `SetScale` | `id:DisplayId, scale:u16` | `Done` (the monitor is made anew at `scale` under the same number: `Starting` in the list that comes with the reply, then `Running`) | changes | `BAD_SIZE` (a scale not in `Limits.scales`, or one the desktop does not give that size), `UNKNOWN_DISPLAY` |
+| 13 | `SetScale` | `id:DisplayId, scale:u16` | `Done`: a host with feature 17 gives the scale in place (the monitor stays `Running`, its stream and windows as they are); an older one makes the monitor anew at `scale` under the same number (`Starting` in the list that comes with the reply, then `Running`). The monitor leaves "Auto". | changes | `BAD_SIZE` (a scale not in `Limits.scales`, or one the desktop does not give that size), `UNKNOWN_DISPLAY` |
+| 14 | `AutoScale` | `id:DisplayId, scale:u16` | `Done`: the main headset's choice for a monitor in "Auto", given in place; for one not in Auto nothing changes | changes, main headset | `BAD_SIZE`, `BAD_ARGUMENT` (a display of the PC or a window panel), `UNKNOWN_DISPLAY`, `NOT_ALLOWED` |
+| 15 | `SetScaleAuto` | `id:DisplayId, on:bool` | `Done` ("Auto" on or off; `ScaleAuto` comes with the reply) | changes | `BAD_ARGUMENT` (a display of the PC or a window panel), `UNKNOWN_DISPLAY` |
 
 `SetDisplays` sets the monitors of a profile, left to right: monitors of a size that
 is there already are kept with their windows; `shown_physical` are the displays of the
 PC to show, the others are hidden. `SetScale` is from 0.2.0 step 7.10: a host before it
 answers it `UNSUPPORTED`, as any kind it does not know; a headset offers it only to a
-host that names capability 10 (monitors with a scale). Kind 8 is retired
+host that names capability 10 (monitors with a scale). `AutoScale` and `SetScaleAuto`
+are from 0.2.0 too, sent only to a host that names capability 17; an older host
+answers them `UNSUPPORTED`. Kind 8 is retired
 (`RETIRED_REQUEST_KINDS`) and never used.
 
 A display of the host seen for the first time is shown in the headset, while the
@@ -1205,6 +1212,39 @@ without "No limits" are shown, and a headset connected then decodes one more str
 at first every display of the host shows, standing to the others as on its desktop
 (`Display.desk`; side by side where they cover each other, as a cloned desktop's do),
 and the person hides those not needed.
+
+### Scale in place and Auto
+
+A host that names feature 17 changes a virtual monitor's scale in place: its output,
+its stream (no new generation) and its windows stay, and the desktop lays the outputs
+out again for the new size in the same step. It keeps for each virtual monitor whether
+it is in "Auto" (`ScaleAuto`): a monitor made from then on is, until a scale is chosen
+by hand (`SetScale`, the PC's window or the desktop's own display settings); monitors
+kept from a version before are not. The headset turns Auto on or off with
+`SetScaleAuto`.
+
+For a monitor in Auto, the main headset chooses (implementation-defined; the current
+headset): `k`, headset pixels per logical pixel of the desktop, is the headset pixels a
+pixel of the stream takes where the monitor is shown, times the scale. It asks with
+`AutoScale` for the smallest of `Limits.scales` (100 % and above) at which `k` is at
+least 0.85; where none is, the largest. Monitors glued edge to edge in the headset get
+scales chosen together, so their `k` is as close as the steps allow (one scale for
+neighbours of one size), the seam between them seamless. It asks only after the
+arrangement held for 0.8 s with nothing in a hand, goes up only once `k` fell below
+0.82 and down only where `k` stays at 0.88 or more, asks a monitor at most every 3 s,
+and does not ask again a scale the host did not give while the monitor keeps its size.
+A headset whose pixels per degree it does not know asks nothing; a guest asks nothing.
+A monitor it adds in Auto it asks for at the scale its place wants already
+(`AddDisplay`'s `mode.scale`), so it needs no second change; one added at a scale chosen
+by hand it takes out of Auto (`SetScaleAuto`) once made. A profile keeps which of its
+monitors were in Auto: switched to, the headset turns Auto on for those and gives the
+others the profile's scale.
+
+The host gives a scale its desktop does not take for that size as the nearest it takes
+among `Limits.scales`, the larger of two as near (Hyprland takes only scales that make
+whole logical pixels: 2560x1440 at 150 % is not one). A scale the desktop refuses
+leaves the monitor at the one it has, which `Displays` shows, and the layout goes on
+without it.
 
 ### Commands
 

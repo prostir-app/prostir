@@ -62,6 +62,8 @@ impl Kde {
                 has_primary: true,
                 origin_is_primary: false,
                 scales: Scales::Any { min: 50, max: 400 },
+                // KWin changes an output's scale live (`kscreen-doctor`).
+                scales_in_place: true,
                 refresh: vec![60],
                 // KDE's screenshot tool cannot take one output by name.
                 screenshot_one_output: false,
@@ -145,14 +147,16 @@ impl Desktop for Kde {
         )))
     }
 
-    /// Only what differs from `current` is sent, in one call.
+    /// Only what differs from `current` is sent, in one call: new scales with the
+    /// places for the new sizes, so KDE never sees outputs over each other.
     fn place(&mut self, plan: &DeskPlan, current: &Outputs) -> Result<()> {
-        let mut settings: Vec<String> = plan
-            .positions
-            .iter()
-            .filter(|(key, x, y)| current.get(key).is_none_or(|g| (g.x, g.y) != (*x, *y)))
-            .map(|(key, x, y)| format!("output.{key}.position.{x},{y}"))
-            .collect();
+        let mut settings = scale_settings(&plan.scales);
+        settings.extend(
+            plan.positions
+                .iter()
+                .filter(|(key, x, y)| current.get(key).is_none_or(|g| (g.x, g.y) != (*x, *y)))
+                .map(|(key, x, y)| format!("output.{key}.position.{x},{y}")),
+        );
         if let Some(p) = &plan.primary
             && current.get(p).is_none_or(|g| g.priority != Some(1))
         {
@@ -255,6 +259,15 @@ impl Desktop for Kde {
     fn cursor(&mut self) -> Option<&mut dyn CursorSource> {
         Some(&mut self.cursor)
     }
+}
+
+/// `kscreen-doctor` settings giving outputs new scales (`output.N.scale.1.25`), which
+/// KWin takes live: the output, its stream and its windows stay.
+fn scale_settings(scales: &[(OutputKey, u16)]) -> Vec<String> {
+    scales
+        .iter()
+        .map(|(key, percent)| format!("output.{key}.scale.{}", f64::from(*percent) / 100.0))
+        .collect()
 }
 
 /// A KWin output: a virtual one, or a display of the PC streamed as it is.
@@ -387,5 +400,28 @@ impl Output for KdeOutput {
 
     fn desk_scale(&self) -> Option<u16> {
         self.stream.desk_scale()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A new scale goes as KScreen's factor, one setting for each output.
+    #[test]
+    fn scales_are_kscreen_settings() {
+        let scales = [
+            (OutputKey::new("Virtual-Prostir-1"), 125),
+            (OutputKey::new("Virtual-Prostir-2"), 200),
+            (OutputKey::new("Virtual-Prostir-3"), 150),
+        ];
+        assert_eq!(
+            scale_settings(&scales),
+            [
+                "output.Virtual-Prostir-1.scale.1.25",
+                "output.Virtual-Prostir-2.scale.2",
+                "output.Virtual-Prostir-3.scale.1.5",
+            ]
+        );
     }
 }

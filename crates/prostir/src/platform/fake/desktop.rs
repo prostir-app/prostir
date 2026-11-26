@@ -7,7 +7,9 @@
 //!   size, as sharing a monitor in Discord does on KDE; starting Prostir's own stream
 //!   over puts its size back;
 //! - `resize-sticky Fake-2 320x240`: the same, but only making the output anew does;
-//! - `refuse-scale`: setting the next monitor's scale fails, as `kscreen-doctor` can;
+//! - `refuse-scale`: setting the next monitor's scale fails, as `kscreen-doctor` can
+//!   (made with one, or given one in place with a layout: then the whole layout
+//!   fails, as `kscreen-doctor` fails a call);
 //! - `scale Fake-2 150`: the person gives the output another scale in the desktop's
 //!   display settings;
 //! - `unplug eDP-1`, `plug eDP-1`: a display of the PC goes away (the lid closed, the
@@ -39,7 +41,8 @@
 //!   hangs.
 //!
 //! As KWin, it keeps each output's scale by name: an output made anew has the scale
-//! its name had last, until the platform layer sets another.
+//! its name had last, until the platform layer sets another. As KWin, it changes a
+//! monitor's scale in place, with the layout: the output and its stream stay.
 //!
 //! The PC's own displays are `PROSTIR_FAKE_PHYSICAL`: `CONNECTOR=EDID@WxH` separated
 //! by `;` (an empty EDID: the display says nothing), all plugged in at the start.
@@ -284,6 +287,7 @@ impl FakeDesktop {
                 has_primary: false,
                 origin_is_primary: false,
                 scales: Scales::Any { min: 50, max: 400 },
+                scales_in_place: true,
                 refresh: vec![60],
                 // With `PROSTIR_FAKE_SCREENSHOT=stream`, as on KDE: the picture of
                 // one monitor comes from its own stream.
@@ -425,6 +429,20 @@ impl Desktop for FakeDesktop {
 
     fn place(&mut self, plan: &DeskPlan, _current: &Outputs) -> Result<()> {
         super::hang("place");
+        // New scales first, in the same call, as `kscreen-doctor` takes them.
+        if !plan.scales.is_empty() && REFUSE_SCALE.swap(false, Ordering::Relaxed) {
+            anyhow::bail!("fake desktop: the scales {:?} were refused", plan.scales);
+        }
+        for (key, percent) in &plan.scales {
+            let screen = Screen::find(key.as_str())
+                .with_context(|| format!("fake desktop: no output {key}"))?;
+            set_scale(
+                &self.layout,
+                key.as_str(),
+                screen.size(),
+                f64::from(*percent) / 100.0,
+            );
+        }
         let mut layout = self.layout.lock().unwrap();
         for (key, x, y) in &plan.positions {
             if let Some(g) = layout.get_mut(key.as_str()) {

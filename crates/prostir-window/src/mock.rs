@@ -66,6 +66,7 @@ fn display(id: u32, name: &str, w: u32, h: u32, x: i32, y: i32) -> Display {
         mode: Mode { w, h, scale: 100 },
         desk: Some(DeskRect { x, y, w, h }),
         placing: false,
+        auto_scale: false,
         state: DisplayState::Running,
         failure: None,
     }
@@ -150,7 +151,7 @@ fn base() -> State {
                 [3440, 1440],
                 [1440, 2560],
             ],
-            scales: vec![100, 125, 150],
+            scales: vec![100, 125, 150, 175, 200],
             displays_max: Some(6),
             physical_max: Some(2),
             streams_max: Some(8),
@@ -634,7 +635,16 @@ impl Inner {
                 if !self.state.limits.scales.contains(scale) {
                     return Err(refused(ApiError::BadSize, "Такого масштабу немає."));
                 }
-                self.display_mut(*id)?.mode.scale = *scale;
+                let d = self.display_mut(*id)?;
+                d.mode.scale = *scale;
+                d.auto_scale = false;
+            }
+            Request::SetScaleAuto { id, on } => {
+                let d = self.display_mut(*id)?;
+                if d.kind != DisplayKind::Virtual {
+                    return Err(refused(ApiError::BadArgument, "Лише монітор Prostir."));
+                }
+                d.auto_scale = *on;
             }
             Request::SetPrimary { id } => {
                 self.display_mut(*id)?;

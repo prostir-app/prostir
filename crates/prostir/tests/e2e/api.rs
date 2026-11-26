@@ -715,7 +715,7 @@ fn monitors_scaled_and_placed_from_the_pc() {
         assert!(started.elapsed() < SOON, "not above: {na:?} and {nb:?}");
         std::thread::sleep(Duration::from_millis(50));
     }
-    // Another scale: the same monitor, made anew at it.
+    // Another scale: the same monitor, in place.
     let scale = *state
         .limits
         .scales
@@ -1049,8 +1049,9 @@ fn the_volume_from_the_pc_reaches_the_headset() {
     assert_eq!(error_name(&bad), "BadArgument");
 }
 
-/// A scale the desktop did not set (the call failed) is not taken for one given in its
-/// settings: the monitor keeps the scale chosen in Prostir, never seen on the desktop.
+/// A scale the desktop did not take in place (the call failed): the monitor keeps the
+/// one it has, as the desktop has it, and nothing is taken for one given in its
+/// settings.
 #[test]
 fn a_scale_that_could_not_be_set_is_not_taken() {
     let (_dir, mut pc, _keys, _headset) = session("api-refused-scale", &Options::default());
@@ -1069,17 +1070,19 @@ fn a_scale_that_could_not_be_set_is_not_taken() {
         assert!(started.elapsed() < SOON, "no monitor running");
         std::thread::sleep(Duration::from_millis(50));
     };
-    let failed = pc.count_log("fake desktop: setting the scale of");
+    let failed = pc.count_log("fake desktop: the scales");
     pc.desktop("refuse-scale");
     pc.wait_log(SOON, "fake desktop: the next scale set fails");
     let request = format!(r#"{{"request":"set_scale","id":{},"scale":150}}"#, a.id);
     call(&bus, "Call", &(request.as_str(),)).unwrap();
-    pc.wait_log_after(SOON, "fake desktop: setting the scale of", failed);
+    pc.wait_log_after(SOON, "fake desktop: the scales", failed);
     // Ticks enough to take a scale seen twice.
     std::thread::sleep(Duration::from_secs(3));
     let (_, state) = get_state(&bus);
     let d = state.display(a.id).unwrap();
-    assert_eq!(d.mode.scale, 150, "{d:?}");
+    // Given in place, refused: it keeps the one it has, still running.
+    assert_eq!(d.mode.scale, a.mode.scale, "{d:?}");
+    assert_eq!(d.state, prostir_api::DisplayState::Running, "{d:?}");
     assert_eq!(pc.count_log("given on the desktop, taken"), 0);
 }
 

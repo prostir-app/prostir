@@ -1,6 +1,6 @@
 //! "For development" (the preview build only, see `crate::PREVIEW`): how large the
-//! monitors are made, the compositor's filters for their layers, and the numbers next
-//! to the monitor looked at. Kept in memory only, a test of the moment.
+//! monitors are made, the compositor's filters for their layers, the line Auto's scale
+//! reaches, and the numbers next to the monitor looked at. Kept in memory only, a test of the moment.
 
 use super::super::Model;
 use crate::ui::Action;
@@ -13,6 +13,10 @@ impl Model {
             Action::DevSuperSampling(filter) => dev.super_sampling = filter,
             Action::DevSharpening(filter) => dev.sharpening = filter,
             Action::DevMetrics(on) => dev.metrics = on,
+            Action::DevAutoLine(line) => {
+                self.auto.set_line(line);
+                return;
+            }
             Action::DevSizeReset => {
                 self.world.reset_size(self.now);
                 return;

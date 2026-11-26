@@ -26,8 +26,8 @@ pub const SIZES: [(u32, u32); 6] = [
     (5120, 1440),
     (1440, 2560),
 ];
-/// Scales offered, in percent ("larger text").
-const SCALES: [u16; 3] = [100, 125, 150];
+/// Scales offered, in percent ("larger text"; the steps "Auto" chooses from).
+pub const SCALES: [u16; 5] = [100, 125, 150, 175, 200];
 /// The smallest and the largest monitor the PC makes, in pixels.
 pub const MIN_SIZE: (u32, u32) = (320, 240);
 pub const MAX_SIZE: (u32, u32) = (7680, 4320);
@@ -128,7 +128,14 @@ impl Publisher {
                 },
             );
         }
+        // Monitors in Auto, where the desktop changes scales in place.
+        let scale_auto = src.displays.scales_in_place().then(|| {
+            let mut part = src.displays.scale_auto_part();
+            part.auto.retain(|id| displays.get(*id).is_some());
+            part
+        });
         PcState {
+            scale_auto,
             info: Some(pc_info(src.displays)),
             caps: Some(host_caps(src.displays, src.volume)),
             access: Some(self.access),
@@ -233,6 +240,9 @@ fn host_caps(displays: &Displays, volume: bool) -> HostCaps {
     if displays.moves_mouse() {
         features.push(caps::pc::MOVE_MOUSE);
     }
+    if displays.scales_in_place() {
+        features.push(caps::pc::SCALE_IN_PLACE);
+    }
     if displays.screenshots_one_output() {
         features.push(caps::pc::SCREENSHOT_ONE);
     }
@@ -271,9 +281,21 @@ mod tests {
     #[test]
     fn scales_offered_fit_every_size() {
         let mut l = limits(Prefs::default(), &HeadsetCaps::default(), Codec::H264);
-        assert_eq!(l.scales, [100, 125, 150]);
+        assert_eq!(l.scales, [100, 125, 150, 175, 200]);
         keep_scales_of_every_size(&mut l, |_, _| Scales::Any { min: 50, max: 400 });
-        assert_eq!(l.scales, [100, 125, 150]);
+        assert_eq!(l.scales, [100, 125, 150, 175, 200]);
+        // Hyprland: whole logical pixels for every size, so no 150 % (2560x1440).
+        let mut hyprland = l.clone();
+        keep_scales_of_every_size(&mut hyprland, |w, h| {
+            let whole = |px: u32, p: u16| (px * 100).is_multiple_of(u32::from(p));
+            Scales::Steps(
+                [100, 125, 150, 175, 200]
+                    .into_iter()
+                    .filter(|p| whole(w, *p) && whole(h, *p))
+                    .collect(),
+            )
+        });
+        assert_eq!(hyprland.scales, [100, 125, 200]);
         keep_scales_of_every_size(&mut l, |w, _| {
             Scales::Steps(if w < 2000 {
                 vec![100, 125]

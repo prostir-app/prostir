@@ -448,6 +448,11 @@ window-mon-size = { $w } × { $h }
 window-mon-size-scaled = { $w } × { $h }, scale { $scale }%
 window-mon-size-at-scale = { $w } × { $h } · { $scale }%
 window-mon-scale = Scale
+window-mon-scale-auto-desc = While the headset is connected, it picks the scale from how large it shows the monitor.
+window-mon-scale-percent = Scale, %
+window-mon-scale-auto = Auto
+# $scale (Number): the scale chosen for the monitor, percent
+window-mon-scale-auto-at = Auto, { $scale }%
 window-mon-main = Main monitor
 window-mon-main-desc = The panel and new windows go here.
 window-mon-remove = Remove monitor
@@ -803,6 +808,7 @@ headset-pc-display-limit = the PC's limit reached
 # $page (Number): the page shown; $pages (Number): how many pages there are
 headset-page-of = Page { $page } of { $pages }
 headset-scale = Scale
+headset-scale-auto = Auto
 headset-monitors-line-up = Line up: close the seams (A button)
 headset-add-monitor = Add a monitor
 # $count (Number): how many monitors the PC makes at most
@@ -1030,6 +1036,7 @@ headset-note-primary = Now the primary monitor
 headset-note-display-shown = The PC display is shown
 headset-note-display-hidden = The PC display is hidden
 headset-note-scale = Scale changed
+headset-note-scale-auto = The scale follows the monitor's size
 headset-note-no-limits-on = More monitors and displays allowed
 headset-note-no-limits-off = Recommended limits back on
 headset-note-sound-headset = PC sound plays in the headset

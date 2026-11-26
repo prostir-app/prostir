@@ -51,6 +51,8 @@ impl Displays {
         }
         let number = self.free_number();
         self.add_as(id, number, spec);
+        // A new monitor's scale is the main headset's choice until one is chosen.
+        self.auto.insert(id);
         // A headset that places the monitors gives this one its place once it shows
         // it; meanwhile the desktop has it at a stand-in place.
         if self.headset_places {
@@ -148,6 +150,7 @@ impl Displays {
     /// arrangement.
     pub(super) fn forget(&mut self, id: ScreenId) {
         self.too_big.remove(&id);
+        self.auto.remove(&id);
         self.placing.remove(id);
         for row in &mut self.rows {
             row.retain(|e| e.id != id);
@@ -229,6 +232,24 @@ impl Displays {
                 Some(unused.remove(i))
             })
             .collect();
+        // A monitor in Auto of the same size is kept too, at the scale it has: the
+        // headset chose it.
+        for (slot, s) in plan.iter_mut().zip(specs) {
+            if slot.is_some() {
+                continue;
+            }
+            let same_size = |id: &ScreenId| {
+                self.auto.contains(id)
+                    && self
+                        .screens
+                        .get(id)
+                        .and_then(|m| m.kind.spec())
+                        .is_some_and(|m| (m.width, m.height) == (s.width, s.height))
+            };
+            if let Some(i) = unused.iter().position(same_size) {
+                *slot = Some(unused.remove(i));
+            }
+        }
         // Remove before adding (to stay under the limit), but never the last one.
         let mut last = None;
         for id in unused {
@@ -406,9 +427,73 @@ impl Displays {
         Some((spec.width, spec.height))
     }
 
-    /// Gives monitor `id` the scale `percent` (one the desktop gives its size): its
-    /// output is made anew under the same name, so the desktop keeps its place.
+    /// Gives monitor `id` the scale `percent` (one the desktop gives its size), chosen
+    /// by hand: it leaves Auto. In place where the desktop does that (the output, its
+    /// stream and its windows stay); else its output is made anew under the same name,
+    /// so the desktop keeps its place.
     pub fn rescale(&mut self, id: ScreenId, percent: u16) -> Result<()> {
+        self.set_scale(id, percent)?;
+        self.auto.remove(&id);
+        Ok(())
+    }
+
+    /// Whether monitor `id` is in Auto.
+    pub fn is_auto(&self, id: ScreenId) -> bool {
+        self.auto.contains(&id)
+    }
+
+    /// The monitors in Auto.
+    pub fn auto_ids(&self) -> impl Iterator<Item = ScreenId> + '_ {
+        self.auto.iter().copied().filter(|id| self.is_monitor(*id))
+    }
+
+    /// Auto on or off for monitor `id` (a virtual monitor; `BadArgument` for a display
+    /// of the PC or a window panel). Whether it changed.
+    pub fn set_scale_auto(&mut self, id: ScreenId, on: bool) -> Result<bool> {
+        match self.screens.get(&id) {
+            None => bail!(UserError::UnknownDisplay),
+            Some(s) if !s.is_virtual() => bail!(UserError::BadArgument),
+            Some(_) => {}
+        }
+        Ok(if on {
+            self.auto.insert(id)
+        } else {
+            self.auto.remove(&id)
+        })
+    }
+
+    /// The scale the main headset chose for monitor `id` in Auto, percent, of `offered`
+    /// (the scales offered to headsets): set in place, the monitor staying in Auto.
+    /// One the desktop does not give its size becomes the nearest it gives of
+    /// `offered` (the larger of two as near). Whether it changed: a
+    /// monitor not in Auto stays as it is.
+    pub fn auto_scale(&mut self, id: ScreenId, percent: u16, offered: &[u16]) -> Result<bool> {
+        match self.screens.get(&id) {
+            None => bail!(UserError::UnknownDisplay),
+            Some(s) if !s.is_virtual() => bail!(UserError::BadArgument),
+            Some(_) if !self.auto.contains(&id) => return Ok(false),
+            Some(_) => {}
+        }
+        let (w, h) = self.monitor_size(id).ok_or(UserError::UnknownDisplay)?;
+        let gives = self.scales_for(w, h);
+        let Some(percent) = nearest_scale(percent, offered, |p| gives.allows(p)) else {
+            bail!(UserError::BadSize {
+                w,
+                h,
+                scale: percent
+            });
+        };
+        let was = self
+            .screens
+            .get(&id)
+            .and_then(|s| s.kind.spec())
+            .map(MonitorSpec::percent);
+        self.set_scale(id, percent)?;
+        Ok(was != Some(percent))
+    }
+
+    /// Gives monitor `id` the scale `percent` (one the desktop gives its size).
+    fn set_scale(&mut self, id: ScreenId, percent: u16) -> Result<()> {
         let Some(spec) = self
             .screens
             .get(&id)
@@ -433,11 +518,14 @@ impl Displays {
         if wanted.percent() == spec.percent() {
             return Ok(());
         }
+        let in_place = self.facts.as_ref().is_some_and(|f| f.caps.scales_in_place);
         if let Some(screen) = self.screens.get_mut(&id) {
-            // The worker makes its output anew.
-            screen.encoding = None;
             screen.kind = ScreenKind::Virtual { spec: wanted };
-            screen.state = ScreenState::Starting;
+            if !in_place {
+                // The worker makes its output anew.
+                screen.encoding = None;
+                screen.state = ScreenState::Starting;
+            }
         }
         Ok(())
     }
@@ -551,7 +639,14 @@ impl Displays {
                 _ => None,
             })
             .collect();
+        let auto = self
+            .auto
+            .iter()
+            .filter(|id| specs.contains_key(id))
+            .copied()
+            .collect();
         Some(SavedScreens {
+            auto,
             specs,
             physical,
             // The PC's displays keep their places while not connected or not shown.
@@ -559,4 +654,22 @@ impl Displays {
             primary: self.primary,
         })
     }
+}
+
+/// The scale to give for `asked` among `offered` where `gives` says which the desktop
+/// gives: `asked` itself, else the nearest given (the larger of two as near); none
+/// where it gives none of them.
+pub(super) fn nearest_scale(
+    asked: u16,
+    offered: &[u16],
+    gives: impl Fn(u16) -> bool,
+) -> Option<u16> {
+    if gives(asked) {
+        return Some(asked);
+    }
+    offered
+        .iter()
+        .copied()
+        .filter(|p| gives(*p))
+        .min_by_key(|p| (p.abs_diff(asked), std::cmp::Reverse(*p)))
 }

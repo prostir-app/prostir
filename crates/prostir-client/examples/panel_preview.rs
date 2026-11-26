@@ -362,6 +362,10 @@ fn main() {
         confirm_delete: None,
         can_scale: std::env::var("NO_SCALE").is_err(),
         add_scale: 100,
+        // `AUTO`: the PC changes scales in place, every monitor in Auto.
+        can_auto: std::env::var("AUTO").is_ok(),
+        add_auto: std::env::var("AUTO").is_ok(),
+        auto: Vec::new(),
         active_profile: Some(1),
         note: None,
         // "For development", as the preview build has it (DEV=1).
@@ -369,6 +373,7 @@ fn main() {
             dev: prostir::clarity::Dev::default(),
             known: std::env::var("UNKNOWN_HEADSET").is_err(),
             can_reset: true,
+            auto_line: 85,
         }),
         texts,
         languages: languages.into(),

@@ -44,7 +44,8 @@
 //! 4. Scales in steps, through an undocumented call: [`VirtualSpec::scale`] in percent,
 //!    [`Scales::Steps`], which may depend on the mode ([`Desktop::scales_for`]); the
 //!    scales offered to the headset are those the desktop gives every size offered,
-//!    and the desktop checks its own.
+//!    and the desktop checks its own. Where it changes a monitor's scale in place
+//!    ([`DesktopCaps::scales_in_place`], [`DeskPlan::scales`]) the output stays.
 //! 5. Physical pixels, the primary output always at (0, 0): the desktop converts to and
 //!    from logical pixels itself (see above), and with
 //!    [`DesktopCaps::origin_is_primary`] the core shifts its whole plan so the primary
@@ -154,9 +155,11 @@ pub trait Desktop: Send {
     /// the display stays.
     fn show(&mut self, key: &OutputKey) -> Result<Box<dyn Output>>;
 
-    /// Moves outputs where `plan` says and makes its primary the primary output, where
-    /// the desktop has one. Only what differs from `current` (as [`Desktop::outputs`]
-    /// said a moment ago) is sent. An error when the desktop did not take it.
+    /// Moves outputs where `plan` says, gives the monitors of [`DeskPlan::scales`]
+    /// their new scale in the same call (so outputs never cover each other on the
+    /// way), and makes its primary the primary output, where the desktop has one.
+    /// Only what differs from `current` (as [`Desktop::outputs`] said a moment ago) is
+    /// sent. An error when the desktop did not take it.
     fn place(&mut self, plan: &DeskPlan, current: &Outputs) -> Result<()>;
 
     /// Checks now and then that `primary` is still the primary output, and makes it so
@@ -542,6 +545,10 @@ pub struct DesktopCaps {
     /// The scales it gives an output of any size, in percent (see
     /// [`Desktop::scales_for`] for those of one size).
     pub scales: Scales,
+    /// It changes the scale of a monitor of ours in place ([`DeskPlan::scales`]), the
+    /// output, its stream and its windows as they are; else a monitor is made anew at
+    /// another scale.
+    pub scales_in_place: bool,
     /// Refresh rates it makes virtual monitors with, in Hz.
     pub refresh: Vec<u16>,
     /// [`Windows::screenshot`] can take a single output; if not, a monitor's picture is
@@ -688,6 +695,10 @@ pub struct DeskPlan {
     pub positions: Vec<(OutputKey, i32, i32)>,
     /// The output to make primary, where the desktop has one.
     pub primary: Option<OutputKey>,
+    /// Monitors of ours whose scale changes, in percent (one the desktop gives their
+    /// size): only where [`DesktopCaps::scales_in_place`], never a display of the PC
+    /// or a window panel. Their places in `positions` are for their new size.
+    pub scales: Vec<(OutputKey, u16)>,
 }
 
 /// Every output on the desktop, by key.
@@ -764,6 +775,7 @@ mod windows_shape {
             has_primary: true,
             origin_is_primary: true,
             scales: Scales::Steps(vec![100, 125, 150, 175, 200]),
+            scales_in_place: true,
             refresh: vec![60, 72, 90, 120],
             screenshot_one_output: true,
             moves_pointer: true,

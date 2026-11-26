@@ -171,10 +171,16 @@ fn monitors_by_name_and_keyboard() {
     );
     assert_eq!(h.state().ui.selected, Some(3));
     // The selected monitor's controls.
-    press(&mut h, "125\u{a0}%");
+    // Five scales: as numbers on a line of their own, Auto a switch above them.
+    press(&mut h, "125");
     assert_eq!(
         handle.calls().last(),
         Some(&Request::SetScale { id: 3, scale: 125 })
+    );
+    press_as(&mut h, Some(Role::Switch), "Авто");
+    assert_eq!(
+        handle.calls().last(),
+        Some(&Request::SetScaleAuto { id: 3, on: true })
     );
     press_as(&mut h, Some(Role::Switch), "Головний монітор");
     assert_eq!(handle.calls().last(), Some(&Request::SetPrimary { id: 3 }));

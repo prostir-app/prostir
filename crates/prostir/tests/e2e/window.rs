@@ -108,7 +108,7 @@ fn the_window_s_client_drives_the_service() {
         me.is_some_and(|me| others.clone().all(|o| me.y + me.h as i32 <= o.y))
     });
 
-    // Another scale, made anew under the same id.
+    // Another scale, given in place under the same id.
     let scale = *state
         .limits
         .scales

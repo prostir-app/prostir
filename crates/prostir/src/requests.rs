@@ -66,6 +66,8 @@ fn needs(request: &Request) -> u32 {
         | Request::SetPrimary { .. }
         | Request::ShowPhysical { .. }
         | Request::SetScale { .. }
+        | Request::AutoScale { .. }
+        | Request::SetScaleAuto { .. }
         | Request::SetEncoding { .. }
         | Request::SetSound { .. } => perms::CHANGES,
         Request::DetachWindow => perms::CHANGES | perms::PRIVATE,
@@ -239,6 +241,36 @@ fn carry_out(
             displays.rescale(id, scale)?;
             info!("headset set {id} to {scale} %");
             keep_screens(store, displays, true);
+            Outcome::Done
+        }
+        Request::AutoScale { id, scale } => {
+            // The main headset's choice, where the desktop changes scales in place.
+            if !displays.scales_in_place() {
+                bail!(UserError::Unsupported);
+            }
+            if !asker.access.is_main() {
+                bail!(UserError::NotAllowed);
+            }
+            let id = ScreenId::from_wire(id);
+            if !limits.scales.contains(&scale) {
+                let (w, h) = displays.monitor_size(id).ok_or(UserError::UnknownDisplay)?;
+                bail!(UserError::BadSize { w, h, scale });
+            }
+            if displays.auto_scale(id, scale, &limits.scales)? {
+                info!("headset chose {scale} % for {id} (Auto)");
+                keep_screens(store, displays, false);
+            }
+            Outcome::Done
+        }
+        Request::SetScaleAuto { id, on } => {
+            let id = ScreenId::from_wire(id);
+            if displays.set_scale_auto(id, on)? {
+                info!(
+                    "headset turned Auto {} for {id}",
+                    if on { "on" } else { "off" }
+                );
+                keep_screens(store, displays, false);
+            }
             Outcome::Done
         }
         Request::SetEncoding {

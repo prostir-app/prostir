@@ -172,6 +172,9 @@ pub(crate) fn pc_state() -> PcState {
             display: Some(DisplayId(100)),
         }),
         sound_from: Some(SoundFrom { display: None }),
+        scale_auto: Some(state::ScaleAuto {
+            auto: vec![DisplayId(3)],
+        }),
     }
 }
 
@@ -367,6 +370,20 @@ pub(crate) fn client_samples() -> Vec<ClientMsg> {
             Request::SetScale {
                 id: DisplayId(3),
                 scale: 150,
+            },
+        ),
+        ClientMsg::request(
+            ReqId(7),
+            Request::AutoScale {
+                id: DisplayId(3),
+                scale: 175,
+            },
+        ),
+        ClientMsg::request(
+            ReqId(8),
+            Request::SetScaleAuto {
+                id: DisplayId(3),
+                on: true,
             },
         ),
         ClientMsg::request(
@@ -1154,6 +1171,51 @@ fn the_largest_snapshot_is_small() {
     state.focus = None;
     let bytes = host_bytes(&state.snapshot().unwrap());
     assert!(bytes.len() < 32 * 1024, "{} bytes", bytes.len());
+}
+
+/// The parts and requests of "Auto" (feature 17) are additions: an older headset
+/// skips the part, and an older PC reads the requests as kinds it does not know.
+#[test]
+fn auto_scale_is_additive() {
+    use crate::request::Asked;
+    use crate::wire::{decode, encode};
+    let part = HostMsg::ScaleAuto {
+        part: state::ScaleAuto {
+            auto: vec![DisplayId(3), DisplayId(9)],
+        },
+    };
+    let bytes = host_bytes(&part);
+    assert_eq!(bytes[0], 44);
+    assert_eq!(read_host(&bytes).unwrap(), part);
+    assert!(!RETIRED_HOST_TAGS.contains(&44));
+    let mut state = PcState::default();
+    assert_eq!(state.apply(part).unwrap(), None);
+    assert!(state.scale_auto.as_ref().unwrap().has(DisplayId(9)));
+    assert!(!state.scale_auto.unwrap().has(DisplayId(4)));
+    for (asked, kind) in [
+        (
+            Request::AutoScale {
+                id: DisplayId(3),
+                scale: 125,
+            },
+            14,
+        ),
+        (
+            Request::SetScaleAuto {
+                id: DisplayId(3),
+                on: false,
+            },
+            15,
+        ),
+    ] {
+        let bytes = encode(&Asked::Known(asked.clone())).unwrap();
+        assert_eq!(bytes[0], kind);
+        assert_eq!(
+            decode::<Asked<Request>>(&bytes).unwrap(),
+            Asked::Known(asked)
+        );
+    }
+    assert_eq!(state::caps::pc::SCALE_IN_PLACE, Feature(17));
 }
 
 /// A small random number generator, the same numbers on every run.

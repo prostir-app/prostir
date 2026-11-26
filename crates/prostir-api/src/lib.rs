@@ -126,10 +126,17 @@ pub enum Request {
         id: u32,
         shown: bool,
     },
-    /// Another scale for a monitor, percent: made anew at it, same id.
+    /// Another scale for a monitor, percent: in place where the desktop does that,
+    /// else made anew at it, same id. It takes the monitor out of Auto.
     SetScale {
         id: u32,
         scale: u16,
+    },
+    /// Auto on or off for a monitor: its scale chosen by the main headset from how
+    /// large it shows the monitor (`auto_scale` of the display).
+    SetScaleAuto {
+        id: u32,
+        on: bool,
     },
     SetPrimary {
         id: u32,
@@ -234,6 +241,7 @@ pub const REQUESTS: &[&str] = &[
     "retry_monitor",
     "show_physical",
     "set_scale",
+    "set_scale_auto",
     "set_primary",
     "place",
     "screenshot",
@@ -835,6 +843,9 @@ pub struct Display {
     /// where the headset put it. Left out when false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub placing: bool,
+    /// A monitor in Auto: the main headset chooses its scale. Left out when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub auto_scale: bool,
     pub state: DisplayState,
     pub failure: Option<Problem>,
 }
@@ -1063,6 +1074,7 @@ mod tests {
                 id: 103,
                 scale: 150,
             },
+            Request::SetScaleAuto { id: 103, on: true },
             Request::SetPrimary { id: 103 },
             Request::Place {
                 id: 103,
@@ -1289,6 +1301,7 @@ mod tests {
                     h: 1152,
                 }),
                 placing: false,
+                auto_scale: true,
                 state: DisplayState::Failed,
                 failure: Some(Problem {
                     code: ApiError::Desktop,
@@ -1378,7 +1391,7 @@ mod tests {
             r#""displays":[{"id":103,"kind":"virtual","name":"Prostir-1","#,
             r#""output":"Virtual-Prostir-1","builtin":false,"shown":true,"#,
             r#""mode":{"w":2560,"h":1440,"scale":125},"desk":{"x":0,"y":0,"w":2048,"h":1152},"#,
-            r#""state":"failed","failure":{"code":"Desktop","text":"KScreen"}}],"primary":103,"#,
+            r#""auto_scale":true,"state":"failed","failure":{"code":"Desktop","text":"KScreen"}}],"primary":103,"#,
             r#""limits":{"sizes":[[1920,1080]],"scales":[100,125],"displays_max":6,"#,
             r#""physical_max":2,"streams_max":8,"min":[640,360],"max":[3840,2160]},"#,
             r#""encoding":{"bitrate":30,"large":60,"sharp":false,"sharp_by_size":false,"#,

@@ -1053,12 +1053,19 @@ static TOOLS: &[Tool] = &[
     },
     asks(
         "set_scale",
-        "Another scale for a monitor, in percent: its output is made anew with the same id \
-         (starting meanwhile).",
+        "Another scale for a monitor, in percent, the same id: in place where the desktop \
+         does that (it keeps running), else its output is made anew (starting meanwhile). \
+         It takes the monitor out of Auto.",
         &[
             ID,
             Arg::of("scale", "integer", "scale in percent").within(25, 400),
         ],
+    ),
+    asks(
+        "set_scale_auto",
+        "Auto on or off for a monitor: its scale chosen by the main headset from how large \
+         it shows the monitor (auto_scale in the state).",
+        &[ID, Arg::of("on", "boolean", "in Auto")],
     ),
     Tool {
         name: "show_pc_display",

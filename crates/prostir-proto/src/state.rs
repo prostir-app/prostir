@@ -215,6 +215,10 @@ pub mod caps {
         /// Tells the mouse pointer apart from the pictures (`CursorShape`,
         /// `CursorAt`), where every headset with a session draws it itself.
         pub const CURSOR: Feature = Feature(16);
+        /// Changes a monitor's scale in place, its output and its windows as they are
+        /// (not made anew): the headset may choose scales by itself ("Auto", see
+        /// [`crate::state::ScaleAuto`]). 15 and 16 are taken by other work under way.
+        pub const SCALE_IN_PLACE: Feature = Feature(17);
     }
 
     /// What the headset can do.
@@ -930,6 +934,25 @@ pub fn check_rows(rows: &[Row]) -> Result<(), WireError> {
     Ok(())
 }
 
+wire_struct! {
+    /// The monitors whose scale the main headset chooses ("Auto", a part, from 0.2.0
+    /// with feature 17): the PC keeps the flag of each, the headset picks the scale
+    /// from how large it shows the monitor (`Request::AutoScale`). Only virtual
+    /// monitors; never a display of the PC itself or a window panel.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ScaleAuto {
+        #[wire(max = MAX_DISPLAYS)]
+        pub auto: Vec<DisplayId>,
+    }
+}
+
+impl ScaleAuto {
+    /// Whether monitor `id` is in Auto.
+    pub fn has(&self, id: DisplayId) -> bool {
+        self.auto.contains(&id)
+    }
+}
+
 /// A part of the state inside `Snapshot` or `Open`: the tag of the message it is, and
 /// the message's payload, so it is read by the same code as that message on its own.
 /// A part a reader does not know is skipped.
@@ -969,11 +992,13 @@ pub struct PcState {
     pub up_wanted: std::collections::BTreeMap<UpKind, UpWanted>,
     pub focus: Option<Focus>,
     pub sound_from: Option<SoundFrom>,
+    /// The monitors in "Auto" (from 0.2.0 with feature 17; an older PC sends none).
+    pub scale_auto: Option<ScaleAuto>,
 }
 
 /// Tags of the PC's parts, in the order they go: `Displays` first (other parts name its
 /// displays), `Focus` and `SoundFrom` last.
-const PC_PARTS: &[u8] = &[31, 36, 37, 35, 34, 32, 33, 40, 16, 23];
+const PC_PARTS: &[u8] = &[31, 36, 37, 35, 34, 44, 32, 33, 40, 16, 23];
 
 impl PcState {
     /// Whether messages with `tag` are parts of the PC's state.
@@ -1005,6 +1030,7 @@ impl PcState {
             caps => HostCaps,
             access => Access,
             limits => Limits,
+            scale_auto => ScaleAuto,
             encoding => Encoding,
             sound => Sound
         );
@@ -1040,6 +1066,7 @@ impl PcState {
             M::HostCaps { part } => self.caps = Some(part),
             M::Access { part } => self.access = Some(part),
             M::Limits { part } => self.limits = Some(part),
+            M::ScaleAuto { part } => self.scale_auto = Some(part),
             M::Encoding { part } => self.encoding = Some(part),
             M::Sound { part } => self.sound = Some(part),
             M::UpWanted { part } => {
