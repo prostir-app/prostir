@@ -7,7 +7,10 @@
 //! `crate::input`).
 //!
 //! The token lives in Prostir's settings folder, readable by the user alone
-//! (`input-token`).
+//! (`input-token`). A no, no answer in time, or the person stopping the control (on
+//! the desktop's own indicator) forgets it: the next time asks again, never
+//! silently. A session that did not start is closed, with its request, so no dialog
+//! is left on the screen.
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -80,16 +83,53 @@ impl OpenInput for PortalOpen {
         let types: u32 = portal
             .get_property("AvailableDeviceTypes")
             .unwrap_or(KEYBOARD | POINTER);
-        let session = start_session(&conn, &portal, types)?;
-        let path = ObjectPath::try_from(session.as_str())?;
-        let fd: OwnedFd = portal
-            .call("ConnectToEIS", &(&path, HashMap::<&str, Value<'_>>::new()))
-            .context("ConnectToEIS")?;
-        let socket = UnixStream::from(std::os::fd::OwnedFd::from(fd));
-        let ei = Ei::connect(socket, DEVICES_WITHIN)?;
-        info!("input: through the RemoteDesktop portal and libei");
-        Ok(Box::new(PortalInput { conn, session, ei }))
+        let session = create_session(&conn, &portal)?;
+        let opened = (|| -> Result<Ei> {
+            start_session(&conn, &portal, &session, types)?;
+            let path = ObjectPath::try_from(session.as_str())?;
+            let fd: OwnedFd = portal
+                .call("ConnectToEIS", &(&path, HashMap::<&str, Value<'_>>::new()))
+                .context("ConnectToEIS")?;
+            let socket = UnixStream::from(std::os::fd::OwnedFd::from(fd));
+            Ei::connect(socket, DEVICES_WITHIN)
+        })();
+        match opened {
+            Ok(ei) => {
+                info!("input: through the RemoteDesktop portal and libei");
+                Ok(Box::new(PortalInput { conn, session, ei }))
+            }
+            Err(e) => {
+                // No session left behind, and no dialog of it on the screen.
+                close(&conn, &session, "org.freedesktop.portal.Session");
+                if said_no(&e) {
+                    forget_token();
+                }
+                Err(e)
+            }
+        }
     }
+}
+
+/// No answer to a request in time (the request is closed).
+#[derive(Debug)]
+struct NoAnswer;
+
+impl std::fmt::Display for NoAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the portal did not answer in time")
+    }
+}
+
+impl std::error::Error for NoAnswer {}
+
+/// Whether `e` is the person's no, or their stop.
+fn said_no(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<InputRefused>().is_some() || e.downcast_ref::<InputStopped>().is_some()
+}
+
+/// Closes the portal's object at `path` (a `Request` or a `Session`).
+fn close(conn: &Connection, path: &str, iface: &str) {
+    let _ = conn.call_method(Some(DEST), path, Some(iface), "Close", &());
 }
 
 /// A token for a portal request, new each time.
@@ -118,7 +158,7 @@ where
         .trim_start_matches(':')
         .replace('.', "_");
     let path = format!("{PATH}/request/{sender}/{token}");
-    let request = Proxy::new(conn, DEST, path, "org.freedesktop.portal.Request")?;
+    let request = Proxy::new(conn, DEST, path.as_str(), "org.freedesktop.portal.Request")?;
     let mut answers = request.receive_signal("Response")?;
     portal
         .call_method(method, body)
@@ -131,16 +171,17 @@ where
         .spawn(move || {
             let _ = tx.send(answers.next());
         })?;
-    let answer = rx
-        .recv_timeout(within)
-        .map_err(|_| anyhow::anyhow!("the portal did not answer {method} in time"))?
-        .context("the portal went away")?;
+    let Ok(answer) = rx.recv_timeout(within) else {
+        // Its dialog, if any, goes with it.
+        close(conn, &path, "org.freedesktop.portal.Request");
+        return Err(anyhow::Error::new(NoAnswer).context(method.to_owned()));
+    };
+    let answer = answer.context("the portal went away")?;
     Ok(answer.body().deserialize()?)
 }
 
-/// Creates a session, picks its devices (with the token kept, if any) and starts it,
-/// which shows the desktop's dialog when there is no token: the session's handle.
-fn start_session(conn: &Connection, portal: &Proxy<'_>, types: u32) -> Result<String> {
+/// Creates a session: its handle.
+fn create_session(conn: &Connection, portal: &Proxy<'_>) -> Result<String> {
     let (t, s) = (token(), token());
     let options = HashMap::from([
         ("handle_token", Value::from(t.as_str())),
@@ -159,7 +200,15 @@ fn start_session(conn: &Connection, portal: &Proxy<'_>, types: u32) -> Result<St
         .get("session_handle")
         .and_then(|v| String::try_from(v.clone()).ok())
         .context("the portal gave no session")?;
-    let path = ObjectPath::try_from(session.as_str())?;
+    Ok(session)
+}
+
+/// Picks the session's devices (with the token kept, if any) and starts it, which
+/// shows the desktop's dialog when there is no token. No answer from the person in
+/// time counts as a no: asked again only on their next action after Prostir starts
+/// again.
+fn start_session(conn: &Connection, portal: &Proxy<'_>, session: &str, types: u32) -> Result<()> {
+    let path = ObjectPath::try_from(session)?;
 
     let t = token();
     let kept = load_token();
@@ -189,14 +238,21 @@ fn start_session(conn: &Connection, portal: &Proxy<'_>, types: u32) -> Result<St
     if kept.is_none() {
         info!("input: the desktop asks the person whether Prostir may control the input");
     }
-    let (code, results) = ask(
+    let (code, results) = match ask(
         conn,
         portal,
         "Start",
         &t,
         &(&path, "", options),
         PERSON_WITHIN,
-    )?;
+    ) {
+        Err(e) if e.downcast_ref::<NoAnswer>().is_some() => {
+            return Err(
+                anyhow::Error::new(InputRefused).context("no answer from the person in time")
+            );
+        }
+        other => other?,
+    };
     match code {
         0 => {}
         1 => return Err(InputRefused.into()),
@@ -213,7 +269,7 @@ fn start_session(conn: &Connection, portal: &Proxy<'_>, types: u32) -> Result<St
         Some(new) => save_token(&new),
         None => info!("input: the desktop keeps no permission for next time"),
     }
-    Ok(session)
+    Ok(())
 }
 
 fn token_file() -> Option<PathBuf> {
@@ -222,6 +278,16 @@ fn token_file() -> Option<PathBuf> {
             .join("prostir")
             .join("input-token"),
     )
+}
+
+/// The kept permission is no more: the person said no, or stopped the control. The
+/// next session asks again (with the desktop's dialog), never silently.
+fn forget_token() {
+    if let Some(file) = token_file()
+        && std::fs::remove_file(&file).is_ok()
+    {
+        info!("input: the desktop's kept permission is forgotten");
+    }
 }
 
 fn load_token() -> Option<String> {
@@ -266,13 +332,19 @@ struct PortalInput {
 
 impl Drop for PortalInput {
     fn drop(&mut self) {
-        let _ = self.conn.call_method(
-            Some(DEST),
-            self.session.as_str(),
-            Some("org.freedesktop.portal.Session"),
-            "Close",
-            &(),
-        );
+        close(&self.conn, &self.session, "org.freedesktop.portal.Session");
+    }
+}
+
+impl PortalInput {
+    /// What came of a call; stopped by the person, the kept permission goes.
+    fn checked<T>(r: Result<T>) -> Result<T> {
+        if let Err(e) = &r
+            && said_no(e)
+        {
+            forget_token();
+        }
+        r
     }
 }
 
@@ -281,24 +353,24 @@ impl Injector for PortalInput {
         self.ei.touches()
     }
     fn pointer_to(&mut self, at: &Spot) -> Result<()> {
-        self.ei.pointer_to(at)
+        Self::checked(self.ei.pointer_to(at))
     }
     fn pointer_by(&mut self, dx: f64, dy: f64) -> Result<()> {
-        self.ei.pointer_by(dx, dy)
+        Self::checked(self.ei.pointer_by(dx, dy))
     }
     fn button(&mut self, button: MouseButton, down: bool) -> Result<()> {
-        self.ei.button(button, down)
+        Self::checked(self.ei.button(button, down))
     }
     fn scroll(&mut self, dx: i32, dy: i32) -> Result<()> {
-        self.ei.scroll(dx, dy)
+        Self::checked(self.ei.scroll(dx, dy))
     }
     fn touch(&mut self, id: u32, phase: TouchPhase, at: &Spot) -> Result<()> {
-        self.ei.touch(id, phase, at)
+        Self::checked(self.ei.touch(id, phase, at))
     }
     fn key(&mut self, code: u16, down: bool) -> Result<()> {
-        self.ei.key(code, down)
+        Self::checked(self.ei.key(code, down))
     }
     fn pump(&mut self) -> Result<()> {
-        self.ei.pump()
+        Self::checked(self.ei.pump())
     }
 }

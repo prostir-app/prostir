@@ -3,7 +3,7 @@
 //! devices the desktop closed opened again after a pause.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::*;
 use crate::platform::OutputKey;
@@ -111,9 +111,14 @@ fn at(x: f64) -> Spot {
     }
 }
 
+/// What a run shares, with a no of its own (not the process's).
+fn own_shared() -> Arc<Shared> {
+    Arc::new(Shared::new(Box::leak(Box::new(AtomicBool::new(false)))))
+}
+
 /// A run with `opener`, its devices opened by a first move.
 fn opened(opener: &Arc<Opener>) -> Run {
-    let mut run = Run::new(Box::new(|_| {}), Arc::default());
+    let mut run = Run::new(Box::new(|_| {}), own_shared());
     run.set_opener(Some(opener.clone()));
     let now = Instant::now();
     run.event(
@@ -243,7 +248,7 @@ fn a_desktop_without_touch_gets_mouse_actions() {
 fn a_refusal_is_not_asked_again() {
     let o = opener(true, true);
     let mut run = opened(&o);
-    assert!(run.refused && run.injector.is_none());
+    assert!(run.shared.refused() && run.injector.is_none());
     for _ in 0..3 {
         run.event(click(1, true), Instant::now());
         run.tick(Instant::now());
@@ -313,7 +318,7 @@ fn devices_the_person_stopped_are_not_opened_again() {
         let told = told.clone();
         Run::new(
             Box::new(move |n| told.lock().unwrap().push(n)),
-            Arc::default(),
+            own_shared(),
         )
     };
     run.set_opener(Some(o.clone()));
@@ -327,7 +332,7 @@ fn devices_the_person_stopped_are_not_opened_again() {
     wait_open(&mut run);
     o.stop.store(true, Ordering::Relaxed);
     run.event(click(1, true), Instant::now());
-    assert!(run.injector.is_none() && run.refused);
+    assert!(run.injector.is_none() && run.shared.refused());
     assert_eq!(
         State::of(run.shared.state.load(Ordering::Relaxed)),
         State::Refused
@@ -374,4 +379,24 @@ fn a_press_nowhere_is_dropped_and_a_release_lets_go() {
     told(&o);
     run.event(nowhere(false), now);
     assert_eq!(told(&o), ["Left up"]);
+}
+
+/// A no outlives the displays it was said with: the next set (a new thread, a new
+/// opener, as for the next session) does not ask again.
+#[test]
+fn a_no_holds_for_the_next_displays_too() {
+    let o = opener(true, true);
+    let mut first = opened(&o);
+    assert!(first.shared.refused());
+    let again = opener(true, false);
+    let mut next = Run::new(Box::new(|_| {}), first.shared.clone());
+    next.set_opener(Some(again.clone()));
+    assert_eq!(
+        State::of(next.shared.state.load(Ordering::Relaxed)),
+        State::Refused
+    );
+    next.event(click(1, true), Instant::now());
+    next.tick(Instant::now());
+    assert_eq!(again.asked.load(Ordering::Relaxed), 0);
+    first.tick(Instant::now());
 }

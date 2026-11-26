@@ -29,7 +29,7 @@ pub mod touch_mouse;
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -125,12 +125,32 @@ enum Msg {
     Ev(Ev),
 }
 
+/// The person said no (or stopped the devices) in this run of Prostir: kept for the
+/// whole process, not only while one set of displays lives, so a later session does
+/// not ask again.
+static REFUSED: AtomicBool = AtomicBool::new(false);
+
 /// What the thread and its handle share.
-#[derive(Default)]
 struct Shared {
     state: AtomicU8,
     /// Moves sent and not taken yet.
     moves: AtomicUsize,
+    /// The person's no: [`REFUSED`] (the tests' own elsewhere).
+    refused: &'static AtomicBool,
+}
+
+impl Shared {
+    fn new(refused: &'static AtomicBool) -> Self {
+        Self {
+            state: AtomicU8::new(0),
+            moves: AtomicUsize::new(0),
+            refused,
+        }
+    }
+
+    fn refused(&self) -> bool {
+        self.refused.load(Ordering::Relaxed)
+    }
 }
 
 /// The control loop's side of the input thread. Dropped, the thread lets go of
@@ -147,7 +167,7 @@ impl Input {
     pub fn start(tell: impl Fn(News) + Send + 'static) -> Self {
         let (tx, rx) = mpsc::channel();
         let (end_tx, ended) = mpsc::channel();
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared::new(&REFUSED));
         let run = Run::new(Box::new(tell), shared.clone());
         let spawned = std::thread::Builder::new()
             .name("input".into())
@@ -187,6 +207,9 @@ impl Input {
 
     /// How the input is now.
     pub fn state(&self) -> State {
+        if self.shared.refused() {
+            return State::Refused;
+        }
         State::of(self.shared.state.load(Ordering::Relaxed))
     }
 }
@@ -213,8 +236,6 @@ struct Run {
     opener: Option<Arc<dyn OpenInput>>,
     injector: Option<Box<dyn Injector>>,
     opening: Option<Opening>,
-    /// The person said no: not asked again.
-    refused: bool,
     /// Not opened again before this, and the pause after it.
     reopen: (Instant, Duration),
     held: Held,
@@ -230,7 +251,6 @@ impl Run {
             opener: None,
             injector: None,
             opening: None,
-            refused: false,
             reopen: (Instant::now(), REOPEN_FIRST),
             held: Held::default(),
             mice: BTreeMap::new(),
@@ -304,9 +324,9 @@ impl Run {
         self.opening = None;
         self.held.clear();
         self.mice.clear();
-        self.refused = false;
-        self.said = None;
-        self.set_state(State::Fine);
+        let refused = self.shared.refused();
+        self.said = refused.then_some(News::Refused);
+        self.set_state(if refused { State::Refused } else { State::Fine });
         self.reopen = (Instant::now(), REOPEN_FIRST);
         self.opener = opener;
     }
@@ -328,7 +348,7 @@ impl Run {
         if self.injector.is_some() {
             return true;
         }
-        if self.opening.is_some() || self.refused || now < self.reopen.0 {
+        if self.opening.is_some() || self.shared.refused() || now < self.reopen.0 {
             return false;
         }
         let Some(opener) = self.opener.clone() else {
@@ -387,7 +407,7 @@ impl Run {
     /// The person said no, or stopped it: not opened again by itself.
     fn refuse(&mut self, e: &anyhow::Error) {
         warn!("input: {e:#}; not asked again until Prostir starts again");
-        self.refused = true;
+        self.shared.refused.store(true, Ordering::Relaxed);
         self.set_state(State::Refused);
         self.say(News::Refused);
     }
