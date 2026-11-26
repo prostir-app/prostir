@@ -651,7 +651,7 @@ impl Hands {
 
     /// A pinch or a trigger down on a monitor: the pointer frozen where it pressed
     /// for [`Feel::freeze_ms`] or until the ray turns [`Feel::freeze_deg`], then it
-    /// drags. A hand's button waits (with the "hold" and middle pinch takes): moved,
+    /// drags. A hand's button waits: moved past the freeze,
     /// it goes down where it pressed; let go, a click (a right one held long with the
     /// middle pinch take); held still, "hold" takes the monitor.
     #[allow(clippy::too_many_arguments, reason = "the frame's parts, each needed")]
