@@ -35,7 +35,7 @@ pub struct Settings {
     /// `window-language`), written only when not the default.
     pub window: prostir_api::WindowLook,
     /// Each headset's role and rights, by its key (hex): `access KEY main input mic`.
-    /// A headset without a line is the main one, with every right.
+    /// A headset without a line has [`UNLISTED`].
     pub access: BTreeMap<String, Access>,
 }
 
@@ -55,9 +55,30 @@ impl Settings {
 
     /// The role and rights of the headset with key `key`.
     pub fn access_of(&self, key: &[u8; 32]) -> Access {
-        self.access.get(&hex(key)).copied().unwrap_or(Access::MAIN)
+        self.access.get(&hex(key)).copied().unwrap_or(UNLISTED)
+    }
+
+    /// Gives the headset with key `key` the input right or takes it: its line then
+    /// has its other rights as they were (those of [`UNLISTED`] without a line).
+    /// Whether that changed anything.
+    pub fn set_input(&mut self, key: &[u8; 32], on: bool) -> bool {
+        let mut a = self.access_of(key);
+        if a.may(perms::INPUT) == on {
+            return false;
+        }
+        a.perms ^= perms::INPUT;
+        self.access.insert(hex(key), a);
+        true
     }
 }
+
+/// The role and rights of a paired headset without an `access` line: the main one,
+/// with every right but the mouse and keyboard (and the clipboard), which the person
+/// at the PC allows for each headset.
+pub const UNLISTED: Access = Access {
+    role: role::MAIN,
+    perms: perms::ALL & !(perms::INPUT | perms::CLIPBOARD),
+};
 
 /// A key as `access` lines name it.
 pub(super) fn hex(key: &[u8; 32]) -> String {

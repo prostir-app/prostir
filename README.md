@@ -615,7 +615,11 @@ number and its place in the headset, and comes back there (the eight seen last a
 remembered). Another monitor in the same
 connector is a new display with a place of its own.
 
-One headset is the main one and may do everything. A headset can be given less with a
+One headset is the main one and may do everything but control the PC's mouse and
+keyboard, which you allow for each headset on the PC: the first time a headset tries,
+the PC asks (a notification, the tray, the settings window), and the switch "Mouse and
+keyboard control" on the Headsets page of the settings window, or `prostir ctl input
+on|off HEADSET`, changes it at any time. A headset can be given more or less with a
 line of its own in `settings.txt`, by its key (the first word of its line in
 `~/.config/prostir/paired_headsets`):
 
@@ -623,9 +627,11 @@ line of its own in `settings.txt`, by its key (the first word of its line in
 access 3f9a…(64 hex digits) guest input
 ```
 
-`main` or `guest`, then its rights: `input` (the mouse following the gaze, moving a
-window to a monitor), `mic`, `changes` (monitors and the PC's settings), `private`
-(notifications, window titles, screenshots), `camera` and `clipboard` (for later). A
+`main` or `guest`, then its rights: `input` (clicks, the wheel, touches, the mouse
+following the gaze, moving a window to a monitor), `mic`, `changes` (monitors and the
+PC's settings), `private` (notifications, window titles, screenshots), `camera` and
+`clipboard` (for later). Without a line a headset is `main` with every right but
+`input` and `clipboard`; allowing the mouse and keyboard writes its line. A
 guest's arrangement does not move the desktop, and its volume does not change the
 PC's. A line with a word that is none of these (a typo) gives that headset no rights
 at all until it is put right, and the PC's log says so.

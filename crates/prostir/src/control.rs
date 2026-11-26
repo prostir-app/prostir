@@ -14,6 +14,9 @@ pub(super) struct Control {
     /// Commands for the headset from the tray and the local API, and who waits for
     /// what came of each.
     pub(crate) for_headset: VecDeque<(Asked<Command>, Option<api::Reply>)>,
+    /// The name of the headset the tray asks about: may it use the mouse and
+    /// keyboard (see `allow_input`).
+    pub(crate) input_ask: Option<String>,
 }
 
 impl Control {
@@ -57,6 +60,7 @@ impl Control {
             desktop_stuck: displays.is_some_and(Displays::desk_stuck),
             usb_large: displays.and_then(Displays::large_mbit),
             desktop_unusable,
+            input_ask: self.input_ask.clone(),
         };
         if self.shown.as_ref() != Some(&status) {
             tray::set_status(self.tray.as_ref(), status.clone());
@@ -132,6 +136,12 @@ impl Brain {
                 info!("pairing a new headset: from the tray");
             }
             TrayCommand::StopPairing => self.door.stop_pairing(),
+            TrayCommand::AllowInput => {
+                if let Some(key) = self.input_asks.first_waiting() {
+                    info!("the person at the PC allows the mouse and keyboard: from the tray");
+                    self.set_input(&key, true);
+                }
+            }
             TrayCommand::Quit => {
                 self.quit = true;
                 self.quit_asked = true;

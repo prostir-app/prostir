@@ -216,6 +216,48 @@ fn outcome_card(ui: &mut Ui, v: &mut View<'_, '_>, o: &Outcome) {
     });
 }
 
+/// A headset's mouse and keyboard on this PC: the question while it waits for an
+/// answer, and the switch.
+fn input_right(ui: &mut Ui, v: &mut View<'_, '_>, h: &Headset) {
+    if v.ui.unsupported.contains("set_input") {
+        return;
+    }
+    let tk = v.tk;
+    let p = tk.p;
+    let on = h.rights.iter().any(|r| r == "input");
+    let set = |on| {
+        Action::Send(Request::SetInput {
+            headset: h.key.clone(),
+            on,
+        })
+    };
+    ui.add_space(tk.th.shape.padding);
+    if h.asks_input && !on {
+        text(
+            ui,
+            tk.f("window-hs-input-ask", &[("name", (&h.name).into())]),
+            tk.body_m(),
+            p.text,
+        );
+        ui.add_space(tk.th.shape.spacing);
+        ui.horizontal(|ui| {
+            if w::button(ui, tk, &tk.t("window-hs-input-allow"), Kind::Primary, true).clicked() {
+                v.out.push(set(true));
+            }
+            if w::button(ui, tk, &tk.t("window-hs-input-later"), Kind::Quiet, true).clicked() {
+                v.out.push(set(false));
+            }
+        });
+        ui.add_space(tk.th.shape.padding);
+    }
+    let label = tk.t("window-hs-input");
+    w::row(ui, tk, &label, Some(&tk.t("window-hs-input-desc")), |ui| {
+        if let Some(on) = w::switch(ui, tk, &label, on, true) {
+            v.out.push(set(on));
+        }
+    });
+}
+
 pub(super) fn headsets(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let tk = v.tk;
     let p = tk.p;
@@ -349,6 +391,7 @@ pub(super) fn headsets(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                         });
                     },
                 );
+                input_right(ui, v, h);
             }
             if i + 1 < n {
                 w::divider(ui, tk);

@@ -840,11 +840,17 @@ a `Request` or `Command` of an unknown kind gets `UNSUPPORTED`, an unknown prese
 
 ### Rights
 
-The host checks the rights of the headset (`Access`, told to it as a part). Without a
-line of its own in the host's `settings.txt` a headset is the main one with every
-right, so a single headset can do everything; a line of its own with a word that is
-no role or right gives it no rights (a guest), never every right. A request without its right fails
-`NOT_ALLOWED`; anything else without its right is dropped and logged.
+The host checks the rights of the headset (`Access`, told to it as a part, again
+whenever it changes). Without a line of its own in the host's `settings.txt` a headset
+is the main one with every right but input and the clipboard: those the person at the
+host gives each headset (the current host asks the first time a headset without the
+input right sends `MouseTo`, `MouseButton`, `MouseScroll` or `Touch`, or a request
+that needs it, and writes the answer into the headset's line; never from a headset). A
+line of its own with a word that is no role or right gives it no rights (a guest),
+never every right. A request without its right fails `NOT_ALLOWED`; anything else
+without its right is dropped and logged. A right given or taken during a session
+holds at once: the host sends the new `Access` and `HostCaps` (feature 15 named or
+not), and lets go of what the headset held pressed once it has no input right.
 
 One session at a time is the main one. Of several headsets whose line makes them the
 main one, the session that was main already stays so, else the first connected; the
@@ -1489,7 +1495,11 @@ A host that can make input on its desktop names feature 1 (`MouseTo` moves the m
 and, to a headset with the input right, feature 15: then the headset may send mouse
 buttons (`MouseButton`), the wheel (`MouseScroll`) and fingers on a display (`Touch`),
 in the same lane as `MouseTo` and in the order they happen. Points are pixels of the
-display's picture as in `MouseTo` and `CursorAt`.
+display's picture as in `MouseTo` and `CursorAt`. `MouseTo` needs the input right
+too: a host names feature 1 to every headset, so one without the right may send it,
+and the host takes that as asking for the right (see [Rights](#rights)). A headset
+whose `Access` lacks the input right says so to its user where a press on a monitor of
+that host goes nowhere, and where it is given (implementation-defined).
 
 - **Buttons.** `MouseButton` moves the mouse to its point, then presses or lets go.
   A press of a button already down, or a release of one not down, changes nothing.

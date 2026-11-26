@@ -213,6 +213,14 @@ pub enum Request {
         headset: String,
     },
     ForgetAll,
+    /// Gives a paired headset the input right (the mouse and keyboard from the
+    /// headset) or takes it, by its `key`, its whole key or its name: kept in
+    /// `settings.txt`, and its session has it at once. Off answers the question
+    /// `asks_input` shows as "not now".
+    SetInput {
+        headset: String,
+        on: bool,
+    },
     /// Opens the settings window.
     ShowSettings,
     Quit,
@@ -259,6 +267,7 @@ pub const REQUESTS: &[&str] = &[
     "pairing_code",
     "forget_headset",
     "forget_all",
+    "set_input",
     "show_settings",
     "quit",
 ];
@@ -729,8 +738,13 @@ pub struct Headset {
     pub last_seen: Option<u64>,
     /// Its role by its line in `settings.txt` (a headset without one is `main`).
     pub role: Role,
-    /// Its rights: `input`, `mic`, `camera`, `clipboard`, `changes`, `private`.
+    /// Its rights: `input`, `mic`, `camera`, `clipboard`, `changes`, `private`. A
+    /// headset without a line in `settings.txt` has every one but `input` and
+    /// `clipboard`.
     pub rights: Vec<String>,
+    /// It tried to use the mouse without the input right, and the person at the PC is
+    /// asked whether it may (`set_input` answers).
+    pub asks_input: bool,
     /// Its session, while it is connected.
     pub session: Option<Session>,
 }
@@ -1112,6 +1126,10 @@ mod tests {
                 headset: "a1b2c3d4e5f6".into(),
             },
             Request::ForgetAll,
+            Request::SetInput {
+                headset: "Quest 3".into(),
+                on: true,
+            },
             Request::ShowSettings,
             Request::Quit,
         ]
@@ -1268,6 +1286,7 @@ mod tests {
                 last_seen: Some(1_795_000_000),
                 role: Role::Main,
                 rights: vec!["input".into(), "mic".into()],
+                asks_input: false,
                 session: Some(Session {
                     via: Via::Wifi,
                     worn: true,
@@ -1388,6 +1407,7 @@ mod tests {
             r#""window":{"theme":"system","palette":"ink","language":null},"autostart":true,"#,
             r#""headsets":[{"key":"a1b2c3d4e5f6","name":"Quest 3","model":"Quest 3","#,
             r#""app":"0.2.0","last_seen":1795000000,"role":"main","rights":["input","mic"],"#,
+            r#""asks_input":false,"#,
             r#""session":{"via":"wifi","worn":true,"battery":{"percent":80,"charging":false},"#,
             r#""profile":"Робота","profiles":["","Робота"],"mic_allowed":true,"mic_on":false,"#,
             r#""main":true,"commands":true,"#,

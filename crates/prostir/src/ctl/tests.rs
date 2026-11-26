@@ -107,6 +107,20 @@ fn commands_read_as_requests() {
         }
     );
     assert_eq!(asks("forget --all"), Request::ForgetAll);
+    assert_eq!(
+        asks("input on Quest 3"),
+        Request::SetInput {
+            headset: "Quest 3".into(),
+            on: true
+        }
+    );
+    assert_eq!(
+        asks("input off a1b2c3d4e5f6"),
+        Request::SetInput {
+            headset: "a1b2c3d4e5f6".into(),
+            on: false
+        }
+    );
     assert_eq!(asks("autostart on"), Request::Autostart { on: true });
     let counting = |counting| Request::SetCounting { counting };
     assert_eq!(asks("count yes"), counting(api::Counting::Yes));

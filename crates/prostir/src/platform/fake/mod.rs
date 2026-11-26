@@ -847,7 +847,7 @@ pub mod autostart {
 /// A tray without an icon: a test "clicks" its items by writing their names, one a
 /// line, to `$XDG_RUNTIME_DIR/fake-tray` (`forget`, `recenter`, `settings`, `pair`,
 /// `pair stop`, `autostart on`, `autostart off`, `quit`, `sharp on`, `sharp off`,
-/// `quality 15`, `quality 50`; `activate`: a click on the icon itself), which is
+/// `quality 15`, `quality 50`, `allow input`; `activate`: a click on the icon itself), which is
 /// read and removed once written.
 pub mod tray {
     use crate::events::EventSink;
@@ -876,6 +876,7 @@ pub mod tray {
                     "sharp off" => TrayCommand::SetSharp(false),
                     "quality 15" => TrayCommand::SetBitrate(15),
                     "quality 50" => TrayCommand::SetBitrate(50),
+                    "allow input" => TrayCommand::AllowInput,
                     other => {
                         log::warn!("fake tray: no item {other:?}");
                         continue;
@@ -908,6 +909,9 @@ pub mod tray {
                 "fine"
             }
         );
+        if let Some(name) = &status.input_ask {
+            log::info!("fake tray: allow {name} the mouse and keyboard?");
+        }
     }
 
     pub fn set_battery(_handle: Option<&Handle>, _battery: Option<(u8, bool)>) {}
@@ -951,13 +955,14 @@ pub mod dialogs {
         false
     }
 
-    /// A notification with a button: in the log, and a test "presses" the button by
-    /// writing `click` to `$XDG_RUNTIME_DIR/fake-notice`, or closes it with `close`.
+    /// A notification with buttons: in the log, and a test "presses" the first button
+    /// by writing `click` to `$XDG_RUNTIME_DIR/fake-notice` (another with `click N`,
+    /// from 0), or closes it with `close`.
     pub struct Notice {
         read: std::fs::File,
     }
 
-    pub fn notice(title: &str, body: &str, button: &str, _plain: &str) -> Option<Notice> {
+    pub fn notice(title: &str, body: &str, buttons: &[&str], _plain: &str) -> Option<Notice> {
         use std::os::fd::FromRawFd;
         let mut fds = [0; 2];
         // SAFETY: pipe2 fills the two descriptors, owned right below.
@@ -975,14 +980,20 @@ pub mod dialogs {
         let watched = super::watch_file("fake-notice", move |text| {
             use std::io::Write;
             let mut write = write.lock().unwrap();
-            match text.trim() {
-                "click" => {
+            let text = text.trim();
+            let button = match text.strip_prefix("click") {
+                Some("") => Some(0),
+                Some(n) => n.trim().parse::<usize>().ok(),
+                None => None,
+            };
+            match (text, button) {
+                (_, Some(n)) => {
                     if let Some(w) = write.as_mut() {
-                        let _ = w.write_all(b"pair\n");
+                        let _ = w.write_all(format!("b{n}\n").as_bytes());
                     }
                 }
-                "close" => {}
-                other => {
+                ("close", _) => {}
+                (other, None) => {
                     log::warn!("fake notice: no {other:?}");
                     return true;
                 }
@@ -994,7 +1005,7 @@ pub mod dialogs {
         if !watched {
             return None;
         }
-        log::info!("notification: {title}: {body} [{button}]");
+        log::info!("notification: {title}: {body} [{}]", buttons.join("] ["));
         Some(Notice { read })
     }
 
@@ -1004,13 +1015,20 @@ pub mod dialogs {
             self.read.as_raw_fd()
         }
 
-        pub fn check(&mut self) -> Option<bool> {
+        pub fn check(&mut self) -> Option<crate::platform::Said> {
+            use crate::platform::Said;
             use std::io::Read;
             let mut buf = [0u8; 16];
             match self.read.read(&mut buf) {
-                Ok(n) if n > 0 => Some(buf[..n].starts_with(b"pair")),
+                Ok(n) if n > 0 => Some(
+                    String::from_utf8_lossy(&buf[..n])
+                        .trim()
+                        .strip_prefix('b')
+                        .and_then(|n| n.parse().ok())
+                        .map_or(Said::Closed, Said::Button),
+                ),
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => None,
-                _ => Some(false),
+                _ => Some(Said::Closed),
             }
         }
     }

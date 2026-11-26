@@ -1,5 +1,6 @@
 // Every unsafe block says why it is sound.
 #![deny(clippy::undocumented_unsafe_blocks)]
+mod allow_input;
 mod api;
 mod brain;
 mod cli;
@@ -146,6 +147,8 @@ struct Brain {
     retiring: Vec<worker::Retired>,
     /// The PC's Wi-Fi, as found when a headset last connected over the network.
     wifi: Option<api::Wifi>,
+    /// The headsets asked for the input right while Prostir runs (see `allow_input`).
+    input_asks: allow_input::Asks,
 }
 
 impl Brain {
@@ -287,8 +290,13 @@ impl Brain {
                 else {
                     return;
                 };
-                if session.handle(msg, came, displays, &mut self.store) {
+                let changed = session.handle(msg, came, displays, &mut self.store);
+                let wants_input = session.take_input_wish();
+                if changed {
                     self.headsets_changed();
+                }
+                if wants_input {
+                    self.ask_input(key);
                 }
             }
             Event::SessionEnded(id, e) => {
@@ -344,6 +352,7 @@ impl Brain {
                 info!("pairing a new headset: from the notice");
             }
             Event::Notice(false) => self.door.notice_up(false, Instant::now()),
+            Event::InputAnswer(key, answer) => self.input_answered(key, answer),
             Event::Window(on) => {
                 info!(
                     "the settings window {} the session bus",
@@ -1060,6 +1069,7 @@ fn full_with(
         shown_settings: None,
         shown_battery: None,
         for_headset: VecDeque::new(),
+        input_ask: None,
     };
     control.show(None, &store, &TrayLine::default(), 0, false, false);
     let now = Instant::now();
@@ -1099,6 +1109,7 @@ fn full_with(
         desk_unusable: None,
         retiring: Vec::new(),
         wifi: None,
+        input_asks: allow_input::Asks::default(),
     };
 
     // The local API has a state to give from the moment it is on the bus.

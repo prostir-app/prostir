@@ -115,6 +115,7 @@ fn headset(key: &str, name: &str, hours_ago: u64) -> Headset {
         rights: ["input", "mic", "camera", "clipboard", "changes", "private"]
             .map(String::from)
             .to_vec(),
+        asks_input: false,
         session: None,
     }
 }
@@ -738,6 +739,20 @@ impl Inner {
                 }
             }
             Request::ForgetAll => s.headsets.clear(),
+            Request::SetInput { headset, on } => {
+                let Some(h) = s
+                    .headsets
+                    .iter_mut()
+                    .find(|h| h.key == *headset || h.name == *headset)
+                else {
+                    return Err(refused(ApiError::BadArgument, "Такого шолома немає."));
+                };
+                h.rights.retain(|r| r != "input");
+                if *on {
+                    h.rights.insert(0, "input".into());
+                }
+                h.asks_input = false;
+            }
             Request::SoundToHeadset { on } => s.sound.to_headset = *on,
             // As the service: only while the headset shares its volume.
             Request::Volume { level } => match &mut s.sound.volume {

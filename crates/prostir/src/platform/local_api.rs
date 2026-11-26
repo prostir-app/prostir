@@ -603,6 +603,15 @@ impl Object {
         .await
     }
 
+    /// The mouse and keyboard from a paired headset, allowed or not.
+    async fn set_input(&self, fingerprint_or_name: String, on: bool) -> Result<(), BusError> {
+        self.done(Request::SetInput {
+            headset: fingerprint_or_name,
+            on,
+        })
+        .await
+    }
+
     async fn show_settings(&self) -> Result<(), BusError> {
         self.done(Request::ShowSettings).await
     }

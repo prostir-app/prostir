@@ -355,6 +355,9 @@ pub struct Pc {
     pub state: PcState,
     /// The menu's requests to it in this session, and its commands waiting for one.
     pub asks: Asks,
+    /// The user was told that this PC does not let the headset use its mouse (said
+    /// once, until it does).
+    pub input_off_said: bool,
 }
 
 /// How a connection ended, as the network thread saw it.
@@ -1027,6 +1030,7 @@ impl Session {
                 label,
                 state: PcState::default(),
                 asks: Asks::default(),
+                input_off_said: false,
             })),
         );
         self.search.update = None;

@@ -87,6 +87,7 @@ pc-ctl-max = max
 pc-ctl-guest = guest
 pc-ctl-main = main
 pc-ctl-connected-2 = , connected
+pc-ctl-input-allowed = , mouse and keyboard
 pc-ctl-prostir-is-not-running-waiting = Prostir is not running, waiting
 pc-ctl-prostir-is-running = Prostir is running
 pc-ctl-headset-connected = Headset connected:
@@ -136,6 +137,7 @@ pc-tray-stop-pairing = Stop pairing
 pc-tray-pair-a-new-headset = Pair a new headset
 pc-tray-forget-paired-headsets = Forget paired headsets
 pc-tray-quit = Quit
+pc-tray-allow-input = Allow { $name } to control the mouse and keyboard
 pc-tray-quality-economy = Economy: 15 Mbit/s
 pc-tray-quality-normal = Normal: 30 Mbit/s
 pc-tray-quality-high = High: 50 Mbit/s
@@ -187,6 +189,7 @@ pc-local-the-headset-s-volume-is-changed = The headset's volume is changed while
 pc-local-this-headset-s-volume-is-not = This headset's volume is not changed from the PC, only with its buttons
 pc-local-no-paired-headset = No paired headset
 pc-local-several-headsets-have-this-name-give = Several headsets have this name: give its key
+pc-local-access-line-mistyped = This headset's access line in settings.txt has a mistake: correct it first
 pc-local-the-headset-s-system-does-not = The headset's system does not let it record its microphone
 pc-local-process = process
 pc-local-prostir-is-already-running = Prostir is already running
@@ -235,6 +238,12 @@ pc-session-the-desktop-does-not-respond = The desktop does not respond
 
 pc-input-not-allowed = Controlling the mouse from the headset is not allowed on this PC. It can be allowed again after Prostir restarts.
 pc-input-unavailable = The PC's desktop could not open its input. Clicks from the headset do nothing for now.
+pc-input-ask-title = Mouse and keyboard
+pc-input-ask = { $name } wants to control the mouse and keyboard on this PC. Allow?
+pc-input-ask-plain = { $name } wants to control the mouse and keyboard on this PC. You can allow it in the Prostir window, under Headsets.
+pc-input-ask-allow = Allow
+pc-input-ask-later = Not now
+pc-input-a-headset = Headset
 
 ## src/wake.rs
 
@@ -487,6 +496,11 @@ window-hs-last = Last connected { $when }
 window-hs-never = Last connected: not known
 window-hs-app = Prostir { $app }, key { $key }
 window-hs-key = Key { $key }
+window-hs-input = Mouse and keyboard control
+window-hs-input-desc = Clicks, the wheel, touches and the mouse following the gaze from this headset.
+window-hs-input-ask = { $name } wants to control the mouse and keyboard on this PC. Allow?
+window-hs-input-allow = Allow
+window-hs-input-later = Not now
 window-ago-now = just now
 window-ago-minutes = { $n ->
     [one] { $n } minute ago
@@ -811,6 +825,7 @@ headset-pc-display-shown = Shown
 headset-pc-display-hidden = Hidden
 headset-pc-displays = PC displays
 headset-pc-display-limit = the PC's limit reached
+headset-pc-input-off = Mouse control is off on the PC. Turn it on in the Prostir window on the PC, under Headsets.
 # $page (Number): the page shown; $pages (Number): how many pages there are
 headset-page-of = Page { $page } of { $pages }
 headset-scale = Scale

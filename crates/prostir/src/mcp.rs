@@ -402,7 +402,7 @@ impl Server {
                 fields.insert("request".into(), request.into());
                 let request = Request::from_json(&Value::Object(fields).to_string())
                     .map_err(|f| json!({"error": f.error.name(), "text": f.text}))?;
-                not_a_yes_to_counting(&request)?;
+                the_persons_own(&request)?;
                 let answer = self.ask(&request)?;
                 Ok(vec![text(&answer.to_json())])
             }
@@ -412,7 +412,7 @@ impl Server {
                 };
                 let request = Request::from_json(&request.to_string())
                     .map_err(|f| json!({"error": f.error.name(), "text": f.text}))?;
-                not_a_yes_to_counting(&request)?;
+                the_persons_own(&request)?;
                 let answer = self.ask(&request)?;
                 Ok(vec![text(&answer.to_json())])
             }
@@ -706,15 +706,20 @@ fn text(text: &str) -> Value {
 }
 
 /// Arguments that do not read.
-/// Counting this PC needs the person's own yes: an agent never gives it, by the
-/// tool or by `call`.
-fn not_a_yes_to_counting(request: &Request) -> Result<(), Value> {
+/// Counting this PC, and the mouse and keyboard from a headset, need the person's
+/// own yes: an agent never gives it, by the tool or by `call`.
+fn the_persons_own(request: &Request) -> Result<(), Value> {
     match request {
         Request::SetCounting {
             counting: crate::api::Counting::Yes,
         } => Err(bad(
             "set_counting: yes is the person's own answer, given in the settings window, \
              the tray or `prostir ctl count yes`; an agent can set no or unasked",
+        )),
+        Request::SetInput { on: true, .. } => Err(bad(
+            "set_input: allowing the mouse and keyboard is the person's own choice, made in \
+             the settings window, the tray, the notification or `prostir ctl input on`; an \
+             agent can turn them off",
         )),
         _ => Ok(()),
     }
@@ -1192,6 +1197,19 @@ static TOOLS: &[Tool] = &[
         does: Does::Ask("forget_headset"),
         touch: Touch::Destroys,
     },
+    asks(
+        "set_input",
+        "Takes the mouse and keyboard from a paired headset (on false: its clicks, the wheel, \
+         touches and the mouse following its gaze no longer reach the PC), kept in \
+         settings.txt; it also answers not now to the question asks_input shows. \
+         Allowing them (on true) is the person's own choice, made in the settings window, \
+         the tray, the notification or `prostir ctl input on`: an agent can only turn \
+         them off. The state's headsets[].rights has input where allowed.",
+        &[
+            Arg::of("headset", "string", "its key, its whole key or its name"),
+            ON,
+        ],
+    ),
     Tool {
         name: "forget_all",
         description: "Forgets every paired headset.",

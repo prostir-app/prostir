@@ -222,6 +222,19 @@ impl ksni::Tray for Tray {
             );
             items.push(MenuItem::Separator);
         }
+        if let Some(name) = &self.status.input_ask {
+            items.push(
+                StandardItem {
+                    label: crate::i18n::f("pc-tray-allow-input", &[("name", name.as_str().into())]),
+                    activate: Box::new(|tray: &mut Self| {
+                        tray.commands.tray(Command::AllowInput);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            items.push(MenuItem::Separator);
+        }
         items.extend([
             StandardItem {
                 label: self.status_line(),

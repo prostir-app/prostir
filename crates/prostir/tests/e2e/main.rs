@@ -65,7 +65,14 @@ pub fn connect(pc: &Pc, keys: &mut Keys) -> FakeHeadset {
 /// monitor.
 pub fn session(name: &str, options: &Options) -> (TestDir, Pc, Keys, FakeHeadset) {
     let dir = TestDir::new(name);
-    dir.save_monitors(TWO_MONITORS);
+    if options.input {
+        // As this version keeps them: a `settings.txt` there (the access line goes in
+        // it) means no `monitors.txt` is moved over.
+        dir.save_screens("next 200\nrow\nscreen 0 640x360\nscreen 1 480x272\n");
+        dir.save_settings("mirror off\n");
+    } else {
+        dir.save_monitors(TWO_MONITORS);
+    }
     let mut keys = dir.pair();
     let pc = Pc::start(&dir, options);
     let mut headset = connect(&pc, &mut keys);
