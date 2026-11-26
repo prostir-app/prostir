@@ -67,14 +67,12 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../src/main_loop/shell.rs"),
     ),
     (
-        "main_loop/spheres.rs",
-        include_str!("../src/main_loop/spheres.rs"),
-    ),
-    (
         "main_loop/start.rs",
         include_str!("../src/main_loop/start.rs"),
     ),
-    ("view.rs", include_str!("../src/view.rs")),
+    ("view/mod.rs", include_str!("../src/view/mod.rs")),
+    ("view/fx.rs", include_str!("../src/view/fx.rs")),
+    ("palette.rs", include_str!("../src/palette.rs")),
     (
         "interaction/mod.rs",
         include_str!("../src/interaction/mod.rs"),

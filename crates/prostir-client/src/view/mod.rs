@@ -4,6 +4,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod fx;
+
 use crate::app::Model;
 use crate::caps::Offer;
 use crate::ids::DisplayKey;

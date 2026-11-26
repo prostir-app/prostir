@@ -1,6 +1,8 @@
-//! The only thing this app renders itself: tracked hands and pointer rays, drawn
-//! as shaded sphere impostors into a transparent projection layer on top of the
-//! monitors. Frames with nothing to show render nothing.
+//! The only thing this app renders itself: tracked hands, pointer rays and the effects
+//! that answer them (the core's `view::fx`), drawn as shaded sphere impostors, soft
+//! lights and rings into a transparent projection layer on top of the monitors.
+//! Frames with nothing to show render nothing. The instances go into a buffer made
+//! once (larger only if a frame ever needs more), so a frame takes no memory.
 
 use std::ptr;
 
@@ -10,135 +12,10 @@ use glow::HasContext;
 use openxr as xr;
 
 use crate::platform::openxr::{Gfx, quat, vec3};
+use crate::view::fx::{self, Fx, Kind};
 
-/// A sphere to draw: world position, radius in metres, straight (non-premultiplied)
-/// linear RGBA.
-#[derive(Debug, Clone, Copy)]
-pub struct Sphere {
-    pub center: Vec3,
-    pub radius: f32,
-    pub color: [f32; 4],
-    pub kind: Kind,
-}
-
-/// How a [`Sphere`] is drawn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    /// A shaded ball (hands, rays).
-    Ball,
-    /// A soft light that brightens what is behind it: where a fingertip or a ray is
-    /// about to touch the menu, like the system's own windows.
-    Glow,
-    /// A thin bright ring: a touch that just happened.
-    Ring,
-}
-
-impl Sphere {
-    pub fn glow(center: Vec3, radius: f32, color: [f32; 4]) -> Self {
-        Self {
-            center,
-            radius,
-            color,
-            kind: Kind::Glow,
-        }
-    }
-
-    pub fn ring(center: Vec3, radius: f32, color: [f32; 4]) -> Self {
-        Self {
-            center,
-            radius,
-            color,
-            kind: Kind::Ring,
-        }
-    }
-}
-
-const HAND_COLOR: [f32; 4] = [0.62, 0.66, 0.74, 1.0];
-const RAY_COLOR: [f32; 3] = [0.85, 0.92, 1.0];
-
-/// XR_EXT_hand_tracking joint chains: wrist → fingertip for each finger.
-const FINGERS: [&[usize]; 5] = [
-    &[1, 2, 3, 4, 5],
-    &[1, 6, 7, 8, 9, 10],
-    &[1, 11, 12, 13, 14, 15],
-    &[1, 16, 17, 18, 19, 20],
-    &[1, 21, 22, 23, 24, 25],
-];
-/// Across the palm, so it reads as a hand rather than five sticks.
-const PALM: [&[usize]; 2] = [&[6, 11, 16, 21], &[7, 12, 17, 22]];
-
-/// Spheres along the bones of one tracked hand: `(position, radius)` per joint;
-/// `alpha` below 1 makes it see-through.
-pub fn hand_spheres(joints: &[(Vec3, f32); 26], alpha: f32, out: &mut Vec<Sphere>) {
-    let color = [
-        HAND_COLOR[0],
-        HAND_COLOR[1],
-        HAND_COLOR[2],
-        HAND_COLOR[3] * alpha,
-    ];
-    let mut segment = |a: usize, b: usize, scale: f32| {
-        let (pa, ra) = joints[a];
-        let (pb, rb) = joints[b];
-        let steps = ((pa.distance(pb) / 0.004).ceil() as usize).max(1);
-        for i in 0..=steps {
-            let t = i as f32 / steps as f32;
-            out.push(Sphere {
-                center: pa.lerp(pb, t),
-                radius: (ra + (rb - ra) * t) * scale,
-                color,
-                kind: Kind::Ball,
-            });
-        }
-    };
-    for chain in FINGERS {
-        for w in chain.windows(2) {
-            segment(w[0], w[1], 0.95);
-        }
-    }
-    for chain in PALM {
-        for w in chain.windows(2) {
-            segment(w[0], w[1], 1.3);
-        }
-    }
-}
-
-/// Only the fingertips of one tracked hand (the five tips, a little larger than their
-/// joints), `alpha` below 1 see-through.
-pub fn tip_spheres(joints: &[(Vec3, f32); 26], alpha: f32, out: &mut Vec<Sphere>) {
-    for tip in [5, 10, 15, 20, 25] {
-        let (center, radius) = joints[tip];
-        out.push(Sphere {
-            center,
-            radius: radius * 1.4,
-            color: [
-                HAND_COLOR[0],
-                HAND_COLOR[1],
-                HAND_COLOR[2],
-                HAND_COLOR[3] * alpha,
-            ],
-            kind: Kind::Ball,
-        });
-    }
-}
-
-/// A dotted pointer ray from `origin` for `length` metres.
-pub fn ray_spheres(origin: Vec3, dir: Vec3, length: f32, out: &mut Vec<Sphere>) {
-    let steps = (length / 0.025) as usize;
-    for i in 1..=steps {
-        let t = i as f32 / steps as f32;
-        out.push(Sphere {
-            center: origin + dir * (length * t),
-            radius: 0.0018,
-            color: [
-                RAY_COLOR[0],
-                RAY_COLOR[1],
-                RAY_COLOR[2],
-                0.85 * (1.0 - t * 0.7),
-            ],
-            kind: Kind::Ball,
-        });
-    }
-}
+/// Floats of one instance as the shader takes them: centre and radius, colour, kind.
+const FLOATS: usize = 9;
 
 const VERTEX: &str = r"#version 300 es
 layout(location = 0) in vec2 corner;
@@ -209,9 +86,11 @@ pub struct Overlay {
     height: u32,
     /// Whether the last frame drew something (and the layer should be shown).
     drawn: bool,
-    /// The spheres as the shader takes them, kept from frame to frame and filled
+    /// The instances as the shader takes them, kept from frame to frame and filled
     /// again.
     data: Vec<f32>,
+    /// How many instances the GL buffer holds.
+    room: usize,
 }
 
 impl Overlay {
@@ -266,9 +145,21 @@ impl Overlay {
             gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 8, 0);
             let instances = gl.create_buffer().map_err(|e| anyhow!(e))?;
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(instances));
+            gl.buffer_data_size(
+                glow::ARRAY_BUFFER,
+                (fx::CAPACITY * FLOATS * 4) as i32,
+                glow::DYNAMIC_DRAW,
+            );
             for (loc, size, offset) in [(1, 4, 0), (2, 4, 16), (3, 1, 32)] {
                 gl.enable_vertex_attrib_array(loc);
-                gl.vertex_attrib_pointer_f32(loc, size, glow::FLOAT, false, 36, offset);
+                gl.vertex_attrib_pointer_f32(
+                    loc,
+                    size,
+                    glow::FLOAT,
+                    false,
+                    (FLOATS * 4) as i32,
+                    offset,
+                );
                 gl.vertex_attrib_divisor(loc, 1);
             }
             gl.bind_vertex_array(None);
@@ -320,21 +211,22 @@ impl Overlay {
                 width,
                 height,
                 drawn: false,
-                data: Vec::new(),
+                data: Vec::with_capacity(fx::CAPACITY * FLOATS),
+                room: fx::CAPACITY,
             })
         }
     }
 
-    /// Draws `spheres` for both eyes. With nothing to draw, nothing is rendered
-    /// and [`Overlay::layer`] returns `None`.
+    /// Draws `list` for both eyes. With nothing to draw, nothing is rendered and
+    /// [`Overlay::layer_views`] returns `None`.
     pub fn render(
         &mut self,
         gl: &glow::Context,
         views: &[xr::View],
-        spheres: &mut [Sphere],
+        list: &mut [Fx],
     ) -> Result<()> {
         self.drawn = false;
-        if spheres.is_empty() || views.len() < 2 {
+        if list.is_empty() || views.len() < 2 {
             return Ok(());
         }
         for (eye, view) in self.eyes.iter_mut().zip(views) {
@@ -345,13 +237,13 @@ impl Overlay {
             .inverse();
             // Far to near: correct overlap without a depth buffer (sorted in place:
             // a stable sort would take memory every frame).
-            spheres.sort_unstable_by(|a, b| {
+            list.sort_unstable_by(|a, b| {
                 let za = view_matrix.transform_point3(a.center).z;
                 let zb = view_matrix.transform_point3(b.center).z;
                 za.total_cmp(&zb)
             });
             self.data.clear();
-            self.data.extend(spheres.iter().flat_map(|s| {
+            self.data.extend(list.iter().flat_map(|s| {
                 let kind = match s.kind {
                     Kind::Ball => 0.0,
                     Kind::Glow => 1.0,
@@ -387,8 +279,17 @@ impl Overlay {
                 );
                 gl.bind_vertex_array(Some(self.vao));
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.instances));
-                gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes(&self.data), glow::STREAM_DRAW);
-                gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, spheres.len() as i32);
+                if list.len() > self.room {
+                    // More than ever before: a larger buffer, once.
+                    self.room = list.len().next_power_of_two();
+                    gl.buffer_data_size(
+                        glow::ARRAY_BUFFER,
+                        (self.room * FLOATS * 4) as i32,
+                        glow::DYNAMIC_DRAW,
+                    );
+                }
+                gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes(&self.data));
+                gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, list.len() as i32);
                 gl.bind_vertex_array(None);
                 gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }

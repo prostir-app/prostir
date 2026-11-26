@@ -12,7 +12,7 @@
 //! The loop is [`run`]; its parts each have a module: the start (`start`), the
 //! model's effects and the threads' news (`shell`), Android's and OpenXR's events
 //! (`events`), the frame's input (`input`), the selftest's asks (`acts`), the
-//! pictures (`pictures`), the hands and rays (`spheres`) and the layers (`compose`,
+//! pictures (`pictures`), the hands, rays and effects (the core's `view::fx`) and the layers (`compose`,
 //! as the core's `layers::plan` orders them and keeps them within what the
 //! compositor takes).
 
@@ -29,7 +29,6 @@ mod input;
 mod no_selftest;
 mod pictures;
 mod shell;
-mod spheres;
 mod start;
 
 use std::path::PathBuf;
@@ -285,14 +284,10 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         stage
             .pictures
             .metrics(&xr.gl, &shell.model, &shell.video, now)?;
-        // Hands and rays: only rendered when there is something to show.
-        spheres::fill(
-            &mut kept.buffers.spheres,
-            &mut shell.model,
-            &kept.hands,
-            &input,
-            now,
-        );
+        // Hands, rays and effects: only rendered when there is something to show.
+        kept.buffers
+            .effects
+            .fill(&mut shell.model, &kept.hands, &input, now);
         let layers_wanted = compose::end(&xr, &mut stage, &mut shell, &mut kept, now, time)?;
         if let (Some(t), Some(start)) = (test.as_deref_mut(), &frame_start) {
             t.frame_end(

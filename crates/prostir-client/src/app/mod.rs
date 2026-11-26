@@ -704,6 +704,13 @@ impl Model {
         crate::interaction::trial::Trial::default()
     }
 
+    /// The colours, opacity and sizes of what the headset draws over the monitors (in
+    /// the preview build, as strong as "Hands (trial)" says).
+    pub fn palette(&self) -> crate::palette::Palette {
+        let t = self.trial();
+        crate::palette::Palette::DEFAULT.scaled(t.fx_size(), t.fx_alpha())
+    }
+
     /// The PCs' mouse pointers, where the headset draws them.
     pub fn cursors(&self) -> &Cursors {
         &self.cursors

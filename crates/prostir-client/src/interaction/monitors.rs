@@ -767,6 +767,7 @@ impl Hands {
                 self.hands[h].phase = Phase::Idle;
                 if let Some(grab) = start_grab(scene, p.id, ray) {
                     scene.haptic(h);
+                    self.took(now, ray.origin + ray.dir * grab.distance);
                     self.hands[h].phase =
                         Phase::Carry(Carry::by_ray(self.reach(grab, ray, head, h)));
                 }
@@ -855,6 +856,7 @@ impl Hands {
             };
             if let Some(grab) = start_grab(scene, id, ray) {
                 scene.haptic(h);
+                self.took(now, at);
                 self.hands[h].phase = Phase::Carry(Carry {
                     grab: self.reach(grab, ray, head, h),
                     palm: Some(gesture),
