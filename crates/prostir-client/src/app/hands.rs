@@ -203,6 +203,11 @@ impl Scene for Model {
         // what the drag is compared with.
         self.rev += 1;
         let at = self.world.hold(thing, &self.settings);
+        // Locked: a monitor is not taken, and the user is told why.
+        if at.is_none() && self.settings.locked && thing.display().is_some() {
+            let text = self.texts().t("headset-note-locked").to_owned();
+            self.show_toast(text);
+        }
         self.map_moved();
         at
     }

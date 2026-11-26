@@ -41,7 +41,10 @@ pub use limit::{Bounds, Keep, limit, within};
 pub use prostir_layout::space::cuts;
 pub use saved::{Arrangement, Desk, PixelSize, parse_keyboard, write_keyboard};
 pub(crate) use saved::{parse_place, parse_radius, parse_tilt, placed_well, upright, write_place};
-pub use stick::{Stick, StickScratch, stick, stick_on_wall};
+pub use stick::{
+    MATCH_SIZE, Stick, StickScratch, carried_with, glued_group, seen_as_before, stick, stick_group,
+    stick_group_on_wall, stick_on_wall,
+};
 
 pub use prostir_layout::circle::{OVERHEAD_PITCH, RADIUS, VIEW_RADIUS};
 

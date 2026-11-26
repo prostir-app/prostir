@@ -2,8 +2,10 @@
 //! the hands and the menu's view as the shell runs them each frame, with the network
 //! and the system quiet, counted by an allocator that counts this thread's
 //! allocations. A quiet frame, a ray on a monitor or on the menu, and a drag of a
-//! monitor with the menu closed or open, or over the seam between two glued ones (the
-//! magnet turning it there), allocate nothing; the menu's state is made
+//! monitor with the menu closed or open (the main display carrying the one glued
+//! beside it, the magnet asked for the two each frame, step 8.5), or over the seam
+//! between two glued ones (the magnet turning it there), allocate nothing; the menu's
+//! state is made
 //! anew only when what it shows changed. Pointing about the menu's picture, once each
 //! button was pointed at, draws nothing and takes no memory. Step 8's hands (the
 //! preview build's trial): a fingertip touching a monitor, the ray as the mouse with
@@ -559,8 +561,21 @@ fn a_frame_takes_no_memory() {
     };
     let drag = move |i: u32| drag_at(target, i);
     let monitor = |l: &Loop| l.hands.held().any(|t| t.display().is_some());
+    let second = |l: &Loop| {
+        l.m.world()
+            .placement(DisplayKey::new(PC, DisplayId(2)))
+            .expect("placed")
+            .position
+    };
+    let beside_was = second(&l);
+    // The main display, glued beside the other, carries it (step 8.5), the magnet
+    // asked for the group every frame.
     assert_eq!(l.measure(300, drag), (0, 0), "a drag, the menu closed");
     assert!(monitor(&l), "the drag held a monitor");
+    assert!(
+        second(&l).distance(beside_was) > 1e-3,
+        "the other went along"
+    );
     let mut grab = Button::default();
     grab.update(1.0);
     grab.update(0.0);

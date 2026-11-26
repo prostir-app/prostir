@@ -518,6 +518,108 @@ fn the_magnet_needs_a_monitor_almost_against_another() {
     );
 }
 
+/// Let go beside a monitor of nearly its size (10 % smaller), a monitor takes its
+/// height, the shape of its picture kept (step 8.5); much smaller (30 %), it keeps its
+/// own. On a wall the same.
+#[test]
+fn the_magnet_takes_the_neighbours_size() {
+    let two = [(0, 2560, 1440), (1, 2560, 1440)];
+    for wall in [false, true] {
+        let preset = if wall { Preset::Wall } else { Preset::Arc };
+        let laid = arrange(preset, &two, None, None, None);
+        let w = laid[&0].width;
+        for (k, takes) in [(0.9, true), (0.7, false)] {
+            let mut p = laid.clone();
+            let m = p.get_mut(&1).unwrap();
+            // Smaller about its own left edge, 2 cm off its neighbour.
+            m.width *= k;
+            m.position += m.rotation * Vec3::new(-w * (1.0 - k) / 2.0 + 0.02, 0.0, 0.0);
+            let mut scratch = StickScratch::default();
+            let s = if wall {
+                stick_on_wall(&p, &two, (Vec3::ZERO, 0.0), 1, &mut scratch)
+            } else {
+                stick(&p, &two, (Vec3::ZERO, 0.0), 1, &mut scratch)
+            }
+            .expect("sticks");
+            let want = if takes { w } else { w * k };
+            assert!(
+                (s.placement.width - want).abs() < 1e-4,
+                "wall {wall}, {k}: {} wide, not {want}",
+                s.placement.width
+            );
+            if !wall {
+                let mut after = p;
+                after.insert(1, s.placement);
+                assert!(seam(&after[&0], &after[&1]) < 1e-3, "edge to edge");
+            }
+        }
+    }
+}
+
+/// A group of two glued side by side carried away from a third it was glued to, and
+/// let go almost against it: the one of the group next to it sticks to it, and the
+/// group goes along one piece, glued as it was, its size its own (step 8.5).
+#[test]
+fn a_group_sticks_as_one_piece() {
+    let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];
+    let laid = arrange(Preset::Arc, &three, None, None, None);
+    let mut all = Vec::new();
+    glued_group(
+        &laid,
+        &three,
+        Vec3::ZERO,
+        2,
+        &mut StickScratch::default(),
+        &mut all,
+    );
+    assert_eq!(all.len(), 3, "a row is one group");
+    // The one next to 2, and the other.
+    let by = |a: u32| laid[&a].position.distance(laid[&2].position);
+    let (next, far) = if by(0) < by(1) { (0, 1) } else { (1, 0) };
+    let yaw = |p: &Placement| (-p.position.x).atan2(-p.position.z);
+    let away = (yaw(&laid[&next]) - yaw(&laid[&2])).signum() * 0.03;
+    let turn = Quat::from_rotation_y(away);
+    let mut p = laid.clone();
+    for id in [0, 1] {
+        let q = p.get_mut(&id).unwrap();
+        q.position = turn * q.position;
+        q.rotation = (turn * q.rotation).normalize();
+    }
+    let mut group = Vec::new();
+    glued_group(
+        &p,
+        &three,
+        Vec3::ZERO,
+        2,
+        &mut StickScratch::default(),
+        &mut group,
+    );
+    assert_eq!(group, [2], "apart now");
+    let s = stick_group(
+        &p,
+        &three,
+        (Vec3::ZERO, 0.0),
+        far,
+        &[next],
+        None,
+        &mut StickScratch::default(),
+    )
+    .expect("sticks");
+    assert_eq!(s.neighbour, 2);
+    let mut after = p.clone();
+    after.insert(far, s.placement);
+    after.insert(next, carried_with(&p[&next], &p[&far], &s.placement));
+    assert!(
+        seam(&after[&next], &after[&2]) < 1e-3,
+        "edge to edge with 2"
+    );
+    assert!(seam(&after[&far], &after[&next]) < 1e-3, "glued as it was");
+    assert!(
+        (s.placement.width - p[&far].width).abs() < 1e-6,
+        "its own size"
+    );
+}
+
 #[test]
 fn dropped_on_a_seam_it_joins_the_nearer_monitor() {
     let three = [(0, 2560, 1440), (1, 2560, 1440), (2, 2560, 1440)];

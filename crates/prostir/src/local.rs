@@ -40,6 +40,7 @@ fn command_of(request: &Request) -> Option<Command> {
         Request::Focus { on } => Command::FocusMode { on: *on },
         Request::Follow { on } => Command::Follow { on: *on },
         Request::NoLimits { on } => Command::NoLimits { on: *on },
+        Request::Lock { on } => Command::Lock { on: *on },
         Request::Preset { preset } => Command::Preset { preset: *preset },
         _ => return None,
     })
@@ -565,6 +566,7 @@ impl Brain {
             | Request::Focus { .. }
             | Request::Follow { .. }
             | Request::NoLimits { .. }
+            | Request::Lock { .. }
             | Request::Preset { .. } => unsupported(""),
         }
     }

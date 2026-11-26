@@ -169,7 +169,7 @@ fn every_tool_is_listed() {
     let reply = ask(&mut server, "tools/list", &json!({}));
     let tools = reply["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), TOOLS.len());
-    assert_eq!(tools.len(), 37);
+    assert_eq!(tools.len(), 38);
     let mut names = std::collections::BTreeSet::new();
     for t in tools {
         let name = t["name"].as_str().unwrap();
@@ -196,6 +196,7 @@ fn every_tool_is_listed() {
         "show_pc_display",
         "recenter",
         "no_limits",
+        "lock",
         "set_quality",
         "set_codec",
         "pair_new_headset",

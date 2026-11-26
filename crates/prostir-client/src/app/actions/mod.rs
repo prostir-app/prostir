@@ -75,7 +75,8 @@ impl Model {
             | Action::MenuButton(_)
             | Action::Follow(_)
             | Action::MoveAll(_)
-            | Action::Magnet(_) => self.act_look(action),
+            | Action::Magnet(_)
+            | Action::Lock(_) => self.act_look(action),
             Action::ConnectTo(_)
             | Action::ShowKeypad
             | Action::Key(_)

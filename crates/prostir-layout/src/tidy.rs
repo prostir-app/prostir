@@ -22,7 +22,10 @@
 //!   axis, tilted by the row's tilt, without leaning, turned about its own centre; the
 //!   monitors close up side by side in the order of their row, left to right, the mean
 //!   of their directions where it was (the least movement of them all, and no drift
-//!   towards the primary); their mid-lines on one circle, at the mean distance their
+//!   towards the primary); tilted, they close up where their side edges come nearest the
+//!   axis (flat monitors on a cone meet only there, and further out stand a little
+//!   apart, rather than go into each other); their mid-lines on one circle, at the mean
+//!   distance their
 //!   side edges were from the axis; and one line up and down: tops, middles or bottoms,
 //!   whichever the monitors are nearest to, where that line was on average.
 //! - A flat row (monitors parallel and in one plane, a wall) stays in its plane: side
@@ -609,11 +612,21 @@ fn line_up_rows<K: Copy + Ord>(
                     0.001,
                 )
             };
+            // Seen within the bound, a monitor of the row may still go through one of
+            // the row before it in the room (one nearer the eye than the other).
+            let through = |p: K, u: K| {
+                let (a, b) = (
+                    seen_in(p, &lined, &local, turn, Vec3::ZERO),
+                    seen_in(u, &lined, &local, turn, dir * s),
+                );
+                cuts(&a.placement, a.height(), &b.placement, b.height())
+            };
             let fits = || {
                 inner.iter().all(|&p| {
                     rows[r].iter().all(|&u| {
-                        overlap(p, u, &lined, &local, turn, dir * s, over) <= OVERLAP_MAX
-                            || covered(p, u)
+                        (overlap(p, u, &lined, &local, turn, dir * s, over) <= OVERLAP_MAX
+                            || covered(p, u))
+                            && !through(p, u)
                     })
                 })
             };
@@ -763,9 +776,21 @@ fn lined_up<K>(row: &[(K, Placement, PixelSize)], flat: bool) -> bool {
             p.centre + p.right * p.width / 2.0,
         )
     };
-    let together = poses
-        .windows(2)
-        .all(|w| level(sides(&w[0]).1).distance(level(sides(&w[1]).0)) <= SNUG);
+    // Tilted, they stand as far apart on the mid-line as `straighten` leaves them for
+    // their edges nearer the axis to meet.
+    let apart = |a: &Pose, b: &Pose| {
+        if flat {
+            return 0.0;
+        }
+        let radius = level(sides(first).0).length();
+        let tallest = poses.iter().map(|p| p.height).fold(0.0f32, f32::max);
+        let more =
+            |w: f32| cone_half(radius, w, tallest, tilt) - (w / 2.0 / radius).min(1.0).asin();
+        2.0 * radius * ((more(a.width) + more(b.width)) / 2.0).sin()
+    };
+    let together = poses.windows(2).all(|w| {
+        level(sides(&w[0]).1).distance(level(sides(&w[1]).0)) <= apart(&w[0], &w[1]) + SNUG
+    });
     let around = if flat {
         let depth = |p: &Pose| -p.centre.dot(first.face);
         poses.iter().all(|p| {
@@ -807,6 +832,18 @@ fn lined_up<K>(row: &[(K, Placement, PixelSize)], flat: bool) -> bool {
         .all(|(y, p)| (y - p.centre.y).abs() <= SNUG)
 }
 
+/// Half the turn round the axis a monitor `w` wide takes in a row whose side edges'
+/// middles stand on a circle of `radius`, tilted by `tilt` on its cone, `tallest` the
+/// tallest of the row: as seen at the end of its side edges nearer the axis (on a
+/// smaller circle there, so it takes more of a turn), so that neighbours meet at those
+/// ends and go into each other nowhere.
+fn cone_half(radius: f32, w: f32, tallest: f32, tilt: f32) -> f32 {
+    let half = (w / 2.0 / radius).min(1.0).asin();
+    let middle = radius * half.cos();
+    let near = (middle - tallest / 2.0 * tilt.sin().abs()).max(middle * 0.5);
+    (w / 2.0).atan2(near)
+}
+
 /// One row straightened in its own frame (its axis along +Y through the eye at the
 /// origin): see the module's description.
 fn straighten<K: Copy + Ord>(row: &[(K, Placement, PixelSize)]) -> Vec<(K, Placement)> {
@@ -825,7 +862,12 @@ fn straighten<K: Copy + Ord>(row: &[(K, Placement, PixelSize)]) -> Vec<(K, Place
         let widest = poses.iter().map(|p| p.width).fold(0.0f32, f32::max);
         r.max(widest / 2.0 * 1.0001).max(least_radius(widest))
     };
+    // Tilted, the row stands on a cone: at the end of the monitors nearer the axis
+    // their edges are on a smaller circle, so they go round it as wide apart as there
+    // (else their corners there reach into each other).
+    let tallest = poses.iter().map(|p| p.height).fold(0.0f32, f32::max);
     let half = |w: f32| f64::from((w / 2.0 / radius).min(1.0).asin());
+    let half_in = |w: f32| f64::from(cone_half(radius, w, tallest, tilt));
     // Directions around the axis, each near the one before it in the row, so the row
     // keeps its own order and ends (as its rows say, left to right).
     let mut az: Vec<f64> = Vec::with_capacity(row.len());
@@ -837,8 +879,8 @@ fn straighten<K: Copy + Ord>(row: &[(K, Placement, PixelSize)]) -> Vec<(K, Place
     let mut offsets = vec![0.0f64; row.len()];
     let mut x = 0.0f64;
     for (i, p) in poses.iter().enumerate() {
-        offsets[i] = x + half(p.width);
-        x += 2.0 * half(p.width);
+        offsets[i] = x + half_in(p.width);
+        x += 2.0 * half_in(p.width);
     }
     let n = row.len() as f64;
     let start = az.iter().sum::<f64>() / n - offsets.iter().sum::<f64>() / n;
@@ -1170,4 +1212,47 @@ fn close(gap: &dyn Fn(f32) -> Option<f32>, reach: f32) -> Option<f32> {
         }
     }
     Some(way * (near + far) / 2.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A row tilted back as a whole is straightened on its cone: the ends of the edges
+    /// nearer the axis meet, the rest stands a little apart (flat monitors on a cone),
+    /// none goes into the next, and lining it up again finds it lined up already.
+    #[test]
+    fn a_tilted_row_is_lined_up_once() {
+        let px = PixelSize::new(2560, 1440);
+        for tilt in [0.0f32, 0.17, 0.35, 0.6] {
+            let rough: Vec<(u32, Placement, PixelSize)> = (0..3)
+                .map(|i| {
+                    let yaw = (i as f32 - 1.0) * 0.62 + 0.01 * i as f32;
+                    let position = Vec3::new(yaw.sin(), 0.02 * i as f32, -yaw.cos());
+                    let rotation =
+                        (Quat::from_rotation_y(-yaw) * Quat::from_rotation_x(-tilt)).normalize();
+                    let p = Placement {
+                        position,
+                        rotation,
+                        width: 1.25,
+                    };
+                    (i, p, px)
+                })
+                .collect();
+            let row: Vec<(u32, Placement, PixelSize)> = straighten(&rough)
+                .into_iter()
+                .map(|(k, p)| (k, p, px))
+                .collect();
+            assert!(lined_up(&row, false), "tilt {tilt}: {row:?}");
+            for w in row.windows(2) {
+                let (a, b) = (&w[0].1, &w[1].1);
+                let h = a.height(px);
+                assert!(!cuts(a, h, b, h), "tilt {tilt}: through");
+                // Corners: a's right ones, b's left ones (bottom, then top).
+                let (ca, cb) = (a.corners(h), b.corners(h));
+                let meet = ca[1].distance(cb[0]).min(ca[2].distance(cb[3]));
+                assert!(meet < 2e-3, "tilt {tilt}: the near ends {meet} apart");
+            }
+        }
+    }
 }

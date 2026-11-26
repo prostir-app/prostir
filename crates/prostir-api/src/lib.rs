@@ -101,6 +101,10 @@ pub enum Request {
     NoLimits {
         on: bool,
     },
+    /// "Locked": the monitors stay where they are, no hand in the headset takes one.
+    Lock {
+        on: bool,
+    },
     Preset {
         preset: u8,
     },
@@ -235,6 +239,7 @@ pub const REQUESTS: &[&str] = &[
     "focus",
     "follow",
     "no_limits",
+    "lock",
     "preset",
     "add_monitor",
     "remove_monitor",
@@ -307,6 +312,7 @@ impl Request {
                 | Self::Focus { .. }
                 | Self::Follow { .. }
                 | Self::NoLimits { .. }
+                | Self::Lock { .. }
                 | Self::Preset { .. }
         )
     }
@@ -1061,6 +1067,7 @@ mod tests {
             Request::Focus { on: false },
             Request::Follow { on: true },
             Request::NoLimits { on: true },
+            Request::Lock { on: true },
             Request::Preset { preset: 3 },
             Request::AddMonitor {
                 w: 2560,

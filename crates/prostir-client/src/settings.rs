@@ -113,6 +113,9 @@ pub struct Settings {
     pub magnet: bool,
     /// Dragging one monitor moves the whole arrangement.
     pub move_all: bool,
+    /// "Locked": the monitors stay where they are, a hand or a controller takes none
+    /// (the menu's own arranging, and the PC's, still move them).
+    pub locked: bool,
     /// Sound placed on the side of the monitor whose window plays it.
     pub sound_from_screen: bool,
     /// The clock in 12-hour time (2:05 PM) rather than 24-hour (14:05).
@@ -159,6 +162,7 @@ impl Default for Settings {
             follow: false,
             magnet: true,
             move_all: false,
+            locked: false,
             sound_from_screen: false,
             clock_12h: false,
             date_style: DateStyle::LikeMenu,
@@ -206,6 +210,7 @@ impl Settings {
                 Some(("follow", v)) => s.follow = v == "on",
                 Some(("magnet", v)) => s.magnet = v != "off",
                 Some(("move-all", v)) => s.move_all = v == "on",
+                Some(("locked", v)) => s.locked = v == "on",
                 Some(("sound-from-screen", v)) => s.sound_from_screen = v == "on",
                 Some(("clock", v)) => s.clock_12h = v == "12h",
                 Some(("date", v)) => {
@@ -300,7 +305,7 @@ impl Settings {
             out,
             "preset {preset}\ncurve {curve}\nbackground {background}\nhands {hands}\n\
              focus {}\ncinema {}\nlanguage {}\npc-language {}\nintro {}\nkeyboard-window {}\nmic {}\ntab {}\nfollow {}\n\
-             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\nmagnet {}\nmove-all {}\nsound-from-screen {}\nclock {}\ndate {}\nmenu-button {}\nbrightness {}\nno-limits {}\n",
+             gaze-mouse {}\nlarge-menu {}\nleft-handed {}\nbattery-saver {}\nnotifications {}\nrest-every {}\nmagnet {}\nmove-all {}\nlocked {}\nsound-from-screen {}\nclock {}\ndate {}\nmenu-button {}\nbrightness {}\nno-limits {}\n",
             on(self.focus),
             on(self.cinema),
             match &self.language {
@@ -322,6 +327,7 @@ impl Settings {
             self.rest_every,
             on(self.magnet),
             on(self.move_all),
+            on(self.locked),
             on(self.sound_from_screen),
             if self.clock_12h { "12h" } else { "24h" },
             match self.date_style {
@@ -357,6 +363,7 @@ mod tests {
             follow: true,
             magnet: false,
             move_all: true,
+            locked: true,
             sound_from_screen: true,
             clock_12h: true,
             date_style: DateStyle::Numbers,
