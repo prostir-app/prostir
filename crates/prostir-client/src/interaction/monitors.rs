@@ -7,7 +7,9 @@
 //! switches between the two by how near its fingertip is to a surface it can touch,
 //! with hysteresis; a hand takes a monitor with a fist, a middle pinch or a pinch held
 //! still ([`Take`]); a middle pinch scrolls or right-clicks, a controller's stick
-//! scrolls; one pointer: the ray of the hand that pressed last moves the PC's mouse.
+//! scrolls; one pointer: the ray of the hand that pressed last moves the PC's mouse,
+//! and while that hand touches (its fingertip near a surface, its ray off) no ray
+//! moves it. One finger touches at a time ([`TOUCHES_AT_ONCE`]).
 //!
 //! What goes to the PC is a [`PcInput`] said to the scene; how it reaches the PC (and
 //! whether it may) is the model's. With the modes off nothing here acts and the hands
@@ -27,6 +29,13 @@ use crate::layout::{Grab, Ray};
 use crate::world::{panel_height, panel_width};
 
 use super::feel::ms;
+
+/// How many fingers touch the monitors at once. Each hand has a slot of its own on
+/// the wire (its number), ready for gestures of two fingers; until those come (after
+/// 0.2.0, plans/step-8-interaction.md, section 10, 11), one: a second fingertip only
+/// hovers while the first touches, so a hand resting near a monitor makes no
+/// gesture of two fingers on the PC.
+pub const TOUCHES_AT_ONCE: usize = 1;
 
 /// How a hand takes a monitor (with [`Modes::monitors`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -454,7 +463,8 @@ impl Hands {
     }
 
     /// A fingertip in front of a monitor, not pressing: a hover, or a press as it
-    /// crosses the surface coming from in front.
+    /// crosses the surface coming from in front (while fewer than
+    /// [`TOUCHES_AT_ONCE`] fingers touch).
     fn hover_monitor(
         &mut self,
         h: usize,
@@ -463,6 +473,12 @@ impl Hands {
         scene: &mut impl Scene,
     ) {
         let f = self.feel;
+        let touching = self
+            .hands
+            .iter()
+            .filter(|o| matches!(o.phase, Phase::Poke(_)))
+            .count();
+        let free = touching < TOUCHES_AT_ONCE;
         let hand = &mut self.hands[h];
         let Some(t) = under else {
             hand.m.last_z = None;
@@ -481,7 +497,7 @@ impl Hands {
         let crossed = t.z <= surface
             && t.z > surface - f.touch_enter_m
             && came_from.is_some_and(|c| c > surface);
-        if crossed && settled {
+        if crossed && settled && free {
             hand.touched_at = Some(now);
             hand.phase = Phase::Poke(Poke {
                 id: t.id,
@@ -1062,13 +1078,16 @@ impl Hands {
         }
         let f = self.feel;
         let has = |h: usize| self.hands[h].m.point.is_some();
-        // While the hand that pressed last still presses (a touch, a click, a scroll),
-        // the other only points, even where that hand gives no point.
+        // While the hand that pressed last still presses (a touch, a click, a scroll)
+        // or touches (its fingertip near what it may touch, its ray off), the other
+        // only points, even where that hand gives no point: a touch then a ray
+        // passing by does not bring the PC's pointer back under it.
         let pressing = self.m.mouse_hand.filter(|&h| {
-            matches!(
-                self.hands[h].phase,
-                Phase::Poke(_) | Phase::RayPress(_) | Phase::Scroll(_)
-            )
+            self.hands[h].m.touch_mode
+                || matches!(
+                    self.hands[h].phase,
+                    Phase::Poke(_) | Phase::RayPress(_) | Phase::Scroll(_)
+                )
         });
         let mover = match pressing {
             Some(h) => Some(h).filter(|&h| has(h)),

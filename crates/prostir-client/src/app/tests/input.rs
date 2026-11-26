@@ -388,3 +388,99 @@ fn the_gaze_leaves_the_mouse_alone_while_something_is_held() {
         sim.take();
     }
 }
+
+/// A right hand pointing with its palm at `palm`, fingers forward (as the scripts of
+/// `interaction::record` pose it): the index fingertip 10 cm in front of the palm and
+/// a little to the right, the other fingers curled.
+#[cfg(feature = "preview")]
+fn pointing(palm: Vec3) -> crate::interaction::Joints {
+    use crate::interaction::{INDEX_TIP, signals};
+    let mut j = [(palm, 0.01); 26];
+    j[signals::WRIST].0 = palm + Vec3::new(0.0, 0.0, 0.06);
+    j[signals::MIDDLE_PROXIMAL].0 = palm + Vec3::new(0.0, 0.0, -0.03);
+    for (tip, dx) in [(15, -0.01), (20, -0.025), (25, -0.04)] {
+        j[tip].0 = palm + Vec3::new(dx, -0.02, -0.025);
+    }
+    j[INDEX_TIP].0 = palm + TIP;
+    j[signals::THUMB_TIP].0 = palm + Vec3::new(0.06, 0.0, -0.04);
+    j
+}
+
+/// Where the index fingertip of [`pointing`] is from its palm.
+#[cfg(feature = "preview")]
+const TIP: Vec3 = Vec3::new(0.025, 0.0, -0.1);
+
+/// Step 8's hands (the preview build's trial, "Hands: control"): a fingertip on a
+/// monitor touches the PC by its hand's slot: down as it crosses the surface, moves as
+/// it slides, up as it comes back; touching again and then lost for longer than a
+/// moment, the touch is cancelled, never a tap. Each as the wire says it, to a PC that
+/// takes input.
+#[cfg(feature = "preview")]
+#[test]
+fn a_fingertip_touches_a_pc_and_a_lost_hand_cancels() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::Close);
+    sim.takes_input();
+    sim.menu(Action::DevMonitors(true));
+    sim.menu(Action::Hands(crate::settings::HandMode::Control));
+    sim.take();
+    let p = *sim.m.world().shown(k(1)).expect("drawn");
+    let (normal, side) = (p.rotation * Vec3::Z, p.rotation * Vec3::X);
+    let at = |x: f32, z: f32| p.position + side * x + normal * z;
+    let mut hands = Hands::new();
+    let step = |sim: &mut Sim, hands: &mut Hands, tip: Option<Vec3>| {
+        sim.now += 11 * MS;
+        let mut input = frame(HandState {
+            is_hand: true,
+            ..HandState::default()
+        });
+        input.joints[1] = tip.map(|t| pointing(t - TIP));
+        sim.m.tick(sim.now, &input);
+        hands.buttons(sim.now, &input, &mut sim.m);
+        hands.step(sim.now, &input, &mut sim.m, &mut Pictures(None));
+        sim.m.animate(sim.now, &input);
+        sim.check_view();
+    };
+    let go = |sim: &mut Sim, hands: &mut Hands, n: u32, from: Vec3, to: Vec3| {
+        for i in 1..=n {
+            step(sim, hands, Some(from.lerp(to, i as f32 / n as f32)));
+        }
+    };
+    let phases = |fx: &[Effect]| -> Vec<Phase> {
+        input_sent(fx)
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Touch {
+                    id: DisplayId(1),
+                    slot: 1,
+                    phase,
+                    ..
+                } => Some(phase),
+                _ => None,
+            })
+            .collect()
+    };
+    go(&mut sim, &mut hands, 10, at(0.0, 0.12), at(0.0, 0.01));
+    assert_eq!(phases(&sim.take()), [], "a hover");
+    go(&mut sim, &mut hands, 3, at(0.0, 0.01), at(0.0, -0.004));
+    assert_eq!(phases(&sim.take()), [Phase::Down]);
+    go(&mut sim, &mut hands, 12, at(0.0, -0.004), at(0.06, -0.004));
+    let slid = phases(&sim.take());
+    assert!(
+        slid.len() >= 3 && slid.iter().all(|&p| p == Phase::Move),
+        "{slid:?}"
+    );
+    go(&mut sim, &mut hands, 6, at(0.06, -0.004), at(0.06, 0.08));
+    assert_eq!(phases(&sim.take()), [Phase::Up]);
+
+    sim.frames(Duration::from_secs(1));
+    go(&mut sim, &mut hands, 10, at(0.0, 0.12), at(0.0, -0.004));
+    assert_eq!(phases(&sim.take()), [Phase::Down]);
+    for _ in 0..30 {
+        step(&mut sim, &mut hands, None);
+    }
+    assert_eq!(phases(&sim.take()), [Phase::Cancel], "the hand lost");
+    sim.frames(Duration::from_secs(1));
+    assert_eq!(phases(&sim.take()), [], "nothing held");
+}
