@@ -172,7 +172,7 @@ impl Draw<'_> {
             self.glow(
                 place.position + place.rotation * Vec3::new(at.x, at.y, 0.003),
                 p.hover_far_m - (p.hover_far_m - p.hover_near_m) * near,
-                c.accent,
+                c.effect_accent,
                 (a + boost).min(1.0),
             );
         }
@@ -186,15 +186,16 @@ impl Draw<'_> {
             let at = n.point + n.normal * 0.003;
             if n.pressed {
                 self.ring(at, p.press_ring_m, c.pressed, p.press_alpha);
-                self.glow(at, p.press_glow_m, c.accent, 0.6);
+                self.glow(at, p.press_glow_m, c.effect_accent, 0.6);
                 if n.held > 0.25 {
-                    self.hold(at + n.normal * 0.001, n.held);
+                    let sizes = (p.touch_hold_from_m, p.touch_hold_to_m);
+                    self.hold(at + n.normal * 0.001, n.held, sizes);
                 }
             } else {
                 let k = (n.z.max(0.0) / touch_hover).clamp(0.0, 1.0);
                 let r = p.near_ring_m + (p.near_ring_far_m - p.near_ring_m) * k;
-                self.ring(at, r, c.accent, 0.35 + 0.55 * (1.0 - k));
-                self.glow(at, p.near_glow_m, c.accent, 0.15 + 0.35 * (1.0 - k));
+                self.ring(at, r, c.effect_accent, 0.35 + 0.55 * (1.0 - k));
+                self.glow(at, p.near_glow_m, c.effect_accent, 0.15 + 0.35 * (1.0 - k));
             }
         }
         // Where a ray points: a small light on the menu, a wider faint one on monitors.
@@ -206,21 +207,22 @@ impl Draw<'_> {
                 Thing::Display(_) | Thing::Adding { .. } => {
                     (p.point_monitor_m, p.point_monitor_alpha)
                 }
-                Thing::Attach(_) => (p.point_attach_m, p.point_menu_alpha),
+                Thing::Attach(_) => (p.point_attach_m, p.point_attach_alpha),
                 Thing::Wrist => (p.point_palm_m, p.point_menu_alpha),
             };
-            self.glow(pick.hit.point, m, c.accent, a);
+            self.glow(pick.hit.point, m, c.effect_accent, a);
         }
     }
 
-    /// A ring closing in while a hold runs (`k`: how far, 0 to 1), done when it closed.
-    fn hold(&mut self, at: Vec3, k: f32) {
+    /// A ring closing in while a hold runs (`k`: how far, 0 to 1) from one size to
+    /// another, done when it closed.
+    fn hold(&mut self, at: Vec3, k: f32, (from, to): (f32, f32)) {
         let (p, c) = (*self.p, *self.c);
         let k = k.clamp(0.0, 1.0);
         let color = if k >= 1.0 { c.done } else { c.waiting };
         self.ring(
             at,
-            p.hold_from_m - (p.hold_from_m - p.hold_to_m) * k,
+            from - (from - to) * k,
             color,
             p.hold_faint_alpha + (p.hold_alpha - p.hold_faint_alpha) * k,
         );
@@ -234,22 +236,22 @@ impl Draw<'_> {
             if let Some((at, k)) = hands.pressing(h) {
                 self.ring(at, p.press_ring_m, c.pressed, p.press_alpha * 0.6);
                 if let Some(k) = k {
-                    self.hold(at, k);
+                    self.hold(at, k, (p.hold_from_m, p.hold_to_m));
                 }
             }
             // A press held towards taking or a right click (step 8).
             if let Some((at, k)) = hands.progress(h) {
-                self.hold(at, k);
+                self.hold(at, k, (p.hold_from_m, p.hold_to_m));
             }
             // Where a hand holds what it carries.
             if let Some(at) = carried_at(model, hands, h) {
-                self.ring(at, p.held_ring_m, c.accent, p.held_alpha);
+                self.ring(at, p.held_ring_m, c.effect_accent, p.held_alpha);
             }
         }
         // A tap, a click or a take spreads out as a wave for a moment.
         for (center, k, mark) in hands.marks(now) {
             let color = match mark {
-                Mark::Touch => c.light,
+                Mark::Touch => c.wave,
                 Mark::Right | Mark::Take => c.done,
             };
             let r = p.wave_from_m + (p.wave_to_m - p.wave_from_m) * k;
@@ -274,9 +276,15 @@ impl Draw<'_> {
         for k in 0..3 {
             let phase = (t * 3.0 - k as f32 * 0.33).rem_euclid(1.0);
             let r = p.mouse_dot_m + (p.mouse_ring_m - p.mouse_dot_m) * (1.0 - phase);
-            self.ring(point, r, c.mouse, p.mouse_alpha * phase * (1.0 - t * 0.5));
+            let a = p.mouse_alpha * phase * (1.0 - t * 0.5);
+            self.out.push(Fx::ring(point, r, rgba(c.mouse, a)));
         }
-        self.glow(point, p.mouse_dot_m * 2.0, c.mouse, p.mouse_alpha * 0.9);
+        let glow = Fx::glow(
+            point,
+            p.mouse_dot_m * 2.0,
+            rgba(c.mouse, p.mouse_alpha * 0.9),
+        );
+        self.out.push(glow);
     }
 
     /// The magnet while dragging: the edge the monitor would stick to lights up.
@@ -302,12 +310,9 @@ impl Draw<'_> {
                 } else {
                     Vec3::new(k * half_w, s.side * half_h, 0.01)
                 };
-                self.glow(
-                    n.position + n.rotation * local,
-                    p.guide_m,
-                    c.guide,
-                    p.guide_alpha,
-                );
+                let at = n.position + n.rotation * local;
+                let glow = Fx::glow(at, p.guide_m, rgba(c.guide, p.guide_alpha));
+                self.out.push(glow);
             }
         }
     }
@@ -363,6 +368,11 @@ impl Draw<'_> {
             }
         }
     }
+}
+
+/// `c` at opacity `a`, whatever the palette's strength.
+fn rgba(c: [f32; 3], a: f32) -> [f32; 4] {
+    [c[0], c[1], c[2], a.clamp(0.0, 1.0)]
 }
 
 /// Where hand `h` holds what it carries, on its surface as drawn.

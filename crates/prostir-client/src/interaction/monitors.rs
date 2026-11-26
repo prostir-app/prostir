@@ -1127,7 +1127,7 @@ impl Hands {
         let f = &self.feel;
         match self.m.modes.movement {
             Movement::Sphere(_) if grab.id.display().is_some() && !is_hand => {
-                grab.on_sphere_by_ray(ray, head.position)
+                grab.on_sphere_by_ray(ray, head.position, f)
             }
             Movement::Sphere(p) if grab.id.display().is_some() => {
                 let shoulder = signals::shoulder(head.position, head.forward, h == 0, f);

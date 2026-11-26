@@ -36,9 +36,11 @@ pub struct Palette {
     // ---- Colours ----
     /// A fingertip or a ray about to act: the hover's light, a touch, where a ray
     /// points.
-    pub accent: Srgb,
-    /// The wave of a tap or a click, the ray itself.
+    pub effect_accent: Srgb,
+    /// The ray itself.
     pub light: Srgb,
+    /// The wave of a tap or a click.
+    pub wave: Srgb,
     /// The ring of a press held down.
     pub pressed: Srgb,
     /// A ring closing in while a hold runs.
@@ -81,6 +83,11 @@ pub struct Palette {
     pub press_alpha: f32,
     /// The light around a fingertip pressed on a monitor.
     pub press_glow_m: f32,
+    /// A fingertip held on a monitor towards a long press: a ring closing in from
+    /// this...
+    pub touch_hold_from_m: f32,
+    /// ...to this.
+    pub touch_hold_to_m: f32,
     /// A ring closing in while a hold runs: from this...
     pub hold_from_m: f32,
     /// ...to this, when it is done.
@@ -106,10 +113,11 @@ pub struct Palette {
     pub point_monitor_alpha: f32,
     /// On "Attach" under a window.
     pub point_attach_m: f32,
+    pub point_attach_alpha: f32,
     /// On the palm menu.
     pub point_palm_m: f32,
 
-    // ---- The rest ----
+    // ---- The rest (as large and opaque whatever the scale and strength) ----
     /// The rings closing in on the PC's mouse: from this...
     pub mouse_ring_m: f32,
     /// ...to this, and the light on it.
@@ -128,8 +136,9 @@ pub struct Palette {
 impl Palette {
     /// The neutral palette (see the module).
     pub const DEFAULT: Palette = Palette {
-        accent: Srgb([221, 236, 255]),
+        effect_accent: Srgb([221, 236, 255]),
         light: Srgb([237, 246, 255]),
+        wave: Srgb([231, 243, 255]),
         pressed: Srgb([255, 255, 255]),
         waiting: Srgb([255, 234, 170]),
         done: Srgb([203, 255, 225]),
@@ -149,6 +158,8 @@ impl Palette {
         press_ring_m: 0.012,
         press_alpha: 0.95,
         press_glow_m: 0.018,
+        touch_hold_from_m: 0.04,
+        touch_hold_to_m: 0.014,
         hold_from_m: 0.05,
         hold_to_m: 0.015,
         hold_faint_alpha: 0.4,
@@ -163,6 +174,7 @@ impl Palette {
         point_monitor_m: 0.03,
         point_monitor_alpha: 0.3,
         point_attach_m: 0.01,
+        point_attach_alpha: 0.5,
         point_palm_m: 0.008,
         mouse_ring_m: 0.1,
         mouse_dot_m: 0.01,
@@ -185,8 +197,9 @@ impl Palette {
     /// The colours in linear light (made once, when the palette changes).
     pub fn shades(&self) -> Shades {
         Shades {
-            accent: self.accent.linear(),
+            effect_accent: self.effect_accent.linear(),
             light: self.light.linear(),
+            wave: self.wave.linear(),
             pressed: self.pressed.linear(),
             waiting: self.waiting.linear(),
             done: self.done.linear(),
@@ -207,8 +220,9 @@ impl Default for Palette {
 /// A palette's colours in linear light (see [`Palette::shades`]).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Shades {
-    pub accent: [f32; 3],
+    pub effect_accent: [f32; 3],
     pub light: [f32; 3],
+    pub wave: [f32; 3],
     pub pressed: [f32; 3],
     pub waiting: [f32; 3],
     pub done: [f32; 3],
@@ -227,9 +241,10 @@ mod tests {
     #[test]
     fn the_defaults_are_the_look_before() {
         let s = Palette::DEFAULT.shades();
-        let before: [([f32; 3], [f32; 3]); 8] = [
-            (s.accent, [0.72, 0.84, 1.0]),
+        let before: [([f32; 3], [f32; 3]); 9] = [
+            (s.effect_accent, [0.72, 0.84, 1.0]),
             (s.light, [0.85, 0.92, 1.0]),
+            (s.wave, [0.8, 0.9, 1.0]),
             (s.pressed, [1.0, 1.0, 1.0]),
             (s.waiting, [1.0, 0.82, 0.4]),
             (s.done, [0.6, 1.0, 0.75]),

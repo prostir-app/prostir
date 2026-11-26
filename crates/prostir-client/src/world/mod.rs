@@ -2379,10 +2379,16 @@ impl World {
                 None => self.bounds,
             };
             let limited = layout::limit(p, aspect, head, self.floor, &bounds, layout::Keep::Size);
-            // Never into another monitor or over one: where the bounds would put it
-            // there, it stays where it was.
+            // The bounds never put it into another monitor or over one: where they
+            // would (and where the hand put it would not), it stays where it was.
             p = match was {
-                Some(was) if limited != p && self.troubles(id, &limited, aspect, head) => was,
+                Some(was)
+                    if limited != p
+                        && self.troubles(id, &limited, aspect, head)
+                        && !self.troubles(id, &p, aspect, head) =>
+                {
+                    was
+                }
                 _ => limited,
             };
         }

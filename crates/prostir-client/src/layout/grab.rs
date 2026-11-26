@@ -51,23 +51,39 @@ struct OnSphere {
     /// By a controller's ray; its distance now (the stick's).
     by_ray: Option<f32>,
     /// How far the hand reached in or out since it took it, counting only the moves
-    /// that went mostly that way, and where it was from the shoulder a frame ago.
+    /// that went mostly that way, and where it was from the shoulder when a move was
+    /// last counted (a move is judged once it went [`REACH_STEP`]: the tracking's
+    /// jitter, which goes nowhere, never adds up).
     reached: f32,
     last_arm: Vec3,
+    /// The nearest and the furthest it may go: the bounds, or where it was taken if
+    /// that is outside them (it does not jump when taken, and goes no further out).
+    lo: f32,
+    hi: f32,
 }
 
-/// `d` within `lo` to `hi`, slowing down over the last `knee` before each.
-fn soft_clamp(d: f32, lo: f32, hi: f32, knee: f32) -> f32 {
-    let knee = knee.min((hi - lo) / 2.0).max(0.0);
-    if knee <= 0.0 {
-        return d.clamp(lo, hi);
+/// How far a hand moves before the move is judged as reaching in or out, or across.
+const REACH_STEP: f32 = 0.01;
+
+impl OnSphere {
+    /// The distance `d` within its bounds, slowing down over the last `knee` before
+    /// each (no more than it stood from the bound when taken, so it does not jump).
+    fn bounded(&self, d: f32, knee: f32) -> f32 {
+        let (lo, hi) = (self.lo, self.hi);
+        let knee_lo = knee.min(self.d0 - lo).max(0.0);
+        let knee_hi = knee.min(hi - self.d0).max(0.0);
+        soft_clamp(d, (lo, knee_lo), (hi, knee_hi))
     }
-    if d < lo + knee {
-        lo + knee * ((d - lo - knee) / knee).exp()
-    } else if d > hi - knee {
-        hi - knee * (-(d - hi + knee) / knee).exp()
+}
+
+/// `d` within `lo` to `hi`, slowing down over the last knee before each.
+fn soft_clamp(d: f32, (lo, knee_lo): (f32, f32), (hi, knee_hi): (f32, f32)) -> f32 {
+    if knee_lo > 0.0 && d < lo + knee_lo {
+        lo + knee_lo * ((d - lo - knee_lo) / knee_lo).exp()
+    } else if knee_hi > 0.0 && d > hi - knee_hi {
+        hi - knee_hi * (-(d - hi + knee_hi) / knee_hi).exp()
     } else {
-        d
+        d.clamp(lo, hi)
     }
 }
 
@@ -101,24 +117,27 @@ impl Grab {
         }
         let point = ray.origin + ray.dir * self.distance;
         let arm = ray.origin - shoulder;
+        let d0 = point.distance(eye).max(0.05);
         self.sphere = Some(OnSphere {
             pivot: eye,
             shoulder,
             dir0: (point - eye).normalize_or(Vec3::NEG_Z),
-            d0: point.distance(eye).max(0.05),
+            d0,
             hand_dir0: arm.normalize_or(Vec3::NEG_Z),
             r0: arm.length().max(0.05),
             power,
             by_ray: None,
             reached: 0.0,
             last_arm: arm,
+            lo: feel.bound_near_m.min(d0),
+            hi: feel.bound_far_m.max(d0),
         });
         self
     }
 
     /// For a controller taking a monitor along `ray`: moved on a sphere round `eye`
     /// as its ray turns, nearer, further and larger by its stick (see [`OnSphere`]).
-    pub fn on_sphere_by_ray(mut self, ray: Ray, eye: Vec3) -> Self {
+    pub fn on_sphere_by_ray(mut self, ray: Ray, eye: Vec3, feel: &Feel) -> Self {
         let point = ray.origin + ray.dir * self.distance;
         let d0 = point.distance(eye).max(0.05);
         self.sphere = Some(OnSphere {
@@ -132,6 +151,8 @@ impl Grab {
             by_ray: Some(d0),
             reached: 0.0,
             last_arm: Vec3::ZERO,
+            lo: feel.bound_near_m.min(d0),
+            hi: feel.bound_far_m.max(d0),
         });
         self
     }
@@ -164,8 +185,8 @@ impl Grab {
             let (dir, d) = match s.by_ray {
                 Some(d) => {
                     let turn = Quat::from_rotation_arc(s.hand_dir0, ray.dir);
-                    let d = (d * (1.0 + dead(stick.y) * f.stick_distance_per_s * dt))
-                        .clamp(f.bound_near_m, f.bound_far_m);
+                    let d =
+                        (d * (1.0 + dead(stick.y) * f.stick_distance_per_s * dt)).clamp(s.lo, s.hi);
                     s.by_ray = Some(d);
                     placement.width = (placement.width
                         * (1.0 + dead(stick.x) * f.stick_width_per_s * dt))
@@ -176,21 +197,24 @@ impl Grab {
                     let arm = ray.origin - s.shoulder;
                     let turn = Quat::from_rotation_arc(s.hand_dir0, arm.normalize_or(s.hand_dir0));
                     // Only reaching in or out moves it nearer or further: a move that
-                    // goes mostly that way, past a dead zone.
-                    let radial = arm.length() - s.last_arm.length();
+                    // goes mostly that way, judged once it went a centimetre, past a
+                    // dead zone.
                     let step = (arm - s.last_arm).length();
-                    let across = (step * step - radial * radial).max(0.0).sqrt();
-                    if radial.abs() > f.reach_dominance * across {
-                        s.reached += radial;
+                    if step >= REACH_STEP {
+                        let radial = arm.length() - s.last_arm.length();
+                        let across = (step * step - radial * radial).max(0.0).sqrt();
+                        if radial.abs() > f.reach_dominance * across {
+                            s.reached += radial;
+                        }
+                        s.last_arm = arm;
                     }
-                    s.last_arm = arm;
                     let dr = s.reached;
                     let dr = dr.signum() * (dr.abs() - f.reach_dead_m).max(0.0);
                     let d = s.d0 * ((s.r0 + dr) / s.r0).max(0.05).powf(s.power);
                     (turn * s.dir0, d)
                 }
             };
-            let d = soft_clamp(d, f.bound_near_m, f.bound_far_m, f.bound_soft_m);
+            let d = s.bounded(d, f.bound_soft_m);
             let point = s.pivot + dir * d;
             self.distance = point.distance(ray.origin);
             self.sphere = Some(s);
@@ -428,7 +452,7 @@ mod tests {
             dir: (at - controller).normalize(),
         };
         let mut g = Grab::start(Thing::Menu, at.distance(controller), Vec2::ZERO, &p)
-            .on_sphere_by_ray(ray, eye);
+            .on_sphere_by_ray(ray, eye, &f);
         let turned = Ray {
             dir: Quat::from_rotation_y(0.5) * ray.dir,
             ..ray
@@ -450,15 +474,85 @@ mod tests {
 
     #[test]
     fn soft_clamp_slows_down_before_each_bound() {
-        assert_eq!(soft_clamp(1.0, 0.35, 6.0, 0.05), 1.0);
-        assert!(soft_clamp(9.0, 0.35, 6.0, 0.05) <= 6.0);
-        assert!(soft_clamp(9.0, 0.35, 6.0, 0.05) > 5.99);
-        assert!(soft_clamp(-3.0, 0.35, 6.0, 0.05) >= 0.35);
-        let (a, b) = (
-            soft_clamp(5.97, 0.35, 6.0, 0.05),
-            soft_clamp(5.98, 0.35, 6.0, 0.05),
-        );
+        let (lo, hi) = ((0.35, 0.05), (6.0, 0.05));
+        assert_eq!(soft_clamp(1.0, lo, hi), 1.0);
+        assert!(soft_clamp(9.0, lo, hi) <= 6.0);
+        assert!(soft_clamp(9.0, lo, hi) > 5.99);
+        assert!(soft_clamp(-3.0, lo, hi) >= 0.35);
+        let (a, b) = (soft_clamp(5.97, lo, hi), soft_clamp(5.98, lo, hi));
         assert!(a < b && b - a < 0.01);
-        assert_eq!(soft_clamp(7.0, 0.35, 6.0, 0.0), 6.0);
+        assert_eq!(soft_clamp(7.0, lo, (6.0, 0.0)), 6.0);
+    }
+
+    /// A monitor taken where it stands beyond 6 m (the app put it there) does not
+    /// jump when taken, by a hand or a controller, and goes no further out.
+    #[test]
+    fn taken_beyond_the_bounds_it_does_not_jump() {
+        let f = Feel::DEFAULT;
+        let eye = Vec3::new(0.0, 1.6, 0.0);
+        let at = Vec3::new(0.0, 1.6, -7.0);
+        let p0 = Placement {
+            position: at,
+            rotation: facing(at, eye),
+            width: 2.0,
+        };
+        let controller = Vec3::new(0.2, 1.2, -0.3);
+        let ray = Ray {
+            origin: controller,
+            dir: (at - controller).normalize(),
+        };
+        let mut p = p0;
+        let mut g = Grab::start(Thing::Menu, at.distance(controller), Vec2::ZERO, &p)
+            .on_sphere_by_ray(ray, eye, &f);
+        g.update(&mut p, ray, eye, Vec2::ZERO, 0.01, &f);
+        assert!(
+            p.position.distance(at) < 1e-3,
+            "by a controller: {:?}",
+            p.position
+        );
+        g.update(&mut p, ray, eye, Vec2::new(0.0, 1.0), 0.5, &f);
+        assert!(p.position.distance(eye) <= 7.0 + 1e-3, "no further");
+        g.update(&mut p, ray, eye, Vec2::new(0.0, -1.0), 0.2, &f);
+        assert!(p.position.distance(eye) < 6.9, "nearer");
+
+        let shoulder = Vec3::new(0.17, 1.42, 0.0);
+        let hand = Vec3::new(0.2, 1.3, -0.4);
+        let ray = Ray {
+            origin: hand,
+            dir: (at - hand).normalize(),
+        };
+        let mut p = p0;
+        let mut g = Grab::start(Thing::Menu, at.distance(hand), Vec2::ZERO, &p)
+            .on_sphere(ray, eye, shoulder, 1.0, &f);
+        g.update(&mut p, ray, eye, Vec2::ZERO, 0.01, &f);
+        assert!(
+            p.position.distance(at) < 1e-3,
+            "by a hand: {:?}",
+            p.position
+        );
+    }
+
+    /// The tracking's jitter, a few millimetres to and fro for seconds, never adds
+    /// up past the dead zone: the distance stays.
+    #[test]
+    fn jitter_does_not_change_the_distance() {
+        let f = Feel::DEFAULT;
+        let (mut g, mut p, eye, _, hand, ray) = taken_by_hand();
+        let d0 = p.position.distance(eye);
+        let mut seed: u32 = 3;
+        let mut k = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        for _ in 0..2000 {
+            // Up to 3 mm off where the hand is, every way.
+            let at = hand + Vec3::new(k(), k(), k()) * 0.006;
+            g.update(&mut p, Ray { origin: at, ..ray }, eye, Vec2::ZERO, 0.01, &f);
+        }
+        assert!(
+            (p.position.distance(eye) - d0).abs() < 1e-3,
+            "{} from {d0}",
+            p.position.distance(eye)
+        );
     }
 }

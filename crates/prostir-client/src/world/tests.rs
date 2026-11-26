@@ -2180,3 +2180,30 @@ fn a_hand_keeps_monitors_within_the_bounds() {
     }
     assert!(kept < 150, "mostly moved: {kept} kept");
 }
+
+/// A monitor carried in front of another (hiding it, as the hand put it) and pulled
+/// nearer than the bounds let it be stops at the bound, rather than staying where it
+/// was a frame ago: only trouble the bounds themselves would make keeps it there.
+#[test]
+fn carried_in_front_of_another_it_stops_at_the_bound() {
+    let mut sim = Sim::at_desk();
+    let head = sim.head.0;
+    let thing = Thing::Display(k(2));
+    sim.world.hold(thing, &sim.s).expect("taken");
+    let one = sim.place(k(1));
+    let toward = (one.position - head).normalize();
+    let at = |d: f32| Placement {
+        position: head + toward * d,
+        rotation: layout::facing(head + toward * d, head),
+        width: 0.6,
+    };
+    sim.world.drag(&sim.s, thing, at(0.7), head);
+    let before = sim.place(k(2));
+    assert!(
+        before.position.distance(at(0.7).position) < 1e-4,
+        "in front of 1"
+    );
+    sim.world.drag(&sim.s, thing, at(0.2), head);
+    let d = sim.place(k(2)).position.distance(head);
+    assert!((d - 0.35).abs() < 2e-3, "stopped at the bound: {d}");
+}
