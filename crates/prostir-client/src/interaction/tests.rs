@@ -8,6 +8,7 @@
 )]
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use glam::{Quat, Vec2, Vec3};
 use prostir_proto::state::DisplayId;
@@ -17,6 +18,10 @@ use crate::ids::PcId;
 use crate::world::panel_width;
 
 const MS: Duration = Duration::from_millis(1);
+const HOLD_TO_DRAG: Duration = Duration::from_millis(300);
+const TOUCH_RING: Duration = Duration::from_millis(350);
+const AFTER_TOUCH: Duration = Duration::from_millis(600);
+const ATTACH_LINGER: Duration = Duration::from_millis(1200);
 
 fn monitor(n: u32) -> DisplayKey {
     DisplayKey::new(PcId([3; 8]), DisplayId(n))

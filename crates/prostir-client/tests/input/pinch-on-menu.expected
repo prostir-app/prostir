@@ -1,0 +1,6 @@
+0.143 haptic right
+0.143 press-menu Recenter
+0.506 take menu
+0.506 haptic right
+0.517..0.792 drag menu x26 at (-0.48, 1.02, -0.67)
+0.803 let-go menu

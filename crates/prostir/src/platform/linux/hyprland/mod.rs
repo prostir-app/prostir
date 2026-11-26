@@ -28,8 +28,8 @@ use crate::encoder::Encoder;
 use crate::platform::linux::{is_panel, named_virtual};
 use crate::platform::{
     AddModel, Cursor, CursorSink, CursorSource, DeskPlan, Desktop, DesktopCaps, FrameSource,
-    Geometry, GpuDevices, Memory, Origin, Output, OutputHealth, OutputKey, Outputs,
-    PhysicalDisplay, Pointer, Scales, VirtualSpec, Windows,
+    Geometry, GpuDevices, Injects, Memory, OpenInput, Origin, Output, OutputHealth, OutputKey,
+    Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec, Windows,
 };
 use pointer::{PointerSession, SinkSlot, Units};
 use screencopy::Capture;
@@ -664,6 +664,8 @@ pub struct Hyprland {
     rules: Arc<Rules>,
     /// The pointer apart from the frames, where Hyprland offers pointer sessions.
     cursor: Option<HyprCursor>,
+    /// How to open its virtual input (see `linux/input`).
+    input: Option<Arc<dyn OpenInput>>,
     /// The graphics devices to share (wlr-screencopy hands buffers over: none taken
     /// yet).
     _gpu: GpuDevices,
@@ -677,6 +679,7 @@ impl Hyprland {
         rules.remove_leftovers();
         rules.keep_after_reloads();
         *LIVE.lock().unwrap() = Arc::downgrade(&rules);
+        let input = super::input::for_wlroots();
         Self {
             caps: DesktopCaps {
                 name: "Hyprland",
@@ -688,13 +691,15 @@ impl Hyprland {
                 scales_in_place: true,
                 refresh: vec![60],
                 screenshot_one_output: true,
-                moves_pointer: true,
+                // Virtual pointers and keyboards.
+                injects: input.as_ref().map_or(Injects::NONE, |(i, _)| *i),
                 // Hyprland keeps headless outputs after the program that made them.
                 cleans_up_after_crash: false,
             },
             windows: HyprWindows::new(),
             rules,
             cursor: cursor_apart().then(HyprCursor::default),
+            input: input.map(|(_, open)| open),
             _gpu: gpu,
         }
     }
@@ -828,6 +833,10 @@ impl Desktop for Hyprland {
             Some(c) => Some(c),
             None => None,
         }
+    }
+
+    fn input(&mut self) -> Option<Arc<dyn OpenInput>> {
+        self.input.clone()
     }
 }
 

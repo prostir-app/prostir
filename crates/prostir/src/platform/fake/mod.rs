@@ -20,7 +20,8 @@
 //!   lines through a pipe, so the real watcher of the sound system follows it.
 //! - No windows, no mouse, no screenshots (its desktop has no [`crate::platform::Windows`]
 //!   and no [`crate::platform::Pointer`]), no notifications, no USB, and no outside
-//!   programs are run. The tray is a file a test writes menu
+//!   programs are run. Its virtual input writes what it is told to the log, with
+//!   `PROSTIR_FAKE_INPUT` (see `input.rs`). The tray is a file a test writes menu
 //!   items to (see [`tray`]).
 //! - Another program can resize a monitor, as sharing it in Discord does on KDE: a
 //!   test writes `resize Fake-2 320x240` to `$XDG_RUNTIME_DIR/fake-desktop` (see
@@ -39,6 +40,7 @@
 //! left out.
 
 mod desktop;
+mod input;
 mod screen;
 
 use std::net::Ipv4Addr;

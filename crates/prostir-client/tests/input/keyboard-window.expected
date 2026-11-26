@@ -1,0 +1,4 @@
+0.033 take keyboard
+0.033 haptic right
+0.044..0.154 drag keyboard x11 at (0.03, 0.75, -0.45)
+0.165 let-go keyboard

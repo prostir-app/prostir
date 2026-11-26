@@ -1021,6 +1021,7 @@ impl Brain {
                 hardware: o.hardware,
                 copies: o.copies,
                 note: o.note,
+                slowed: o.slowed,
                 stats: o.stats.map(|s| api::StreamStats {
                     window_ms: s.window_ms,
                     frames: s.frames,

@@ -33,7 +33,8 @@ pub use desktop::{Desktop, DesktopMemo};
 pub use draw::{DRAW_HOLD, draw_order};
 pub use grab::Grab;
 pub use hit::{
-    Cylinder, Hit, Ray, hit, hit_surface, image_frame, image_point, image_uv, image_width,
+    Against, Cylinder, Hit, Ray, against, hit, hit_surface, image_frame, image_point, image_uv,
+    image_width,
 };
 pub use prostir_layout::space::cuts;
 pub use saved::{Arrangement, Desk, PixelSize, parse_keyboard, write_keyboard};

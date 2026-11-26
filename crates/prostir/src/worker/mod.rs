@@ -141,11 +141,6 @@ pub enum Job {
         job: JobId,
         until: Instant,
     },
-    MouseTo {
-        id: ScreenId,
-        x: u16,
-        y: u16,
-    },
     WindowHere {
         job: JobId,
         id: ScreenId,
@@ -210,6 +205,8 @@ pub struct Connected {
     pub physical: Vec<PhysicalDisplay>,
     /// It tells the mouse pointer apart from the pictures (see `CursorSource`).
     pub cursor: bool,
+    /// How to open its virtual input, where it has one.
+    pub input: Option<Arc<dyn crate::platform::OpenInput>>,
 }
 
 /// What came of a job.

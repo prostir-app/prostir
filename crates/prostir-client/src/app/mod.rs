@@ -18,9 +18,12 @@ mod actions;
 mod auto;
 mod gaze;
 mod hands;
+mod pc_input;
 mod session;
 #[cfg(test)]
 mod tests;
+#[cfg(feature = "preview")]
+mod trial;
 mod volume;
 
 use std::collections::BTreeSet;
@@ -39,7 +42,7 @@ use prostir_proto::{ClientMsg, Codec};
 use crate::caps::{Caps, Offer};
 use crate::cursors::Cursors;
 use crate::ids::{DisplayKey, PcId};
-use crate::interaction::{FrameInput, Head};
+use crate::interaction::{Feel, FrameInput, Head};
 use crate::lang::{Known, Lang, LangState, Moment, Texts};
 use crate::layout::{self, Desk, Placement};
 use crate::net::NetEvent;
@@ -66,8 +69,6 @@ pub const CONFIRM_FOR: Duration = Duration::from_secs(4);
 pub const TOAST_FOR: Duration = Duration::from_secs(4);
 /// How long the "where is the mouse" rings show.
 pub const FINDER_FOR: Duration = Duration::from_millis(1600);
-/// How long the gaze rests on another monitor before the mouse goes there.
-pub const GAZE_DWELL: Duration = Duration::from_millis(600);
 /// After the gaze sent the mouse somewhere, how long before it may again.
 const GAZE_AGAIN: Duration = Duration::from_millis(1500);
 /// Without a PC this long, the menu opens on its own (the connection screen).
@@ -194,6 +195,10 @@ pub enum PlatformEvent {
     /// This many monitors do not fit in the layers the compositor takes (see
     /// `layers::plan`): said when the number changes.
     LayersHidden(usize),
+    /// `feel.txt` was read (the preview build, at the start and from "For
+    /// development"): its text, or `None` when there is none.
+    #[cfg(feature = "preview")]
+    Feel(Option<String>),
 }
 
 /// What the model asks the shell to do, in order.
@@ -219,6 +224,13 @@ pub enum Effect {
     System(SystemCmd),
     /// The app closes (the store said it is not the person's).
     Exit,
+    /// A recording of the input is done (the preview build): to be written into the
+    /// app's external folder as `name`.
+    #[cfg(feature = "preview")]
+    Recording {
+        name: String,
+        bytes: Vec<u8>,
+    },
 }
 
 /// For OpenXR and the runtime's extensions.
@@ -274,6 +286,9 @@ pub enum SystemCmd {
     /// Follow the system's volume, of `steps` above silence, read this often (`None`:
     /// only after a set or a volume button), and at once when this starts.
     WatchVolume { steps: u8, every: Option<Duration> },
+    /// Read `feel.txt` from the app's external folder (the preview build).
+    #[cfg(feature = "preview")]
+    ReadFeel,
 }
 
 /// A short message shown on its own, below the line of sight.
@@ -517,6 +532,18 @@ pub struct Model {
     /// development" are shown (see [`Model::metrics_place`]); not in the menu.
     #[cfg(feature = "preview")]
     looked_monitor: Option<DisplayKey>,
+    /// The numbers of how the hands feel (`feel.txt` may change them in the preview
+    /// build).
+    feel: Feel,
+    /// When a hand last acted on a PC's monitor (step 8): the mouse following the gaze
+    /// waits a moment after.
+    pc_acted: Option<Instant>,
+    /// What the hands hold pressed on a PC (said again while it stays, see
+    /// `pc_input`).
+    held: pc_input::Held,
+    /// "Hands (trial)" of "For development".
+    #[cfg(feature = "preview")]
+    dev_input: trial::DevInput,
 }
 
 impl Model {
@@ -632,6 +659,11 @@ impl Model {
             hidden: Hidden::default(),
             #[cfg(feature = "preview")]
             looked_monitor: None,
+            feel: Feel::DEFAULT,
+            pc_acted: None,
+            held: pc_input::Held::default(),
+            #[cfg(feature = "preview")]
+            dev_input: trial::DevInput::default(),
         };
         // The language's file had lines that could not be read: said once, in front.
         if let Some(warning) = m.texts().warning() {
@@ -656,6 +688,20 @@ impl Model {
 
     pub fn world(&self) -> &World {
         &self.world
+    }
+
+    /// The numbers of how the hands feel.
+    pub fn feel(&self) -> &Feel {
+        &self.feel
+    }
+
+    /// What "Hands (trial)" of "For development" has chosen (the preview build; in any
+    /// other, the input and the look as before step 8).
+    pub fn trial(&self) -> crate::interaction::trial::Trial {
+        #[cfg(feature = "preview")]
+        return self.dev_input.trial;
+        #[cfg(not(feature = "preview"))]
+        crate::interaction::trial::Trial::default()
     }
 
     /// The PCs' mouse pointers, where the headset draws them.
@@ -969,6 +1015,8 @@ impl Model {
         if self.effects.len() != before {
             self.rev += 1;
         }
+        // What stays pressed on a PC is said again (nothing the menu shows).
+        self.keep_held(now);
         self.saves_told();
         // Another language chosen (or the PC's changed): loaded on the system thread,
         // the menu keeps the one it has until then.
@@ -989,6 +1037,8 @@ impl Model {
         self.world_done();
         self.auto_scale();
         self.expire_shown();
+        #[cfg(feature = "preview")]
+        self.record_frame(now, input);
         if let Some(head) = input.head {
             self.frame(input, head);
         } else {
@@ -1256,6 +1306,8 @@ impl Model {
             }
             PlatformEvent::CustomPanorama(there) => self.headset.custom_panorama = there,
             PlatformEvent::LayersHidden(hidden) => self.layers_hidden(hidden),
+            #[cfg(feature = "preview")]
+            PlatformEvent::Feel(text) => self.feel_text(text.as_deref()),
         }
     }
 
@@ -1458,7 +1510,15 @@ impl Model {
     /// Mouse follows the gaze: after resting on another monitor for a moment, the
     /// mouse goes to where the user looks on it (as drawn).
     fn follow_gaze(&mut self, looked: Option<(DisplayKey, Vec2)>) {
-        let busy = self.world.wrist().is_some() || self.world.holding() || self.settings.cinema;
+        // A ray or a finger acting on a monitor moves the mouse itself (step 8).
+        let quiet = crate::interaction::feel::ms(self.feel.gaze_quiet_ms);
+        // A button or a finger held on a PC sends nothing while still: busy as well.
+        let acting = self.held.any()
+            || self
+                .pc_acted
+                .is_some_and(|t| self.now.saturating_duration_since(t) < quiet);
+        let busy =
+            self.world.wrist().is_some() || self.world.holding() || self.settings.cinema || acting;
         let main = self.session.main();
         if !self.settings.gaze_mouse || !self.can_move_mouse() || main.is_none() || busy {
             self.gaze_on = None;
@@ -1478,7 +1538,7 @@ impl Model {
                 let recently = self
                     .gaze_moved
                     .is_some_and(|t| now.saturating_duration_since(t) < GAZE_AGAIN);
-                if now.saturating_duration_since(since) >= GAZE_DWELL && !recently {
+                if now.saturating_duration_since(since) >= self.feel.gaze_dwell() && !recently {
                     let f = |v: f32| (v * 65535.0) as u16;
                     info!("gaze: mouse to monitor {id} at {:.2},{:.2}", uv.x, uv.y);
                     self.mouse_to(id, f(uv.x), f(uv.y));
@@ -1678,6 +1738,7 @@ impl Model {
     pub fn headset_state(&self) -> HeadsetState {
         HeadsetState {
             profiles: Some(self.profiles_part()),
+            prefs: Some(prefs_of(&self.settings, &self.feel)),
             // With its count of the headset's own changes.
             volume: self.volume.as_ref().map(volume::SharedVolume::now),
             ..headset_state(
@@ -1707,7 +1768,7 @@ impl Model {
     fn prefs_changed(&mut self) {
         let state = self.headset_state();
         self.session.set_headset(state);
-        let part = prefs_of(&self.settings);
+        let part = prefs_of(&self.settings, &self.feel);
         self.tell_all(&ClientMsg::Prefs { part });
     }
 
@@ -1979,6 +2040,8 @@ fn tab_code(tab: Tab) -> u8 {
         Tab::Settings(Section::Paired) => 9,
         #[cfg(feature = "preview")]
         Tab::Settings(Section::Dev) => 10,
+        #[cfg(feature = "preview")]
+        Tab::Settings(Section::DevHands) => 11,
     }
 }
 
@@ -1997,19 +2060,21 @@ fn tab_from_code(code: u8) -> Tab {
         // "For development" only where the build has it.
         #[cfg(feature = "preview")]
         10 => Tab::Settings(Section::Dev),
+        #[cfg(feature = "preview")]
+        11 => Tab::Settings(Section::DevHands),
         _ => Tab::Quick,
     }
 }
 
 /// The headset's settings the PC acts on, from `s`.
-fn prefs_of(s: &Settings) -> Prefs {
+fn prefs_of(s: &Settings, feel: &Feel) -> Prefs {
     Prefs {
         notifications: s.notifications,
         sound_from_screen: s.sound_from_screen,
         focus_mode: s.focus,
         gaze_mouse_ms: s
             .gaze_mouse
-            .then(|| u16::try_from(GAZE_DWELL.as_millis()).unwrap_or(u16::MAX)),
+            .then(|| u16::try_from(feel.gaze_dwell().as_millis()).unwrap_or(u16::MAX)),
         no_limits: s.no_limits,
     }
 }
@@ -2034,7 +2099,7 @@ pub fn headset_state(
     }
     HeadsetState {
         caps: Some(told),
-        prefs: Some(prefs_of(settings)),
+        prefs: Some(prefs_of(settings, &Feel::DEFAULT)),
         presence: Some(Presence { worn }),
         battery: battery.map(|(percent, charging)| Battery { percent, charging }),
         volume: volume

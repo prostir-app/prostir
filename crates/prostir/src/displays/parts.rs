@@ -85,9 +85,17 @@ impl Displays {
         }
     }
 
-    /// Whether the desktop lets the mouse be moved from here.
-    pub fn moves_mouse(&self) -> bool {
-        self.facts.as_ref().is_some_and(|f| f.caps.moves_pointer)
+    /// What the desktop's virtual input makes: the mouse moved and clicked from here,
+    /// keys.
+    pub fn injects(&self) -> crate::platform::Injects {
+        self.facts
+            .as_ref()
+            .map_or(crate::platform::Injects::NONE, |f| f.caps.injects)
+    }
+
+    /// How the input from the headset is now (refused, not opening).
+    pub fn input_state(&self) -> crate::input::State {
+        self.input.state()
     }
 
     /// Whether the desktop tells the mouse pointer apart from the pictures.

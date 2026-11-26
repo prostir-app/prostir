@@ -5,6 +5,7 @@ pub mod autostart;
 mod desktop;
 pub mod dialogs;
 mod hyprland;
+mod input;
 mod kde;
 pub mod notifications;
 mod screenshot;

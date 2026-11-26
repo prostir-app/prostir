@@ -22,7 +22,9 @@ use crate::errors::{Counted, UserError};
 use crate::events::EventSink;
 use crate::platform::audio::{self, MicIn};
 use crate::platform::sound::{MicAvailability, OutputDevice, Route, SoundStatus};
-use crate::platform::{DesktopCaps, MonitorSpec, OutputKey, PhysicalDisplay, Scales, WindowList};
+use crate::platform::{
+    DesktopCaps, MonitorSpec, OutputKey, PhysicalDisplay, Scales, Spot, WindowList,
+};
 use crate::router::Router;
 use crate::screen::{Screen, ScreenId, ScreenKind, ScreenState};
 use crate::store::{LEGACY_LAPTOP, Physical, PhysicalKey, SavedScreens, Settings};
@@ -86,6 +88,9 @@ pub struct OutputEncoding {
     pub copies: bool,
     /// Why it is not the best this PC has for it, when it is not.
     pub note: Option<String>,
+    /// Its encoder fell back to the faster setting for dropping frames (see
+    /// `Router::slowed`).
+    pub slowed: bool,
     /// What its encoder made in the last window of the router's report.
     pub stats: Option<crate::router::StreamStats>,
 }
@@ -224,6 +229,9 @@ pub struct Displays {
     facts: Option<Facts>,
     /// The sound thread (after `mic`: its share of the microphone goes last).
     sound: Sound,
+    /// The input from the headsets (see `crate::input`): before the worker, so its
+    /// devices go first.
+    input: crate::input::Input,
     /// The desktop's worker: dropped, it puts everything back (window panels first).
     desk: Desk,
 }
@@ -251,6 +259,12 @@ impl Displays {
             events.clone(),
         );
         let sound = Sound::start(router.clone(), events.clone(), desk.generation());
+        let input = {
+            let events = events.clone();
+            crate::input::Input::start(move |news| {
+                events.send(crate::events::Event::Input(news));
+            })
+        };
         let mut displays = Self {
             screens: BTreeMap::new(),
             detaching: BTreeMap::new(),
@@ -297,6 +311,7 @@ impl Displays {
             focus: None,
             facts: None,
             sound,
+            input,
             desk,
         };
         // In the order of the rows, then any the rows leave out.
@@ -368,6 +383,7 @@ impl Displays {
         self.cfg.codec = c.codec;
         self.choices = c.choices;
         self.router.set_cursor_source(c.cursor);
+        self.input.set_opener(c.input);
         self.facts = Some(Facts {
             caps: c.caps,
             scales: c.scales,

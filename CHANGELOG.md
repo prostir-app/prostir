@@ -4,11 +4,15 @@
 
 ### Clearer text
 
-- Sharper text is on by default for monitors smaller than 2560×1440 (with VA-API): at
-  the same bitrate small text is much clearer, and the keyframe of a 1080p monitor even
-  smaller. Larger monitors keep the faster setting, as the slower one takes longer than
-  a frame to encode there. Turning Sharper text on or off applies to every monitor;
-  settings of earlier versions keep it only where it was turned on.
+- Sharper text is on by default for every monitor, 2560×1440 and larger too (with
+  VA-API): at the same bitrate small text is much clearer, and the keyframe of a 1080p
+  monitor even smaller. It held 60 frames a second at 2560×1440 on one monitor and on
+  three in a test on an Intel PC. If a monitor's encoder keeps dropping frames with it
+  for about 10 s, that monitor goes to the faster setting at once, which the log and the
+  Quality page of the settings window say; a Sharper text you turned on yourself is never
+  taken back. Turning Sharper text on or off applies to every monitor; settings of
+  earlier versions keep it only where it was turned on. After a big change of the
+  picture, the early sharpening of a still screen now applies to large monitors too.
 - After a big change of the picture (another file, another tab) the first frame is
   coarse: with Sharper text, once the screen is still, it is sharpened after about
   0.7 s instead of about 4 s, once per pause (the faster setting cannot make a still
@@ -193,6 +197,13 @@
   monitor the headset cannot take.
 - Hyprland: Prostir finds out once which form of commands this Hyprland takes (older and
   newer versions differ), instead of trying two forms for each command.
+- The mouse can follow your gaze on KDE Plasma too, and the PC is ready for clicks,
+  the wheel and touches from the headset (they come with the headset's next steps). On
+  KDE Plasma the desktop asks once whether Prostir may control the mouse and keyboard,
+  the first time it is needed, and remembers the answer; on Hyprland no question is
+  asked. Where the desktop has no touch, a tap is a click, moving a finger scrolls and
+  holding it is a right click. Nothing stays pressed when the headset leaves or is
+  taken off.
 
 ### Picture and video in the headset
 
@@ -229,6 +240,12 @@
   it is too slow for.
 - On KDE Plasma, a picture KWin says nothing changed on is not encoded again (the repeat of a still screen and a fresh picture asked by the headset
   still go).
+
+### Hands in the headset
+
+- A hand that carries a monitor, the menu or the keyboard window no longer presses a
+  button of the menu when its fingertip passes in front of it: a hand does one thing at
+  a time.
 
 ### Settings
 

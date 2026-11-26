@@ -3,14 +3,57 @@
 
 use std::time::Instant;
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
+use prostir_proto::state::caps;
 
 use super::{By, Effect, Model, SystemCmd};
-use crate::ids::{DisplayKey, Target, Thing};
-use crate::interaction::Scene;
-use crate::layout::{Placement, Ray};
+use crate::ids::{DisplayKey, PcId, Target, Thing};
+use crate::interaction::record::{Piece, Stage};
+use crate::interaction::{Feel, Modes, PcInput, Scene, Touched};
+use crate::layout::{self, Placement, Ray};
 use crate::ui::{self, Action};
 use crate::world::Pickable;
+
+impl Model {
+    /// PC `pc` lets the headset move its mouse.
+    pub(super) fn pc_moves_mouse(&self, pc: PcId) -> bool {
+        self.session.pc(pc).is_some_and(|p| {
+            p.state
+                .caps
+                .as_ref()
+                .is_some_and(|c| c.has(caps::pc::MOVE_MOUSE))
+        })
+    }
+
+    /// The cylinder monitor `id` is drawn on (none: flat).
+    fn curve_of(&self, id: DisplayKey) -> Option<f32> {
+        self.world
+            .curve_radius(&self.settings)
+            .filter(|_| !self.world.is_window(id))
+    }
+
+    /// What stands in the room now, as a recording of the input keeps it.
+    pub fn input_stage(&self) -> Stage {
+        let w = &self.world;
+        let pieces = w
+            .draw_list()
+            .iter()
+            .filter_map(|&(_, id)| {
+                Some(Piece {
+                    thing: Thing::Display(id),
+                    place: *w.shown(id)?,
+                    height: w.height_of(id),
+                    window: w.is_window(id),
+                })
+            })
+            .collect();
+        let mut stage = Stage::new(w.menu(), self.menu.open, pieces);
+        stage.large_menu = self.settings.large_menu;
+        stage.left_handed = self.settings.left_handed;
+        stage.modes = Scene::modes(self);
+        stage
+    }
+}
 
 impl Scene for Model {
     fn pick(&self, ray: Ray, attach: Option<DisplayKey>) -> Option<Target> {
@@ -58,6 +101,63 @@ impl Scene for Model {
 
     fn resizing(&self) -> Option<DisplayKey> {
         self.world.resizing()
+    }
+
+    fn feel(&self) -> &Feel {
+        &self.feel
+    }
+
+    fn modes(&self) -> Modes {
+        let t = self.trial();
+        Modes {
+            monitors: t.monitors,
+            take: t.take,
+            hands: self.settings.hands == crate::settings::HandMode::Control,
+            movement: t.movement,
+        }
+    }
+
+    fn touchable(&self, at: Vec3, only: Option<DisplayKey>) -> Option<Touched> {
+        let w = &self.world;
+        let mut best: Option<Touched> = None;
+        for &(_, id) in w.draw_list() {
+            if w.is_window(id) || only.is_some_and(|o| o != id) {
+                continue;
+            }
+            let Some(p) = w.shown(id) else { continue };
+            let (height, curve) = (w.height_of(id), self.curve_of(id));
+            let Some(a) = layout::against(p, height, curve, at) else {
+                continue;
+            };
+            if only.is_none() && a.z < -self.feel.touch_through_m {
+                continue;
+            }
+            if best.is_none_or(|b| a.z.abs() < b.z.abs()) {
+                best = Some(Touched {
+                    id,
+                    local: a.local,
+                    z: a.z,
+                    point: a.point,
+                    normal: a.normal,
+                    uv: layout::image_uv(p, height, curve, a.local),
+                });
+            }
+        }
+        best
+    }
+
+    fn monitor_uv(&self, id: DisplayKey, local: Vec2) -> Option<Vec2> {
+        let p = self.world.shown(id)?;
+        Some(layout::image_uv(
+            p,
+            self.world.height_of(id),
+            self.curve_of(id),
+            local,
+        ))
+    }
+
+    fn mouse_shown(&self, id: DisplayKey) -> bool {
+        self.pc_moves_mouse(id.pc) && self.cursors.on(id, self.now).is_some()
     }
 
     fn palm(&mut self, place: Option<Placement>) {
@@ -152,5 +252,12 @@ impl Scene for Model {
 
     fn haptic(&mut self, hand: usize) {
         self.effects.push(Effect::Haptic(hand));
+    }
+
+    /// The mouse goes where the hand sends it, where the PC lets the headset move it
+    /// (one pointer, drawn at once where the ray is); its buttons, scrolls and touches
+    /// to a PC that takes them (see `pc_input`).
+    fn pc(&mut self, now: Instant, input: PcInput) {
+        self.act_on_pc(now, input);
     }
 }

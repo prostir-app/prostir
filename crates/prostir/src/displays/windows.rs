@@ -17,9 +17,42 @@ impl Displays {
         job
     }
 
-    /// Puts the mouse on screen `id` at `x`/`y` across its image (0..=65535).
-    pub fn mouse_to(&mut self, id: ScreenId, x: u16, y: u16) {
-        self.desk.ask(Job::MouseTo { id, x, y });
+    /// The point `u`, `v` across the image of screen `id` (0..=65535 from the top
+    /// left) on the desktop, while it is there: the middle of its first pixel to the
+    /// middle of its last, as `CursorAt` says it back (see `cursor.rs`).
+    pub fn spot(&self, id: ScreenId, u: u16, v: u16) -> Option<Spot> {
+        // Only a display the headsets are shown.
+        if !matches!(self.screens.get(&id)?.state, ScreenState::Running) {
+            return None;
+        }
+        let rect = self.desk_rect(id)?;
+        let output = OutputKey::new(self.output_of(id)?);
+        let at = |start: i32, len: u32, f: u16| {
+            f64::from(start) + f64::from(len.saturating_sub(1)) * f64::from(f) / 65535.0
+        };
+        let desk = self.on_desk.values().fold(rect, |all, r| {
+            let (x, y) = (all.x.min(r.x), all.y.min(r.y));
+            let right = (all.x + all.w as i32).max(r.x + r.w as i32);
+            let bottom = (all.y + all.h as i32).max(r.y + r.h as i32);
+            state::DeskRect {
+                x,
+                y,
+                w: (right - x) as u32,
+                h: (bottom - y) as u32,
+            }
+        });
+        Some(Spot {
+            x: at(rect.x, rect.w, u),
+            y: at(rect.y, rect.h, v),
+            output,
+            rect,
+            desk,
+        })
+    }
+
+    /// Hands `ev` to the input thread, never waiting (see `crate::input`).
+    pub fn input(&self, ev: crate::input::Ev) {
+        self.input.send(ev);
     }
 
     /// Puts the PC's active window on a panel of its own, numbered `id` (a number never

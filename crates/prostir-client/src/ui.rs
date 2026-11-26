@@ -277,6 +277,19 @@ pub struct DevView {
     pub can_reset: bool,
     /// The line Auto's scale reaches, in hundredths (see `autoscale::LINES`).
     pub auto_line: u8,
+    /// "Hands (trial)".
+    pub hands: DevHands,
+}
+
+/// What "Hands (trial)" shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DevHands {
+    pub trial: crate::interaction::trial::Trial,
+    /// The seconds of the recording of the input left (`None`: not recording).
+    pub recording: Option<u8>,
+    /// What reading `feel.txt` came to: found, the numbers changed, the lines not
+    /// taken (`None`: not read yet).
+    pub feel: Option<(bool, u8, u8)>,
 }
 
 /// Which control asked the PC for something: its answer is said under the button pressed
@@ -370,6 +383,9 @@ pub enum Section {
     /// "For development": in the preview build only (see `UiState::dev`).
     #[cfg(feature = "preview")]
     Dev,
+    /// "Hands (trial)", the second part of it.
+    #[cfg(feature = "preview")]
+    DevHands,
 }
 
 impl Tab {
@@ -524,6 +540,24 @@ pub enum Action {
     /// "For development": the line Auto's scale reaches, in hundredths.
     #[cfg(feature = "preview")]
     DevAutoLine(u8),
+    /// "Hands (trial)": monitors touched and clicked (step 8), how a hand takes one,
+    /// how the hands and the effects are drawn.
+    #[cfg(feature = "preview")]
+    DevMonitors(bool),
+    #[cfg(feature = "preview")]
+    DevTake(crate::interaction::Take),
+    #[cfg(feature = "preview")]
+    DevMovement(crate::interaction::trial::Movement),
+    #[cfg(feature = "preview")]
+    DevHandLook(crate::interaction::trial::HandLook),
+    #[cfg(feature = "preview")]
+    DevFx(crate::interaction::trial::FxSet),
+    /// "Hands (trial)": the input recorded for 30 seconds, into a file.
+    #[cfg(feature = "preview")]
+    DevRecord,
+    /// "Hands (trial)": `feel.txt` read again.
+    #[cfg(feature = "preview")]
+    DevReadFeel,
     Close,
 }
 
@@ -4414,13 +4448,19 @@ fn build_settings(s: &UiState, section: Section, items: &mut Vec<Item>, top: f32
     ];
     // "For development" only where the build has it.
     #[cfg(feature = "preview")]
-    let dev = s
-        .dev
-        .is_some()
-        .then(|| (Section::Dev, l.t("headset-section-dev")));
+    let dev = s.dev.is_some().then(|| {
+        [
+            (Section::Dev, l.t("headset-section-dev")),
+            (Section::DevHands, l.t("headset-section-dev-hands")),
+        ]
+    });
     #[cfg(not(feature = "preview"))]
-    let dev = None;
-    for (i, (sec, label)) in sections.into_iter().chain(dev).enumerate() {
+    let dev: Option<[(Section, &str); 0]> = None;
+    for (i, (sec, label)) in sections
+        .into_iter()
+        .chain(dev.into_iter().flatten())
+        .enumerate()
+    {
         let r = rect(nx, top + i as f32 * 60.0, nw, 52.0);
         if sec == section {
             items.push(button(r, label, Style::TabOn, None));
@@ -4607,6 +4647,12 @@ fn settings_page(
         Section::Dev => {
             if let Some(dev) = s.dev {
                 build_dev(s, dev, items, cx, cw.min(700.0), ctop);
+            }
+        }
+        #[cfg(feature = "preview")]
+        Section::DevHands => {
+            if let Some(dev) = s.dev {
+                build_dev_hands(s, dev.hands, items, cx, cw.min(700.0), ctop, wrap);
             }
         }
         Section::Help => {
@@ -4985,6 +5031,182 @@ fn build_pc(s: &UiState, items: &mut Vec<Item>, x: f32, w: f32, mut y: f32) -> f
         ],
     );
     y
+}
+
+/// "Hands (trial)" (the preview build): monitors touched and clicked and how a hand
+/// takes one, how the hands and the effects look, the input recorded, `feel.txt`.
+#[cfg(feature = "preview")]
+fn build_dev_hands(
+    s: &UiState,
+    v: DevHands,
+    items: &mut Vec<Item>,
+    x: f32,
+    w: f32,
+    mut y: f32,
+    wrap: Wrap<'_>,
+) {
+    use crate::interaction::Take;
+    use crate::interaction::trial::{FxSet, HandLook, Movement};
+    let l = &s.texts;
+    let t = v.trial;
+    segmented(
+        items,
+        x,
+        w,
+        &mut y,
+        l.t("headset-dev-monitors"),
+        vec![
+            (
+                l.t("headset-off"),
+                Action::DevMonitors(false),
+                !t.monitors,
+                true,
+            ),
+            (
+                l.t("headset-dev-monitors-on"),
+                Action::DevMonitors(true),
+                t.monitors,
+                true,
+            ),
+        ],
+    );
+    let note = wrap(l.t("headset-dev-monitors-note"), 16.0, w);
+    for (k, line) in note.iter().enumerate() {
+        items.push(text(
+            x,
+            y - 20.0 + k as f32 * 21.0,
+            16.0,
+            false,
+            MUTED,
+            line,
+        ));
+    }
+    y += note.len() as f32 * 21.0 + 6.0;
+    let take = |label, take: Take| (label, Action::DevTake(take), t.take == take, t.monitors);
+    segmented(
+        items,
+        x,
+        w,
+        &mut y,
+        l.t("headset-dev-take"),
+        vec![
+            take(l.t("headset-dev-take-fist"), Take::Fist),
+            take(l.t("headset-dev-take-middle"), Take::Middle),
+            take(l.t("headset-dev-take-hold"), Take::Hold),
+        ],
+    );
+    let powers: Vec<String> = Movement::ALL
+        .iter()
+        .map(|m| match m {
+            Movement::AsNow => l.t("headset-dev-move-as-now").to_owned(),
+            Movement::Sphere(p) => l.f("headset-dev-move-sphere", &[("power", (*p).into())]),
+        })
+        .collect();
+    segmented(
+        items,
+        x,
+        w,
+        &mut y,
+        l.t("headset-dev-move"),
+        Movement::ALL
+            .into_iter()
+            .zip(&powers)
+            .map(|(m, label)| {
+                (
+                    label.as_str(),
+                    Action::DevMovement(m),
+                    t.movement == m,
+                    true,
+                )
+            })
+            .collect(),
+    );
+    let percents: Vec<String> = HandLook::ALL
+        .iter()
+        .map(|look| match look {
+            HandLook::Percent(p) => l.f("headset-dev-hand-percent", &[("percent", (*p).into())]),
+            HandLook::Solid => l.t("headset-dev-hand-solid").to_owned(),
+            HandLook::Tips => l.t("headset-dev-hand-tips").to_owned(),
+        })
+        .collect();
+    segmented(
+        items,
+        x,
+        w,
+        &mut y,
+        l.t("headset-dev-hand-look"),
+        HandLook::ALL
+            .into_iter()
+            .zip(&percents)
+            .map(|(look, label)| {
+                (
+                    label.as_str(),
+                    Action::DevHandLook(look),
+                    t.look == look,
+                    true,
+                )
+            })
+            .collect(),
+    );
+    let fx = |fx: FxSet| {
+        let label = l.t(match fx {
+            FxSet::Thin => "headset-dev-fx-thin",
+            FxSet::Standard => "headset-dev-fx-standard",
+            FxSet::Bold => "headset-dev-fx-bold",
+        });
+        (label, Action::DevFx(fx), t.fx == fx, true)
+    };
+    segmented(
+        items,
+        x,
+        w,
+        &mut y,
+        l.t("headset-dev-fx"),
+        FxSet::ALL.into_iter().map(fx).collect(),
+    );
+    // The recording of the input and `feel.txt`, side by side.
+    let half = (w - 16.0) / 2.0;
+    let recording = v
+        .recording
+        .map(|left| l.f("headset-dev-recording", &[("seconds", left.into())]));
+    items.push(button(
+        rect(x, y - 10.0, half, 48.0),
+        recording
+            .as_deref()
+            .unwrap_or_else(|| l.t("headset-dev-record")),
+        if recording.is_some() {
+            Style::Disabled
+        } else {
+            Style::Normal
+        },
+        recording.is_none().then_some(Action::DevRecord),
+    ));
+    items.push(button(
+        rect(x + half + 16.0, y - 10.0, half, 48.0),
+        l.t("headset-dev-read-feel"),
+        Style::Normal,
+        Some(Action::DevReadFeel),
+    ));
+    let said = match v.feel {
+        Some((false, _, _)) => Some(l.t("headset-dev-feel-none").to_owned()),
+        Some((true, changed, skipped)) => Some(l.f(
+            "headset-dev-feel-read",
+            &[("changed", changed.into()), ("skipped", skipped.into())],
+        )),
+        None => None,
+    };
+    if let Some(said) = said {
+        for (k, line) in wrap(&said, 16.0, half).iter().enumerate() {
+            items.push(text(
+                x + half + 16.0,
+                y + 60.0 + k as f32 * 21.0,
+                16.0,
+                false,
+                MUTED,
+                line,
+            ));
+        }
+    }
 }
 
 /// "For development" (the preview build): how large the monitors are made and "Reset",
@@ -5699,6 +5921,7 @@ mod tests {
                 known: true,
                 can_reset: true,
                 auto_line: 85,
+                hands: DevHands::default(),
             }),
         }
     }

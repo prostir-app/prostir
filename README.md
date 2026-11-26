@@ -155,8 +155,10 @@ the active window to the monitor in front of you, and a screenshot of that monit
 lands in a Prostir folder in your Pictures folder (usually `~/Pictures/Prostir`).
 
 The arrangement can follow your head: turn or move away and, once you have clearly
-looked elsewhere, the monitors glide after you. On Hyprland the mouse can follow your
-gaze, jumping to the monitor you look at. On both desktops the "Mouse?" button shows
+looked elsewhere, the monitors glide after you. The mouse can follow your gaze,
+jumping to the monitor you look at. On KDE Plasma the desktop asks once whether
+Prostir may control the mouse and keyboard (answer with the PC's own mouse or
+keyboard, and let it remember the answer). On both desktops the "Mouse?" button shows
 where the pointer is, with rings.
 
 With your hands shown, hold your left palm open towards your face for a quarter of a

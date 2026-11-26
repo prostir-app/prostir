@@ -14,6 +14,7 @@ mod errors;
 mod events;
 mod find;
 mod i18n;
+mod input;
 mod layout;
 mod listen;
 mod local;
@@ -353,12 +354,31 @@ impl Brain {
             }
             Event::Desk(generation, done) => self.desk(generation, done),
             Event::SoundDevices(generation, done) => self.sound_devices(generation, done),
+            Event::Input(news) => self.input_news(news),
             Event::StillPicture(id) => {
                 if let Some(d) = &mut self.displays {
                     d.fresh_picture(id);
                 }
             }
             Event::Quit => self.quit = true,
+        }
+    }
+
+    /// The input from the headset was not allowed or does not open: said to the
+    /// headsets that may use it.
+    fn input_news(&self, news: input::News) {
+        let (error, detail) = match news {
+            input::News::Refused => (ErrorCode::NOT_ALLOWED, i18n::t("pc-input-not-allowed")),
+            input::News::Unavailable => (ErrorCode::DESKTOP, i18n::t("pc-input-unavailable")),
+        };
+        for s in self.sessions.values() {
+            if s.may(prostir_proto::state::perms::INPUT) {
+                s.send(HostMsg::Problem {
+                    error,
+                    detail: detail.into(),
+                    display: None,
+                });
+            }
         }
     }
 

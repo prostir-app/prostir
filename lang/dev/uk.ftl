@@ -27,3 +27,34 @@ headset-dev-metrics-scale = { $scale } пікс. шолома на пікс. м�
 headset-dev-metrics-rate = { $rate } Мбіт/с
 # $size (Number): kilobytes
 headset-dev-metrics-keyframe = ключовий кадр { $size } КБ
+
+## Налаштування: руки, спроба кроку 8
+
+headset-section-dev-hands = Руки (спроба)
+headset-dev-monitors = Монітори
+headset-dev-monitors-on = Дотик і клік
+headset-dev-monitors-note = З дотиком і кліком монітори приймають дотик пальцем, щипок і тригер, а кожна рука перемикається між дотиком і променем за тим, як близько палець. Кліки, дотики й прокрутка доходять до ПК, що приймає введення з шолома; на іншому за променем іде лише вказівник.
+headset-dev-take = Узяти монітор
+headset-dev-take-fist = Кулаком
+headset-dev-take-middle = Щипком середнім
+headset-dev-take-hold = Утриманням щипка
+headset-dev-move = Монітор у руці рухається
+headset-dev-move-as-now = Уздовж променя
+# $power (Number): степінь відстані руки (1, 2, 3)
+headset-dev-move-sphere = Сфера, p = { $power }
+headset-dev-hand-look = Вигляд рук
+headset-dev-hand-solid = Суцільні
+# $percent (Number): наскільки непрозорі, у відсотках
+headset-dev-hand-percent = { $percent } %
+headset-dev-hand-tips = Кінчики пальців
+headset-dev-fx = Ефекти
+headset-dev-fx-thin = Тонкі
+headset-dev-fx-standard = Стандартні
+headset-dev-fx-bold = Яскраві
+headset-dev-record = Записати ввід, 30 с
+# $seconds (Number): скільки секунд запису лишилось
+headset-dev-recording = Запис: { $seconds } с
+headset-dev-read-feel = Прочитати feel.txt знову
+headset-dev-feel-none = Немає feel.txt: стандартні числа.
+# $changed (Number): скільки чисел інші, ніж стандартні; $skipped (Number): скільки рядків не взято
+headset-dev-feel-read = feel.txt: змінено чисел: { $changed }, не взято рядків: { $skipped }.

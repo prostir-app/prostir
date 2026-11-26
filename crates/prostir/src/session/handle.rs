@@ -1,6 +1,7 @@
 //! What the headset says, carried out: its messages, and what changed about it.
 
 use super::*;
+use crate::input;
 
 impl Session {
     /// Follows what the headset said about itself: worn or not (frames and sound go
@@ -18,6 +19,10 @@ impl Session {
             (false, None) => Some(Instant::now()),
         };
         let fresh = displays.router.set_worn(self.id, worn);
+        if !worn {
+            // Nothing stays pressed on the PC by a headset off the head.
+            displays.input(input::Ev::Release { from: self.id });
+        }
         self.fresh.extend(fresh);
         let denied = self.tray_line().mic_denied;
         if denied && !self.mic_denied {
@@ -134,10 +139,60 @@ impl Session {
                 keep_screens(store, displays, false);
             }
             ClientMsg::Arrange { .. } => info!("a guest's arrangement leaves the desktop as it is"),
-            ClientMsg::MouseTo { id, u, v } if self.publisher.access.may(perms::INPUT) => {
-                displays.mouse_to(ScreenId::from_wire(id), u, v);
+            ClientMsg::MouseTo { .. }
+            | ClientMsg::MouseButton { .. }
+            | ClientMsg::MouseScroll { .. }
+            | ClientMsg::Touch { .. }
+                if !self.publisher.access.may(perms::INPUT) =>
+            {
+                info!("the headset has no right to move the mouse");
             }
-            ClientMsg::MouseTo { .. } => info!("the headset has no right to move the mouse"),
+            // Off the head nothing is pressed (and what was held was let go).
+            ClientMsg::MouseTo { .. }
+            | ClientMsg::MouseButton { .. }
+            | ClientMsg::MouseScroll { .. }
+            | ClientMsg::Touch { .. }
+                if !self.worn() =>
+            {
+                debug!("input from a headset not worn: dropped");
+            }
+            ClientMsg::MouseTo { id, u, v } => {
+                let id = ScreenId::from_wire(id);
+                match displays.spot(id, u, v) {
+                    Some(at) => displays.input(input::Ev::To { from: self.id, at }),
+                    None => debug!("mouse: no {id} on the desktop"),
+                }
+            }
+            ClientMsg::MouseButton {
+                id,
+                u,
+                v,
+                button,
+                down,
+            } => displays.input(input::Ev::Button {
+                from: self.id,
+                at: displays.spot(ScreenId::from_wire(id), u, v),
+                button: mouse_button(button),
+                down,
+            }),
+            ClientMsg::MouseScroll { dx, dy, .. } => displays.input(input::Ev::Scroll {
+                from: self.id,
+                dx: dx.clamp(-SCROLL_MOST, SCROLL_MOST),
+                dy: dy.clamp(-SCROLL_MOST, SCROLL_MOST),
+            }),
+            ClientMsg::Touch {
+                id,
+                slot,
+                u,
+                v,
+                phase,
+            } => displays.input(input::Ev::Touch {
+                from: self.id,
+                slot,
+                phase: touch_phase(phase),
+                at: displays.spot(ScreenId::from_wire(id), u, v),
+                came,
+            }),
             // Said when the monitor looked at changes, at most four times a second: the
             // monitor looked at gets every frame, the others fewer (see
             // `router/priority.rs`).
@@ -171,5 +226,32 @@ impl Session {
             other => warn!("ignoring {other:?}"),
         }
         false
+    }
+}
+
+/// The most of the wheel one `MouseScroll` turns, each way: 50 notches.
+const SCROLL_MOST: i32 = 50 * prostir_proto::input::SCROLL_NOTCH;
+
+/// The PC's button for the headset's.
+fn mouse_button(b: prostir_proto::input::Button) -> platform::MouseButton {
+    use platform::MouseButton;
+    use prostir_proto::input::Button;
+    match b {
+        Button::Left => MouseButton::Left,
+        Button::Right => MouseButton::Right,
+        Button::Middle => MouseButton::Middle,
+        Button::Back => MouseButton::Back,
+        Button::Forward => MouseButton::Forward,
+    }
+}
+
+fn touch_phase(p: prostir_proto::input::TouchPhase) -> platform::TouchPhase {
+    use platform::TouchPhase;
+    use prostir_proto::input::TouchPhase as Wire;
+    match p {
+        Wire::Down => TouchPhase::Down,
+        Wire::Move => TouchPhase::Move,
+        Wire::Up => TouchPhase::Up,
+        Wire::Cancel => TouchPhase::Cancel,
     }
 }

@@ -222,6 +222,11 @@ pc-session-the-headset-does-not-answer = Шолом не відповідає
 pc-session-the-headset-disconnected = Шолом відключився
 pc-session-the-desktop-does-not-respond = Стільниця не відповідає
 
+## src/input/mod.rs
+
+pc-input-not-allowed = Керувати мишею з шолома на цьому ПК не дозволено. Дозволити знову можна після перезапуску Prostir.
+pc-input-unavailable = Стільниця ПК не змогла відкрити введення. Кліки з шолома поки не діють.
+
 ## src/wake.rs
 
 pc-wake-new-headset-nearby = Новий шолом поруч
@@ -548,7 +553,8 @@ window-q-bitrate-desc-large = Зараз { $n } Мбіт/с на кожен мо
 window-q-mbit = { $n }
 window-q-sharp = Чіткіший текст
 window-q-sharp-desc = Повільніше кодування, з яким дрібний текст чіткіший.
-window-q-sharp-desc-by-size = Повільніше кодування, з яким дрібний текст чіткіший. За замовчуванням для моніторів, менших за 2560x1440: більші з ним кодуються довше, ніж триває кадр.
+window-q-sharp-desc-by-size = Повільніше кодування, з яким дрібний текст чіткіший. За замовчуванням для всіх моніторів; той, що з ним не встигає, кодується швидше.
+window-q-sharp-slowed = Із чіткішим текстом ПК не встигав кодувати деякі монітори, тому для них увімкнено швидше кодування.
 window-q-codec = Кодек
 window-q-codec-desc = HEVC, де ПК і шолом це вміють, інакше H.264.
 window-q-cpu = Кодувати процесором

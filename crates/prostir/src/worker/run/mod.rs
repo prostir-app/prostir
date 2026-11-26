@@ -343,6 +343,7 @@ impl Worker {
             let has_windows = windows.is_some();
             let window_list = windows.map(|w| Arc::downgrade(&w.list()));
             let cursor = desktop.cursor().is_some();
+            let input = desktop.input();
             let connected = Connected {
                 caps,
                 scales,
@@ -353,6 +354,7 @@ impl Worker {
                 choices: crate::encoder::available(),
                 physical: desktop.physical(),
                 cursor,
+                input,
             };
             Ok((desktop, gpu, connected))
         })();
@@ -473,8 +475,8 @@ impl Worker {
                 if tuning.1 != self.tuning.unwrap_or_default().1 {
                     e.set_sharp(wanted.encoding.sharp);
                 }
-                let (kbps, sharpens) = e.tuned();
-                self.shared.router.set_tuning(id, kbps, sharpens);
+                let (kbps, sharpens, slowed) = e.tuned();
+                self.shared.router.set_tuning(id, kbps, sharpens, slowed);
             }
         }
         self.tuning = Some(tuning);

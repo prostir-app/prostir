@@ -231,6 +231,11 @@ pc-session-the-headset-does-not-answer = The headset does not answer
 pc-session-the-headset-disconnected = The headset disconnected
 pc-session-the-desktop-does-not-respond = The desktop does not respond
 
+## src/input/mod.rs
+
+pc-input-not-allowed = Controlling the mouse from the headset is not allowed on this PC. It can be allowed again after Prostir restarts.
+pc-input-unavailable = The PC's desktop could not open its input. Clicks from the headset do nothing for now.
+
 ## src/wake.rs
 
 pc-wake-new-headset-nearby = New headset nearby
@@ -563,7 +568,8 @@ window-q-bitrate-desc-large = { $n } Mbit/s for each monitor now, { $large } for
 window-q-mbit = { $n }
 window-q-sharp = Sharper text
 window-q-sharp-desc = A slower encoder setting that keeps small text clearer.
-window-q-sharp-desc-by-size = A slower encoder setting that keeps small text clearer. By default for monitors smaller than 2560x1440: larger ones take longer than a frame to encode with it.
+window-q-sharp-desc-by-size = A slower encoder setting that keeps small text clearer. On by default for every monitor; one that cannot be encoded in time with it uses the faster setting.
+window-q-sharp-slowed = The PC could not encode some monitors in time with sharper text, so they use the faster setting.
 window-q-codec = Codec
 window-q-codec-desc = HEVC where the PC and the headset can, else H.264.
 window-q-cpu = Encode on the processor

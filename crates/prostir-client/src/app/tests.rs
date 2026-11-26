@@ -26,6 +26,8 @@ use crate::platform::store::Store as _;
 use crate::session::{Disconnect, StepId};
 use crate::ui::UiState;
 
+mod input;
+
 const MS: Duration = Duration::from_millis(1);
 const PC: PcId = PcId([9; 8]);
 

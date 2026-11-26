@@ -121,6 +121,14 @@ impl Model {
             | Action::DevSharpening(_)
             | Action::DevMetrics(_)
             | Action::DevAutoLine(_) => self.act_dev(action),
+            #[cfg(feature = "preview")]
+            Action::DevMonitors(_)
+            | Action::DevTake(_)
+            | Action::DevMovement(_)
+            | Action::DevHandLook(_)
+            | Action::DevFx(_)
+            | Action::DevRecord
+            | Action::DevReadFeel => self.act_dev_input(action),
         }
         self.world_done();
     }

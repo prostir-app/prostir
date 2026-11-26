@@ -1,23 +1,37 @@
-//! The hands and the controllers (step 7, 4.1): what they point at, click, touch, drag
-//! and resize, worked out from the frame's input ([`FrameInput`]). In step 7 this is the
-//! input code of 0.1 moved as it was: the same thresholds (holding a pinch 0.3 s drags,
-//! a pinch clicks when it opens, a touch and 0.6 s after it), the same order; step 8
-//! replaces it with a state machine of its own.
+//! The hands and the controllers (step 8, section 1): what they point at, click, touch,
+//! drag and resize, worked out from the frame's input ([`FrameInput`]) as a state
+//! machine of each hand ([`Phase`]): a hand rests, presses, touches, carries or
+//! resizes, one thing at a time. Every number of how it feels is in [`Feel`], which the
+//! scene gives (the defaults are the input's numbers before step 8).
 //!
-//! It changes nothing but its own state (what the hands hold, the touches, the
-//! pointers). What the hands do is said to the [`Scene`] they act on (the model) as it
-//! happens, so a click and a drag of one frame come in the order they came and each
-//! sees what the one before did; what a press on a menu means is asked of the menu's
-//! picture ([`Menus`]), which only the shell has. From outside, only cancelling is done
-//! to it ([`Hands::cancel_all`]): the system menu over the app, the hands no longer the
-//! app's.
+//! It changes nothing but its own state. What the hands do (the intents: a click, a
+//! take, a drag, a touch or a click on a PC's monitor, a vibration) is said to the
+//! [`Scene`] they act on (the model) as it happens, so a click and a drag of one frame
+//! come in the order they came and each sees what the one before did; what a press on
+//! a menu means is asked of the menu's picture ([`Menus`]), which only the shell has.
+//! From outside, only cancelling is done to it ([`Hands::cancel_all`]): the system menu
+//! over the app, the hands no longer the app's.
+//!
+//! What step 8 adds (touching a monitor like a touchscreen, a pinch or a trigger on a
+//! monitor as the mouse, switching between the two by how near the fingertip is,
+//! taking a monitor with a fist, a middle pinch or a held pinch) acts only while the
+//! scene's [`Modes`] say so (the preview build's "For development"); with them off the
+//! hands do what they did before step 8, with the same numbers (see `monitors`).
 
 #![forbid(unsafe_code)]
 
+pub mod feel;
+mod monitors;
+pub mod record;
+pub mod signals;
 #[cfg(test)]
 mod tests;
+pub mod trial;
 
-use std::time::{Duration, Instant};
+pub use feel::Feel;
+pub use monitors::{Modes, MouseButton, PcInput, Take, TouchPhase, Touched, wire_uv};
+
+use std::time::Instant;
 
 use glam::{Quat, Vec2, Vec3};
 
@@ -27,28 +41,8 @@ use crate::layout::{Grab, Hit, Placement, Ray};
 use crate::ui::{self, Action};
 use crate::world::{WRIST_MENU_WIDTH, panel_height, panel_width, wrist_menu_height};
 
-/// How long a pinch must be held on a monitor before it starts dragging it.
-pub const HOLD_TO_DRAG: Duration = Duration::from_millis(300);
 /// `XR_HAND_JOINT_INDEX_TIP_EXT`.
 pub const INDEX_TIP: usize = 10;
-/// Touching the menu with a fingertip, like a touchscreen. Distances from the menu's
-/// surface, positive in front of it.
-pub const POKE_HOVER: f32 = 0.06;
-const POKE_PRESS: f32 = 0.008;
-const POKE_RELEASE: f32 = 0.025;
-/// A finger further behind the menu than this is not touching it (reaching past).
-const POKE_BEHIND: f32 = -0.06;
-/// How long the ring of a touch spreads.
-pub const TOUCH_RING: Duration = Duration::from_millis(350);
-/// Pinches of a hand that just touched the menu are ignored this long.
-pub const AFTER_TOUCH: Duration = Duration::from_millis(600);
-/// A finger "bouncing" off the menu within this long of a touch is not a second one.
-const TOUCH_SETTLES: Duration = Duration::from_millis(400);
-/// How long the "Attach" button under a pointed-at detached window stays after the
-/// pointer left.
-pub const ATTACH_LINGER: Duration = Duration::from_millis(1200);
-/// How long an open palm faces the face before its menu appears.
-pub const PALM_DWELL: Duration = Duration::from_millis(250);
 
 /// Analog press with hysteresis, so a half-pulled trigger does not flicker.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -61,10 +55,20 @@ pub struct Button {
 }
 
 impl Button {
-    /// This frame's `value` (0 to 1).
+    /// This frame's `value` (0 to 1), by the default numbers.
     pub fn update(&mut self, value: f32) {
+        self.update_by(value, &Feel::DEFAULT);
+    }
+
+    /// This frame's `value` (0 to 1): pressed above [`Feel::press_on`], let go below
+    /// [`Feel::press_off`].
+    pub fn update_by(&mut self, value: f32, feel: &Feel) {
         let was = self.down;
-        self.down = if was { value > 0.4 } else { value > 0.75 };
+        self.down = if was {
+            value > feel.press_off
+        } else {
+            value > feel.press_on
+        };
         self.pressed = self.down && !was;
         self.released = !self.down && was;
     }
@@ -182,6 +186,29 @@ pub trait Scene {
     fn holds(&self, thing: Thing) -> bool;
     /// The monitor resized with both hands, as the room sees it.
     fn resizing(&self) -> Option<DisplayKey>;
+    /// The numbers of how the hands feel.
+    fn feel(&self) -> &Feel {
+        &Feel::DEFAULT
+    }
+    /// What the hands may do beyond the input before step 8 (none by default).
+    fn modes(&self) -> Modes {
+        Modes::default()
+    }
+    /// The monitor of a PC under the point `at` (a fingertip), nearest its surface
+    /// (`only`: that one, or none), as a fingertip may touch it.
+    fn touchable(&self, _at: Vec3, _only: Option<DisplayKey>) -> Option<Touched> {
+        None
+    }
+    /// Where the flat-equivalent point `local` of monitor `id` is on its picture (0 to
+    /// 1 from the top left).
+    fn monitor_uv(&self, _id: DisplayKey, _local: Vec2) -> Option<Vec2> {
+        None
+    }
+    /// The headset draws monitor `id`'s PC pointer over it and may move it: a ray on it
+    /// is that pointer, and needs no dot of its own.
+    fn mouse_shown(&self, _id: DisplayKey) -> bool {
+        false
+    }
 
     // ---- What the hands do ----
 
@@ -213,58 +240,79 @@ pub trait Scene {
     fn cancel_holds(&mut self);
     /// A short vibration of `hand`'s controller.
     fn haptic(&mut self, hand: usize);
+    /// A hand acts on a PC's monitor: the mouse, its buttons, a scroll, a touch.
+    fn pc(&mut self, _now: Instant, _input: PcInput) {}
 }
 
 /// A monitor held with both hands: the distance between them sets its width.
 #[derive(Debug, Clone, Copy)]
 struct Scaling {
     id: DisplayKey,
-    /// The hand that took hold second (the first one keeps its ordinary grab).
-    hand: usize,
     start_distance: f32,
     start_width: f32,
 }
 
-/// One fingertip against the menu.
-#[derive(Debug, Default, Clone, Copy)]
-struct Poke {
-    /// Distance to the menu in the previous frame, while in front of it.
+/// What one hand is doing (see the module): one thing at a time.
+#[derive(Debug, Clone, Copy, Default)]
+enum Phase {
+    /// Pointing, or nothing; a fingertip near the menu hovers it.
+    #[default]
+    Idle,
+    /// A fingertip pressed on the menu and not yet pulled back; `drag`: it pressed an
+    /// empty place and drags the menu by that point (in the menu's plane).
+    Touching { drag: Option<Vec2> },
+    /// A pinch down on what the ray pointed at: since when (it takes the thing when
+    /// held), and the menu's button that clicks when the pinch opens (as on the
+    /// system's own windows).
+    Pressed {
+        since: Option<Instant>,
+        click: Option<(Action, Vec3)>,
+    },
+    /// Something in the hand.
+    Carry(monitors::Carry),
+    /// The second hand on the monitor the first one holds: resizing it.
+    Scale(Scaling),
+    /// Step 8: a fingertip pressed on a monitor.
+    Poke(monitors::Poke),
+    /// Step 8: a pinch or a trigger down on a monitor (the mouse's button).
+    RayPress(monitors::RayPress),
+    /// Step 8: a middle pinch on a monitor: scrolling, or a right click.
+    Scroll(monitors::Scroll),
+}
+
+/// One hand's state from frame to frame: its phase and what it remembers across them.
+#[derive(Debug, Clone, Copy, Default)]
+struct Hand {
+    phase: Phase,
+    /// Distance in front of the menu in the last frame, while in front of it.
     last_z: Option<f32>,
-    /// Touched and not yet pulled back.
-    pressed: bool,
-    /// Dragging the menu: the touched point in the menu's own plane.
-    drag: Option<Vec2>,
     /// The last touch: pulling the hand back often closes thumb and index into a
     /// pinch, which must not click whatever this hand's ray points at.
     touched_at: Option<Instant>,
+    /// Whether this side was a tracked hand (not a controller) in its last frame.
+    was_hand: Option<bool>,
+    /// Step 8 (see `monitors`).
+    m: monitors::HandMonitors,
 }
 
-impl Poke {
-    /// Away from the menu: only when it last touched stays.
-    fn away(self) -> Self {
-        Self {
-            touched_at: self.touched_at,
-            ..Self::default()
-        }
-    }
+/// Something that just happened, drawn as a ring spreading out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// A touch or a click.
+    Touch,
+    /// A right click.
+    Right,
 }
 
 /// The hands' own state from frame to frame (see the module).
 #[derive(Debug)]
 pub struct Hands {
+    hands: [Hand; 2],
     /// What each ray points at this frame (none for a hand touching the menu).
     picks: [Option<Target>; 2],
-    pokes: [Poke; 2],
     /// A fingertip near the menu this frame: where on it (in its plane) and how far
     /// in front.
     poke_hover: [Option<(Vec2, f32)>; 2],
-    /// Since when a hand's pinch is held (on something it may drag).
-    hold_since: [Option<Instant>; 2],
-    /// A hand's pinch on a menu button: clicked when let go, unless it was held long
-    /// enough to drag the menu instead (as on the system's own windows).
-    pending_click: [Option<(Action, Vec3)>; 2],
-    grabs: [Option<Grab>; 2],
-    scaling: Option<Scaling>,
     /// The poking fingertip left the palm menu since its last press.
     wrist_poke_armed: bool,
     /// Since when an open palm faces the face (its menu shows after a moment).
@@ -273,11 +321,13 @@ pub struct Hands {
     menu_gesture_held: bool,
     /// The detached window whose "Attach" button shows, and when it was pointed at.
     attach_for: Option<(DisplayKey, Instant)>,
-    /// Touches that just happened: where, when; drawn as a ring spreading out. Kept
-    /// to be filled again.
-    rings: Vec<(Vec3, Instant)>,
-    /// Whether each side was a tracked hand (not a controller) in its last frame.
-    was_hand: [Option<bool>; 2],
+    /// Touches and clicks that just happened: where, when, which; drawn as a ring
+    /// spreading out. Kept to be filled again.
+    rings: Vec<(Vec3, Instant, Mark)>,
+    /// The numbers of this frame (the scene's).
+    feel: Feel,
+    /// Step 8, both hands together (see `monitors`).
+    m: monitors::Shared,
 }
 
 impl Default for Hands {
@@ -289,19 +339,16 @@ impl Default for Hands {
 impl Hands {
     pub fn new() -> Self {
         Self {
+            hands: [Hand::default(); 2],
             picks: [None, None],
-            pokes: [Poke::default(); 2],
             poke_hover: [None, None],
-            hold_since: [None, None],
-            pending_click: [None, None],
-            grabs: [None, None],
-            scaling: None,
             wrist_poke_armed: true,
             palm_since: None,
             menu_gesture_held: false,
             attach_for: None,
-            rings: Vec::new(),
-            was_hand: [None, None],
+            rings: Vec::with_capacity(16),
+            feel: Feel::DEFAULT,
+            m: monitors::Shared::default(),
         }
     }
 
@@ -315,10 +362,12 @@ impl Hands {
     /// A fingertip near the menu: where on it (in its plane), how far in front, and
     /// whether it is pressed.
     pub fn pokes(&self) -> impl Iterator<Item = (usize, Vec2, f32, bool)> + '_ {
-        self.poke_hover
-            .iter()
-            .enumerate()
-            .filter_map(|(h, p)| p.map(|(at, z)| (h, at, z, self.pokes[h].pressed)))
+        self.poke_hover.iter().enumerate().filter_map(|(h, p)| {
+            p.map(|(at, z)| {
+                let pressed = matches!(self.hands[h].phase, Phase::Touching { drag: None });
+                (h, at, z, pressed)
+            })
+        })
     }
 
     /// Hand `h`'s fingertip is near the menu.
@@ -328,15 +377,24 @@ impl Hands {
 
     /// The touches spreading out as rings: where, and how far they spread (0 to 1).
     pub fn rings(&self, now: Instant) -> impl Iterator<Item = (Vec3, f32)> + '_ {
-        self.rings.iter().filter_map(move |(at, when)| {
+        self.marks(now).map(|(at, k, _)| (at, k))
+    }
+
+    /// The same, with what each was.
+    pub fn marks(&self, now: Instant) -> impl Iterator<Item = (Vec3, f32, Mark)> + '_ {
+        let ring = self.feel.touch_ring();
+        self.rings.iter().filter_map(move |(at, when, mark)| {
             let age = now.saturating_duration_since(*when);
-            (age < TOUCH_RING).then(|| (*at, age.as_secs_f32() / TOUCH_RING.as_secs_f32()))
+            (age < ring).then(|| (*at, age.as_secs_f32() / ring.as_secs_f32(), *mark))
         })
     }
 
     /// What the hands hold.
     pub fn held(&self) -> impl Iterator<Item = Thing> + '_ {
-        self.grabs.iter().flatten().map(|g| g.id)
+        self.hands.iter().filter_map(|h| match h.phase {
+            Phase::Carry(c) => Some(c.grab.id),
+            _ => None,
+        })
     }
 
     /// The detached window whose "Attach" button shows.
@@ -365,20 +423,32 @@ impl Hands {
     /// A hand holds something, resizes, or waits on a pinch: what
     /// [`Hands::cancel_all`] would end.
     pub fn busy(&self) -> bool {
-        self.grabs.iter().any(Option::is_some)
-            || self.scaling.is_some()
-            || self.pending_click.iter().any(Option::is_some)
-            || self.hold_since.iter().any(Option::is_some)
+        self.hands.iter().any(|h| {
+            matches!(
+                h.phase,
+                Phase::Carry(_)
+                    | Phase::Scale(_)
+                    | Phase::Pressed { .. }
+                    | Phase::Poke(_)
+                    | Phase::RayPress(_)
+                    | Phase::Scroll(_)
+            )
+        })
     }
 
     /// The hands are not the app's any more (the system menu over it, another way of
-    /// input): what they held is let go where it is, a drag and a resize end, and a
-    /// pinch on a menu button no longer clicks when it opens.
+    /// input): what they held is let go where it is, a drag and a resize end, a pinch
+    /// on a menu button no longer clicks when it opens, and what they pressed on a
+    /// PC's monitor is let go there.
     pub fn cancel_all(&mut self, scene: &mut impl Scene) {
-        self.grabs = [None, None];
-        self.scaling = None;
-        self.pending_click = [None, None];
-        self.hold_since = [None, None];
+        // Without the time of a frame: the last one's.
+        let now = self.m.now;
+        for h in 0..2 {
+            self.end_monitor(h, now, scene, true);
+            if !matches!(self.hands[h].phase, Phase::Touching { .. }) {
+                self.hands[h].phase = Phase::Idle;
+            }
+        }
         scene.cancel_holds();
     }
 
@@ -392,8 +462,11 @@ impl Hands {
         let Some(Head { position: head, .. }) = input.head else {
             return;
         };
+        self.feel = *scene.feel();
+        self.m.begin(now);
+        let ring = self.feel.touch_ring();
         self.rings
-            .retain(|(_, at)| now.saturating_duration_since(*at) < TOUCH_RING);
+            .retain(|(_, at, _)| now.saturating_duration_since(*at) < ring);
         self.sync(scene);
         let menu_hand = usize::from(scene.left_handed());
         let wrist = palm_menu_place(
@@ -403,6 +476,7 @@ impl Hands {
             scene.wrist(),
             &mut self.palm_since,
             now,
+            &self.feel,
         );
         scene.palm(wrist);
         // The left hand's menu gesture counts as the menu button.
@@ -418,9 +492,10 @@ impl Hands {
         }
     }
 
-    /// The rest of this frame's input, acted on `scene` in the order of 0.1: the
-    /// pointers, the palm menu's and the main menu's touches, resizing with both hands,
-    /// then each hand's click, drag and letting go. Nothing without a frame.
+    /// The rest of this frame's input, acted on `scene`: the pointers, the palm menu's
+    /// and the main menu's touches (and, in step 8's modes, the monitors'), resizing
+    /// with both hands, then each hand's click, drag and letting go. Nothing without a
+    /// frame.
     pub fn step(
         &mut self,
         now: Instant,
@@ -428,16 +503,26 @@ impl Hands {
         scene: &mut impl Scene,
         menus: &mut impl Menus,
     ) {
-        let Some(Head { position: head, .. }) = input.head else {
+        let Some(head) = input.head else {
             return;
         };
         self.sync(scene);
+        let modes = scene.modes();
+        if modes != self.m.modes {
+            self.m.modes = modes;
+            self.modes_changed(now, scene);
+        }
         let tips = input.tips();
+
+        // Step 8: each hand's gestures, and whether its fingertip touches or its ray
+        // points.
+        self.switch(input, scene);
 
         // Pointing, clicking and dragging.
         let attach = self.attach_for();
-        for (pick, hand) in self.picks.iter_mut().zip(&input.hands) {
-            *pick = hand.ray.and_then(|r| scene.pick(r, attach));
+        for h in 0..2 {
+            let ray = input.hands[h].ray.filter(|_| !self.hands[h].m.touch_mode);
+            self.picks[h] = ray.and_then(|r| scene.pick(r, attach));
         }
         // A detached window pointed at shows "Attach" under it; it lingers so the
         // pointer can move down onto it.
@@ -448,13 +533,14 @@ impl Hands {
         if let Some(id) = pointed {
             self.attach_for = Some((id, now));
         } else if self.attach_for.is_some_and(|(id, t)| {
-            now.saturating_duration_since(t) > ATTACH_LINGER || !scene.shows(id)
+            now.saturating_duration_since(t) > self.feel.attach_linger() || !scene.shows(id)
         }) {
             self.attach_for = None;
         }
 
         self.palm_menu(now, &tips, scene, menus);
-        self.touch_menu(now, head, &tips, scene, menus);
+        self.touch_menu(now, head.position, &tips, scene, menus);
+        self.touch_monitors(now, input, scene);
 
         let large = scene.large_menu();
         let poked = self
@@ -475,17 +561,26 @@ impl Hands {
         menus.hover(Menu::Main, hover);
 
         // Both hands on one monitor: the distance between them sets its width.
-        if let Some(s) = self.scaling
+        let scaling = self.hands.iter().find_map(|h| match h.phase {
+            Phase::Scale(s) => Some(s),
+            _ => None,
+        });
+        if let Some(s) = scaling
             && let (Some(a), Some(b)) = (input.hands[0].ray, input.hands[1].ray)
         {
             let d = a.origin.distance(b.origin);
-            let width = (s.start_width * d / s.start_distance.max(0.05)).clamp(0.2, 8.0);
+            let width = (s.start_width * d / s.start_distance.max(self.feel.two_hands_min_m))
+                .clamp(self.feel.width_min_m, self.feel.width_max_m);
             scene.resize(width);
         }
 
         for hand in 0..2 {
-            self.hand(now, hand, input, head, scene, menus);
+            if !self.monitor_hand(now, hand, input, head, scene) {
+                self.hand(now, hand, input, head.position, scene, menus);
+            }
         }
+        self.mouse(now, scene);
+        self.shown_rays(input, head);
     }
 
     /// The palm menu, pointed at or touched with the other hand's index finger.
@@ -496,6 +591,7 @@ impl Hands {
         scene: &mut impl Scene,
         menus: &mut impl Menus,
     ) {
+        let f = self.feel;
         let mut wrist_hover = self
             .picks
             .iter()
@@ -508,15 +604,19 @@ impl Hands {
             let local = w.rotation.inverse() * (tip - w.position);
             let inside =
                 local.x.abs() < WRIST_MENU_WIDTH / 2.0 && local.y.abs() < wrist_menu_height() / 2.0;
-            if inside && local.z < 0.04 {
+            if inside && local.z < f.wrist_hover_m {
                 wrist_hover = Some(wrist_point(Vec2::new(local.x, local.y)));
             }
-            if inside && local.z < 0.008 && local.z > -0.03 && self.wrist_poke_armed {
+            if inside
+                && local.z < f.wrist_press_m
+                && local.z > -f.wrist_behind_m
+                && self.wrist_poke_armed
+            {
                 self.wrist_poke_armed = false;
                 wrist_pressed = wrist_hover;
-                self.rings.push((tip, now));
+                self.rings.push((tip, now, Mark::Touch));
             }
-            if !inside || local.z > 0.02 {
+            if !inside || local.z > f.wrist_rearm_m {
                 self.wrist_poke_armed = true;
             }
         } else {
@@ -544,60 +644,94 @@ impl Hands {
         scene: &mut impl Scene,
         menus: &mut impl Menus,
     ) {
+        let f = self.feel;
         self.poke_hover = [None, None];
         for h in 0..2 {
-            let poke = &mut self.pokes[h];
+            let hand = &mut self.hands[h];
+            // One thing at a time: a hand that holds, presses or touches a monitor
+            // does not touch the menu.
+            // A hand that carries something or presses a monitor does not touch the
+            // menu (one thing at a time). A pinch held on something with the
+            // fingertip coming near the menu: as before step 8, the finger is then
+            // the pointer, not the ray, so the hold takes nothing; it presses nothing
+            // either.
+            let (touching, pinching) = match hand.phase {
+                Phase::Idle => (None, false),
+                Phase::Touching { drag } => (Some(drag), false),
+                Phase::Pressed { .. } => (None, true),
+                _ => {
+                    hand.last_z = None;
+                    continue;
+                }
+            };
             let (Some(tip), Some(place)) = (tips[h], scene.menu()) else {
-                *poke = poke.away();
+                hand.last_z = None;
+                if touching.is_some() {
+                    hand.phase = Phase::Idle;
+                }
                 continue;
             };
             let large = scene.large_menu();
             let l = place.rotation.inverse() * (tip - place.position);
             let (half_w, half_h) = (panel_width(large) / 2.0, panel_height(large) / 2.0);
-            if let Some(anchor) = poke.drag {
-                if l.z > POKE_RELEASE {
-                    *poke = poke.away();
+            if let Some(Some(anchor)) = touching {
+                if l.z > f.poke_release_m {
+                    hand.last_z = None;
+                    hand.phase = Phase::Idle;
                     continue;
                 }
                 // The touched point follows the finger; pushing deeper moves it away.
-                let shift = Vec3::new(l.x - anchor.x, l.y - anchor.y, (l.z + 0.03).min(0.0));
+                let shift = Vec3::new(
+                    l.x - anchor.x,
+                    l.y - anchor.y,
+                    (l.z + f.menu_push_m).min(0.0),
+                );
                 let position = place.position + place.rotation * shift;
                 scene.move_menu(position, head);
                 self.picks[h] = None;
                 continue;
             }
             let inside = l.x.abs() <= half_w && l.y.abs() <= half_h;
-            if !inside || l.z > POKE_HOVER || l.z < POKE_BEHIND {
-                poke.last_z = None;
-                poke.pressed = false;
+            if !inside || l.z > f.poke_hover_m || l.z < -f.poke_behind_m {
+                hand.last_z = None;
+                if !pinching {
+                    hand.phase = Phase::Idle;
+                }
                 continue;
             }
             // Near the menu, the finger is the pointer, not this hand's ray.
             self.picks[h] = None;
             let at = Vec2::new(l.x, l.y);
             self.poke_hover[h] = Some((at, l.z));
-            if poke.pressed && l.z > POKE_RELEASE {
-                poke.pressed = false;
+            if pinching {
+                hand.last_z = Some(l.z);
+                continue;
             }
-            let arrived = poke.last_z.is_some_and(|z| z >= POKE_PRESS);
+            let mut pressed = touching.is_some();
+            if pressed && l.z > f.poke_release_m {
+                pressed = false;
+                hand.phase = Phase::Idle;
+            }
+            let arrived = hand.last_z.is_some_and(|z| z >= f.poke_press_m);
             // Hand tracking jitters: a finger "bouncing" off the menu is not a second tap.
-            let settled = poke
+            let settled = hand
                 .touched_at
-                .is_none_or(|t| now.saturating_duration_since(t) > TOUCH_SETTLES);
-            poke.last_z = Some(l.z);
-            if !poke.pressed && arrived && settled && l.z < POKE_PRESS {
-                poke.pressed = true;
-                poke.touched_at = Some(now);
+                .is_none_or(|t| now.saturating_duration_since(t) > f.touch_settles());
+            hand.last_z = Some(l.z);
+            if !pressed && arrived && settled && l.z < f.poke_press_m {
+                hand.touched_at = Some(now);
+                hand.phase = Phase::Touching { drag: None };
                 self.rings.push((
                     place.position + place.rotation * Vec3::new(l.x, l.y, 0.003),
                     now,
+                    Mark::Touch,
                 ));
                 match menus.press(Menu::Main, plane_point(at, large)) {
                     Some(action) => {
                         scene.press_menu(now, action);
                         self.pressed(scene);
                     }
-                    None => self.pokes[h].drag = Some(at),
+                    None => self.hands[h].phase = Phase::Touching { drag: Some(at) },
                 }
             }
         }
@@ -613,13 +747,16 @@ impl Hands {
         scene: &mut impl Scene,
         menus: &mut impl Menus,
     ) {
+        let f = self.feel;
         let mut input = frame.hands[hand];
         // The controller put down and the hand taking over (or the other way): the
         // button or pinch that held something will never be seen let go, so what it
         // held is let go now, as letting go would, and a pinch waiting to click is
         // forgotten.
-        let switched = self.was_hand[hand].is_some_and(|was| was != input.is_hand);
-        self.was_hand[hand] = Some(input.is_hand);
+        let switched = self.hands[hand]
+            .was_hand
+            .is_some_and(|was| was != input.is_hand);
+        self.hands[hand].was_hand = Some(input.is_hand);
         // The button or pinch that holds is seen neither down nor let go: its input
         // stopped (hands that no longer point, as the settings say, give nothing), and
         // it will never be seen let go either.
@@ -629,111 +766,61 @@ impl Hands {
             input.grab
         };
         let stopped = !holding.down && !holding.released;
-        if switched || (input.is_hand && stopped) {
-            self.pending_click[hand] = None;
-            self.hold_since[hand] = None;
+        if (switched || (input.is_hand && stopped))
+            && matches!(self.hands[hand].phase, Phase::Pressed { .. })
+        {
+            self.hands[hand].phase = Phase::Idle;
         }
         // A hand that just touched the menu: its next pinch is the hand pulling back,
         // not a click.
         if input.is_hand
-            && self.pokes[hand]
+            && self.hands[hand]
                 .touched_at
-                .is_some_and(|t| now.saturating_duration_since(t) < AFTER_TOUCH)
+                .is_some_and(|t| now.saturating_duration_since(t) < f.after_touch())
         {
             input.select.pressed = false;
         }
         if input.select.pressed {
-            let mut clicked = false;
-            match self.picks[hand] {
-                Some(Target {
-                    thing: Thing::Attach(id),
-                    hit,
-                }) => {
-                    clicked = true;
-                    self.rings.push((hit.point, now));
-                    scene.haptic(hand);
-                    self.attach_for = None;
-                    scene.press(now, Action::CloseWindow(id));
-                    self.pressed(scene);
-                }
-                Some(Target {
-                    thing: Thing::Menu,
-                    hit,
-                }) => {
-                    let at = panel_point(&hit, scene.large_menu());
-                    if let Some(action) = menus.press(Menu::Main, at) {
-                        if input.is_hand {
-                            // Decided when the pinch opens: a click, or a drag.
-                            self.pending_click[hand] = Some((action, hit.point));
-                        } else {
-                            self.rings.push((hit.point, now));
-                            clicked = true;
-                            scene.haptic(hand);
-                            scene.press_menu(now, action);
-                            self.pressed(scene);
-                        }
-                    }
-                }
-                Some(Target {
-                    thing: Thing::Wrist,
-                    hit,
-                }) => {
-                    clicked = true;
-                    if let Some(action) = menus.press(Menu::Palm, wrist_point(hit.local)) {
-                        self.rings.push((hit.point, now));
-                        scene.haptic(hand);
-                        scene.press(now, action);
-                        self.pressed(scene);
-                    }
-                }
-                Some(Target {
-                    thing: Thing::MenuButton,
-                    hit,
-                }) => {
-                    self.rings.push((hit.point, now));
-                    clicked = true;
-                    scene.haptic(hand);
-                    scene.toggle_menu();
-                    self.pressed(scene);
-                }
-                _ => {}
-            }
-            // Hands drag with pinch-and-hold, like the system's own windows.
-            if input.is_hand && !clicked && self.picks[hand].is_some() {
-                self.hold_since[hand] = Some(now);
-            }
+            self.select_pressed(now, hand, input, scene, menus);
         }
-        if input.select.released {
-            self.hold_since[hand] = None;
+        if input.select.released
+            && let Phase::Pressed { click, .. } = self.hands[hand].phase
+        {
+            self.hands[hand].phase = Phase::Idle;
             // On the menu as it still is (not closed, nothing else pressed meanwhile).
-            if let Some((action, point)) = self.pending_click[hand].take()
+            if let Some((action, point)) = click
                 && scene.menu().is_some()
             {
-                self.rings.push((point, now));
+                self.rings.push((point, now, Mark::Touch));
                 scene.haptic(hand);
                 scene.press_menu(now, action);
                 self.pressed(scene);
             }
         }
+        let carrying = matches!(self.hands[hand].phase, Phase::Carry(_));
         let (start_grab, end_grab) = if input.is_hand {
             let held = input.select.down
-                && self.hold_since[hand]
-                    .is_some_and(|t| now.saturating_duration_since(t) >= HOLD_TO_DRAG);
-            (held && self.grabs[hand].is_none(), input.select.released)
+                && matches!(self.hands[hand].phase, Phase::Pressed { since: Some(t), .. }
+                    if now.saturating_duration_since(t) >= f.hold_to_take());
+            (held && !carrying, input.select.released)
         } else {
             (input.grab.pressed, input.grab.released)
         };
         let end_grab = end_grab || switched || stopped;
 
-        if end_grab && self.scaling.is_some_and(|s| s.hand == hand) {
-            self.scaling = None;
+        if end_grab && matches!(self.hands[hand].phase, Phase::Scale(_)) {
+            self.hands[hand].phase = Phase::Idle;
             scene.resize_end();
         }
-        if end_grab && let Some(released) = self.grabs[hand].take() {
+        if end_grab && let Phase::Carry(released) = self.hands[hand].phase {
+            self.hands[hand].phase = Phase::Idle;
             // Letting go with the first hand ends resizing too.
-            self.scaling = None;
+            let other = &mut self.hands[1 - hand];
+            if matches!(other.phase, Phase::Scale(_)) {
+                other.phase = Phase::Idle;
+            }
             // Let go next to another monitor: it sticks to it, edge to edge.
-            if scene.let_go(now, released.id) {
+            if scene.let_go(now, released.grab.id) {
                 scene.haptic(hand);
             }
             self.sync(scene);
@@ -741,20 +828,24 @@ impl Hands {
         let Some(ray) = input.ray else {
             return;
         };
-        if let Some(mut grab) = self.grabs[hand] {
+        if let Phase::Carry(mut carry) = self.hands[hand].phase {
             // Moved from where it goes now; the room keeps the keyboard flat, a
             // monitor on a wall parallel to it, and moves the rest along with "move all
             // together".
-            if let Some(mut p) = scene.place(grab.id) {
-                grab.update(&mut p, ray, head, input.stick, frame.dt);
-                scene.drag(grab.id, p, head);
-                self.grabs[hand] = Some(grab);
+            if let Some(mut p) = scene.place(carry.grab.id) {
+                carry
+                    .grab
+                    .update(&mut p, ray, head, input.stick, frame.dt, &f);
+                scene.drag(carry.grab.id, p, head);
+                self.hands[hand].phase = Phase::Carry(carry);
             }
         } else if start_grab {
-            self.hold_since[hand] = None;
             // Held on a button: the menu moves, the button is not pressed.
-            self.pending_click[hand] = None;
-            let other = self.grabs[1 - hand].map(|g| g.id);
+            self.hands[hand].phase = Phase::Idle;
+            let other = match self.hands[1 - hand].phase {
+                Phase::Carry(c) => Some(c.grab.id),
+                _ => None,
+            };
             let grabbed = match self.picks[hand] {
                 Some(Target {
                     thing: thing @ (Thing::Menu | Thing::Keyboard),
@@ -768,9 +859,8 @@ impl Hands {
                     if let (Some(a), Some(b)) = (frame.hands[0].ray, frame.hands[1].ray)
                         && let Some(start_width) = scene.resize_start(id)
                     {
-                        self.scaling = Some(Scaling {
+                        self.hands[hand].phase = Phase::Scale(Scaling {
                             id,
-                            hand,
                             start_distance: a.origin.distance(b.origin),
                             start_width,
                         });
@@ -784,37 +874,113 @@ impl Hands {
                 }) => take(scene, thing, hit),
                 _ => None,
             }
-            .map(|g| {
-                if input.is_hand {
-                    g.with_reach(ray.origin, head)
-                } else {
-                    g
-                }
+            .map(|g| match frame.head {
+                Some(full) if input.is_hand => self.reach(g, ray, full, hand),
+                _ => g,
             });
-            if grabbed.is_some() {
+            if let Some(grab) = grabbed {
                 scene.haptic(hand);
-                self.grabs[hand] = grabbed;
+                self.hands[hand].phase = Phase::Carry(monitors::Carry::by_ray(grab));
             }
+        }
+    }
+
+    /// Hand `hand`'s select (trigger or pinch) went down: a click on what its ray
+    /// points at (a controller's at once, a hand's on a menu button when the pinch
+    /// opens), and for a hand the start of a hold that takes it.
+    fn select_pressed(
+        &mut self,
+        now: Instant,
+        hand: usize,
+        input: HandState,
+        scene: &mut impl Scene,
+        menus: &mut impl Menus,
+    ) {
+        let mut clicked = false;
+        let mut click = None;
+        match self.picks[hand] {
+            Some(Target {
+                thing: Thing::Attach(id),
+                hit,
+            }) => {
+                clicked = true;
+                self.rings.push((hit.point, now, Mark::Touch));
+                scene.haptic(hand);
+                self.attach_for = None;
+                scene.press(now, Action::CloseWindow(id));
+                self.pressed(scene);
+            }
+            Some(Target {
+                thing: Thing::Menu,
+                hit,
+            }) => {
+                let at = panel_point(&hit, scene.large_menu());
+                if let Some(action) = menus.press(Menu::Main, at) {
+                    if input.is_hand {
+                        // Decided when the pinch opens: a click, or a drag.
+                        click = Some((action, hit.point));
+                    } else {
+                        self.rings.push((hit.point, now, Mark::Touch));
+                        clicked = true;
+                        scene.haptic(hand);
+                        scene.press_menu(now, action);
+                        self.pressed(scene);
+                    }
+                }
+            }
+            Some(Target {
+                thing: Thing::Wrist,
+                hit,
+            }) => {
+                clicked = true;
+                if let Some(action) = menus.press(Menu::Palm, wrist_point(hit.local)) {
+                    self.rings.push((hit.point, now, Mark::Touch));
+                    scene.haptic(hand);
+                    scene.press(now, action);
+                    self.pressed(scene);
+                }
+            }
+            Some(Target {
+                thing: Thing::MenuButton,
+                hit,
+            }) => {
+                self.rings.push((hit.point, now, Mark::Touch));
+                clicked = true;
+                scene.haptic(hand);
+                scene.toggle_menu();
+                self.pressed(scene);
+            }
+            _ => {}
+        }
+        // Hands drag with pinch-and-hold, like the system's own windows.
+        let since = (input.is_hand && !clicked && self.picks[hand].is_some()).then_some(now);
+        if (since.is_some() || click.is_some())
+            && matches!(self.hands[hand].phase, Phase::Idle | Phase::Pressed { .. })
+        {
+            self.hands[hand].phase = Phase::Pressed { since, click };
         }
     }
 
     /// A press was made (a button, the menu toggled): what the menu showed changed, so a
     /// pinch waiting to click on it clicks nothing.
     fn pressed(&mut self, scene: &impl Scene) {
-        self.pending_click = [None, None];
+        for hand in &mut self.hands {
+            if let Phase::Pressed { click, .. } = &mut hand.phase {
+                *click = None;
+            }
+        }
         self.sync(scene);
     }
 
     /// A hand lets go of what the room no longer has it hold (laid out anew, or gone),
     /// and resizing ends when the room ended it.
     fn sync(&mut self, scene: &impl Scene) {
-        for grab in &mut self.grabs {
-            if grab.is_some_and(|g| !scene.holds(g.id)) {
-                *grab = None;
+        for hand in &mut self.hands {
+            match hand.phase {
+                Phase::Carry(c) if !scene.holds(c.grab.id) => hand.phase = Phase::Idle,
+                Phase::Scale(s) if scene.resizing() != Some(s.id) => hand.phase = Phase::Idle,
+                _ => {}
             }
-        }
-        if self.scaling.is_some_and(|s| scene.resizing() != Some(s.id)) {
-            self.scaling = None;
         }
     }
 }
@@ -849,9 +1015,9 @@ fn wrist_point(local: Vec2) -> (f32, f32) {
 }
 
 /// Where the palm menu goes: lying on the palm (a little above it, its top towards the
-/// fingers), while an open palm is turned to the face. It takes a quarter of a second
-/// of that to appear, so hands passing by (typing, reaching) do not bring it up.
-/// `since`: when the palm started facing the face.
+/// fingers), while an open palm is turned to the face. It takes a moment of that to
+/// appear, so hands passing by (typing, reaching) do not bring it up. `since`: when
+/// the palm started facing the face.
 fn palm_menu_place(
     joints: Option<&Joints>,
     right_hand: bool,
@@ -859,6 +1025,7 @@ fn palm_menu_place(
     previous: Option<Placement>,
     since: &mut Option<Instant>,
     now: Instant,
+    feel: &Feel,
 ) -> Option<Placement> {
     let Some(j) = joints else {
         *since = None;
@@ -874,13 +1041,19 @@ fn palm_menu_place(
         normal = -normal;
     }
     let facing = normal.dot((head - palm).normalize_or_zero());
-    let open = middle_tip.distance(palm) > 0.07;
-    let needed = if previous.is_some() { 0.55 } else { 0.8 };
+    let open = middle_tip.distance(palm) > feel.palm_open_m;
+    let needed = if previous.is_some() {
+        feel.palm_face_off
+    } else {
+        feel.palm_face_on
+    };
     if facing < needed || !open {
         *since = None;
         return None;
     }
-    if previous.is_none() && now.saturating_duration_since(*since.get_or_insert(now)) < PALM_DWELL {
+    if previous.is_none()
+        && now.saturating_duration_since(*since.get_or_insert(now)) < feel.palm_dwell()
+    {
         return None;
     }
     let up = (middle - wrist)

@@ -1,0 +1,5 @@
+0.011 mouse display 1 at (0.500, 0.500)
+0.550 take display 1
+0.550 haptic right
+0.561..0.748 drag display 1 x18 at (0.00, 1.85, -1.80)
+0.759 let-go display 1

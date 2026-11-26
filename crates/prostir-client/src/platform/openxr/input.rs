@@ -7,7 +7,7 @@ use glam::{Vec2, Vec3};
 use log::{info, warn};
 use openxr as xr;
 
-use crate::interaction::{Button, HandState};
+use crate::interaction::{Button, Feel, HandState, signals};
 use crate::layout::Ray;
 use crate::platform::controllers::{self, Role};
 use crate::platform::openxr::{Gfx, has, quat, vec3};
@@ -40,6 +40,8 @@ pub struct Controls {
     /// Whether tracked hands may point and click; otherwise their input is ignored.
     pub hands_enabled: bool,
     pub state: [HandState; 2],
+    /// The numbers of the input (the model's, set each frame).
+    pub feel: Feel,
 }
 
 impl Controls {
@@ -136,6 +138,7 @@ impl Controls {
             joint_pinch: [false; 2],
             hands_enabled: false,
             state: [HandState::default(); 2],
+            feel: Feel::DEFAULT,
         })
     }
 
@@ -172,8 +175,6 @@ impl Controls {
         head: Vec3,
         forward: Vec3,
     ) {
-        const THUMB_TIP: usize = 5;
-        const INDEX_TIP: usize = 10;
         #[allow(clippy::needless_range_loop)] // `hand` indexes several per-side arrays
         for hand in 0..2 {
             self.joints_seen[hand] = joints[hand].is_some();
@@ -204,28 +205,18 @@ impl Controls {
                 s.select = Button::default();
                 continue;
             }
-            let (thumb, index) = (j[THUMB_TIP].0, j[INDEX_TIP].0);
-            let gap = thumb.distance(index);
-            let pinched = if self.joint_pinch[hand] {
-                gap < 0.035
-            } else {
-                gap < 0.015
-            };
+            let (pinched, ray) = signals::index_pinch(
+                &j,
+                self.joint_pinch[hand],
+                head,
+                forward,
+                hand == 0,
+                &self.feel,
+            );
             self.joint_pinch[hand] = pinched;
-            s.select.update(if pinched { 1.0 } else { 0.0 });
-            // Only a hand getting ready to pinch points, as with the runtime's input.
-            if gap > 0.05 && !s.select.down {
-                s.ray = None;
-                continue;
-            }
-            let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
-            let side = if hand == 0 { -1.0 } else { 1.0 };
-            let shoulder = head - Vec3::Y * 0.18 + flat.cross(Vec3::Y) * side * 0.17;
-            let origin = (thumb + index) * 0.5;
-            s.ray = Some(Ray {
-                origin,
-                dir: (origin - shoulder).normalize_or(flat),
-            });
+            s.select
+                .update_by(if pinched { 1.0 } else { 0.0 }, &self.feel);
+            s.ray = ray;
         }
     }
 
@@ -268,7 +259,7 @@ impl Controls {
                         .select
                         .state(session, path)
                         .map_or(0.0, |v| v.current_state);
-                    s.select.update(pinch);
+                    s.select.update_by(pinch, &self.feel);
                 } else {
                     s.select = Button::default();
                 }
@@ -280,9 +271,10 @@ impl Controls {
             });
             let value =
                 |a: &xr::Action<f32>| a.state(session, path).map_or(0.0, |s| s.current_state);
-            s.select.update(value(&self.select));
+            s.select.update_by(value(&self.select), &self.feel);
             // Hands have no grip: `interaction` turns pinch-and-hold into a drag.
-            s.grab.update(if is_hand { 0.0 } else { value(&self.grab) });
+            s.grab
+                .update_by(if is_hand { 0.0 } else { value(&self.grab) }, &self.feel);
             s.stick = self
                 .thumbstick
                 .state(session, path)
@@ -314,8 +306,10 @@ impl Controls {
 
     pub fn pulse(&self, session: &xr::Session<Gfx>, hand: usize) {
         let vibration = xr::HapticVibration::new()
-            .amplitude(0.4)
-            .duration(xr::Duration::from_nanos(25_000_000))
+            .amplitude(self.feel.haptic_amplitude)
+            .duration(xr::Duration::from_nanos(
+                (self.feel.haptic_ms * 1e6).round() as i64,
+            ))
             .frequency(xr::FREQUENCY_UNSPECIFIED);
         let _ = self
             .haptic

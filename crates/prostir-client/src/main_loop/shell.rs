@@ -156,6 +156,15 @@ impl Shell<'_> {
                 self.system.list_languages();
             }
             Effect::Exit => self.exit = true,
+            #[cfg(feature = "preview")]
+            Effect::System(SystemCmd::ReadFeel) => {
+                let text = read_feel(self.external_dir.as_deref());
+                self.later.push(Event::Platform(PlatformEvent::Feel(text)));
+            }
+            #[cfg(feature = "preview")]
+            Effect::Recording { name, bytes } => {
+                write_recording(self.external_dir.as_deref(), name, bytes);
+            }
         }
     }
 
@@ -318,5 +327,42 @@ impl Shell<'_> {
         }
         self.model.presence_due(now);
         self.apply(now);
+    }
+}
+
+/// `feel.txt` in the person's folder (the preview build): its text, or `None` when
+/// there is none (or it cannot be read; said in the log).
+#[cfg(feature = "preview")]
+pub fn read_feel(external_dir: Option<&std::path::Path>) -> Option<String> {
+    let path = external_dir?.join("feel.txt");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            warn!("{}: {e}", path.display());
+            None
+        }
+    }
+}
+
+/// A recording of the input written as `name` into the person's folder (the preview
+/// build), off the frame on a thread of its own.
+#[cfg(feature = "preview")]
+fn write_recording(external_dir: Option<&std::path::Path>, name: String, bytes: Vec<u8>) {
+    let Some(dir) = external_dir.map(std::path::Path::to_path_buf) else {
+        warn!("no folder to write the recording {name} into");
+        return;
+    };
+    let spawned = std::thread::Builder::new()
+        .name("recording".into())
+        .spawn(move || {
+            let path = dir.join(&name);
+            match std::fs::write(&path, &bytes) {
+                Ok(()) => log::info!("the input recorded into {}", path.display()),
+                Err(e) => warn!("{}: {e}", path.display()),
+            }
+        });
+    if let Err(e) = spawned {
+        warn!("the recording's writer: {e}");
     }
 }

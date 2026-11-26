@@ -36,6 +36,7 @@
 
 pub mod discovery;
 pub mod handshake;
+pub mod input;
 pub mod link;
 pub mod packet;
 pub mod request;
@@ -48,6 +49,7 @@ pub mod wire;
 
 use std::io::{self, Read, Write};
 
+use input::{Button, TouchPhase};
 use link::RecordReceiver;
 use packet::{Assembler, Encoded, Limits, Message};
 use request::{Asked, Command, Outcome, Request};
@@ -467,6 +469,32 @@ wire_enum! {
         132 => Reply { req: ReqId, outcome: Outcome },
         /// Put the mouse on display `id`, at `u`/`v` across its image (0..=65535).
         124 => MouseTo { id: DisplayId, u: u16, v: u16 },
+        /// Mouse button `button` pressed (`down`) or let go with the mouse on display
+        /// `id` at `u`/`v` (as in [`ClientMsg::MouseTo`]): the PC moves it there first.
+        /// Only to a PC that names feature 15, in the same lane as `MouseTo` (from 0.2.0
+        /// step 8; an older PC skips it).
+        145 => MouseButton {
+            id: DisplayId,
+            u: u16,
+            v: u16,
+            button: Button,
+            down: bool,
+        },
+        /// The wheel turned with the mouse on display `id`, in 1/120 of a notch
+        /// ([`input::SCROLL_NOTCH`]): `dy` above 0 scrolls down, `dx` above 0 right.
+        /// Only to a PC that names feature 15.
+        146 => MouseScroll { id: DisplayId, dx: i32, dy: i32 },
+        /// Finger `slot` (from 0, one number for each finger touching at once) on display
+        /// `id` at `u`/`v` (as in [`ClientMsg::MouseTo`]). Only to a PC that names
+        /// feature 15; where the PC's desktop has no touch, the PC makes mouse actions of
+        /// it.
+        147 => Touch {
+            id: DisplayId,
+            slot: u8,
+            u: u16,
+            v: u16,
+            phase: TouchPhase,
+        },
         /// The decoder lost frames of this generation: a keyframe, please.
         102 => RequestKeyframe { id: DisplayId, generation: Gen },
         /// The decoder handed frame `seq` of this generation to the compositor.
@@ -526,12 +554,17 @@ impl HostMsg {
 }
 
 /// Tags the code below needs by name (the tests check them against the
-/// declarations): the media messages, read and written by hand, and the hello.
+/// declarations): the media messages, read and written by hand, the hello, and the
+/// input's small messages.
 mod tag {
     pub const FRAME: u8 = 3;
     pub const AUDIO: u8 = 12;
     pub const UP: u8 = 140;
     pub const HELLO: u8 = 101;
+    pub const MOUSE_TO: u8 = 124;
+    pub const MOUSE_BUTTON: u8 = 145;
+    pub const MOUSE_SCROLL: u8 = 146;
+    pub const TOUCH: u8 = 147;
 }
 
 /// [`HostMsg::Frame`] before its data: id, generation, seq, keyframe, pts_us.
@@ -785,6 +818,15 @@ impl ClientMsg {
     /// The tag of [`ClientMsg::Up`] as encoded: a sent slice's body can be told by it
     /// and filled again (see [`Encoded::into_body`]).
     pub const UP_TAG: u8 = tag::UP;
+    /// The tags of the input's small messages, sent up to once a frame (`MouseTo`,
+    /// `MouseButton`, `MouseScroll`, `Touch`): a sent one's body can be told by them
+    /// and filled again (see [`ClientMsg::encode_into`]).
+    pub const INPUT_TAGS: [u8; 4] = [
+        tag::MOUSE_TO,
+        tag::MOUSE_BUTTON,
+        tag::MOUSE_SCROLL,
+        tag::TOUCH,
+    ];
 
     /// What the PC accepts from a headset: before the session, or in it (`opened`).
     pub fn limits(opened: bool) -> Limits {
@@ -804,12 +846,20 @@ impl ClientMsg {
     /// The message's bytes, to send in packets. The data of an up stream moves into
     /// them as it is.
     pub fn encode(self) -> io::Result<Encoded> {
+        self.encode_into(Vec::new())
+    }
+
+    /// The same as [`ClientMsg::encode`], its fields written into `body` (emptied
+    /// first, its memory kept): the body of a message sent before filled again (see
+    /// [`Encoded::into_body`]), so a stream of small messages needs no new memory for
+    /// each. An up stream's data is its body as it is (`body` goes unused).
+    pub fn encode_into(self, mut body: Vec<u8>) -> io::Result<Encoded> {
         match self {
             ClientMsg::Up { up, data } => Encoded::new(tag::UP, &[up], data),
             other => {
-                let mut fields = Vec::new();
-                other.put_fields(&mut fields).map_err(unsendable)?;
-                Encoded::new(other.wire_tag(), &[], fields)
+                body.clear();
+                other.put_fields(&mut body).map_err(unsendable)?;
+                Encoded::new(other.wire_tag(), &[], body)
             }
         }
     }
