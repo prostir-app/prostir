@@ -148,6 +148,12 @@ pub struct Caps {
     pub hand_aim: bool,
     /// The system's menu gesture of the left hand (`XR_FB_hand_tracking_aim`).
     pub menu_gesture: bool,
+    /// The controllers drawn as the runtime models them (`XR_FB_render_model`, else
+    /// `XR_MSFT_controller_model`); without, a dot where each is.
+    pub controller_models: bool,
+    /// The hands drawn as the runtime models them (`XR_FB_hand_tracking_mesh`);
+    /// without, balls along their bones.
+    pub hand_mesh: bool,
     /// The layers the compositor takes in a frame (`maxLayerCount`).
     pub layers_max: u8,
     /// The codecs the headset decodes, their sides and their pixel budget at
@@ -295,6 +301,8 @@ impl Caps {
             hands: false,
             hand_aim: false,
             menu_gesture: false,
+            controller_models: false,
+            hand_mesh: false,
             layers_max: LAYERS_AT_LEAST,
             decoders,
             streams_max,
@@ -420,6 +428,8 @@ impl Caps {
             ("hands", !self.hands),
             ("hand_aim", !self.hand_aim),
             ("menu_gesture", !self.menu_gesture),
+            ("controller_models", !self.controller_models),
+            ("hand_mesh", !self.hand_mesh),
             ("volume_steps", self.volume_steps.is_none()),
         ];
         let names: Vec<&str> = off.iter().filter(|(_, o)| *o).map(|(n, _)| *n).collect();
@@ -528,6 +538,8 @@ mod tests {
             hands: true,
             hand_aim: true,
             menu_gesture: true,
+            controller_models: true,
+            hand_mesh: true,
             layers_max: 16,
             decoders: DECODERS_UNSAID.to_vec(),
             streams_max: 12,
@@ -593,6 +605,10 @@ mod tests {
         without(|c| c.hands = false, &[Offer::Hands]);
         without(|c| c.hand_aim = false, &[Offer::HandRay]);
         without(|c| c.menu_gesture = false, &[Offer::MenuGesture]);
+        // Without the runtime's models, the hands and controllers are drawn as before:
+        // nothing hidden.
+        without(|c| c.controller_models = false, &[]);
+        without(|c| c.hand_mesh = false, &[]);
         without(|c| c.volume_steps = None, &[Offer::SharedVolume]);
         without(|c| c.volume_steps = Some(0), &[Offer::SharedVolume]);
         // One rate offered: nothing to choose.
@@ -608,7 +624,7 @@ mod tests {
         assert_eq!(
             c.missing(),
             "refresh_rates,perf_levels,cylinder,equirect,color_scale,room,image_flip,\
-             keyboard_window,hands,hand_aim,menu_gesture"
+             keyboard_window,hands,hand_aim,menu_gesture,controller_models,hand_mesh"
         );
         assert_eq!(c.rate(false), None);
         assert_eq!(c.rate(true), None);

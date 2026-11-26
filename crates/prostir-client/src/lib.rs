@@ -29,6 +29,7 @@ pub mod layers;
 pub mod layout;
 #[cfg(feature = "preview")]
 pub mod metrics;
+pub mod model;
 pub mod net;
 pub mod note;
 pub mod outbox;

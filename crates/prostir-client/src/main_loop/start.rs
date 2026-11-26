@@ -15,6 +15,7 @@ use jni::objects::JObject;
 use log::{info, warn};
 use openxr as xr;
 
+use super::models::Models;
 use super::pictures::{Pictures, custom_panorama_path};
 use super::shell::Shell;
 use super::{Gpu, Selftest};
@@ -158,6 +159,8 @@ pub struct Stage {
     /// Tracked hands and pointer rays, drawn on top of everything.
     pub hand_trackers: Option<[xr::HandTracker; 2]>,
     pub overlay: Option<Overlay>,
+    /// The runtime's models of the controllers, as asked for (step 8.6).
+    pub models: Models,
 }
 
 /// What the loop works with, made at the start.
@@ -278,9 +281,13 @@ pub fn start<'s>(
     } else {
         None
     };
-    let overlay = Overlay::new(gl, instance, system, session, format)
+    let mut overlay = Overlay::new(gl, instance, system, session, format)
         .inspect_err(|e| warn!("hand/ray overlay unavailable: {e:#}"))
         .ok();
+    // The hands as the runtime models them, once (step 8.6).
+    if let Some(ov) = overlay.as_mut() {
+        Models::hands(xr, hand_trackers.as_ref(), ov);
+    }
     // The selftest reads nothing of the person's there (`host.txt`, a panorama).
     let external_dir = app.external_data_path().filter(|_| test.is_none());
     let custom_pano = custom_panorama_path(external_dir.as_deref()).is_some();
@@ -398,6 +405,7 @@ pub fn start<'s>(
             pictures,
             hand_trackers,
             overlay,
+            models: Models::new(session),
         },
         net_rx,
         vm,

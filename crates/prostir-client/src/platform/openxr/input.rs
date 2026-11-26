@@ -16,6 +16,8 @@ pub struct Controls {
     set: xr::ActionSet,
     hands: [xr::Path; 2],
     aim_spaces: [xr::Space; 2],
+    /// Where each controller is held, for its model.
+    grip_spaces: [xr::Space; 2],
     grab: xr::Action<f32>,
     select: xr::Action<f32>,
     thumbstick: xr::Action<xr::Vector2f>,
@@ -37,6 +39,8 @@ pub struct Controls {
     /// Sides whose input comes from the tracked joints (see `hands_from_joints`).
     joint_hands: [bool; 2],
     joint_pinch: [bool; 2],
+    /// Where each controller is held this frame (`None`: not tracked, or a hand).
+    pub grips: [Option<xr::Posef>; 2],
     /// Whether tracked hands may point and click; otherwise their input is ignored.
     pub hands_enabled: bool,
     pub state: [HandState; 2],
@@ -58,6 +62,7 @@ impl Controls {
             instance.string_to_path("/user/hand/right")?,
         ];
         let aim = set.create_action::<xr::Posef>("aim", "Aim", &hands)?;
+        let grip = set.create_action::<xr::Posef>("grip", "Controller", &hands)?;
         let grab = set.create_action::<f32>("grab", "Grab monitor", &hands)?;
         let select = set.create_action::<f32>("select", "Select", &hands)?;
         let thumbstick =
@@ -84,6 +89,7 @@ impl Controls {
                     let path = instance.string_to_path(&path)?;
                     bindings.push(match input.role {
                         Role::Aim => xr::Binding::new(&aim, path),
+                        Role::Grip => xr::Binding::new(&grip, path),
                         Role::Select => xr::Binding::new(&select, path),
                         Role::Grab => xr::Binding::new(&grab, path),
                         Role::Stick => xr::Binding::new(&thumbstick, path),
@@ -118,10 +124,15 @@ impl Controls {
             aim.create_space(session, hands[0], xr::Posef::IDENTITY)?,
             aim.create_space(session, hands[1], xr::Posef::IDENTITY)?,
         ];
+        let grip_spaces = [
+            grip.create_space(session, hands[0], xr::Posef::IDENTITY)?,
+            grip.create_space(session, hands[1], xr::Posef::IDENTITY)?,
+        ];
         Ok(Self {
             set,
             hands,
             aim_spaces,
+            grip_spaces,
             grab,
             select,
             thumbstick,
@@ -136,10 +147,25 @@ impl Controls {
             last_profile: [None; 2],
             joint_hands: [false; 2],
             joint_pinch: [false; 2],
+            grips: [None; 2],
             hands_enabled: false,
             state: [HandState::default(); 2],
             feel: Feel::DEFAULT,
         })
+    }
+
+    /// The path of hand `side` (`/user/hand/left` or `right`).
+    pub fn hand_path(&self, side: usize) -> xr::Path {
+        self.hands[side]
+    }
+
+    /// The interaction profile of side `side` as last read (`None`: none yet), and
+    /// whether it is tracked hands rather than a controller.
+    pub fn profile(&self, side: usize) -> (Option<xr::Path>, bool) {
+        (
+            self.last_profile[side].filter(|p| *p != xr::Path::NULL),
+            self.tracked_hands[side] || self.joint_hands[side],
+        )
     }
 
     /// Call when the runtime reports an interaction profile change (controllers
@@ -238,9 +264,16 @@ impl Controls {
                 xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID,
             );
             let is_hand = self.tracked_hands[hand];
+            self.grips[hand] = None;
             if self.joint_hands[hand] && !is_hand {
                 // Filled in by `hands_from_joints`.
                 continue;
+            }
+            if !is_hand {
+                let held = self.grip_spaces[hand].locate(base, time)?;
+                let flags = xr::SpaceLocationFlags::POSITION_VALID
+                    | xr::SpaceLocationFlags::ORIENTATION_VALID;
+                self.grips[hand] = held.location_flags.contains(flags).then_some(held.pose);
             }
             let ready = !is_hand
                 || self

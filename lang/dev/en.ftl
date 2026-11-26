@@ -43,10 +43,13 @@ headset-dev-move-as-now = Along the ray
 # $power (Number): the power of the reach (1, 2, 3)
 headset-dev-move-sphere = Sphere, p = { $power }
 headset-dev-hand-look = Hands look
-headset-dev-hand-solid = Solid
+headset-dev-hand-standard = Standard
 # $percent (Number): how opaque, in percent
 headset-dev-hand-percent = { $percent } %
 headset-dev-hand-tips = Fingertips
+headset-dev-models = Hands and controllers
+headset-dev-models-runtime = System models
+headset-dev-models-own = Balls
 headset-dev-fx = Effects
 headset-dev-fx-thin = Thin
 headset-dev-fx-standard = Standard

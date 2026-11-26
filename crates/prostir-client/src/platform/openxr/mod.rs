@@ -49,6 +49,11 @@ pub fn extensions(available: &xr::ExtensionSet, minimal: bool) -> xr::ExtensionS
     on.htc_vive_focus3_controller_interaction = available.htc_vive_focus3_controller_interaction;
     crate::platform::meta::extensions(available, &mut on);
     crate::platform::htc::extensions(available, &mut on);
+    // A controller's model by its own module, where the runtime has no
+    // `XR_FB_render_model`.
+    if !on.fb_render_model {
+        crate::platform::msft::extensions(available, &mut on);
+    }
     on
 }
 

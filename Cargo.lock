@@ -3761,6 +3761,7 @@ dependencies = [
  "prostir-layout",
  "prostir-proto",
  "prostir-testkit",
+ "serde_json",
  "tiny-skia",
 ]
 

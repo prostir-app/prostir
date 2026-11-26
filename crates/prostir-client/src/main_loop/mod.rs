@@ -25,6 +25,7 @@ mod acts;
 mod compose;
 mod events;
 mod input;
+mod models;
 #[cfg(not(all(feature = "selftest", not(feature = "store"))))]
 mod no_selftest;
 mod pictures;
@@ -42,6 +43,7 @@ use openxr as xr;
 use crate::interaction::{FrameInput, Hands};
 use crate::lang::Moment;
 use crate::platform::openxr::Gfx;
+use crate::platform::openxr::overlay::Overlay;
 #[cfg(all(feature = "selftest", not(feature = "store")))]
 use crate::selftest::device::{self as selftest, Act, Selftest};
 use crate::view::View;
@@ -250,6 +252,11 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
 
         // This frame's input.
         let input = input::read(&xr, &stage, &mut shell, &mut kept, now, time, dt)?;
+        // The controllers' models, when the controllers changed (step 8.6).
+        if let Some(ov) = stage.overlay.as_mut() {
+            let tint = shell.model.palette().controller.linear();
+            stage.models.refresh(now, &xr.gl, &shell.controls, ov, tint);
+        }
         shell.model.tick(now, &input);
         shell.apply(now);
 
@@ -285,9 +292,13 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
             .pictures
             .metrics(&xr.gl, &shell.model, &shell.video, now)?;
         // Hands, rays and effects: only rendered when there is something to show.
+        let loaded = stage
+            .overlay
+            .as_ref()
+            .map_or_else(Default::default, Overlay::loaded);
         kept.buffers
             .effects
-            .fill(&mut shell.model, &kept.hands, &input, now);
+            .fill(&mut shell.model, &kept.hands, &input, loaded, now);
         let layers_wanted = compose::end(&xr, &mut stage, &mut shell, &mut kept, now, time)?;
         if let (Some(t), Some(start)) = (test.as_deref_mut(), &frame_start) {
             t.frame_end(

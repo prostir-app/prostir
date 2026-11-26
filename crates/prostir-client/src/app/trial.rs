@@ -53,6 +53,7 @@ impl Model {
             Action::DevMovement(movement) => t.movement = movement,
             Action::DevHandLook(look) => t.look = look,
             Action::DevFx(fx) => t.fx = fx,
+            Action::DevOwnModels(own) => t.own_models = own,
             Action::DevRecord => self.start_recording(),
             Action::DevReadFeel => self.effects.push(Effect::System(SystemCmd::ReadFeel)),
             // The others are not this part's (see `Model::act`).

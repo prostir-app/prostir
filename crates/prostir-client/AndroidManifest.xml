@@ -21,6 +21,9 @@
     <uses-permission android:name="horizonos.permission.HAND_TRACKING" />
     <!-- Older Horizon OS versions. -->
     <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+    <!-- The controllers' models from the system (XR_FB_render_model). -->
+    <uses-feature android:name="com.oculus.feature.RENDER_MODEL" android:required="false" />
+    <uses-permission android:name="com.oculus.permission.RENDER_MODEL" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <queries>

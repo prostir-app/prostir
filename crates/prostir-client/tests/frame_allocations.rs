@@ -14,7 +14,7 @@
 //! monitor past its neighbour (the magnet), the ray giving way to touch and back, the
 //! input recorded, all take none. The hands' layer is filled each frame too (step 8.2):
 //! a pinch held on a monitor, its rings, the take's wave and the ring where the hand
-//! holds it, none.
+//! holds it, none; nor do the runtime's models of a hand and a controller (step 8.6).
 //!
 //! On the desktop only: the app built for Android has its own counting allocator, and
 //! a program has one.
@@ -44,7 +44,7 @@ use prostir::session::NetCmd;
 use prostir::settings::Settings;
 use prostir::ui::Action;
 use prostir::view::View;
-use prostir::view::fx::Effects;
+use prostir::view::fx::{Effects, Loaded};
 use prostir_proto::link::{LinkInfo, RecordSender};
 use prostir_proto::state::{
     Display, DisplayId, DisplayKind, DisplayState, Displays, HostCaps, Mode, permission,
@@ -142,6 +142,11 @@ struct Loop {
     /// The hands, rays and effects drawn (step 8.2), and the most in a frame.
     effects: Effects,
     most_effects: usize,
+    /// The runtime's models of the hands and controllers (step 8.6): which the shell
+    /// has, and the frames a hand's and a controller's were drawn.
+    loaded: Loaded,
+    hand_meshes: u64,
+    controller_meshes: u64,
     /// The numbers of "For development" (the preview build): their label and the
     /// menu's panel they are drawn by, the bytes the stream counts, how many times the
     /// label was drawn again.
@@ -325,8 +330,12 @@ impl Loop {
             }
         }
         // The hands, rays and effects of the hands' layer.
-        self.effects.fill(&mut self.m, &self.hands, &input, now);
-        self.most_effects = self.most_effects.max(self.effects.list().len());
+        self.effects
+            .fill(&mut self.m, &self.hands, &input, self.loaded, now);
+        let (list, meshes) = self.effects.list();
+        self.most_effects = self.most_effects.max(list.len());
+        self.hand_meshes += u64::from(meshes.hands[1].is_some());
+        self.controller_meshes += u64::from(meshes.controllers[1]);
         // The frame's layers, and the model told when monitors do not fit.
         layers::plan(&self.m, &self.hands, &Drawn, &mut self.plan);
         if let Some(hidden) = self.plan.news() {
@@ -440,6 +449,9 @@ fn connected(layers_max: u8) -> Loop {
         plan: Plan::new(),
         effects: Effects::new(),
         most_effects: 0,
+        loaded: Loaded::default(),
+        hand_meshes: 0,
+        controller_meshes: 0,
         #[cfg(feature = "preview")]
         label: prostir::metrics::Label::new(),
         #[cfg(feature = "preview")]
@@ -1005,6 +1017,13 @@ fn step_8s_hands_take_no_memory() {
     assert_eq!(l.measure_with(300, touch), 0, "touching a monitor");
     assert!(l.pressed > 30, "pressed in {} frames", l.pressed);
     assert!(l.touches > 10, "touches sent: {}", l.touches);
+    // The same with the runtime's models (step 8.6): the hand drawn as its model.
+    l.loaded = Loaded {
+        controllers: [true; 2],
+        hands: [true; 2],
+    };
+    assert_eq!(l.measure_with(300, touch), 0, "a hand's model touching");
+    assert!(l.hand_meshes > 250, "hand models: {}", l.hand_meshes);
 
     // The ray as the mouse: a controller's, a little further each frame.
     let target = one.position;
@@ -1026,6 +1045,13 @@ fn step_8s_hands_take_no_memory() {
         "MouseTo {} times",
         l.mouse_tos - sent
     );
+    // A controller's model where it is held, in place of its dot.
+    assert!(
+        l.controller_meshes > 250,
+        "controller models: {}",
+        l.controller_meshes
+    );
+    l.loaded = Loaded::default();
 
     // A controller's trigger on the monitor: clicks, drags and holds (its place said
     // again while held), and its stick scrolls between the presses.

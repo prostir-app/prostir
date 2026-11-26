@@ -559,6 +559,10 @@ pub enum Action {
     DevHandLook(crate::interaction::trial::HandLook),
     #[cfg(feature = "preview")]
     DevFx(crate::interaction::trial::FxSet),
+    /// "Hands (trial)": the hands and controllers drawn as balls and dots even where
+    /// the runtime models them (to compare).
+    #[cfg(feature = "preview")]
+    DevOwnModels(bool),
     /// "Hands (trial)": the input recorded for 30 seconds, into a file.
     #[cfg(feature = "preview")]
     DevRecord,
@@ -5164,7 +5168,7 @@ fn build_dev_hands(
         .iter()
         .map(|look| match look {
             HandLook::Percent(p) => l.f("headset-dev-hand-percent", &[("percent", (*p).into())]),
-            HandLook::Solid => l.t("headset-dev-hand-solid").to_owned(),
+            HandLook::Solid => l.t("headset-dev-hand-standard").to_owned(),
             HandLook::Tips => l.t("headset-dev-hand-tips").to_owned(),
         })
         .collect();
@@ -5186,6 +5190,18 @@ fn build_dev_hands(
                 )
             })
             .collect(),
+    );
+    let models = |label, own: bool| (label, Action::DevOwnModels(own), t.own_models == own, true);
+    segmented(
+        items,
+        x,
+        w,
+        &mut y,
+        l.t("headset-dev-models"),
+        vec![
+            models(l.t("headset-dev-models-runtime"), false),
+            models(l.t("headset-dev-models-own"), true),
+        ],
     );
     let fx = |fx: FxSet| {
         let label = l.t(match fx {
