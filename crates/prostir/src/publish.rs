@@ -246,6 +246,9 @@ fn host_caps(displays: &Displays, volume: bool) -> HostCaps {
     if displays.screenshots_one_output() {
         features.push(caps::pc::SCREENSHOT_ONE);
     }
+    if displays.tells_cursor() {
+        features.push(caps::pc::CURSOR);
+    }
     if volume {
         features.push(caps::pc::VOLUME);
     }

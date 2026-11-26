@@ -637,7 +637,7 @@ mod tests {
         _file: std::fs::File,
         chunk: Box<ss::spa_chunk>,
         _data: Box<ss::spa_data>,
-        _spa: Box<ss::spa_buffer>,
+        spa: Box<ss::spa_buffer>,
         pwb: Box<pw::pw_buffer>,
     }
 
@@ -672,7 +672,7 @@ mod tests {
                 _file: file,
                 chunk,
                 _data: data,
-                _spa: spa,
+                spa,
                 pwb,
             }
         }
@@ -793,6 +793,57 @@ mod tests {
         given.chunk.size = 0;
         // SAFETY: as above.
         assert!(!unsafe { has_picture(b, None) }, "empty");
+    }
+
+    /// A buffer as KWin 6.8 sends it when only the pointer moved, made with the pointer
+    /// apart: its plane marked corrupted (size left at the whole buffer's), the
+    /// pointer's metadata with a new look (RGBA, premultiplied). It never reaches the
+    /// encoder, and the core hears the look (straight, its hotspot) and the hotspot's
+    /// place in the output's pixels.
+    #[test]
+    fn a_kwin_pointer_buffer_tells_the_core_and_not_the_encoder() {
+        use crate::platform::{CursorEvent, OutputKey};
+        let mut given = Given::new(16, 2);
+        given.chunk.flags = ss::SPA_CHUNK_FLAG_CORRUPTED as i32;
+        // Two pixels, RGBA premultiplied as KWin 6.8 sends them: blue opaque, red at half.
+        let pixels = [0, 0, 255, 255, 128, 0, 0, 128];
+        let mut cursor = super::super::meta::tests::cursor_meta(
+            1,
+            (100, 50),
+            (1, 0),
+            Some((ss::SPA_VIDEO_FORMAT_RGBA, 2, 1, &pixels)),
+        );
+        let mut metas = [ss::spa_meta {
+            type_: ss::SPA_META_Cursor,
+            size: cursor.len() as u32,
+            data: cursor.as_mut_ptr().cast(),
+        }];
+        given.spa.n_metas = 1;
+        given.spa.metas = metas.as_mut_ptr();
+        let b = given.ptr();
+        // SAFETY: the buffer, its parts and its metadata live through the test.
+        let found = unsafe { super::super::meta::metas((*b).buffer) };
+        // SAFETY: as above.
+        let picture = unsafe { has_picture(b, found.header) };
+        assert!(!picture, "the pointer alone");
+        let meta = super::super::meta::read_cursor(found.cursor.unwrap()).unwrap();
+        let mut tap = super::super::pointer::CursorTap::new(
+            OutputKey::new("Virtual-Prostir-1"),
+            std::sync::Arc::default(),
+        );
+        let mut heard = Vec::new();
+        tap.events(&meta, (2560, 1440), |e| heard.push(e));
+        let [
+            CursorEvent::Shape(image),
+            CursorEvent::Moved { output, x, y, size },
+        ] = &heard[..]
+        else {
+            panic!("{heard:?}");
+        };
+        assert_eq!((image.w, image.h, image.hot_x, image.hot_y), (2, 1, 1, 0));
+        assert_eq!(image.rgba, [0, 0, 255, 255, 255, 0, 0, 128]);
+        assert_eq!(output.as_str(), "Virtual-Prostir-1");
+        assert_eq!((*x, *y, *size), (100, 50, (2560, 1440)));
     }
 
     /// A frame of the feed takes no memory of Rust's (only GStreamer's, as

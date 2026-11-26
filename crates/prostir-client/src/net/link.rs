@@ -704,10 +704,16 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
             gaps.restart();
             media_bytes = 0;
         }
-        // A part of the PC's state: kept, checked, and told to the app. Pictures and
-        // sound, most of what comes, are never parts: they go on as they are, not
-        // copied.
-        let msg = if matches!(msg, HostMsg::Frame { .. } | HostMsg::Audio { .. }) {
+        // A part of the PC's state: kept, checked, and told to the app. Pictures,
+        // sound and the pointer, most of what comes, are never parts: they go on as
+        // they are, not copied.
+        let msg = if matches!(
+            msg,
+            HostMsg::Frame { .. }
+                | HostMsg::Audio { .. }
+                | HostMsg::CursorShape { .. }
+                | HostMsg::CursorAt { .. }
+        ) {
             Some(msg)
         } else {
             match state.apply(msg.clone()) {
@@ -877,6 +883,36 @@ fn session(conn: &mut Conn, wire: &mut Wire, language: Option<Lang>) -> io::Resu
                 shared.tell(NetEvent::Command { pc, req, asked });
             }
             HostMsg::Notice { text } => shared.tell(NetEvent::Notice(pc, text)),
+            HostMsg::CursorShape {
+                shape,
+                w,
+                h,
+                hot_x,
+                hot_y,
+                rgba,
+            } => shared.tell(NetEvent::CursorShape {
+                pc,
+                shape,
+                look: crate::cursors::Look {
+                    w,
+                    h,
+                    hot_x,
+                    hot_y,
+                    rgba,
+                },
+            }),
+            HostMsg::CursorAt {
+                display,
+                u,
+                v,
+                shape,
+            } => shared.tell(NetEvent::CursorAt {
+                pc,
+                display,
+                u,
+                v,
+                shape,
+            }),
             HostMsg::VolumeAsk { asked } => shared.tell(NetEvent::VolumeAsk { pc, asked }),
             // What the next queries ask for this PC with: from this PC's own session
             // only, kept under its key.

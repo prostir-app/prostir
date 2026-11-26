@@ -25,6 +25,7 @@
 mod format;
 mod frames;
 pub mod meta;
+pub mod pointer;
 
 use std::cell::RefCell;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -48,6 +49,7 @@ use pw::stream::{Stream, StreamFlags, StreamRc, StreamState};
 use crate::encoder::{Pause, SourceFailed};
 use frames::{Pictures, Slots};
 use meta::Sightings;
+use pointer::CursorTap;
 
 /// How long the start waits for KWin's stream to agree on a format (normally tens of
 /// ms) before it goes on without knowing: a failure after it is the encoder's
@@ -120,14 +122,16 @@ pub struct Feed {
 impl Feed {
     /// Starts feeding KWin's PipeWire node `node` (`label` names it in the log) into
     /// `appsrc`, following the encoder's `pause`; the last picture goes again every
-    /// `every` while the screen is still. Fails as the source ([`SourceFailed`]) when
-    /// the stream cannot start.
+    /// `every` while the screen is still. With `cursor` (a stream made with the pointer
+    /// apart), what each buffer says of the pointer goes to it. Fails as the source
+    /// ([`SourceFailed`]) when the stream cannot start.
     pub fn start(
         node: u32,
         label: &str,
         appsrc: gst_app::AppSrc,
         pause: Arc<Pause>,
         every: Duration,
+        cursor: Option<CursorTap>,
     ) -> Result<Self> {
         let (say, hear) = Mail::new()?;
         let (started, first) = mpsc::channel();
@@ -147,6 +151,7 @@ impl Feed {
                 say: say.clone(),
                 started,
                 seen: seen.clone(),
+                cursor,
             };
             std::thread::Builder::new()
                 .name(format!("pw-{label}"))
@@ -214,6 +219,7 @@ struct Setup {
     say: Mail,
     started: mpsc::Sender<Result<(), String>>,
     seen: Sightings,
+    cursor: Option<CursorTap>,
 }
 
 /// The feed's state, on its thread. Never borrowed across a call into PipeWire that
@@ -222,6 +228,8 @@ struct State {
     label: String,
     appsrc: gst_app::AppSrc,
     seen: Sightings,
+    /// Where what each buffer says of the pointer goes (the pointer apart).
+    cursor: Option<CursorTap>,
     /// Told once whether the stream started; none after.
     started: Option<mpsc::Sender<Result<(), String>>>,
     /// What the encoder takes, asked when connecting.
@@ -361,6 +369,25 @@ fn format_chosen(stream: &Stream, state: &Shared, format: Option<&Pod>) {
     }
 }
 
+/// What a buffer's metadata (`cursor`) says of the pointer, to the core, where the
+/// stream has the pointer apart: on the picture of the format agreed (its size).
+fn tell_cursor(state: &Shared, cursor: Option<&[u8]>) {
+    let Some(meta) = cursor.and_then(meta::read_cursor) else {
+        return;
+    };
+    let mut st = state.borrow_mut();
+    let st = &mut *st;
+    let size = st
+        .layout
+        .as_ref()
+        .map_or((0, 0), |l| (l.width(), l.height()));
+    if let Some(tap) = st.cursor.as_mut()
+        && size.0 > 0
+    {
+        tap.saw(&meta, size);
+    }
+}
+
 /// KWin sent frames: the pointer and the changed parts of each are seen, and the
 /// newest picture goes to the encoder; the rest go back at once.
 fn frames_came(stream: &Stream, state: &Shared) {
@@ -378,6 +405,7 @@ fn frames_came(stream: &Stream, state: &Shared) {
         let picture = unsafe { frames::has_picture(b, metas.header) };
         let crop = metas.crop.and_then(frames::read_crop);
         seen.saw_frame(metas.cursor, metas.damage, picture);
+        tell_cursor(state, metas.cursor);
         if picture && let Some((older, _)) = newest.replace((b, crop)) {
             // SAFETY: dequeued above, not handed to anyone.
             unsafe { stream.queue_raw_buffer(older) };
@@ -467,6 +495,7 @@ fn run(setup: Setup, hear: mpsc::Receiver<Say>) {
         say: mail,
         started,
         seen,
+        cursor,
     } = setup;
     let fail = |why: String| {
         let _ = started.send(Err(why));
@@ -499,6 +528,7 @@ fn run(setup: Setup, hear: mpsc::Receiver<Say>) {
         pictures: Pictures::new(appsrc.clone(), every),
         appsrc,
         seen,
+        cursor,
         started: Some(started),
         possible: gst::Caps::new_empty(),
         layout: None,

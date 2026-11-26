@@ -26,8 +26,8 @@ use crate::events::{Event, EventSink};
 use crate::i18n::t;
 use crate::layout::panel_size;
 use crate::platform::{
-    ActiveWindow, DeskPlan, Desktop, Geometry, MonitorSpec, Output, OutputHealth, OutputKey,
-    VirtualSpec, dialogs,
+    ActiveWindow, CursorSink, DeskPlan, Desktop, Geometry, MonitorSpec, Output, OutputHealth,
+    OutputKey, VirtualSpec, dialogs,
 };
 use crate::router::Router;
 use crate::screen::{ScreenId, SizeAction, SizeGuard};
@@ -198,6 +198,9 @@ struct Slot {
     started_for: Option<(Backend, Codec)>,
     /// Its encoder sends the rows bottom first (see `EncoderConfig::rows_up`).
     rows_up: bool,
+    /// Its stream started with the pointer apart from the pictures (see
+    /// [`Wanted::cursor_apart`]).
+    cursor_apart: bool,
     /// The attempt it failed at (tried again only at another).
     failed: Option<u32>,
     /// A display of the PC is shown again from then.
@@ -224,6 +227,7 @@ impl Slot {
             output: None,
             started_for: None,
             rows_up: false,
+            cursor_apart: false,
             failed: None,
             rest_until: None,
             kept: None,
@@ -314,6 +318,10 @@ pub struct Worker {
     scale_refused: BTreeMap<ScreenId, u16>,
     panels_checked: Instant,
     physical_due: Instant,
+    /// The pointer is apart from the pictures, as the desktop was last told.
+    cursor_apart: bool,
+    /// The desktop's streams have to start over for that to reach them.
+    cursor_restarts: bool,
 }
 
 impl Worker {
@@ -334,6 +342,7 @@ impl Worker {
             let windows = desktop.windows();
             let has_windows = windows.is_some();
             let window_list = windows.map(|w| Arc::downgrade(&w.list()));
+            let cursor = desktop.cursor().is_some();
             let connected = Connected {
                 caps,
                 scales,
@@ -343,6 +352,7 @@ impl Worker {
                 codec,
                 choices: crate::encoder::available(),
                 physical: desktop.physical(),
+                cursor,
             };
             Ok((desktop, gpu, connected))
         })();
@@ -388,6 +398,8 @@ impl Worker {
             scale_refused: BTreeMap::new(),
             panels_checked: now,
             physical_due: now,
+            cursor_apart: false,
+            cursor_restarts: false,
         }
     }
 
@@ -466,7 +478,39 @@ impl Worker {
             }
         }
         self.tuning = Some(tuning);
+        self.set_cursor_apart(wanted.cursor_apart);
         self.wanted = Some(wanted);
+    }
+
+    /// The pointer apart from the pictures (`apart`) or in them: the desktop is told
+    /// (the router hears the pointer from it while apart), and where that reaches only
+    /// streams started after it, the running ones start over (see `next_step`).
+    fn set_cursor_apart(&mut self, apart: bool) {
+        if apart == self.cursor_apart {
+            return;
+        }
+        let Some(source) = self.desktop.cursor() else {
+            return;
+        };
+        self.shared.steps.begin(if apart {
+            "leaving the mouse pointer out of the pictures"
+        } else {
+            "drawing the mouse pointer into the pictures"
+        });
+        // What it said before is no news: it says the pointer anew at once.
+        self.shared.router.cursor_forget();
+        let sink = apart.then(|| {
+            let router = self.shared.router.clone();
+            CursorSink::new(move |event| router.cursor(event))
+        });
+        source.set_apart(sink);
+        self.cursor_restarts = source.restarts_streams();
+        self.shared.steps.end();
+        self.cursor_apart = apart;
+        info!(
+            "the mouse pointer is {} the pictures",
+            if apart { "apart from" } else { "in" }
+        );
     }
 
     /// Steps towards the wanted state until there is none to take, taking newer
@@ -565,10 +609,13 @@ impl Worker {
             if !w.stream {
                 return Some(Step::StopStream(*id));
             }
-            // Another encoder or codec wanted, or the rows the other way round (the
+            // Another encoder or codec wanted, or the rows the other way round, or the
+            // pointer in or out of the pictures where only a new stream has it so (the
             // headsets with a session changed).
             if slot.is_some_and(|s| {
-                restart_due(s.started_for, s.kept, cfg, now) || s.rows_up != wanted.encoding.rows_up
+                restart_due(s.started_for, s.kept, cfg, now)
+                    || s.rows_up != wanted.encoding.rows_up
+                    || (self.cursor_restarts && s.cursor_apart != self.cursor_apart)
             }) {
                 return Some(Step::Restart(*id));
             }
@@ -659,6 +706,7 @@ impl Worker {
     /// Puts everything back: window panels first (each window back where it was), then
     /// the outputs and their encoders, then the desktop.
     fn close(mut self) {
+        self.set_cursor_apart(false);
         self.begin("putting the desktop back");
         // Every encoder stops at once (each driver takes its time to let go), then
         // the outputs go one after the other, each at once.

@@ -19,6 +19,7 @@ pub mod caps;
 pub mod clarity;
 pub mod commands;
 pub mod connecting;
+pub mod cursors;
 pub mod device;
 pub mod frames;
 pub mod ids;

@@ -7,6 +7,7 @@
 mod api;
 mod asleep;
 mod control;
+mod cursor;
 mod desk;
 mod encoders;
 mod failures;

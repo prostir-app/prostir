@@ -37,6 +37,7 @@ use prostir_proto::state::{
 use prostir_proto::{ClientMsg, Codec};
 
 use crate::caps::{Caps, Offer};
+use crate::cursors::Cursors;
 use crate::ids::{DisplayKey, PcId};
 use crate::interaction::{FrameInput, Head};
 use crate::lang::{Known, Lang, LangState, Moment, Texts};
@@ -446,6 +447,9 @@ pub struct Model {
     palm_shown: bool,
     /// The volume shared with the PC (`None`: the app cannot set the system's).
     volume: Option<volume::SharedVolume>,
+    /// The PCs' mouse pointers, drawn by the headset (never in the menu: they change
+    /// nothing of [`Model::rev`]).
+    cursors: Cursors,
     /// "Auto" of the monitors' scales (see `autoscale`), and its list, filled again
     /// at each look.
     auto: crate::autoscale::Auto,
@@ -597,6 +601,7 @@ impl Model {
             profiles_changed: false,
             palm_shown: false,
             volume,
+            cursors: Cursors::default(),
             auto: crate::autoscale::Auto::default(),
             auto_list: Vec::new(),
             auto_asks: Vec::new(),
@@ -651,6 +656,11 @@ impl Model {
 
     pub fn world(&self) -> &World {
         &self.world
+    }
+
+    /// The PCs' mouse pointers, where the headset draws them.
+    pub fn cursors(&self) -> &Cursors {
+        &self.cursors
     }
 
     /// The generation of each display's stream, and how its picture is.
@@ -892,6 +902,15 @@ impl Model {
     /// `event` came, at `now`.
     pub fn handle(&mut self, now: Instant, event: Event) {
         self.now = now;
+        // Where a PC's pointer is changes nothing the menu shows, and comes up to 120
+        // times a second: the menu's state is not made again for it.
+        let event = match event {
+            Event::Net(e @ (NetEvent::CursorAt { .. } | NetEvent::CursorShape { .. })) => {
+                self.net_event(e);
+                return;
+            }
+            other => other,
+        };
         self.rev += 1;
         match event {
             Event::Net(event) => self.net_event(event),
@@ -1462,14 +1481,7 @@ impl Model {
                 if now.saturating_duration_since(since) >= GAZE_DWELL && !recently {
                     let f = |v: f32| (v * 65535.0) as u16;
                     info!("gaze: mouse to monitor {id} at {:.2},{:.2}", uv.x, uv.y);
-                    self.send_to(
-                        id.pc,
-                        ClientMsg::MouseTo {
-                            id: id.id,
-                            u: f(uv.x),
-                            v: f(uv.y),
-                        },
-                    );
+                    self.mouse_to(id, f(uv.x), f(uv.y));
                     // Where the mouse is now, until the PC says it.
                     if let Some(p) = self.session.pc_mut(id.pc) {
                         p.state.focus = Some(state::Focus {
@@ -1483,6 +1495,13 @@ impl Model {
             }
             _ => self.gaze_on = Some((id, now)),
         }
+    }
+
+    /// Puts PC `id.pc`'s mouse on monitor `id` at `u`, `v` across its picture: its
+    /// pointer is drawn there at once, until the PC's word of it catches up.
+    fn mouse_to(&mut self, id: DisplayKey, u: u16, v: u16) {
+        self.send_to(id.pc, ClientMsg::MouseTo { id: id.id, u, v });
+        self.cursors.moved_here(id.pc, id.id, u, v, self.now);
     }
 
     /// Rest reminders: after so many minutes of wearing, a short message. Every 20

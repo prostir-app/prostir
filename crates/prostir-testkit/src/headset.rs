@@ -261,6 +261,23 @@ pub struct View {
     listed: Vec<DisplayId>,
     /// The name of every display listed in this session, removed since or not.
     named: BTreeMap<DisplayId, String>,
+    /// The looks of the PC's pointer that came (`CursorShape`), by number, in order:
+    /// their sizes.
+    pub cursor_shapes: Vec<(u32, (u16, u16))>,
+    /// Where the PC said its pointer is (`CursorAt`), in order.
+    pub cursor_at: Vec<CursorAt>,
+    /// The looks kept as the headset app keeps them: the 64 that came last.
+    cursor_kept: std::collections::VecDeque<u32>,
+}
+
+/// Where the PC said its pointer is: on a display (none: on none of them), its point
+/// across the display's picture, in a look (0: hidden).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorAt {
+    pub display: Option<DisplayId>,
+    pub u: u16,
+    pub v: u16,
+    pub shape: u32,
 }
 
 impl View {
@@ -399,6 +416,35 @@ impl View {
             HostMsg::FindSecret { secret } => self.find_secret = Some(secret),
             HostMsg::Ping { .. } => self.pings += 1,
             HostMsg::Goodbye { reason } => self.goodbye = Some(reason),
+            HostMsg::CursorShape { shape, w, h, .. } => {
+                self.arrivals.push(Arrival::Other("CursorShape"));
+                self.cursor_shapes.push((shape, (w, h)));
+                self.cursor_kept.retain(|s| *s != shape);
+                if self.cursor_kept.len() >= prostir_proto::CURSOR_SHAPES {
+                    self.cursor_kept.pop_front();
+                }
+                self.cursor_kept.push_back(shape);
+            }
+            HostMsg::CursorAt {
+                display,
+                u,
+                v,
+                shape,
+            } => {
+                self.arrivals.push(Arrival::Other("CursorAt"));
+                // The PC sends a look before the place that names it, and again once
+                // the headset may have let it go.
+                if shape != 0 && !self.cursor_kept.contains(&shape) {
+                    self.broken
+                        .push(format!("the pointer in look {shape}, which never came"));
+                }
+                self.cursor_at.push(CursorAt {
+                    display,
+                    u,
+                    v,
+                    shape,
+                });
+            }
             other => self.arrivals.push(Arrival::Other(other_name(&other))),
         }
         self.round_trips.extend(arrived.round_trip);

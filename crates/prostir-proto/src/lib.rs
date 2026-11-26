@@ -119,6 +119,14 @@ pub const AUDIO_CHANNELS: u32 = 2;
 /// interleaved signed 16-bit little-endian mono.
 pub const MIC_CHANNELS: u32 = 1;
 
+/// The widest and tallest picture of the mouse pointer ([`HostMsg::CursorShape`]), in
+/// pixels.
+pub const CURSOR_SIDE_MAX: u16 = 256;
+/// How many looks of the pointer a headset keeps for each PC ([`HostMsg::CursorShape`]):
+/// with one more, the one that came first goes, and the PC counts the same way, so it
+/// sends a look again once the headset may have let it go.
+pub const CURSOR_SHAPES: usize = 64;
+
 /// Why the PC ends a session ([`HostMsg::Goodbye`]). A code a reader does not know
 /// reads as [`PcGoodbye::Other`], so a new reason needs no new protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,6 +362,34 @@ wire_enum! {
         /// The PC closes the session on purpose, for `reason` (a [`PcGoodbye`] code);
         /// the connection closes after it.
         27 => Goodbye { reason: u8 },
+        /// A look of the mouse pointer, numbered `shape` (never 0): a picture of `w`x`h`
+        /// pixels (at most [`CURSOR_SIDE_MAX`] each way), 8-bit RGBA in sRGB, not
+        /// premultiplied, top row first, whose point at `hot_x`, `hot_y` is where the
+        /// pointer points. Sent before the first [`HostMsg::CursorAt`] naming it, and
+        /// again only once the headset may have let it go (see [`CURSOR_SHAPES`]).
+        /// The same picture has the same number all session long. Only between a PC and
+        /// a headset that both name the capability (PC 16, headset 10).
+        42 => CursorShape {
+            shape: u32,
+            w: u16,
+            h: u16,
+            hot_x: u16,
+            hot_y: u16,
+            #[wire(rest)]
+            rgba: Vec<u8>,
+        },
+        /// Where the mouse pointer is: on display `display`, its point at `u`, `v`
+        /// across the display's picture (0..=65535 from the top left, as in
+        /// [`ClientMsg::MouseTo`]), looking as `shape`. `display` none: on none of the
+        /// displays streamed to this headset; `shape` 0: hidden. Only the newest one
+        /// waits to be sent (a newer one takes its place), never before the
+        /// [`HostMsg::CursorShape`] it names.
+        43 => CursorAt {
+            display: Option<DisplayId>,
+            u: u16,
+            v: u16,
+            shape: u32,
+        },
         /// Whether the codes matched: the PC's confirmation tag if they did.
         11 => PairResult { tag: Option<[u8; secure::CONFIRM_LEN]> },
     }
@@ -510,6 +546,31 @@ fn host_head(tag: u8) -> usize {
 /// [`ClientMsg::Up`] keeps its stream's number apart from its data.
 fn client_head(tag: u8) -> usize {
     usize::from(tag == tag::UP)
+}
+
+/// Whether a look of the pointer is one the protocol allows: numbered, of a size within
+/// [`CURSOR_SIDE_MAX`], its point on the picture, with every pixel's four bytes.
+pub fn check_cursor_shape(
+    shape: u32,
+    (w, h): (u16, u16),
+    (hot_x, hot_y): (u16, u16),
+    bytes: usize,
+) -> Result<(), WireError> {
+    if shape == 0 {
+        return Err(WireError::Invalid("a pointer's look numbered 0"));
+    }
+    if !(1..=CURSOR_SIDE_MAX).contains(&w) || !(1..=CURSOR_SIDE_MAX).contains(&h) {
+        return Err(WireError::Invalid(
+            "a pointer's picture of no size or too large",
+        ));
+    }
+    if hot_x >= w || hot_y >= h {
+        return Err(WireError::Invalid("a pointer's point off its picture"));
+    }
+    if bytes != usize::from(w) * usize::from(h) * 4 {
+        return Err(WireError::Invalid("a pointer's picture not of its size"));
+    }
+    Ok(())
 }
 
 /// A message this side cannot send: a field over its limit, or too large as a whole.
@@ -694,6 +755,14 @@ impl HostMsg {
             Self::Displays { part } => part.check(),
             Self::Limits { part } => part.check(),
             Self::VolumeAsk { asked } => asked.check(),
+            Self::CursorShape {
+                shape,
+                w,
+                h,
+                hot_x,
+                hot_y,
+                rgba,
+            } => check_cursor_shape(*shape, (*w, *h), (*hot_x, *hot_y), rgba.len()),
             _ => Ok(()),
         }
     }

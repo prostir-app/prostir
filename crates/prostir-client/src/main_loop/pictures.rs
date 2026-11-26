@@ -1,7 +1,9 @@
 //! The small pictures drawn on the CPU and shown as layers: the menus, the menu's
 //! button, the pointer dot, the toast, "Attach", the placeholder of a monitor being
 //! added, what is wrong with a monitor's picture, the black layer over a dimmed room
-//! and the panorama. Each is drawn and uploaded only when what it shows changed.
+//! and the panorama. Each is drawn and uploaded only when what it shows changed. The
+//! looks of the PCs' mouse pointers come as they are, each made into a picture of its
+//! own once, kept while its PC's pointer may show it again.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,7 +13,7 @@ use std::time::{Duration, Instant};
 use super::Gpu;
 use crate::app::Model;
 use crate::background;
-use crate::ids::DisplayKey;
+use crate::ids::{DisplayKey, PcId};
 use crate::interaction::{Hands, Menu, Menus};
 use crate::lang::Texts;
 #[cfg(feature = "preview")]
@@ -78,6 +80,65 @@ fn load_panorama(choice: Background, dir: Option<&Path>) -> Panorama {
     )
 }
 
+/// The picture a PC's mouse pointer is drawn from: one that changes, as large as the
+/// largest look ([`crate::layers::POINTER_SIDE`]), each look drawn at its top left and
+/// the rest clear (premultiplied 0), shown whole: no runtime's way of reading a part
+/// of a picture, nor a pixel from beside the look, can show.
+pub struct PcPointer {
+    pub pc: PcId,
+    /// None where it could not be made (said once; no pointer is drawn for that PC).
+    pub layer: Option<ImageLayer>,
+    /// The look in it now (0: none yet).
+    pub shape: u32,
+    /// Its pixels, kept to put the next look in without new memory.
+    pixels: Vec<u8>,
+}
+
+impl PcPointer {
+    /// The picture of PC `pc`'s pointer, made for it; none if the runtime refused it.
+    fn new(gpu: &Gpu<'_>, pc: PcId) -> Self {
+        let side = crate::layers::POINTER_SIDE;
+        let layer = ImageLayer::new(gpu.session, gpu.format, side, side, false)
+            .inspect_err(|e| warn!("no picture for the PC's pointer: {e:#}"))
+            .ok();
+        Self {
+            pc,
+            layer,
+            shape: 0,
+            pixels: Vec::new(),
+        }
+    }
+
+    /// Draws look `shape` in it, unless it is in it already. A look that could not be
+    /// uploaded is not shown (and tried again next frame).
+    fn show(&mut self, gl: &glow::Context, shape: u32, look: &crate::cursors::Look) {
+        let Some(layer) = self.layer.as_mut().filter(|_| self.shape != shape) else {
+            return;
+        };
+        let side = crate::layers::POINTER_SIDE as usize;
+        // Clear, then the look at the top left, row by row.
+        self.pixels.clear();
+        self.pixels.resize(side * side * 4, 0);
+        let row = usize::from(look.w) * 4;
+        for (y, line) in look.rgba.chunks_exact(row).enumerate() {
+            let at = y * side * 4;
+            self.pixels[at..at + row].copy_from_slice(line);
+        }
+        match layer.upload_part(gl, &self.pixels, None) {
+            Ok(()) => self.shape = shape,
+            Err(e) => {
+                warn!("the PC's pointer could not be drawn: {e:#}");
+                self.shape = 0;
+            }
+        }
+    }
+
+    /// Whether it shows look `shape` of PC `pc`.
+    pub fn shows(&self, pc: PcId, shape: u32) -> bool {
+        self.pc == pc && self.shape == shape && shape != 0 && self.layer.is_some()
+    }
+}
+
 /// The two menus' pictures, which know where their buttons are.
 pub struct Panels {
     pub main: Panel,
@@ -126,6 +187,8 @@ pub struct Pictures {
     /// What is wrong with each monitor's picture, in words, for what it is now and the
     /// language it was drawn in.
     pub trouble_layers: HashMap<DisplayKey, (crate::video::Health, Texts, ImageLayer)>,
+    /// Each PC's mouse pointer: a picture of the look it shows now (see `cursors`).
+    pub pc_cursors: Vec<PcPointer>,
     /// The toast drawn last (see `Toast::n`).
     toast_drawn: u64,
     button_hovered: bool,
@@ -180,6 +243,7 @@ impl Pictures {
             dim_layer: None,
             placeholder: None,
             trouble_layers: HashMap::new(),
+            pc_cursors: Vec::new(),
             toast_drawn: 0,
             button_hovered: false,
             panels,
@@ -355,6 +419,28 @@ impl Pictures {
             )?;
             self.trouble_layers
                 .insert(id, (health, model.texts().clone(), layer));
+        }
+        // The PCs' pointers: a picture for each PC whose pointer shows, made once, the
+        // look drawn in it when it changes. Never the end of the frame.
+        let cursors = model.cursors();
+        self.pc_cursors.retain(|p| cursors.knows(p.pc));
+        for &(id, _, _) in world.monitors() {
+            let Some(shown) = cursors.on(id, model.now()) else {
+                continue;
+            };
+            let i = match self.pc_cursors.iter().position(|p| p.pc == id.pc) {
+                Some(i) => i,
+                None => {
+                    let gpu = Gpu {
+                        session,
+                        gl,
+                        format,
+                    };
+                    self.pc_cursors.push(PcPointer::new(&gpu, id.pc));
+                    self.pc_cursors.len() - 1
+                }
+            };
+            self.pc_cursors[i].show(gl, shown.shape, shown.look);
         }
         // Only what changed is uploaded: pointing at another button changes its part.
         if world.wrist().is_some() && self.panels.palm.render_if_dirty().is_some() {

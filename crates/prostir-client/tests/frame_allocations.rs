@@ -176,6 +176,9 @@ impl Ready for Drawn {
     fn hands(&self) -> bool {
         true
     }
+    fn pc_cursor(&self, _: PcId, _: u32) -> bool {
+        true
+    }
 }
 
 impl Loop {
@@ -490,6 +493,61 @@ fn telling_the_gaze_takes_no_memory() {
         }
     }
     assert!(l.gazes - gazes > 6, "told {}", l.gazes - gazes);
+}
+
+/// The PC's mouse pointer moving over the monitors every frame, from one to the other
+/// and off them, changing between looks it sent before (an animated pointer): its layer
+/// is planned each frame where the PC says, with no memory taken. The looks came
+/// before the frames counted (the only time they take any).
+#[test]
+fn the_pcs_pointer_takes_no_memory() {
+    let mut l = connected(16);
+    for shape in 1..=3u32 {
+        l.handle(Event::Net(NetEvent::CursorShape {
+            pc: PC,
+            shape,
+            look: prostir::cursors::Look {
+                w: 32,
+                h: 32,
+                hot_x: 4,
+                hot_y: 2,
+                rgba: vec![shape as u8; 32 * 32 * 4],
+            },
+        }));
+    }
+    let pointers = |l: &Loop| {
+        l.plan
+            .layers()
+            .iter()
+            .filter(|layer| matches!(layer, layers::Layer::PcCursor { .. }))
+            .count()
+    };
+    let mut drawn = 0;
+    for round in 0..2 {
+        let before = allocations();
+        for i in 0u32..300 {
+            // Across monitor 1, then 2, then off both for a moment; a look a frame.
+            let display = match (i / 100) % 3 {
+                0 => Some(DisplayId(1)),
+                1 => Some(DisplayId(2)),
+                _ => (i % 2 == 0).then_some(DisplayId(1)),
+            };
+            l.handle(Event::Net(NetEvent::CursorAt {
+                pc: PC,
+                display,
+                u: (i * 211 % 65_536) as u16,
+                v: (i * 97 % 65_536) as u16,
+                shape: 1 + i % 3,
+            }));
+            l.frame(HandState::default());
+            drawn += pointers(&l);
+        }
+        // The first round makes room for what the model keeps; the next takes none.
+        if round > 0 {
+            assert_eq!(allocations() - before, 0, "round {round}");
+        }
+    }
+    assert!(drawn > 400, "drawn in {drawn} frames");
 }
 
 /// The preview build's numbers by the monitor looked at, in a session as it runs: the

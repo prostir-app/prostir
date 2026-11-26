@@ -225,9 +225,10 @@ const RATE_SLACK: f32 = 0.5;
 /// The layers every OpenXR runtime takes (`XR_MIN_COMPOSITION_LAYERS_SUPPORTED`).
 pub const LAYERS_AT_LEAST: u8 = 16;
 /// The layers the app keeps for its own things, not the streams: the background, the
-/// menu, its button, the hands and rays, the dots where the two rays point and the
-/// toast, so pointing or a message never pushes a monitor out (see `layers`).
-pub const RESERVED_LAYERS: u8 = 7;
+/// menu, its button, the hands and rays, the dots where the two rays point, the
+/// toast, and the PC's mouse pointer over its monitor, so pointing, a message or the
+/// pointer never pushes a monitor out (see `layers`).
+pub const RESERVED_LAYERS: u8 = 8;
 
 /// The frame rate a decoder must keep at the size the PC is told: the PC sends 60.
 pub const DECODE_RATE: f64 = 60.0;
@@ -365,6 +366,8 @@ impl Caps {
             caps::headset::MIC,
             // The head's ray, which the menu's pointing already works from.
             caps::headset::GAZE,
+            // The PC's pointer as a layer of its own over its monitor (`cursors`).
+            caps::headset::CURSOR,
         ];
         // The compositor shows a surface's rows bottom first and cannot turn the layer
         // over: the PC turns the picture over instead.
@@ -756,9 +759,11 @@ mod tests {
         assert_eq!(streams_max([None, Some(0), Some(10)], 32), 10);
         // No more than the layers the app's own things leave.
         assert_eq!(streams_max([None, Some(32)], 16), 16 - RESERVED_LAYERS);
+        // The least compositor: 8 streams, a PC's pointer having a layer of its own.
+        assert_eq!(streams_max([None, Some(32)], LAYERS_AT_LEAST), 8);
         assert_eq!(streams_max([Some(1000)], 64), 64 - RESERVED_LAYERS);
         assert_eq!(streams_max([None], 64), STREAMS_UNSAID);
-        assert_eq!(streams_max([], 8), 8 - RESERVED_LAYERS);
+        assert_eq!(streams_max([], 10), 10 - RESERVED_LAYERS);
         assert_eq!(streams_max([], 2), 1);
         assert_eq!(volume_steps(Some(15), false), Some(15));
         assert_eq!(volume_steps(Some(15), true), None);

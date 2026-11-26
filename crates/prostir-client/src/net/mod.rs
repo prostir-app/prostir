@@ -240,6 +240,20 @@ pub enum NetEvent {
     },
     /// A desktop notification of the PC.
     Notice(PcId, String),
+    /// A look of PC `pc`'s mouse pointer, numbered `shape` (see `cursors`).
+    CursorShape {
+        pc: PcId,
+        shape: u32,
+        look: crate::cursors::Look,
+    },
+    /// Where PC `pc`'s mouse pointer is, and how it looks (see `cursors`).
+    CursorAt {
+        pc: PcId,
+        display: Option<DisplayId>,
+        u: u16,
+        v: u16,
+        shape: u32,
+    },
     /// A stream starts (or starts over in a new generation).
     StreamStart {
         pc: PcId,

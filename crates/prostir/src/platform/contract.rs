@@ -71,7 +71,9 @@
 //! 9. A limit on encoder sessions: learned when an encoder does not open while others
 //!    of it run, and kept with the probes in the cache (`encoder/probe.rs`); not a
 //!    field here. The output goes on with the next encoder.
-//! 10. The cursor in the frames or apart: [`FrameSource::cursor`].
+//! 10. The cursor in the frames or apart: [`FrameSource::cursor`]; told apart to the
+//!     headsets (its look and place, the headset drawing it) through
+//!     [`Desktop::cursor`], as on Linux.
 //! 11. Sound also in the speakers, and no microphone without VB-CABLE: the sound part
 //!     of the platform (`sound.rs`: `Route`, `MicAvailability`, an explicit
 //!     `OutputDevice` to capture from), not the desktop.
@@ -176,6 +178,100 @@ pub trait Desktop: Send {
 
     /// Its mouse; none where the mouse is neither found nor moved.
     fn pointer(&mut self) -> Option<&mut dyn Pointer>;
+
+    /// The mouse pointer apart from the frames; none where the desktop draws it into
+    /// them and cannot say how it looks and where it is (then it stays in the frames).
+    fn cursor(&mut self) -> Option<&mut dyn CursorSource> {
+        None
+    }
+}
+
+/// The mouse pointer told apart from the frames, so each headset draws it itself
+/// (`CursorShape` and `CursorAt` in the protocol): moving it then changes no frame,
+/// and it moves in the headset with every frame the headset shows. KWin says it in
+/// its streams' metadata, wlroots desktops in a pointer session of
+/// `ext-image-copy-capture`, Windows in Desktop Duplication.
+pub trait CursorSource: Send {
+    /// With a sink: from now on the pointer is left out of the frames of every output
+    /// but window panels, and `sink` hears how it looks and where it is, at once (as
+    /// they are now) and on every change, from any thread. Without: it is drawn into
+    /// the frames again, and nothing more is told.
+    ///
+    /// A window panel keeps the pointer in its frames all the same: it shows one
+    /// window, which the person works in at the PC as much as in the headset, and the
+    /// core takes the pointer on a panel for on none of the displays.
+    fn set_apart(&mut self, sink: Option<CursorSink>);
+
+    /// Whether a change of [`CursorSource::set_apart`] reaches only streams started
+    /// after it (KWin chooses how the pointer goes when it makes a stream): the core
+    /// then starts the running ones over. Where it does not, switching costs nothing.
+    fn restarts_streams(&self) -> bool {
+        false
+    }
+}
+
+/// What a [`CursorSource`] says of the pointer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CursorEvent {
+    /// It looks so now, and shows (if it was hidden).
+    Shape(CursorImage),
+    /// Its point is at `x`, `y` in the pixels of the picture of `output` as the
+    /// desktop makes it, `size` of them (turned as its frames are, before any
+    /// scaling down for an encoder); outside that picture when it is off it.
+    Moved {
+        output: OutputKey,
+        x: i32,
+        y: i32,
+        size: (u32, u32),
+    },
+    /// It is hidden (a video full screen, a game, touch), until a look comes again.
+    Hidden,
+    /// It left the picture of `output` (for another output's, or none): where it was
+    /// on that output no longer counts.
+    Left { output: OutputKey },
+}
+
+/// A look of the pointer: `w`x`h` pixels of 8-bit RGBA in sRGB, not premultiplied, top
+/// row first, pointing at `hot_x`, `hot_y`. In the pixels of the outputs' pictures as
+/// the desktop makes them (the core scales it with a picture scaled down to stream).
+#[derive(Clone, PartialEq, Eq)]
+pub struct CursorImage {
+    pub w: u16,
+    pub h: u16,
+    pub hot_x: u16,
+    pub hot_y: u16,
+    pub rgba: Vec<u8>,
+}
+
+impl std::fmt::Debug for CursorImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}x{} pointing at {},{}",
+            self.w, self.h, self.hot_x, self.hot_y
+        )
+    }
+}
+
+/// Where a [`CursorSource`] tells what it has to say: the core's, called from any
+/// thread, never waiting for anything.
+#[derive(Clone)]
+pub struct CursorSink(Arc<dyn Fn(CursorEvent) + Send + Sync>);
+
+impl CursorSink {
+    pub fn new(tell: impl Fn(CursorEvent) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(tell))
+    }
+
+    pub fn send(&self, event: CursorEvent) {
+        (self.0)(event);
+    }
+}
+
+impl std::fmt::Debug for CursorSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CursorSink")
+    }
 }
 
 /// An output streamed to the headset: a virtual monitor, a window panel, or a display of
@@ -207,6 +303,11 @@ pub trait Output: Send {
 
     /// Stops feeding the current encoder (before it is replaced).
     fn detach(&mut self);
+
+    /// The next encoder [`Output::attach`] feeds gets frames with the pointer left out
+    /// (`apart`, see [`CursorSource`]) or drawn in, where the desktop makes that per
+    /// stream (KWin). Never apart for a window panel, which keeps the pointer.
+    fn set_cursor_apart(&mut self, _apart: bool) {}
 
     /// Makes it the primary output, where the desktop has one.
     fn make_primary(&self);
@@ -419,8 +520,12 @@ pub use crate::encoder::GpuDevices;
 pub enum Cursor {
     /// Into the frames.
     InFrame,
-    /// Apart from them (Desktop Duplication, a driver's hardware cursor).
-    #[cfg_attr(not(test), expect(dead_code, reason = "every source draws it in"))]
+    /// Apart from them (KWin's stream with the pointer apart, Desktop Duplication, a
+    /// driver's hardware cursor).
+    #[cfg_attr(
+        all(not(test), feature = "fake-desktop"),
+        expect(dead_code, reason = "the fake desktop draws no pointer in")
+    )]
     Separate,
 }
 
@@ -789,6 +894,39 @@ mod windows_shape {
         // Resized by another program: the sides disagree.
         assert_eq!(scale_of((2560, 1440), (320, 240)), None);
         assert_eq!(scale_of((2560, 1440), (0, 0)), None);
+    }
+
+    /// Desktop Duplication says the pointer apart: what it says reaches the core's sink
+    /// as it was said, from any thread.
+    #[test]
+    fn a_pointer_apart_fits_the_contract() {
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = {
+            let heard = heard.clone();
+            CursorSink::new(move |e| heard.lock().unwrap().push(e))
+        };
+        let image = CursorImage {
+            w: 32,
+            h: 32,
+            hot_x: 0,
+            hot_y: 0,
+            rgba: vec![0; 32 * 32 * 4],
+        };
+        let events = [
+            CursorEvent::Shape(image),
+            CursorEvent::Moved {
+                output: OutputKey::new("DISPLAY1"),
+                x: -3,
+                y: 2000,
+                size: (3840, 2160),
+            },
+            CursorEvent::Hidden,
+        ];
+        let sent = events.clone();
+        std::thread::spawn(move || sent.into_iter().for_each(|e| sink.send(e)))
+            .join()
+            .unwrap();
+        assert_eq!(*heard.lock().unwrap(), events);
     }
 
     #[test]

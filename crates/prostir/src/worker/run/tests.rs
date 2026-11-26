@@ -196,6 +196,7 @@ fn wanted(specs: &[(u32, u32, u32)]) -> Wanted {
             ..Default::default()
         },
         wake_physical: false,
+        cursor_apart: false,
     }
 }
 

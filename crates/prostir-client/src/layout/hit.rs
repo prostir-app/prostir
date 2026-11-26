@@ -1,6 +1,6 @@
 //! Where a ray meets a monitor, flat or curved, and the point on its image.
 
-use glam::{Vec2, Vec3};
+use glam::{Quat, Vec2, Vec3};
 
 use super::Placement;
 
@@ -125,6 +125,43 @@ pub fn image_uv(p: &Placement, height: f32, curve_radius: Option<f32>, local: Ve
         }
     };
     Vec2::new(u.clamp(0.0, 1.0), v.clamp(0.0, 1.0))
+}
+
+/// The world point at `uv` (0..=1 from the top left) of a monitor's image, on its
+/// surface (the reverse of [`image_uv`]), and how the surface turns there: its
+/// rotation's Z out of the surface, Y up the monitor. On a curve, the plane that
+/// touches the cylinder there.
+pub fn image_frame(
+    p: &Placement,
+    height: f32,
+    curve_radius: Option<f32>,
+    uv: Vec2,
+) -> (Vec3, Quat) {
+    let y = (0.5 - uv.y) * height;
+    match curve_radius {
+        None => (
+            p.position + p.rotation * Vec3::new((uv.x - 0.5) * p.width, y, 0.0),
+            p.rotation,
+        ),
+        Some(radius) => {
+            let c = Cylinder::new(p, radius);
+            let angle = (uv.x - 0.5) * c.central_angle;
+            let q = Vec3::new(c.radius * angle.sin(), y, -c.radius * angle.cos());
+            // The normal there is the monitor's turned about its up by -angle.
+            (
+                c.center + p.rotation * q,
+                p.rotation * Quat::from_rotation_y(-angle),
+            )
+        }
+    }
+}
+
+/// How wide a monitor's image is laid out, in metres: across, or along its arc.
+pub fn image_width(p: &Placement, curve_radius: Option<f32>) -> f32 {
+    match curve_radius {
+        None => p.width,
+        Some(radius) => Cylinder::new(p, radius).arc_length(),
+    }
 }
 
 /// The world point at `uv` (0..=1 from the top left) of a monitor's image, just in

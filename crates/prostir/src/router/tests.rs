@@ -796,3 +796,205 @@ fn silence_stops_after_200_ms_and_sound_comes_at_once() {
     router.send_audio(silence);
     assert_eq!(audio(&outbox), 1, "silence after sound goes on for a while");
 }
+
+/// A headset that draws the pointer itself.
+fn drawing() -> state::HeadsetCaps {
+    state::HeadsetCaps {
+        features: vec![state::caps::headset::CURSOR],
+        ..headset()
+    }
+}
+
+fn look(grey: u8) -> CursorEvent {
+    CursorEvent::Shape(crate::platform::CursorImage {
+        w: 2,
+        h: 2,
+        hot_x: 0,
+        hot_y: 0,
+        rgba: vec![grey; 16],
+    })
+}
+
+/// The pointer moved to `x`, `y` of `output`, whose picture is 64x32 on the desktop.
+fn moved(output: &str, x: i32, y: i32) -> CursorEvent {
+    CursorEvent::Moved {
+        output: OutputKey::new(output),
+        x,
+        y,
+        size: (64, 32),
+    }
+}
+
+/// The pointer's messages among what `outbox` sent: the looks' numbers, and the places.
+fn pointer(outbox: &Outbox) -> (Vec<u32>, Vec<At>) {
+    let (mut looks, mut places) = (Vec::new(), Vec::new());
+    for m in sent(outbox) {
+        match m {
+            HostMsg::CursorShape { shape, .. } => looks.push(shape),
+            HostMsg::CursorAt {
+                display,
+                u,
+                v,
+                shape,
+            } => places.push(At {
+                display,
+                u,
+                v,
+                shape,
+            }),
+            _ => {}
+        }
+    }
+    (looks, places)
+}
+
+/// The pointer goes apart from the pictures only while every headset draws it: then
+/// each hears its look once and its place across the picture of a display it was told
+/// of; a headset that does not draw it brings it back into the pictures, and the other
+/// hears it is nowhere.
+#[test]
+fn the_pointer_goes_to_headsets_that_all_draw_it() {
+    let router = Router::new();
+    router.set_cursor_source(true);
+    let s = id(1);
+    router.add_stream(s, Codec::H264, "Prostir-1".into());
+    router.set_stream_output(s, OutputKey::new("Fake-1"), false);
+    size(&router, s);
+    let first = attach(&router, 1, drawing());
+    assert!(router.cursor_apart());
+    router.publish(1, &BTreeSet::from([s]));
+    sent(&first);
+    router.cursor(look(1));
+    router.cursor(moved("Fake-1", 63, 0));
+    let (looks, places) = pointer(&first);
+    let shape = looks[0];
+    assert_eq!(looks.len(), 1);
+    // The newest place only: the look first came with a place of none.
+    assert_eq!(
+        places,
+        [At {
+            display: Some(s.wire()),
+            u: 65535,
+            v: 0,
+            shape
+        }]
+    );
+    // The same again: nothing; on an output not streamed: nowhere, the same look.
+    router.cursor(moved("Fake-1", 63, 0));
+    router.cursor(look(1));
+    assert_eq!(pointer(&first), (vec![], vec![]));
+    router.cursor(moved("eDP-1", 5, 5));
+    assert_eq!(
+        pointer(&first).1,
+        [At {
+            shape,
+            ..At::NOWHERE
+        }]
+    );
+    router.cursor(CursorEvent::Hidden);
+    assert_eq!(pointer(&first).1, [At::NOWHERE]);
+
+    // A second headset that draws it gets the look and the place it has now.
+    router.cursor(look(2));
+    router.cursor(moved("Fake-1", 0, 31));
+    sent(&first);
+    let second = attach(&router, 2, drawing());
+    router.publish(2, &BTreeSet::from([s]));
+    let (looks, places) = pointer(&second);
+    assert_eq!(looks.len(), 1);
+    assert_eq!(
+        places.last(),
+        Some(&At {
+            display: Some(s.wire()),
+            u: 0,
+            v: 65535,
+            shape: looks[0]
+        })
+    );
+    // One that does not: into the pictures, both told it is nowhere, then nothing.
+    let old = attach(&router, 3, headset());
+    assert!(!router.cursor_apart());
+    assert_eq!(pointer(&first), (vec![], vec![At::NOWHERE]));
+    assert_eq!(pointer(&second), (vec![], vec![At::NOWHERE]));
+    router.cursor(moved("Fake-1", 9, 9));
+    assert_eq!(pointer(&first), (vec![], vec![]));
+    assert_eq!(pointer(&old), (vec![], vec![]));
+    // It leaves: apart again; what the desktop says next goes out, no look again.
+    router.detach(3);
+    assert!(router.cursor_apart());
+    router.cursor(moved("Fake-1", 0, 0));
+    let (looks, places) = pointer(&first);
+    assert!(looks.is_empty());
+    assert_eq!(places.last().map(|a| (a.u, a.v)), Some((0, 0)));
+    // The stream stops: the pointer on it is nowhere.
+    router.remove_stream(s);
+    assert_eq!(pointer(&first).1.last().map(|a| a.display), Some(None));
+}
+
+/// Nothing of the pointer goes where the desktop does not tell it; the last headset
+/// leaving changes nothing (one that comes back starts nothing over); a headset off
+/// the head is sent nothing, and hears where the pointer is once put on again.
+#[test]
+fn the_pointer_goes_only_where_the_desktop_tells_it_and_the_headset_is_worn() {
+    let router = Router::new();
+    let s = id(1);
+    router.add_stream(s, Codec::H264, "Prostir-1".into());
+    router.set_stream_output(s, OutputKey::new("Fake-1"), false);
+    size(&router, s);
+    let first = attach(&router, 1, drawing());
+    router.publish(1, &BTreeSet::from([s]));
+    assert!(!router.cursor_apart(), "the desktop does not tell it");
+    router.cursor(look(1));
+    router.cursor(moved("Fake-1", 1, 1));
+    assert_eq!(pointer(&first), (vec![], vec![]));
+    router.set_cursor_source(true);
+    assert!(router.cursor_apart());
+    router.detach(1);
+    assert!(router.cursor_apart(), "kept without a headset");
+    let first = attach(&router, 1, drawing());
+    router.publish(1, &BTreeSet::from([s]));
+    sent(&first);
+    // Off the head: nothing; on again: where it is now.
+    router.set_worn(1, false);
+    router.cursor(moved("Fake-1", 2, 2));
+    assert_eq!(pointer(&first), (vec![], vec![]));
+    router.set_worn(1, true);
+    let (_, places) = pointer(&first);
+    assert_eq!(places.last().map(|a| a.display), Some(Some(s.wire())));
+}
+
+/// On a window panel (its frames keep the pointer) the pointer is on none of the
+/// displays; over a picture scaled down to stream, its look goes scaled with it.
+#[test]
+fn a_panel_keeps_the_pointer_and_a_scaled_picture_scales_it() {
+    let router = Router::new();
+    router.set_cursor_source(true);
+    let (panel, big) = (id(1), id(2));
+    router.add_stream(panel, Codec::H264, "Prostir-1".into());
+    router.set_stream_output(panel, OutputKey::new("Panel-1"), true);
+    size(&router, panel);
+    router.add_stream(big, Codec::H264, "Prostir-2".into());
+    router.set_stream_output(big, OutputKey::new("Big-2"), false);
+    size(&router, big);
+    let first = attach(&router, 1, drawing());
+    router.publish(1, &BTreeSet::from([panel, big]));
+    sent(&first);
+    router.cursor(look(1));
+    router.cursor(moved("Panel-1", 3, 3));
+    assert_eq!(pointer(&first).1.last().map(|a| a.display), Some(None));
+    // The 64x32 stream of a picture of 128x64: the 2x2 look goes as 1x1.
+    router.cursor(CursorEvent::Moved {
+        output: OutputKey::new("Big-2"),
+        x: 127,
+        y: 0,
+        size: (128, 64),
+    });
+    let sizes: Vec<(u16, u16)> = sent(&first)
+        .into_iter()
+        .filter_map(|m| match m {
+            HostMsg::CursorShape { w, h, .. } => Some((w, h)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sizes, [(1, 1)]);
+}

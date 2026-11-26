@@ -15,11 +15,12 @@ use log::info;
 
 use crate::encoder::Encoder;
 use crate::platform::{
-    AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, GpuDevices, Memory, Origin,
-    Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec,
-    Windows,
+    AddModel, Cursor, CursorSink, CursorSource, DeskPlan, Desktop, DesktopCaps, FrameSource,
+    GpuDevices, Memory, Origin, Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer,
+    Scales, VirtualSpec, Windows,
 };
 use feed::Feed;
+use feed::pointer::{CursorTap, SinkSlot};
 use virtual_output::{Screencast, VirtualOutput};
 use windows::KdeWindows;
 
@@ -46,6 +47,8 @@ pub struct Kde {
     woke_display_at: Option<Instant>,
     /// Displays of the PC shown so far, to number their streams in the log.
     shown: u32,
+    /// The pointer apart from the pictures: where its streams tell it.
+    cursor: KdeCursor,
     /// The graphics devices to share (KWin hands buffers over: none taken yet).
     _gpu: GpuDevices,
 }
@@ -75,8 +78,28 @@ impl Kde {
             primary_looked: (0, None, None),
             woke_display_at: None,
             shown: 0,
+            cursor: KdeCursor::default(),
             _gpu: gpu,
         })
+    }
+}
+
+/// KWin tells the pointer apart in the metadata of streams made so (`feed/pointer.rs`):
+/// each output's stream with the pointer apart tells the core's sink, kept here.
+#[derive(Default)]
+struct KdeCursor {
+    sink: SinkSlot,
+}
+
+impl CursorSource for KdeCursor {
+    fn set_apart(&mut self, sink: Option<CursorSink>) {
+        *self.sink.lock().unwrap() = sink;
+    }
+
+    /// KWin chooses how the pointer goes when it makes a stream: an output's encoder
+    /// starts over on the stream that has it so (see [`KdeOutput`]).
+    fn restarts_streams(&self) -> bool {
+        true
     }
 }
 
@@ -101,7 +124,12 @@ impl Desktop for Kde {
             bail!("monitor {spec} is out of range");
         }
         let output = self.screencast.create(spec)?;
-        Ok(Box::new(KdeOutput::new(output, Origin::Monitor, None)))
+        Ok(Box::new(KdeOutput::new(
+            output,
+            Origin::Monitor,
+            None,
+            self.cursor.sink.clone(),
+        )))
     }
 
     fn show(&mut self, key: &OutputKey) -> Result<Box<dyn Output>> {
@@ -110,11 +138,12 @@ impl Desktop for Kde {
         // the streams of one connection apart, and the log tells them apart by it.
         let connection = Screencast::connect()?;
         self.shown += 1;
-        let output = connection.mirror(self.shown, key.as_str())?;
+        let output = connection.mirror(self.shown, key.as_str(), false)?;
         Ok(Box::new(KdeOutput::new(
             output,
             Origin::Capture,
             Some(connection),
+            self.cursor.sink.clone(),
         )))
     }
 
@@ -226,6 +255,10 @@ impl Desktop for Kde {
     fn pointer(&mut self) -> Option<&mut dyn Pointer> {
         Some(&mut self.windows)
     }
+
+    fn cursor(&mut self) -> Option<&mut dyn CursorSource> {
+        Some(&mut self.cursor)
+    }
 }
 
 /// `kscreen-doctor` settings giving outputs new scales (`output.N.scale.1.25`), which
@@ -238,27 +271,59 @@ fn scale_settings(scales: &[(OutputKey, u16)]) -> Vec<String> {
 }
 
 /// A KWin output: a virtual one, or a display of the PC streamed as it is.
+///
+/// Its stream was made with the pointer drawn in. While the pointer goes apart (and it
+/// is no window panel), a second stream of it, made with the pointer apart on a
+/// connection of its own (KWin streams an output once per connection), feeds the
+/// encoder instead and tells the pointer; it goes once the pointer is drawn in again.
 struct KdeOutput {
     key: OutputKey,
     origin: Origin,
-    // Field order matters: the feed stops before KWin's stream closes, and the
-    // stream before its own KWin connection.
+    // Field order matters: the feed stops before KWin's streams close, and a stream
+    // before its own KWin connection.
     /// KWin's frames going into the current encoder.
     feed: Option<Feed>,
+    /// The stream with the pointer apart, and its connection.
+    apart: Option<(VirtualOutput, Screencast)>,
     stream: VirtualOutput,
     /// The connection of a display of the PC shown (see [`Kde::show`]).
     _connection: Option<Screencast>,
+    /// The next encoder is fed with the pointer apart.
+    wants_apart: bool,
+    sink: SinkSlot,
 }
 
 impl KdeOutput {
-    fn new(stream: VirtualOutput, origin: Origin, connection: Option<Screencast>) -> Self {
+    fn new(
+        stream: VirtualOutput,
+        origin: Origin,
+        connection: Option<Screencast>,
+        sink: SinkSlot,
+    ) -> Self {
         Self {
             key: OutputKey::new(stream.output_name()),
             origin,
             feed: None,
+            apart: None,
             stream,
             _connection: connection,
+            wants_apart: false,
+            sink,
         }
+    }
+
+    /// The stream with the pointer apart, made if it is not yet.
+    fn apart_stream(&mut self) -> Result<&VirtualOutput> {
+        if self.apart.is_none() {
+            let connection = Screencast::connect()?;
+            let stream = connection.mirror(1, self.stream.output_name(), true)?;
+            info!(
+                "{}: a stream with the pointer apart, PipeWire node {}",
+                self.key, stream.node
+            );
+            self.apart = Some((stream, connection));
+        }
+        Ok(&self.apart.as_ref().expect("made above").0)
     }
 }
 
@@ -267,8 +332,10 @@ impl Output for KdeOutput {
         &self.key
     }
 
+    /// Closed also when the stream with the pointer apart (feeding the encoder now)
+    /// was.
     fn health(&self) -> OutputHealth {
-        if self.stream.closed() {
+        if self.stream.closed() || self.apart.as_ref().is_some_and(|(s, _)| s.closed()) {
             OutputHealth::Closed
         } else if let Some((w, h)) = self.stream.resized() {
             OutputHealth::Resized { w, h }
@@ -283,7 +350,11 @@ impl Output for KdeOutput {
             origin: self.origin,
             // PipeWire hands GPU buffers to an encoder that takes them.
             memory: Memory::DmaBuf,
-            cursor: Cursor::InFrame,
+            cursor: if self.wants_apart {
+                Cursor::Separate
+            } else {
+                Cursor::InFrame
+            },
         }
     }
 
@@ -294,8 +365,29 @@ impl Output for KdeOutput {
         let appsrc = encoder
             .appsrc()
             .ok_or_else(|| anyhow::anyhow!("the encoder takes no pushed frames"))?;
-        self.feed = Some(self.stream.feed(appsrc, encoder.paused())?);
+        if !self.wants_apart {
+            self.apart = None;
+            self.feed = Some(self.stream.feed(appsrc, encoder.paused(), None)?);
+            return Ok(());
+        }
+        let tap = CursorTap::new(self.key.clone(), self.sink.clone());
+        let feed = self
+            .apart_stream()
+            .and_then(|s| s.feed(appsrc.clone(), encoder.paused(), Some(tap)));
+        self.feed = Some(match feed {
+            Ok(feed) => feed,
+            // Better the pointer in the picture than no picture.
+            Err(e) => {
+                log::warn!("{}: no stream with the pointer apart: {e:#}", self.key);
+                self.apart = None;
+                self.stream.feed(appsrc, encoder.paused(), None)?
+            }
+        });
         Ok(())
+    }
+
+    fn set_cursor_apart(&mut self, apart: bool) {
+        self.wants_apart = apart;
     }
 
     fn detach(&mut self) {
