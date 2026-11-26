@@ -62,6 +62,14 @@ pub fn shape_id(image: &CursorImage) -> u32 {
     hash.max(1)
 }
 
+/// The point `f` across (0..=65535) an output at `start`, `len` pixels long, in the
+/// desktop's pixels: the middle of its first pixel to the middle of its last, so 65535
+/// is the very edge pixel (where the desktop's screen edge is) and the pixel found back
+/// (rounded down) is the one [`uv_of`] says.
+pub fn point_of(start: i32, len: u32, f: u16) -> f64 {
+    f64::from(start) + f64::from(len.saturating_sub(1)) * f64::from(f) / 65535.0
+}
+
 /// The point at `x`, `y` of a picture `w`x`h` pixels as `u`, `v` across it (0..=65535
 /// from the top left): the reverse of how `MouseTo` finds a pixel (`u * (w - 1) /
 /// 65535`, rounded down), so the headset puts the pointer where the PC has it and a
@@ -402,6 +410,24 @@ mod tests {
         }
         // Off the picture: at its edge.
         assert_eq!(uv_of(-5, 4000, (640, 360)), (0, 65535));
+    }
+
+    /// The headset's 0 and 65535 are the very first and last pixel of the output on the
+    /// desktop (where its screen edges are, KWin's on the pixel rounded to), each pixel
+    /// `uv_of` says comes back as itself, and a point a hair off the edge still
+    /// rounds onto it.
+    #[test]
+    fn the_ends_across_an_output_are_its_edge_pixels() {
+        // HDMI-A-1 of a desktop, below a monitor of Prostir.
+        let (x, w, y, h) = (2320, 1920, 2560, 1080);
+        assert_eq!(point_of(x, w, 0), 2320.0);
+        assert_eq!(point_of(x, w, 65535), 4239.0);
+        assert_eq!(point_of(y, h, 65535), 3639.0);
+        assert_eq!(point_of(y, h, 65534).round(), 3639.0);
+        for py in [0, 1, 539, 1078, 1079] {
+            let (_, v) = uv_of(0, py, (w, h));
+            assert_eq!(point_of(y, h, v).floor() as i32, y + py, "row {py}");
+        }
     }
 
     /// A look goes to a headset once, and again only once the headset may have let it

@@ -25,7 +25,11 @@
 //!
 //! Real touches hide the desktop's pointer, as on a touch screen: from a finger down
 //! until the mouse moves again ([`Pointing`], for the headsets that draw the pointer).
+//!
+//! The mouse put against a screen edge is pushed on a few times ([`edge`]), so the
+//! desktop's edge (an auto-hiding panel) takes it as a real mouse pushing there.
 
+pub mod edge;
 pub mod held;
 pub mod touch_mouse;
 
@@ -42,6 +46,7 @@ use crate::events::SessionId;
 use crate::platform::{
     Injector, InputRefused, InputStopped, MouseButton, OpenInput, Spot, TouchPhase,
 };
+use edge::EdgePush;
 use held::{Act, Held};
 use touch_mouse::TouchMouse;
 
@@ -261,6 +266,8 @@ struct Run {
     reopen: (Instant, Duration),
     held: Held,
     mice: BTreeMap<SessionId, TouchMouse>,
+    /// The mouse held at a screen edge, pushed on.
+    edge: EdgePush,
     /// Where what the input does to the pointer goes, and what it said last.
     pointing: Box<dyn Fn(Pointing) + Send>,
     pointed: Option<Pointing>,
@@ -278,6 +285,7 @@ impl Run {
             reopen: (Instant::now(), REOPEN_FIRST),
             held: Held::default(),
             mice: BTreeMap::new(),
+            edge: EdgePush::default(),
             pointing: Box::new(|_| {}),
             pointed: None,
         }
@@ -309,6 +317,9 @@ impl Run {
             } else {
                 Duration::from_secs(3600)
             };
+            let wait = self.edge.next().map_or(wait, |at| {
+                wait.min(at.saturating_duration_since(Instant::now()))
+            });
             let first = match rx.recv_timeout(wait) {
                 Ok(m) => Some(m),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -344,6 +355,7 @@ impl Run {
     }
 
     fn release_everything(&mut self) {
+        self.edge.stop();
         for from in self.held.sessions() {
             self.release(from);
         }
@@ -355,6 +367,7 @@ impl Run {
         error!("input: a pass of the input thread failed: letting go of everything");
         let _ = catch_unwind(AssertUnwindSafe(|| self.release_everything()));
         self.injector = None;
+        self.edge.stop();
         self.opening = None;
         self.held.clear();
         self.mice.clear();
@@ -559,6 +572,8 @@ impl Run {
     /// Everything `from` holds, let go.
     fn release(&mut self, from: SessionId) {
         let now = Instant::now();
+        // The mouse at an edge is pushed on no more (by whom it was put there).
+        self.edge.stop();
         let dragged = self
             .mice
             .remove(&from)
@@ -580,6 +595,12 @@ impl Run {
         };
         let mut pointing = None;
         for a in acts {
+            match &a {
+                Act::To(at) if injector.relative() => self.edge.moved(at, Instant::now()),
+                Act::To(_) => {}
+                Act::Touch(..) => self.edge.stop(),
+                _ => {}
+            }
             let done = match &a {
                 Act::To(at) => injector.pointer_to(at),
                 Act::Button(b, down) => injector.button(*b, *down),
@@ -609,6 +630,7 @@ impl Run {
         self.injector = None;
         self.held.clear();
         self.mice.clear();
+        self.edge.stop();
         self.fingers_gone();
         if refused(e) {
             self.refuse(e);
@@ -631,6 +653,14 @@ impl Run {
             .collect();
         for (_, acts) in coasting {
             self.act(acts);
+        }
+        // Pushed only by a device whose relative moves the desktop takes as a mouse's.
+        if let Some((dx, dy)) = self.edge.due(now)
+            && let Some(injector) = self.injector.as_mut()
+            && injector.relative()
+            && let Err(e) = injector.pointer_by(dx, dy)
+        {
+            self.lost(&e);
         }
         if let Some(injector) = self.injector.as_mut()
             && let Err(e) = injector.pump()

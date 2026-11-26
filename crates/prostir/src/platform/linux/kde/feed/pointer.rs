@@ -9,6 +9,18 @@
 //! output's picture, the pointer is on another (or none). Its picture is
 //! premultiplied (RGBA in KWin 6.8). The core hears the hotspot's place, and the
 //! picture straight, only what changed.
+//!
+//! On a display of the PC, a picture of a size with nothing in it is no look: KWin 6.8
+//! paints a pointer an app draws itself (kitty's, Dolphin's I-beam, a `wl_surface` of
+//! the app's) into the metadata from its scene (`grabCursorOpenGL`, unlike a pointer
+//! of the theme, its picture as it is), and that can come out clear there, so the
+//! pointer vanished from the headset over those apps. The metadata does not say which
+//! way a picture was made, so on a display of the PC the look before stays, with its
+//! hotspot, until a look with something in it comes (no time limit: the app's pointer
+//! stays clear while the mouse is over it). The cost: an app hiding the pointer with a
+//! clear picture (an X11 game's blank cursor) shows the look before there. On a
+//! monitor of Prostir a clear picture is the look, as it says. A pointer hidden is a
+//! picture of no size (KWin says so for an app that hides it).
 
 use std::sync::{Arc, Mutex};
 
@@ -32,9 +44,17 @@ pub struct CursorTap {
     /// Its picture (straight) and hotspot, as last seen and told.
     look: Option<(u32, u32, Vec<u8>)>,
     hot: Option<(i32, i32)>,
+    /// Hidden, as told; KWin said so last (a look of no size), until a look comes.
     hidden: bool,
+    gone: bool,
     /// Its look came and was not told yet (it was off this output).
     untold: bool,
+    /// KWin's look now is clear (see the module): the one before stands for it, with
+    /// the hotspot it came with.
+    clear: bool,
+    look_hot: Option<(i32, i32)>,
+    /// The stream is of a display of the PC: a clear look keeps the one before.
+    keeps_clear: bool,
 }
 
 impl CursorTap {
@@ -47,8 +67,18 @@ impl CursorTap {
             look: None,
             hot: None,
             hidden: false,
+            gone: false,
             untold: false,
+            clear: false,
+            look_hot: None,
+            keeps_clear: false,
         }
+    }
+
+    /// For a stream of a display of the PC (see the module).
+    pub fn on_a_pc_display(mut self) -> Self {
+        self.keeps_clear = true;
+        self
     }
 
     /// What one buffer said of the pointer (`meta`), on a picture of `size` pixels:
@@ -69,17 +99,24 @@ impl CursorTap {
         size: (u32, u32),
         mut tell: impl FnMut(CursorEvent),
     ) {
-        // Its look, kept also while it is off this output: told once it is on it.
-        let mut gone = false;
+        // Its look, kept also while it is off this output (and while hidden): told
+        // once it is on it.
         if let Some(shape) = &meta.shape {
             if shape.w == 0 || shape.h == 0 {
-                self.look = None;
-                gone = true;
+                self.gone = true;
             } else {
-                let mut rgba = shape.rgba.clone();
-                straighten(&mut rgba);
-                self.look = Some((shape.w, shape.h, rgba));
-                self.untold = true;
+                self.gone = false;
+                let clear = shape.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 0);
+                // A clear one: the look before stands for it (see the module), told
+                // again only to show it again.
+                self.clear = clear && self.keeps_clear && self.look.is_some();
+                self.untold |= !self.clear || self.hidden;
+                if !self.clear {
+                    self.look_hot = meta.pointer.map(|p| (p.hot_x, p.hot_y));
+                    let mut rgba = shape.rgba.clone();
+                    straighten(&mut rgba);
+                    self.look = Some((shape.w, shape.h, rgba));
+                }
             }
         }
         // On this output's picture: KWin says a pointer on every output its picture
@@ -97,12 +134,17 @@ impl CursorTap {
             }
             return;
         };
-        if gone && !std::mem::replace(&mut self.hidden, true) {
-            tell(CursorEvent::Hidden);
-        }
-        let hot = (p.hot_x, p.hot_y);
-        if let Some((w, h, rgba)) = &self.look
-            && (self.untold || self.hot != Some(hot) || self.hidden)
+        // The hotspot KWin says is its look's: the kept look keeps its own.
+        let hot = match self.look_hot {
+            Some(hot) if self.clear => hot,
+            _ => (p.hot_x, p.hot_y),
+        };
+        if self.gone {
+            if !std::mem::replace(&mut self.hidden, true) {
+                tell(CursorEvent::Hidden);
+            }
+        } else if let Some((w, h, rgba)) = &self.look
+            && (self.untold || self.hot != Some(hot))
         {
             let side = |n: u32| u16::try_from(n).unwrap_or(u16::MAX);
             let within = |v: i32, n: u32| u16::try_from(v.clamp(0, n as i32 - 1)).unwrap_or(0);
@@ -202,6 +244,89 @@ mod tests {
         );
         let events = heard(&mut tap, &at(11, 20, Some(look)));
         assert!(matches!(events[..], [CursorEvent::Shape(_)]), "{events:?}");
+    }
+
+    /// On a display of the PC (HDMI-A-1, 1920x1080), KWin's look of kitty's I-beam
+    /// comes clear: the arrow before stays, with its own hotspot, and only the place is
+    /// told; hidden while typing, the clear I-beam shows the arrow again; a look with
+    /// something in it is told as ever.
+    #[test]
+    fn a_clear_look_keeps_the_one_before() {
+        let mut tap =
+            CursorTap::new(OutputKey::new("HDMI-A-1"), SinkSlot::default()).on_a_pc_display();
+        let mut heard = |x, hot, shape| {
+            let meta = CursorMeta {
+                pointer: Some(Pointer {
+                    x,
+                    y: 500,
+                    hot_x: hot,
+                    hot_y: hot,
+                }),
+                shape,
+            };
+            let mut out = Vec::new();
+            tap.events(&meta, (1920, 1080), |e| out.push(e));
+            out
+        };
+        let look = |side: u32, alpha: u8| Shape {
+            w: side,
+            h: side,
+            rgba: [0, 0, 0, alpha].repeat((side * side) as usize),
+        };
+        let events = heard(100, 1, Some(look(4, 255)));
+        let [CursorEvent::Shape(arrow), CursorEvent::Moved { .. }] = &events[..] else {
+            panic!("{events:?}");
+        };
+        assert_eq!((arrow.w, arrow.hot_x), (4, 1));
+        let arrow = arrow.clone();
+        // Over kitty: the I-beam, 24x24 pointing at its middle, clear.
+        let events = heard(900, 11, Some(look(24, 0)));
+        assert!(
+            matches!(events[..], [CursorEvent::Moved { x: 900, .. }]),
+            "{events:?}"
+        );
+        assert!(heard(901, 11, None).len() == 1, "only the place");
+        // Hidden while typing, then shown again by the mouse.
+        let gone = Shape {
+            w: 0,
+            h: 0,
+            rgba: Vec::new(),
+        };
+        assert!(matches!(
+            heard(901, 0, Some(gone))[..],
+            [CursorEvent::Hidden]
+        ));
+        assert!(heard(901, 0, None).is_empty(), "still hidden");
+        let events = heard(902, 11, Some(look(24, 0)));
+        let [CursorEvent::Shape(again), CursorEvent::Moved { .. }] = &events[..] else {
+            panic!("{events:?}");
+        };
+        assert_eq!(*again, arrow, "the arrow, its own hotspot");
+        // An I-beam KWin drew: told.
+        let mut beam = look(24, 0);
+        beam.rgba[11 * 24 * 4 + 11 * 4 + 3] = 255;
+        let events = heard(902, 11, Some(beam));
+        let [CursorEvent::Shape(beam)] = &events[..] else {
+            panic!("{events:?}");
+        };
+        assert_eq!((beam.w, beam.hot_x), (24, 11));
+    }
+
+    /// On a monitor of Prostir a clear look is the look (an app hiding the pointer so).
+    #[test]
+    fn on_a_monitor_a_clear_look_is_the_look() {
+        let mut tap = CursorTap::new(OutputKey::new("Virtual-Prostir-1"), SinkSlot::default());
+        let look = |alpha: u8| Shape {
+            w: 4,
+            h: 4,
+            rgba: [0, 0, 0, alpha].repeat(16),
+        };
+        assert_eq!(heard(&mut tap, &at(10, 20, Some(look(255)))).len(), 2);
+        let events = heard(&mut tap, &at(10, 20, Some(look(0))));
+        let [CursorEvent::Shape(clear)] = &events[..] else {
+            panic!("{events:?}");
+        };
+        assert!(clear.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 0));
     }
 
     /// At the edge between two outputs side by side (640 wide each), KWin says the

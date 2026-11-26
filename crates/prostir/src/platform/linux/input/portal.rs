@@ -352,6 +352,9 @@ impl Injector for PortalInput {
     fn touches(&self) -> bool {
         self.ei.touches()
     }
+    fn relative(&self) -> bool {
+        self.ei.relative()
+    }
     fn pointer_to(&mut self, at: &Spot) -> Result<()> {
         Self::checked(self.ei.pointer_to(at))
     }

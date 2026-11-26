@@ -15,6 +15,8 @@ type Told = Arc<Mutex<Vec<String>>>;
 struct Recorder {
     told: Told,
     touches: bool,
+    /// Takes relative moves as a mouse's (libei); else they fail, as uinput's do.
+    relative: bool,
     /// Fails every call from now on.
     broken: Arc<std::sync::atomic::AtomicBool>,
     /// The person stopped it.
@@ -39,10 +41,14 @@ impl Injector for Recorder {
     fn touches(&self) -> bool {
         self.touches
     }
+    fn relative(&self) -> bool {
+        self.relative
+    }
     fn pointer_to(&mut self, at: &Spot) -> anyhow::Result<()> {
         self.say(format!("to {},{}", at.x, at.y))
     }
     fn pointer_by(&mut self, dx: f64, dy: f64) -> anyhow::Result<()> {
+        anyhow::ensure!(self.relative, "moves to points only");
         self.say(format!("by {dx},{dy}"))
     }
     fn button(&mut self, button: MouseButton, down: bool) -> anyhow::Result<()> {
@@ -63,6 +69,7 @@ impl Injector for Recorder {
 struct Opener {
     told: Told,
     touches: bool,
+    relative: bool,
     refuse: bool,
     asked: AtomicU32,
     broken: Arc<std::sync::atomic::AtomicBool>,
@@ -78,6 +85,7 @@ impl OpenInput for Opener {
         Ok(Box::new(Recorder {
             told: self.told.clone(),
             touches: self.touches,
+            relative: self.relative,
             broken: self.broken.clone(),
             stop: self.stop.clone(),
         }))
@@ -85,9 +93,14 @@ impl OpenInput for Opener {
 }
 
 fn opener(touches: bool, refuse: bool) -> Arc<Opener> {
+    opener_with(touches, refuse, true)
+}
+
+fn opener_with(touches: bool, refuse: bool, relative: bool) -> Arc<Opener> {
     Arc::new(Opener {
         told: Told::default(),
         touches,
+        relative,
         refuse,
         asked: AtomicU32::new(0),
         broken: Arc::default(),
@@ -106,6 +119,7 @@ fn at(x: f64) -> Spot {
         output: OutputKey::new("Fake-1"),
         rect,
         desk: rect,
+        open: crate::platform::Sides::default(),
         x,
         y: 10.0,
     }
@@ -183,6 +197,93 @@ fn the_first_event_opens_the_devices() {
         told(&o),
         ["to 5,10", "Left down", "to 5,10", "Left up", "scroll 0,120"]
     );
+}
+
+/// The mouse put on the last pixel of an open side is pushed on towards it, by moves
+/// relative to where it is, as the time comes; one put elsewhere is not.
+#[test]
+fn the_mouse_at_an_open_edge_is_pushed_on() {
+    let o = opener(true, false);
+    let mut run = opened(&o);
+    let now = Instant::now();
+    run.event(
+        Ev::To {
+            from: 1,
+            at: edge(639.0),
+        },
+        now,
+    );
+    run.tick(now);
+    assert_eq!(told(&o), ["to 639,100"], "not at once");
+    for i in 1..=6 {
+        run.tick(now + edge::PUSH_EVERY * i);
+    }
+    assert_eq!(told(&o), ["by 4,0"; 4]);
+    run.event(
+        Ev::To {
+            from: 1,
+            at: edge(600.0),
+        },
+        now,
+    );
+    run.tick(now + edge::PUSH_EVERY * 2);
+    assert_eq!(told(&o), ["to 600,100"]);
+}
+
+/// A point on the open right side of the output, away from its corners.
+fn edge(x: f64) -> Spot {
+    Spot {
+        open: crate::platform::Sides {
+            right: true,
+            ..Default::default()
+        },
+        y: 100.0,
+        ..at(x)
+    }
+}
+
+/// Devices whose relative moves the desktop does not take as a mouse's (uinput's
+/// fail, wlroots' virtual pointer): never pushed, and nothing is lost.
+#[test]
+fn devices_without_relative_moves_never_push() {
+    let o = opener_with(true, false, false);
+    let mut run = opened(&o);
+    let now = Instant::now();
+    run.event(
+        Ev::To {
+            from: 1,
+            at: edge(639.0),
+        },
+        now,
+    );
+    assert_eq!(run.edge.next(), None);
+    for i in 1..=6 {
+        run.tick(now + edge::PUSH_EVERY * i);
+    }
+    assert_eq!(told(&o), ["to 639,100"]);
+    assert!(run.injector.is_some(), "the devices stay");
+    assert_eq!(o.asked.load(Ordering::Relaxed), 1);
+}
+
+/// The session let go (it ended, the headset taken off): its mouse at an edge is
+/// pushed on no more; so too once everything is let go.
+#[test]
+fn letting_go_stops_the_pushes() {
+    let o = opener(true, false);
+    let mut run = opened(&o);
+    let now = Instant::now();
+    let to = Ev::To {
+        from: 1,
+        at: edge(639.0),
+    };
+    run.event(to.clone(), now);
+    run.event(Ev::Release { from: 1 }, now);
+    run.tick(now + edge::PUSH_EVERY * 2);
+    assert_eq!(told(&o), ["to 639,100"]);
+    run.event(to, now);
+    run.release_everything();
+    run.tick(now + edge::PUSH_EVERY * 2);
+    assert_eq!(told(&o), ["to 639,100"]);
 }
 
 /// A session that ends, or falls silent for 2 s, while it holds a button and a

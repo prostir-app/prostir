@@ -314,6 +314,7 @@ mod tests {
                 w: 2000,
                 h: 1000,
             },
+            open: crate::platform::Sides::default(),
             x: 1000.0,
             y: 500.0,
         };

@@ -252,6 +252,10 @@ impl Injector for Ei {
         self.has(DeviceCapability::Touch)
     }
 
+    fn relative(&self) -> bool {
+        self.has(DeviceCapability::Pointer)
+    }
+
     fn pointer_to(&mut self, at: &Spot) -> Result<()> {
         self.send(
             DeviceCapability::PointerAbsolute,
@@ -410,6 +414,7 @@ mod tests {
             output: OutputKey::new("Virtual-Prostir-1"),
             rect,
             desk: rect,
+            open: crate::platform::Sides::default(),
             x,
             y,
         }
