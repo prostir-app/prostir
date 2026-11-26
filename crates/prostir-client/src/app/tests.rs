@@ -2494,6 +2494,46 @@ impl crate::layers::Ready for AllReady {
     }
 }
 
+/// As [`AllReady`], and the window onto the keyboard too.
+struct WithKeys;
+
+impl crate::layers::Ready for WithKeys {
+    fn background(&self) -> bool {
+        AllReady.background()
+    }
+    fn keyboard_window(&self) -> bool {
+        true
+    }
+    fn picture(&self, id: DisplayKey) -> Option<(u32, u32)> {
+        AllReady.picture(id)
+    }
+    fn trouble(&self, id: DisplayKey) -> bool {
+        AllReady.trouble(id)
+    }
+    fn placeholder(&self) -> bool {
+        AllReady.placeholder()
+    }
+    fn menu(&self) -> bool {
+        AllReady.menu()
+    }
+    fn palm(&self) -> bool {
+        AllReady.palm()
+    }
+    fn attach(&self) -> bool {
+        AllReady.attach()
+    }
+    #[cfg(feature = "preview")]
+    fn metrics(&self) -> bool {
+        AllReady.metrics()
+    }
+    fn hands(&self) -> bool {
+        AllReady.hands()
+    }
+    fn pc_cursor(&self, pc: PcId, shape: u32) -> bool {
+        AllReady.pc_cursor(pc, shape)
+    }
+}
+
 /// The PC's mouse pointer (PC feature 16): a look and where it is make a layer right
 /// over its monitor, the size it has in the picture, its point where the PC says; the
 /// menu hears none of it. Hidden, off the displays, or in a look that never came, none
@@ -2864,6 +2904,14 @@ fn the_layers_go_back_to_front() {
     for id in order {
         assert_eq!(planned(&plan, id), sim.m.world().shown(id).copied());
     }
+    // The real keyboard is nearer than any monitor: its window over them, under the
+    // menu and the hands.
+    crate::layers::plan(&sim.m, &hands, &WithKeys, &mut plan);
+    let at = |want: fn(&Layer) -> bool| plan.layers().iter().rposition(want);
+    let keys = at(|l| matches!(l, Layer::KeyboardWindow)).expect("the keyboard's window");
+    let last_monitor = at(|l| matches!(l, Layer::Monitor(_))).expect("monitors");
+    let button = at(|l| matches!(l, Layer::MenuButton(_))).expect("the button");
+    assert!(last_monitor < keys && keys < button, "{:?}", plan.layers());
 }
 
 /// On a headset of 25 pixels a degree (in the table) the monitors are made 1:1 and
