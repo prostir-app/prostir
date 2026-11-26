@@ -694,7 +694,7 @@ impl Hyprland {
             },
             windows: HyprWindows::new(),
             rules,
-            cursor: cursor_apart().map(|()| HyprCursor::default()),
+            cursor: cursor_apart().then(HyprCursor::default),
             _gpu: gpu,
         }
     }
@@ -704,7 +704,7 @@ impl Hyprland {
 /// (0.54 and newer), and gives Prostir the pointer's place without asking (with
 /// `ecosystem:enforce_permissions` it may not: its pictures would be black and the
 /// pointer gone). Says why not, once.
-fn cursor_apart() -> Option<()> {
+fn cursor_apart() -> bool {
     let enforced =
         request("j/getoption ecosystem:enforce_permissions").is_ok_and(|reply| option_on(&reply));
     let why = if !pointer::offered() {
@@ -713,10 +713,10 @@ fn cursor_apart() -> Option<()> {
         "Hyprland enforces permissions (ecosystem:enforce_permissions)"
     } else {
         info!("Hyprland: the pointer can go apart from the frames");
-        return Some(());
+        return true;
     };
     info!("Hyprland: the pointer stays in the frames: {why}");
-    None
+    false
 }
 
 /// Whether `getoption`'s answer (JSON) says the option is on.

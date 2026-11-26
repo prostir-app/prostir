@@ -604,6 +604,8 @@ struct State {
     gone: bool,
     /// An output said all it had to say (`done`): the units may have changed.
     outputs_done: bool,
+    /// The seat has a pointer (else asking for it is a protocol error on Sway).
+    seat_pointer: bool,
     shm_global: Option<wl_shm::WlShm>,
     /// The capture session of the pointer and its constraints: the batch said last
     /// (`done`), and the one being said.
@@ -632,6 +634,7 @@ impl State {
             ours: None,
             gone: false,
             outputs_done: true,
+            seat_pointer: false,
             shm_global: None,
             session: None,
             size: (0, 0),
@@ -897,7 +900,24 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State {
 delegate_noop!(State: ignore ExtImageCopyCaptureManagerV1);
 delegate_noop!(State: ignore ExtOutputImageCaptureSourceManagerV1);
 delegate_noop!(State: ignore ExtImageCaptureSourceV1);
-delegate_noop!(State: ignore wl_seat::WlSeat);
+impl Dispatch<wl_seat::WlSeat, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_seat::WlSeat,
+        event: wl_seat::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities {
+            capabilities: WEnum::Value(c),
+        } = event
+        {
+            state.seat_pointer |= c.contains(wl_seat::Capability::Pointer);
+        }
+    }
+}
+
 delegate_noop!(State: ignore wl_pointer::WlPointer);
 delegate_noop!(State: ignore wl_shm::WlShm);
 delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
@@ -997,6 +1017,10 @@ fn run(
             return Ok(());
         }
     };
+    // The seat said what it has with the roundtrips above.
+    if !state.seat_pointer {
+        bail!("the seat has no pointer");
+    }
     let source = sources.create_source(&output, &qh, ());
     let pointer = seat.get_pointer(&qh, ());
     let mut stops = 0;
@@ -1426,6 +1450,13 @@ mod tests {
                 println!("{e:?}");
             }
         }))));
+        // A pointer that moves, where the seat has none (`PROSTIR_POINTER_MOVE=1`, Sway
+        // with no input devices).
+        let mover = std::env::var_os("PROSTIR_POINTER_MOVE").map(|_| {
+            let m = std::thread::spawn(move_a_virtual_pointer);
+            std::thread::sleep(Duration::from_secs(1));
+            m
+        });
         let apart = Arc::new(AtomicBool::new(false));
         let units: Box<dyn Fn() -> Units + Send> = if super::super::running() {
             let name = name.clone();
@@ -1444,5 +1475,53 @@ mod tests {
             }
         }
         drop(session);
+        if let Some(m) = mover {
+            m.join().unwrap();
+        }
+    }
+
+    struct Mover;
+
+    impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Mover {
+        fn event(
+            _: &mut Self,
+            _: &wl_registry::WlRegistry,
+            _: wl_registry::Event,
+            _: &GlobalListContents,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+
+    use wayland_protocols_wlr::virtual_pointer::v1::client::{
+        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
+        zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+    };
+    delegate_noop!(Mover: ignore wl_seat::WlSeat);
+    delegate_noop!(Mover: ignore ZwlrVirtualPointerManagerV1);
+    delegate_noop!(Mover: ignore ZwlrVirtualPointerV1);
+
+    /// A virtual pointer (wlr-virtual-pointer) at 100,100 of 1920x1080, then 20 px
+    /// right every 200 ms, 20 times.
+    fn move_a_virtual_pointer() {
+        let conn = Connection::connect_to_env().unwrap();
+        let (globals, mut queue) = registry_queue_init::<Mover>(&conn).unwrap();
+        let qh = queue.handle();
+        let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=1, ()).unwrap();
+        let manager: ZwlrVirtualPointerManagerV1 = globals.bind(&qh, 1..=1, ()).unwrap();
+        let pointer = manager.create_virtual_pointer(Some(&seat), &qh, ());
+        pointer.motion_absolute(0, 100, 100, 1920, 1080);
+        pointer.frame();
+        queue.roundtrip(&mut Mover).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        for i in 1..=20 {
+            pointer.motion(i * 200, 20.0, 0.0);
+            pointer.frame();
+            queue.roundtrip(&mut Mover).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        pointer.destroy();
+        queue.roundtrip(&mut Mover).unwrap();
     }
 }
