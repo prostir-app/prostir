@@ -152,6 +152,9 @@ pub(super) fn quality(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
                 v.out.push(Action::Send(Request::SetSharp { on }));
             }
         });
+        if e.sharp && e.outputs.iter().any(|o| o.slowed) {
+            w::status(ui, tk, p.warning, &tk.t("window-q-sharp-slowed"));
+        }
     });
     ui.add_space(tk.th.shape.section_gap);
     w::card(ui, tk, |ui| {

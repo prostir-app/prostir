@@ -86,6 +86,9 @@ pub struct OutputEncoding {
     pub copies: bool,
     /// Why it is not the best this PC has for it, when it is not.
     pub note: Option<String>,
+    /// Its encoder fell back to the faster setting for dropping frames (see
+    /// `Router::slowed`).
+    pub slowed: bool,
     /// What its encoder made in the last window of the router's report.
     pub stats: Option<crate::router::StreamStats>,
 }

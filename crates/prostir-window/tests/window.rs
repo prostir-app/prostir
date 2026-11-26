@@ -659,6 +659,26 @@ fn quality_by_name() {
     assert!(!e.sharp_by_size, "chosen");
 }
 
+/// A monitor whose encoder went to the faster setting for dropping frames is said
+/// on the Quality page, under Sharper text, and only then.
+#[test]
+fn a_monitor_that_fell_back_to_the_faster_setting_is_said() {
+    let note = "Із чіткішим текстом ПК не встигав кодувати деякі монітори";
+    let (mut h, _) = window(Mock::connected(), Setup::default());
+    open(&mut h, Page::Quality);
+    assert!(h.query_by_label_contains(note).is_none());
+    let mock = Mock::connected().edit(|s| {
+        s.encoding.outputs = vec![prostir_window::api::OutputEncoding {
+            display: 103,
+            slowed: true,
+            ..Default::default()
+        }];
+    });
+    let (mut h, _) = window(mock, Setup::default());
+    open(&mut h, Page::Quality);
+    h.get_by_label_contains(note);
+}
+
 #[test]
 fn what_the_service_does_not_do_is_disabled_quietly() {
     let (mut h, handle) = window(Mock::connected(), Setup::default());
