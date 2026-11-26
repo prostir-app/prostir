@@ -974,8 +974,27 @@ impl Router {
     /// What the desktop says of the pointer (from its own thread): each headset hears
     /// what is news to it, while the pointer is apart from the pictures.
     pub fn cursor(&self, event: CursorEvent) {
+        let moved = matches!(event, CursorEvent::Moved { .. });
         let mut inner = self.inner.lock().unwrap();
         if inner.pointer.take(event) {
+            if moved {
+                inner.pointer.desktop_moved(Instant::now());
+            }
+            inner.tell_cursor(None);
+        }
+    }
+
+    /// What the input did to the pointer (from its thread): real touches hide it
+    /// until the mouse moves, and the headsets drawing it hear so.
+    pub fn pointing(&self, p: crate::input::Pointing) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.pointer.touch(p, Instant::now()) {
+            let how = if inner.pointer.touch_hides() {
+                "hides for touch"
+            } else {
+                "shows again"
+            };
+            info!("the mouse pointer {how}");
             inner.tell_cursor(None);
         }
     }

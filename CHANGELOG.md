@@ -202,8 +202,9 @@
   KDE Plasma the desktop asks once whether Prostir may control the mouse and keyboard,
   the first time it is needed, and remembers the answer; on Hyprland no question is
   asked. Where the desktop has no touch, a tap is a click, moving a finger scrolls and
-  holding it is a right click. Nothing stays pressed when the headset leaves or is
-  taken off.
+  holding it is a right click. Where it has touch (KDE Plasma), the pointer hides while
+  a finger touches, as on a touch screen, and shows again once the mouse moves. Nothing
+  stays pressed when the headset leaves or is taken off.
 
 ### Picture and video in the headset
 

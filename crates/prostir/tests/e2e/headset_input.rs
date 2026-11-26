@@ -234,3 +234,63 @@ fn the_headsets_clicks_the_wheel_and_touches_reach_the_desktop() {
     pc.wait_log(SOON, "fake desktop: button Right up");
     pc.quit();
 }
+
+/// The model's finger on a desktop without touch: a tap of the right hand's slot is a
+/// left click where it touched; held and then lost (cancelled) it lets go without a
+/// click. With touch, the same cancel lifts the touch there.
+#[test]
+fn the_headsets_finger_reaches_both_desktops() {
+    for kind in ["mouse", "touch"] {
+        let (_dir, mut pc, _keys, mut headset) =
+            session(&format!("headset-finger-{kind}"), &with_input(kind));
+        let one = display_of_width(&headset, 640);
+        let mut m = model_of(&headset.view().pc);
+        open_input(&mut pc, &mut headset, one);
+        let one = DisplayKey::new(PC, one);
+        let finger = |phase| PcInput::Touch {
+            id: one,
+            slot: 1,
+            uv: at(10_256, 9_128),
+            phase,
+        };
+        let now = Instant::now();
+        Scene::pc(&mut m, now, finger(TouchPhase::Down));
+        Scene::pc(&mut m, now, finger(TouchPhase::Up));
+        send_on(&mut m, &mut headset);
+        if kind == "mouse" {
+            in_order(
+                &mut pc,
+                &[
+                    "pointer to Fake-1 at 100,50",
+                    "button Left down",
+                    "button Left up",
+                ],
+            );
+            assert_eq!(pc.count_log("fake desktop: touch"), 0, "no touches");
+        } else {
+            in_order(
+                &mut pc,
+                &[
+                    "touch 0 Down on Fake-1 at 100,50",
+                    "touch 0 Up on Fake-1 at 100,50",
+                ],
+            );
+        }
+        let clicks = pc.count_log("fake desktop: button Left up");
+        Scene::pc(&mut m, Instant::now(), finger(TouchPhase::Down));
+        send_on(&mut m, &mut headset);
+        headset.take_for(Duration::from_millis(100)).unwrap();
+        Scene::pc(&mut m, Instant::now(), finger(TouchPhase::Cancel));
+        send_on(&mut m, &mut headset);
+        if kind == "touch" {
+            pc.wait_log(SOON, "fake desktop: touch 0 Cancel on Fake-1 at 100,50");
+        }
+        headset.take_for(Duration::from_millis(800)).unwrap();
+        assert_eq!(
+            pc.count_log("fake desktop: button Left up"),
+            clicks,
+            "{kind}: a cancel is no click"
+        );
+        pc.quit();
+    }
+}
