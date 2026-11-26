@@ -1512,9 +1512,11 @@ impl Model {
     fn follow_gaze(&mut self, looked: Option<(DisplayKey, Vec2)>) {
         // A ray or a finger acting on a monitor moves the mouse itself (step 8).
         let quiet = crate::interaction::feel::ms(self.feel.gaze_quiet_ms);
-        let acting = self
-            .pc_acted
-            .is_some_and(|t| self.now.saturating_duration_since(t) < quiet);
+        // A button or a finger held on a PC sends nothing while still: busy as well.
+        let acting = self.held.any()
+            || self
+                .pc_acted
+                .is_some_and(|t| self.now.saturating_duration_since(t) < quiet);
         let busy =
             self.world.wrist().is_some() || self.world.holding() || self.settings.cinema || acting;
         let main = self.session.main();

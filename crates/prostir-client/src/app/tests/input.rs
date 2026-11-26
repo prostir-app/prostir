@@ -318,3 +318,73 @@ fn a_trigger_held_on_a_monitor_is_let_go_on_the_pc() {
     sim.frames(Duration::from_secs(1));
     assert_eq!(input_sent(&sim.take()), [], "nothing held");
 }
+
+/// The monitors `MouseTo` sent the mouse to among `fx`.
+fn mouse_tos(fx: &[Effect]) -> Vec<u32> {
+    input_sent(fx)
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::MouseTo { id, .. } => Some(id.0),
+            _ => None,
+        })
+        .collect()
+}
+
+/// With the mouse following the gaze: a button or a finger held still on monitor 1
+/// (nothing new sent for seconds) keeps the mouse there however long monitor 2 is
+/// looked at; once let go, the gaze takes the mouse to monitor 2 again.
+#[test]
+fn the_gaze_leaves_the_mouse_alone_while_something_is_held() {
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    sim.menu(Action::Close);
+    sim.takes_input();
+    sim.menu(Action::GazeMouse(true));
+    let (one, two) = (sim.towards(1), sim.towards(2));
+    sim.look(one, Duration::from_secs(2));
+    sim.take();
+    let uv = Vec2::new(0.5, 0.5);
+    let presses = [
+        (
+            PcInput::Button {
+                id: k(1),
+                uv,
+                button: MouseButton::Left,
+                down: true,
+            },
+            PcInput::Button {
+                id: k(1),
+                uv,
+                button: MouseButton::Left,
+                down: false,
+            },
+        ),
+        (
+            PcInput::Touch {
+                id: k(1),
+                slot: 0,
+                uv,
+                phase: TouchPhase::Down,
+            },
+            PcInput::Touch {
+                id: k(1),
+                slot: 0,
+                uv,
+                phase: TouchPhase::Up,
+            },
+        ),
+    ];
+    for (down, up) in presses {
+        let now = sim.now;
+        Scene::pc(&mut sim.m, now, down);
+        sim.look(two, Duration::from_secs(4));
+        let tos = mouse_tos(&sim.take());
+        assert!(tos.iter().all(|&d| d == 1), "{down:?}: {tos:?}");
+        let now = sim.now;
+        Scene::pc(&mut sim.m, now, up);
+        sim.look(two, Duration::from_secs(3));
+        assert_eq!(mouse_tos(&sim.take()), [2], "{up:?}: the gaze again");
+        sim.look(one, Duration::from_secs(3));
+        sim.take();
+    }
+}

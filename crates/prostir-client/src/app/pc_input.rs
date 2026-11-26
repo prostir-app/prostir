@@ -10,7 +10,6 @@
 
 use std::time::{Duration, Instant};
 
-use glam::Vec2;
 use log::debug;
 use prostir_proto::ClientMsg;
 use prostir_proto::input::{Button, TouchPhase as Phase};
@@ -18,7 +17,7 @@ use prostir_proto::state::{caps, perms};
 
 use super::{Effect, Model};
 use crate::ids::{DisplayKey, PcId};
-use crate::interaction::{MouseButton, PcInput, TouchPhase};
+use crate::interaction::{MouseButton, PcInput, TouchPhase, wire_uv};
 use crate::session::Session;
 
 /// While a button or a finger stays pressed, its place is said again this often at
@@ -28,12 +27,6 @@ pub const HELD_EVERY: Duration = Duration::from_millis(500);
 
 /// The fingers kept track of, by slot (the hands give one slot each).
 const SLOTS: usize = 2;
-
-/// A point across a monitor's picture (0 to 1 from the top left) as the wire says it.
-pub fn wire_uv(uv: Vec2) -> (u16, u16) {
-    let f = |v: f32| (v.clamp(0.0, 1.0) * 65535.0) as u16;
-    (f(uv.x), f(uv.y))
-}
 
 /// A scroll as a hand makes it (`dy` positive scrolls up) as the wire says it (`dy`
 /// positive scrolls down); `dx` positive is to the right on both.
@@ -66,13 +59,23 @@ struct Spot {
     said: Instant,
 }
 
-/// What the headset holds pressed on a PC, as sent (see the module).
+/// The PCs whose mouse is kept track of at once (each PC has a mouse of its own).
+const MICE: usize = 2;
+
+/// One PC's mouse while one of its buttons is down.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Mouse {
+    /// Its buttons down (a bit for each, by its number on the wire).
+    buttons: u8,
+    /// Where it is (on a display of its own PC).
+    spot: Spot,
+}
+
+/// What the headset holds pressed on its PCs, as sent (see the module).
 #[derive(Debug, Default)]
 pub(super) struct Held {
-    /// The mouse's buttons down (a bit for each, by its number on the wire).
-    buttons: u8,
-    /// Where the mouse is while one is.
-    mouse: Option<Spot>,
+    /// Each PC's mouse with a button down.
+    mice: [Option<Mouse>; MICE],
     /// Each finger touching, by slot.
     fingers: [Option<Spot>; SLOTS],
 }
@@ -80,30 +83,36 @@ pub(super) struct Held {
 impl Held {
     fn button(&mut self, id: DisplayKey, (u, v): (u16, u16), b: Button, down: bool, now: Instant) {
         let bit = 1u8 << (b as u8).min(7);
-        if down {
-            self.buttons |= bit;
-        } else {
-            self.buttons &= !bit;
-        }
-        self.mouse = (self.buttons != 0).then_some(Spot {
-            id,
-            u,
-            v,
-            said: now,
-        });
-    }
-
-    /// The mouse went to `id` at `u`, `v`.
-    fn moved(&mut self, id: DisplayKey, (u, v): (u16, u16), now: Instant) {
-        if let Some(m) = &mut self.mouse
-            && m.id.pc == id.pc
-        {
-            *m = Spot {
+        let ours = |m: &Option<Mouse>| m.is_some_and(|m| m.spot.id.pc == id.pc);
+        let i = (self.mice.iter().position(ours))
+            .or_else(|| self.mice.iter().position(Option::is_none));
+        let Some(slot) = i.and_then(|i| self.mice.get_mut(i)) else {
+            return;
+        };
+        let was = slot.map_or(0, |m| m.buttons);
+        let buttons = if down { was | bit } else { was & !bit };
+        *slot = (buttons != 0).then_some(Mouse {
+            buttons,
+            spot: Spot {
                 id,
                 u,
                 v,
                 said: now,
-            };
+            },
+        });
+    }
+
+    /// The mouse of `id`'s PC went to `id` at `u`, `v`.
+    fn moved(&mut self, id: DisplayKey, (u, v): (u16, u16), now: Instant) {
+        for m in self.mice.iter_mut().flatten() {
+            if m.spot.id.pc == id.pc {
+                m.spot = Spot {
+                    id,
+                    u,
+                    v,
+                    said: now,
+                };
+            }
         }
     }
 
@@ -119,11 +128,12 @@ impl Held {
         });
     }
 
-    /// PC `pc` is gone: what was pressed on it went with it.
+    /// Nothing is pressed on PC `pc` any more (it is gone, or takes no input).
     pub fn forget(&mut self, pc: PcId) {
-        if self.mouse.is_some_and(|m| m.id.pc == pc) {
-            self.mouse = None;
-            self.buttons = 0;
+        for m in &mut self.mice {
+            if m.is_some_and(|m| m.spot.id.pc == pc) {
+                *m = None;
+            }
         }
         for f in &mut self.fingers {
             if f.is_some_and(|s| s.id.pc == pc) {
@@ -141,18 +151,20 @@ impl Held {
         mut out: impl FnMut(PcId, ClientMsg),
     ) {
         let stale = |s: &Spot| now.saturating_duration_since(s.said) >= HELD_EVERY;
-        if let Some(m) = &mut self.mouse {
-            if !may(m.id.pc) {
-                self.mouse = None;
-                self.buttons = 0;
-            } else if stale(m) {
-                m.said = now;
+        for slot in &mut self.mice {
+            let Some(Mouse { spot: s, .. }) = slot else {
+                continue;
+            };
+            if !may(s.id.pc) {
+                *slot = None;
+            } else if stale(s) {
+                s.said = now;
                 out(
-                    m.id.pc,
+                    s.id.pc,
                     ClientMsg::MouseTo {
-                        id: m.id.id,
-                        u: m.u,
-                        v: m.v,
+                        id: s.id.id,
+                        u: s.u,
+                        v: s.v,
                     },
                 );
             }
@@ -177,10 +189,9 @@ impl Held {
         }
     }
 
-    /// Something is held pressed.
-    #[cfg(test)]
+    /// Something is held pressed: a button, a finger.
     pub fn any(&self) -> bool {
-        self.mouse.is_some() || self.fingers.iter().any(Option::is_some)
+        self.mice.iter().any(Option::is_some) || self.fingers.iter().any(Option::is_some)
     }
 }
 
@@ -219,6 +230,18 @@ impl Model {
             } if !self.takes_input(input.pc()) => {}
             other if !self.takes_input(other.pc()) => {
                 debug!("hands: {other:?} (the PC takes no input from the headset)");
+                // Let go there: nothing is held on it (pressed while it still took
+                // input, the PC lets go by itself).
+                if matches!(
+                    other,
+                    PcInput::Button { down: false, .. }
+                        | PcInput::Touch {
+                            phase: TouchPhase::Up | TouchPhase::Cancel,
+                            ..
+                        }
+                ) {
+                    self.held.forget(other.pc());
+                }
             }
             PcInput::Button {
                 id,
@@ -269,8 +292,12 @@ impl Model {
         }
     }
 
-    /// What stays pressed on a PC is said again, as often as [`HELD_EVERY`].
+    /// What stays pressed on a PC is said again, as often as [`HELD_EVERY`]. While
+    /// something is, the hands act on the PC (the mouse does not follow the gaze).
     pub(super) fn keep_held(&mut self, now: Instant) {
+        if self.held.any() {
+            self.pc_acted = Some(now);
+        }
         let (held, effects, session) = (&mut self.held, &mut self.effects, &self.session);
         held.due(
             now,
@@ -295,6 +322,7 @@ impl PcInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec2;
     use prostir_proto::state::DisplayId;
 
     const PC: PcId = PcId([3; 8]);
@@ -376,6 +404,29 @@ mod tests {
         assert_eq!(due(&mut held, ms(600), true).len(), 1);
         assert!(due(&mut held, ms(1200), false).is_empty());
         assert!(!held.any());
+        // A button held on each of two PCs: each said again on its own; one let go,
+        // the other still.
+        held.button(k(PC, 1), (1, 2), Button::Left, true, t0);
+        held.button(k(OTHER, 3), (3, 4), Button::Left, true, t0);
+        held.button(k(PC, 1), (1, 2), Button::Right, true, t0);
+        let mut pcs: Vec<PcId> = due(&mut held, ms(600), true).iter().map(|s| s.0).collect();
+        pcs.sort();
+        assert_eq!(pcs, [PC, OTHER]);
+        held.button(k(PC, 1), (1, 2), Button::Left, false, t0 + ms(700));
+        held.button(k(OTHER, 3), (3, 4), Button::Left, false, t0 + ms(700));
+        assert_eq!(
+            due(&mut held, ms(1300), true),
+            [(
+                PC,
+                ClientMsg::MouseTo {
+                    id: DisplayId(1),
+                    u: 1,
+                    v: 2
+                }
+            )],
+            "the right button of PC still"
+        );
+        held.forget(PC);
         // A slot beyond the hands' is not kept.
         held.finger(9, k(PC, 1), (1, 1), Phase::Down, t0);
         assert!(!held.any());

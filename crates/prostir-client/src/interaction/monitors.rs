@@ -94,6 +94,13 @@ pub enum PcInput {
     },
 }
 
+/// A point across a monitor's picture (0 to 1 from the top left) as the wire says it
+/// (0..=65535, as `MouseTo`).
+pub fn wire_uv(uv: Vec2) -> (u16, u16) {
+    let f = |v: f32| (v.clamp(0.0, 1.0) * 65535.0) as u16;
+    (f(uv.x), f(uv.y))
+}
+
 /// A point against a PC's monitor (a fingertip near it), as the scene finds it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Touched {
@@ -158,6 +165,9 @@ pub(super) struct Poke {
     moved: bool,
     /// Where the touch is now (the pin until it moved).
     uv: Vec2,
+    /// Where it was last said to the PC, as the wire says it, and when: a move goes
+    /// only to another point, at most every [`Feel::mouse_every_ms`].
+    said: ((u16, u16), Instant),
     /// Since when the fingertip is not seen (the tracking lost).
     lost: Option<Instant>,
 }
@@ -405,8 +415,16 @@ impl Hands {
             if !p.moved && t.local.distance(p.pin_local) > f.touch_pin_m {
                 p.moved = true;
             }
-            if p.moved && t.uv != p.uv {
+            if p.moved {
                 p.uv = t.uv;
+            }
+            // Said only where the PC would see another point, as often as the mouse.
+            let at = wire_uv(p.uv);
+            if p.moved
+                && at != p.said.0
+                && now.saturating_duration_since(p.said.1) >= ms(f.mouse_every_ms)
+            {
+                p.said = (at, now);
                 scene.pc(
                     now,
                     PcInput::Touch {
@@ -474,6 +492,7 @@ impl Hands {
                 deepest: t.z,
                 moved: false,
                 uv: t.uv,
+                said: (wire_uv(t.uv), now),
                 lost: None,
             });
             hand.m.near = Some(NearMonitor {

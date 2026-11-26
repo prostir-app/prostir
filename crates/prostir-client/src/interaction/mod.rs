@@ -29,7 +29,7 @@ mod tests;
 pub mod trial;
 
 pub use feel::Feel;
-pub use monitors::{Modes, MouseButton, PcInput, Take, TouchPhase, Touched};
+pub use monitors::{Modes, MouseButton, PcInput, Take, TouchPhase, Touched, wire_uv};
 
 use std::time::Instant;
 
