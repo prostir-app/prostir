@@ -26,7 +26,6 @@ use crate::platform::openxr::overlay;
 use crate::platform::openxr::{self as xrutil, Gfx, ImageLayer, as_layer, pose, posef};
 use crate::platform::video::SurfaceVideo;
 use crate::view::fx::Effects;
-use crate::world::KEYBOARD_ASPECT;
 
 /// The side of the black layer over a dimmed room, in metres, a metre in front of
 /// the eyes: wider than any field of view.
@@ -218,7 +217,7 @@ pub fn end(
         let shown = shell
             .model
             .keyboard_window()
-            .map(|p| (posef(&p), p.width, p.width * KEYBOARD_ASPECT));
+            .map(|p| (posef(&p), p.width, shell.model.keyboard_depth()));
         if let Err(e) = pt.set_window(local, time, shown) {
             warn!("keyboard window: {e:#}");
             keyboard_failed = true;

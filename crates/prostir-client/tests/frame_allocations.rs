@@ -294,6 +294,7 @@ impl Loop {
             menu_button: false,
             menu_gesture: false,
             align: false,
+            keyboard: None,
         };
         self.m.tick(now, &input);
         self.take();

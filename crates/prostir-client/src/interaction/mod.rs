@@ -121,6 +121,9 @@ pub struct FrameInput {
     pub menu_gesture: bool,
     /// The controller's "Line up" button went down this frame.
     pub align: bool,
+    /// The person's keyboard as the headset tracks it, while the window over it is
+    /// wanted and the keyboard is in view (step 8.7).
+    pub keyboard: Option<crate::keyboard::Seen>,
 }
 
 impl FrameInput {
@@ -136,6 +139,7 @@ impl FrameInput {
             menu_button: false,
             menu_gesture: false,
             align: false,
+            keyboard: None,
         }
     }
 

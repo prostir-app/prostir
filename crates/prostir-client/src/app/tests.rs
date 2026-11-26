@@ -90,6 +90,7 @@ fn frame(right: HandState) -> FrameInput {
         menu_button: false,
         menu_gesture: false,
         align: false,
+        keyboard: None,
     }
 }
 
@@ -3041,4 +3042,89 @@ fn auto_in_profiles_and_new_monitors() {
         matches!(&asked[..], [(_, Request::AddDisplay { mode })] if mode.scale == want),
         "{want}: {asked:?}"
     );
+}
+
+/// A tracked keyboard on the desk, a little to the right.
+fn keyboard_on_desk() -> crate::keyboard::Seen {
+    crate::keyboard::Seen {
+        position: Vec3::new(0.2, -0.5, -0.4),
+        rotation: glam::Quat::IDENTITY,
+        width: 0.44,
+        depth: 0.14,
+    }
+}
+
+impl Sim {
+    /// Frames of 11 ms for `d` with `keyboard` in view (or not).
+    fn frames_seeing(&mut self, d: Duration, keyboard: Option<crate::keyboard::Seen>) {
+        let end = self.now + d;
+        while self.now < end {
+            self.now += 11 * MS;
+            let input = FrameInput {
+                keyboard,
+                ..frame(HandState::default())
+            };
+            self.m.tick(self.now, &input);
+            self.m.animate(self.now, &input);
+            self.check_view();
+        }
+    }
+}
+
+/// With a keyboard the headset tracks, the window settles over it with the margin, stays
+/// there when the keyboard is out of view, and nothing is saved for it.
+#[test]
+fn the_keyboard_window_settles_over_a_tracked_keyboard() {
+    let mut caps = full_caps();
+    caps.keyboard_tracking = true;
+    let mut sim = Sim::of(caps);
+    sim.menu(Action::KeyboardWindow(true));
+    assert!(sim.m.keyboard_wanted());
+    sim.saves();
+    // Nothing seen yet: the window is the one placed by hand.
+    sim.frames_seeing(50 * MS, None);
+    let by_hand = sim.m.keyboard_window().expect("shown");
+    assert!((sim.m.keyboard_depth() - by_hand.width * KEYBOARD_ASPECT).abs() < 1e-6);
+    sim.saves();
+    // Seen: it goes there.
+    let kb = keyboard_on_desk();
+    sim.frames_seeing(Duration::from_secs(1), Some(kb));
+    let at = sim.m.keyboard_window().expect("shown");
+    assert!(at.position.distance(kb.position) < 1e-3);
+    assert!((at.width - (0.44 + 2.0 * crate::keyboard::MARGIN)).abs() < 1e-3);
+    assert!((sim.m.keyboard_depth() - (0.14 + 2.0 * crate::keyboard::MARGIN)).abs() < 1e-3);
+    // Out of view for long: it stays.
+    sim.frames_seeing(Duration::from_secs(5), None);
+    assert_eq!(sim.m.keyboard_window(), Some(at));
+    // Hidden by the person: gone.
+    sim.menu(Action::KeyboardWindow(false));
+    sim.frames_seeing(50 * MS, Some(kb));
+    assert!(sim.m.keyboard_window().is_none());
+    assert!(!sim.m.keyboard_wanted());
+    assert_eq!(sim.saves(), [persist::File::Settings]);
+}
+
+/// A headset that does not track keyboards ignores what it is given: the window stays
+/// where it was put. A runtime that gives up tracking sends the window back there.
+#[test]
+fn without_tracking_the_window_stays_where_it_was_put() {
+    let mut sim = Sim::of(full_caps());
+    sim.menu(Action::KeyboardWindow(true));
+    assert!(!sim.m.keyboard_wanted());
+    sim.frames_seeing(50 * MS, Some(keyboard_on_desk()));
+    let by_hand = sim.m.keyboard_window().expect("shown");
+    assert!(by_hand.position.distance(keyboard_on_desk().position) > 0.1);
+
+    let mut caps = full_caps();
+    caps.keyboard_tracking = true;
+    let mut sim = Sim::of(caps);
+    sim.menu(Action::KeyboardWindow(true));
+    sim.frames_seeing(Duration::from_secs(1), Some(keyboard_on_desk()));
+    let tracked = sim.m.keyboard_window().expect("shown");
+    sim.handle(Event::Platform(PlatformEvent::KeyboardTrackingFailed));
+    assert!(!sim.m.keyboard_wanted());
+    sim.frames_seeing(50 * MS, Some(keyboard_on_desk()));
+    let after = sim.m.keyboard_window().expect("shown");
+    assert_ne!(after, tracked);
+    assert!(after.position.distance(keyboard_on_desk().position) > 0.1);
 }

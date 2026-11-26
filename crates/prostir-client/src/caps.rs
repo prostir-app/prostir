@@ -154,6 +154,10 @@ pub struct Caps {
     /// The hands drawn as the runtime models them (`XR_FB_hand_tracking_mesh`);
     /// without, balls along their bones.
     pub hand_mesh: bool,
+    /// The person's own keyboard tracked, so the window onto the room settles over it
+    /// by itself (`XR_FB_keyboard_tracking`, the system says it tracks one, and the
+    /// window can be shown); without, the window is placed by hand.
+    pub keyboard_tracking: bool,
     /// The layers the compositor takes in a frame (`maxLayerCount`).
     pub layers_max: u8,
     /// The codecs the headset decodes, their sides and their pixel budget at
@@ -303,6 +307,7 @@ impl Caps {
             menu_gesture: false,
             controller_models: false,
             hand_mesh: false,
+            keyboard_tracking: false,
             layers_max: LAYERS_AT_LEAST,
             decoders,
             streams_max,
@@ -430,6 +435,7 @@ impl Caps {
             ("menu_gesture", !self.menu_gesture),
             ("controller_models", !self.controller_models),
             ("hand_mesh", !self.hand_mesh),
+            ("keyboard_tracking", !self.keyboard_tracking),
             ("volume_steps", self.volume_steps.is_none()),
         ];
         let names: Vec<&str> = off.iter().filter(|(_, o)| *o).map(|(n, _)| *n).collect();
@@ -540,6 +546,7 @@ mod tests {
             menu_gesture: true,
             controller_models: true,
             hand_mesh: true,
+            keyboard_tracking: true,
             layers_max: 16,
             decoders: DECODERS_UNSAID.to_vec(),
             streams_max: 12,
@@ -609,6 +616,8 @@ mod tests {
         // nothing hidden.
         without(|c| c.controller_models = false, &[]);
         without(|c| c.hand_mesh = false, &[]);
+        // Without tracking the keyboard, its window is placed by hand: nothing hidden.
+        without(|c| c.keyboard_tracking = false, &[]);
         without(|c| c.volume_steps = None, &[Offer::SharedVolume]);
         without(|c| c.volume_steps = Some(0), &[Offer::SharedVolume]);
         // One rate offered: nothing to choose.
@@ -624,7 +633,7 @@ mod tests {
         assert_eq!(
             c.missing(),
             "refresh_rates,perf_levels,cylinder,equirect,color_scale,room,image_flip,\
-             keyboard_window,hands,hand_aim,menu_gesture,controller_models,hand_mesh"
+             keyboard_window,hands,hand_aim,menu_gesture,controller_models,hand_mesh,keyboard_tracking"
         );
         assert_eq!(c.rate(false), None);
         assert_eq!(c.rate(true), None);

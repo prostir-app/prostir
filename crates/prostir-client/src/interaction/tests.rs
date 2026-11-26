@@ -236,6 +236,7 @@ fn frame(hand: HandState) -> FrameInput {
         menu_button: false,
         menu_gesture: false,
         align: false,
+        keyboard: None,
     }
 }
 

@@ -11,6 +11,7 @@ use openxr as xr;
 use super::Kept;
 use super::shell::Shell;
 use super::start::{Stage, Xr};
+use crate::app::{Event, PlatformEvent};
 use crate::interaction::{FrameInput, Head};
 use crate::lang::Moment;
 use crate::platform::meta;
@@ -113,6 +114,19 @@ pub fn read(
         }
         _ => false,
     };
+    // The person's keyboard, while the window over it is wanted. A runtime that will
+    // not track it is not asked again.
+    let keyboard = if shell.model.keyboard_wanted() {
+        match kept.keyboard.poll(now, local, time) {
+            meta::keyboard::Poll::Seen(seen) => seen,
+            meta::keyboard::Poll::Unavailable => {
+                shell.handle(now, Event::Platform(PlatformEvent::KeyboardTrackingFailed));
+                None
+            }
+        }
+    } else {
+        None
+    };
     Ok(FrameInput {
         head: Some(Head {
             position: head,
@@ -127,5 +141,6 @@ pub fn read(
         menu_button: shell.controls.menu_pressed(session),
         menu_gesture,
         align: shell.controls.align_pressed(session),
+        keyboard,
     })
 }

@@ -266,6 +266,11 @@
   Hands show as the system's model of a hand, see-through, where the system gives one
   (`XR_FB_hand_tracking_mesh`); with the "Room" background only the fingertips, since
   your own hands are in view. Without these, hands and controllers look as before.
+- The keyboard window settles over your own keyboard by itself where the headset
+  tracks one (`XR_FB_keyboard_tracking`, on Quest): the camera view sits on the
+  keyboard with a margin of 3 cm so the hands show, and stays there when the keyboard
+  leaves your view. Where the headset does not track it, or will not for the app, the
+  window is placed by hand as before.
 - "Reset" beside "Layout" on the Monitors page (press twice) and `prostir ctl reset`
   put the monitors back as the layout places them, in front of you, at their standard
   size.
