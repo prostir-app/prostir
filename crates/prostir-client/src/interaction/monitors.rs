@@ -266,6 +266,32 @@ impl Shared {
     }
 }
 
+/// Whether a hand (`right` or the left) rests as it types: its palm turned down, low
+/// below the eyes or on the keyboard the headset tracks (see [`Feel::rest_palm_down`]).
+fn resting(joints: Option<&Joints>, right: bool, head: Head, input: &FrameInput, f: &Feel) -> bool {
+    let Some(j) = joints else {
+        return false;
+    };
+    let (palm, wrist) = (j[0].0, j[1].0);
+    // Across the knuckles, as for the palm menu: out of the palm.
+    let (index, little) = (j[7].0, j[22].0);
+    let mut normal = (little - wrist).cross(index - wrist).normalize_or_zero();
+    if right {
+        normal = -normal;
+    }
+    if normal.dot(Vec3::NEG_Y) < f.rest_palm_down {
+        return false;
+    }
+    let on_keyboard = input.keyboard.is_some_and(|k| {
+        let local = k.rotation.inverse() * (palm - k.position);
+        let m = f.rest_keyboard_m;
+        local.x.abs() <= k.width / 2.0 + m
+            && local.z.abs() <= k.depth / 2.0 + m
+            && (-m..=2.0 * m).contains(&local.y)
+    });
+    on_keyboard || head.position.y - palm.y > f.rest_below_m
+}
+
 /// Degrees between two directions.
 fn degrees(a: Vec3, b: Vec3) -> f32 {
     a.angle_between(b).to_degrees()
@@ -610,8 +636,10 @@ impl Hands {
             Phase::Idle => {}
             _ => return false,
         }
-        // What the ray points at on a monitor (not a detached window).
-        let on = match self.picks[h] {
+        // What the ray points at on a monitor (not a detached window); nothing for a
+        // hand resting on the keyboard (typing: its ray points by chance).
+        let resting = hs.is_hand && resting(input.joints[h].as_ref(), h == 1, head, input, &f);
+        let on = match self.picks[h].filter(|_| !resting) {
             Some(Target {
                 thing: Thing::Display(id),
                 hit,

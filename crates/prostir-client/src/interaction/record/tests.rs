@@ -559,6 +559,33 @@ fn pose(palm: Vec3, p: Pose) -> Joints {
     j
 }
 
+/// Hand `h` (`left` or the right) at `palm` with its palm turned down, fingers
+/// forward, as on a keyboard.
+fn palm_down(palm: Vec3, left: bool) -> Joints {
+    let mut j = pose(palm, Pose::Open);
+    // The index knuckle on the thumb's side: right of the left hand.
+    let side = if left { 1.0 } else { -1.0 };
+    j[7].0 = palm + Vec3::new(0.03 * side, 0.0, -0.03);
+    j[22].0 = palm + Vec3::new(-0.03 * side, 0.0, -0.03);
+    j
+}
+
+/// `n` frames of both hands at height `y` as on a keyboard, palms down, their rays on
+/// monitor 1 wandering a little, the right one pinching now and then.
+fn typing(s: &mut Script, y: f32, n: u32) {
+    for i in 0..n {
+        let k = i as f32 * 0.4;
+        for (h, x) in [(0, -0.22), (1, -0.02)] {
+            let palm = Vec3::new(x + 0.01 * k.sin(), y, -0.3 + 0.01 * k.cos());
+            s.hand(h, true).joints(h, Some(&palm_down(palm, h == 0)));
+            let aim = monitor(1) + Vec3::new(0.05 * k.sin(), 0.03 * k.cos(), 0.0);
+            s.ray_from(h, palm, aim);
+        }
+        s.select(1, if i % 30 == 10 { 1.0 } else { 0.0 });
+        s.frames(1);
+    }
+}
+
 /// Where a fingertip is `z` in front of the middle of the monitor within reach (3).
 fn before_near(z: f32) -> Vec3 {
     let p = stage()
@@ -583,6 +610,17 @@ fn monitor_scripts(out: &mut Vec<(&'static str, Script)>) {
             s.pose(1, palm_for(tip), Pose::Point).frames(1);
         }
     };
+    // Typing with both hands on the keyboard: palms down at the desk, their rays (the
+    // runtime calls them ready to pinch) on monitor 1 by chance, a pinch now and then.
+    add("monitors-typing-on-the-keyboard", &|s| {
+        s.monitors(Take::Hold);
+        typing(s, 0.85, 120);
+    });
+    // The same hand raised, palm still down: it points, and the mouse goes.
+    add("monitors-raised-hand-points", &|s| {
+        s.monitors(Take::Hold);
+        typing(s, 1.3, 20);
+    });
     add("monitors-touch-tap", &|s| {
         s.monitors(Take::Hold);
         touch(s, 10, before_near(0.14), before_near(0.01));
@@ -705,6 +743,7 @@ fn the_scripts_play_as_they_did() {
             "hands-typing",
             "pinch-held-drifting-onto-the-menu",
             "monitors-touch-from-behind",
+            "monitors-typing-on-the-keyboard",
         ];
         if quiet.contains(&name) {
             assert!(journal.is_empty(), "{name} did something: {journal:?}");
@@ -727,6 +766,7 @@ fn the_scripts_play_as_they_did() {
             "keyboard-window" => &["take keyboard", "drag keyboard", "let-go keyboard"],
             "menu-toggled-during-a-pending-pinch" => &["menu closed", "menu open"],
             "monitors-middle-pinch-loses-a-frame" => &["right down", "right up"],
+            "monitors-raised-hand-points" => &["mouse display 1"],
             _ => &[],
         };
         for what in wanted {

@@ -214,6 +214,13 @@ feel! {
     /// The mouse following the gaze waits while a ray or a finger acts on a monitor,
     /// and this long after.
     gaze_quiet_ms: 1000.0, 0.0, 10000.0;
+    /// A hand with its palm turned down this much (the cosine with straight down)...
+    rest_palm_down: 0.6, 0.0, 1.0;
+    /// ...and this far below the eyes, or on the keyboard the headset tracks, rests
+    /// (typing): its ray neither moves the mouse nor presses.
+    rest_below_m: 0.45, 0.0, 1.5;
+    /// On the keyboard: over it, or no further than this from its sides and its face.
+    rest_keyboard_m: 0.1, 0.0, 0.5;
     /// A scroll of one notch for this much of the hand (or a swipe) moving.
     scroll_notch_m: 0.01, 0.002, 0.1;
     /// A controller's stick fully over scrolls this many notches a second.
