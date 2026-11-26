@@ -218,6 +218,7 @@ impl Worker {
             self.shared
                 .router
                 .set_stream_output(id, output.key().clone(), panel);
+            output.set_cursor_apart(self.cursor_apart && !panel);
             let router = self.shared.router.clone();
             let (input, gpu) = (source.input.clone(), self.gpu.clone());
             // Left behind after its time, a late encoder sends nothing; nor does one

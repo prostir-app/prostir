@@ -80,19 +80,16 @@ fn load_panorama(choice: Background, dir: Option<&Path>) -> Panorama {
     )
 }
 
-/// The side of the picture a PC's pointer is drawn in: the largest look fits.
-const POINTER_PX: u32 = prostir_proto::CURSOR_SIDE_MAX as u32;
-
 /// The picture a PC's mouse pointer is drawn from: one that changes, as large as the
-/// largest look, each look drawn at its bottom left when it is shown (the layer shows
-/// that part only).
+/// largest look ([`crate::layers::POINTER_SIDE`]), each look drawn at its top left and
+/// the rest clear (premultiplied 0), shown whole: no runtime's way of reading a part
+/// of a picture, nor a pixel from beside the look, can show.
 pub struct PcPointer {
     pub pc: PcId,
     /// None where it could not be made (said once; no pointer is drawn for that PC).
     pub layer: Option<ImageLayer>,
-    /// The look in it now, and its size (0: none yet).
+    /// The look in it now (0: none yet).
     pub shape: u32,
-    pub size: (u32, u32),
     /// Its pixels, kept to put the next look in without new memory.
     pixels: Vec<u8>,
 }
@@ -100,14 +97,14 @@ pub struct PcPointer {
 impl PcPointer {
     /// The picture of PC `pc`'s pointer, made for it; none if the runtime refused it.
     fn new(gpu: &Gpu<'_>, pc: PcId) -> Self {
-        let layer = ImageLayer::new(gpu.session, gpu.format, POINTER_PX, POINTER_PX, false)
+        let side = crate::layers::POINTER_SIDE;
+        let layer = ImageLayer::new(gpu.session, gpu.format, side, side, false)
             .inspect_err(|e| warn!("no picture for the PC's pointer: {e:#}"))
             .ok();
         Self {
             pc,
             layer,
             shape: 0,
-            size: (0, 0),
             pixels: Vec::new(),
         }
     }
@@ -118,27 +115,17 @@ impl PcPointer {
         let Some(layer) = self.layer.as_mut().filter(|_| self.shape != shape) else {
             return;
         };
-        let (w, h) = (u32::from(look.w), u32::from(look.h));
-        let side = POINTER_PX as usize;
+        let side = crate::layers::POINTER_SIDE as usize;
+        // Clear, then the look at the top left, row by row.
+        self.pixels.clear();
         self.pixels.resize(side * side * 4, 0);
-        // At the bottom left, row by row.
         let row = usize::from(look.w) * 4;
-        let top = side - usize::from(look.h);
         for (y, line) in look.rgba.chunks_exact(row).enumerate() {
-            let at = (top + y) * side * 4;
+            let at = y * side * 4;
             self.pixels[at..at + row].copy_from_slice(line);
         }
-        let part = ui::Area {
-            x: 0,
-            y: top as u32,
-            w,
-            h,
-        };
-        match layer.upload_part(gl, &self.pixels, Some(part)) {
-            Ok(()) => {
-                self.shape = shape;
-                self.size = (w, h);
-            }
+        match layer.upload_part(gl, &self.pixels, None) {
+            Ok(()) => self.shape = shape,
             Err(e) => {
                 warn!("the PC's pointer could not be drawn: {e:#}");
                 self.shape = 0;

@@ -129,6 +129,7 @@ fn a_pipewire_nodes_frames_reach_the_encoder() {
         appsrc.clone(),
         pause.clone(),
         Duration::from_millis(300),
+        None,
     )
     .expect("the feed starts");
     let caps = appsrc.caps().expect("caps set from the stream's format");
@@ -205,6 +206,7 @@ fn a_gone_node_fails_at_once_as_the_source() {
         appsrc,
         Arc::new(Pause::default()),
         Duration::from_secs(2),
+        None,
     );
     let took = started.elapsed();
     let Err(e) = result else {

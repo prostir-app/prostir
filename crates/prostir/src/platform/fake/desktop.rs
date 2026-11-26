@@ -121,6 +121,9 @@ fn pointer_event(event: CursorEvent) -> Result<()> {
             p.at = Some((output.clone(), *x, *y, *size));
         }
         CursorEvent::Hidden => p.hidden = true,
+        CursorEvent::Left { output } => {
+            p.at.take_if(|(o, _, _, _)| *o == *output);
+        }
     }
     if let Some(sink) = &p.sink {
         sink.send(event);

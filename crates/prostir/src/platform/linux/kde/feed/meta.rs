@@ -2,9 +2,9 @@
 //! (`SPA_META_Cursor`, with its picture only when it changed), and which parts of the
 //! picture changed (`SPA_META_VideoDamage`, rectangles).
 //!
-//! Read here and kept in [`Seen`] for whoever draws the pointer apart from the picture
-//! (step 2 of the cursor layer) and encodes the changed parts better (an idea for
-//! later); nothing reads them yet, and the pointer stays drawn into the picture.
+//! Read here and kept in [`Seen`] for whoever encodes the changed parts better (an idea
+//! for later); a stream with the pointer apart tells the pointer to the core as well
+//! (`pointer.rs`).
 
 use std::sync::{Arc, Mutex};
 

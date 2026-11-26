@@ -90,7 +90,8 @@ pub fn scaled(image: &CursorImage, fx: f64, fy: f64) -> CursorImage {
             rgba.push(((a + n / 2) / n) as u8);
         }
     }
-    let point = |p: u16, f: f64, n: u16| ((f64::from(p) * f) as u16).min(n - 1);
+    // The pixel the middle of the one it pointed with falls in.
+    let point = |p: u16, f: f64, n: u16| (((f64::from(p) + 0.5) * f) as u16).min(n - 1);
     CursorImage {
         w,
         h,
@@ -178,6 +179,7 @@ impl Pointer {
                 !same
             }
             CursorEvent::Hidden => !std::mem::replace(&mut self.hidden, true),
+            CursorEvent::Left { output } => self.at.take_if(|(o, _, _, _)| *o == output).is_some(),
         }
     }
 
@@ -464,6 +466,16 @@ mod tests {
         let small = scaled(&image, 0.5, 1.0);
         assert_eq!((small.w, small.h, small.hot_x), (1, 1, 0));
         assert_eq!(small.rgba, [0, 0, 255, 128]);
+        // The point: the pixel the middle of the old one falls in (1.5 of 4 is 1.125
+        // of 3), not its left edge (0.75).
+        let wide = CursorImage {
+            w: 4,
+            h: 1,
+            hot_x: 1,
+            hot_y: 0,
+            rgba: vec![255; 16],
+        };
+        assert_eq!(scaled(&wide, 0.75, 1.0).hot_x, 1);
     }
 
     #[test]

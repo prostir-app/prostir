@@ -2426,15 +2426,15 @@ fn the_pcs_pointer_is_drawn_over_its_monitor() {
         (m.bright, m.alpha),
         "dimmed with its monitor"
     );
-    // 32 of the picture's 2560 pixels wide (along the arc on a curve), 32 of its 1440
-    // high.
+    // The whole picture the look is drawn in: 256 of the picture's 2560 pixels wide
+    // (along the arc on a curve), 256 of its 1440 high.
     let p = m.quad.at;
     let width = layout::image_width(&p, m.curve);
     assert!(
-        (quad.at.width - width * 32.0 / 2560.0).abs() < 1e-5,
+        (quad.at.width - width * 256.0 / 2560.0).abs() < 1e-5,
         "{quad:?}"
     );
-    assert!((quad.height - m.quad.height * 32.0 / 1440.0).abs() < 1e-6);
+    assert!((quad.height - m.quad.height * 256.0 / 1440.0).abs() < 1e-6);
     // Its top left corner (the pixel it points with) at the picture's top left.
     let corner = quad.at.position
         + quad.at.rotation * Vec3::new(-quad.at.width / 2.0, quad.height / 2.0, 0.0);

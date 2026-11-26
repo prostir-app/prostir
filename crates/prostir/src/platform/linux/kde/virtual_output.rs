@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use super::feed::Feed;
+use super::feed::pointer::CursorTap;
 use super::kscreen;
 use crate::encoder::{Input, Pause};
 use crate::platform::linux::is_panel;
@@ -45,11 +46,10 @@ const POINTER_EMBEDDED: u32 = 2;
 /// (`SPA_META_Cursor`), and buffers with the cursor alone when only it moved.
 const POINTER_METADATA: u32 = 4;
 
-/// The cursor apart from the picture (step 2 of the cursor layer): off until the
-/// headset draws it. The feed reads the metadata either way (see `feed/meta.rs`).
-const CURSOR_APART: bool = false;
-
-/// The pointer mode KWin's streams are made with.
+/// The pointer mode of a stream: apart from the picture (in its metadata), or drawn
+/// in. A virtual output is made with its pointer drawn in (making it again would move
+/// its windows away); while the pointer goes apart, a second stream of it, made with
+/// the pointer apart, feeds the encoder (see `KdeOutput`).
 const fn pointer_mode(apart: bool) -> u32 {
     if apart {
         POINTER_METADATA
@@ -544,7 +544,7 @@ impl Screencast {
     /// Streams an existing display (e.g. the laptop panel) without creating anything.
     /// KWin streams a given display only once per connection, so use a fresh
     /// [`Screencast`] for every mirror.
-    pub fn mirror(&self, number: u32, output_name: &str) -> Result<VirtualOutput> {
+    pub fn mirror(&self, number: u32, output_name: &str, apart: bool) -> Result<VirtualOutput> {
         let (output, refresh) = self
             .shared
             .outputs
@@ -559,9 +559,9 @@ impl Screencast {
             .lock()
             .unwrap()
             .insert(number, StreamState::default());
-        let stream =
-            self.screencast
-                .stream_output(&output, pointer_mode(CURSOR_APART), &self.qh, number);
+        let stream = self
+            .screencast
+            .stream_output(&output, pointer_mode(apart), &self.qh, number);
         // Normally ~10 ms; never hold up the headset's requests for long.
         let mirror = self.wait_for_node(
             number,
@@ -650,7 +650,7 @@ impl Screencast {
                 w,
                 h,
                 1.0,
-                pointer_mode(CURSOR_APART),
+                pointer_mode(false),
                 &self.qh,
                 number,
             )
@@ -660,7 +660,7 @@ impl Screencast {
                 w,
                 h,
                 1.0,
-                pointer_mode(CURSOR_APART),
+                pointer_mode(false),
                 &self.qh,
                 number,
             )
@@ -764,14 +764,22 @@ impl VirtualOutput {
     }
 
     /// Starts feeding KWin's stream into the encoder's `appsrc` (see [`input_for`]),
-    /// as the encoder's `pause` says; fails as the source when the stream cannot start.
-    pub fn feed(&self, appsrc: gstreamer_app::AppSrc, pause: Arc<Pause>) -> Result<Feed> {
+    /// as the encoder's `pause` says, and what it says of the pointer to `cursor` (a
+    /// stream with the pointer apart); fails as the source when the stream cannot
+    /// start.
+    pub fn feed(
+        &self,
+        appsrc: gstreamer_app::AppSrc,
+        pause: Arc<Pause>,
+        cursor: Option<CursorTap>,
+    ) -> Result<Feed> {
         Feed::start(
             self.node,
             &format!("node {}", self.node),
             appsrc,
             pause,
             Duration::from_millis(KEEPALIVE_MS.into()),
+            cursor,
         )
     }
 
@@ -1001,6 +1009,7 @@ mod tests {
             encoder.appsrc().unwrap(),
             encoder.paused(),
             Duration::from_millis(KEEPALIVE_MS.into()),
+            None,
         );
         let why = match &feed {
             Ok(_) => failure.recv_timeout(time).ok(),
@@ -1134,6 +1143,7 @@ mod tests {
                 encoder.appsrc().unwrap(),
                 encoder.paused(),
                 Duration::from_millis(KEEPALIVE_MS.into()),
+                None,
             )
         }
     }
@@ -1220,7 +1230,15 @@ mod tests {
                     .unwrap()
                     .downcast::<gstreamer_app::AppSrc>()
                     .unwrap();
-                Feed::start(node, "latency", appsrc, pause, Duration::from_millis(750)).unwrap()
+                Feed::start(
+                    node,
+                    "latency",
+                    appsrc,
+                    pause,
+                    Duration::from_millis(750),
+                    None,
+                )
+                .unwrap()
             });
             std::thread::sleep(Duration::from_secs(6));
             drop(feed);

@@ -489,10 +489,15 @@ pub fn plan(model: &Model, hands: &Hands, ready: &impl Ready, plan: &mut Plan) {
     plan.budget(usize::from(model.headset().caps.layers_max));
 }
 
+/// The side of the square picture a PC's pointer is drawn from, in pixels: its look at
+/// the top left, the rest clear, the largest look fits (the shell's picture is this).
+pub const POINTER_SIDE: u32 = prostir_proto::CURSOR_SIDE_MAX as u32;
+
 /// Where a PC's pointer `shown` is drawn over its monitor, which stands at `p`,
 /// `height` high, on a cylinder of `curve` (none: flat), its picture `picture` pixels:
-/// the pixel of the look it points with over the pixel of the picture the PC says,
-/// in the plane touching the monitor there, as large as it is in the picture.
+/// the whole picture of [`POINTER_SIDE`] the look is at the top left of, its pixels as
+/// large as the monitor's, shifted so the pixel the look points with is over the pixel
+/// of the monitor's picture the PC says; in the plane touching the monitor there.
 pub fn pointer_quad(
     p: &Placement,
     height: f32,
@@ -509,18 +514,18 @@ pub fn pointer_quad(
     let across = image_width(p, curve) / w.max(1) as f32;
     let down = height / h.max(1) as f32;
     let look = shown.look;
-    let (lw, lh) = (f32::from(look.w), f32::from(look.h));
-    // From the middle of the pixel it points with to the middle of the look, right and
-    // up.
-    let right = (lw / 2.0 - (f32::from(look.hot_x) + 0.5)) * across;
-    let up = ((f32::from(look.hot_y) + 0.5) - lh / 2.0) * down;
+    let side = POINTER_SIDE as f32;
+    // From the middle of the pixel it points with to the middle of the whole picture,
+    // right and up.
+    let right = (side / 2.0 - (f32::from(look.hot_x) + 0.5)) * across;
+    let up = ((f32::from(look.hot_y) + 0.5) - side / 2.0) * down;
     Quad {
         at: Placement {
             position: point + rotation * Vec3::new(right, up, 0.0),
             rotation,
-            width: lw * across,
+            width: side * across,
         },
-        height: lh * down,
+        height: side * down,
     }
 }
 

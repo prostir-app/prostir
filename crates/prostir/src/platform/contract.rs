@@ -223,6 +223,9 @@ pub enum CursorEvent {
     },
     /// It is hidden (a video full screen, a game, touch), until a look comes again.
     Hidden,
+    /// It left the picture of `output` (for another output's, or none): where it was
+    /// on that output no longer counts.
+    Left { output: OutputKey },
 }
 
 /// A look of the pointer: `w`x`h` pixels of 8-bit RGBA in sRGB, not premultiplied, top
@@ -250,29 +253,13 @@ impl std::fmt::Debug for CursorImage {
 /// Where a [`CursorSource`] tells what it has to say: the core's, called from any
 /// thread, never waiting for anything.
 #[derive(Clone)]
-pub struct CursorSink(
-    #[cfg_attr(
-        not(any(test, feature = "fake-desktop")),
-        expect(
-            dead_code,
-            reason = "no Linux desktop tells the pointer yet: KDE's own PipeWire consumer will"
-        )
-    )]
-    Arc<dyn Fn(CursorEvent) + Send + Sync>,
-);
+pub struct CursorSink(Arc<dyn Fn(CursorEvent) + Send + Sync>);
 
 impl CursorSink {
     pub fn new(tell: impl Fn(CursorEvent) + Send + Sync + 'static) -> Self {
         Self(Arc::new(tell))
     }
 
-    #[cfg_attr(
-        not(any(test, feature = "fake-desktop")),
-        expect(
-            dead_code,
-            reason = "no Linux desktop tells the pointer yet: KDE's own PipeWire consumer will"
-        )
-    )]
     pub fn send(&self, event: CursorEvent) {
         (self.0)(event);
     }
@@ -313,6 +300,11 @@ pub trait Output: Send {
 
     /// Stops feeding the current encoder (before it is replaced).
     fn detach(&mut self);
+
+    /// The next encoder [`Output::attach`] feeds gets frames with the pointer left out
+    /// (`apart`, see [`CursorSource`]) or drawn in, where the desktop makes that per
+    /// stream (KWin). Never apart for a window panel, which keeps the pointer.
+    fn set_cursor_apart(&mut self, _apart: bool) {}
 
     /// Makes it the primary output, where the desktop has one.
     fn make_primary(&self);

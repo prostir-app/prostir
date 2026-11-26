@@ -368,7 +368,6 @@ pub fn end(
                         Some(layer) => {
                             let Quad { at, height } = *quad;
                             let mut q = layer.quad(local, posef(&at), at.width, height);
-                            q.sub_image = layer.sub_image_part(picture.size.0, picture.size.1);
                             let scale = dim.color_scale;
                             if exts.khr_composition_layer_color_scale_bias
                                 && (scale.r < 1.0 || scale.a < 1.0)
