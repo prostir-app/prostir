@@ -824,6 +824,8 @@ headset-monitors-at-most =
        *[other] At most { $count } monitors
     }
 headset-layout = Layout
+headset-layout-reset = Reset
+headset-layout-reset-confirm = Reset? Press again
 headset-layout-around = Around me
 headset-layout-wall = Wall
 headset-curve = Curve
@@ -1053,6 +1055,7 @@ headset-note-window-here = Window moved here
 headset-note-layout = Monitors laid out again
 headset-note-lined-up = Seams closed
 headset-note-in-front = Everything is in front of you
+headset-note-reset = The monitors stand as the layout places them
 headset-note-mic-headset = PC apps hear the headset microphone
 headset-note-mic-pc = PC apps hear the PC microphone
 headset-note-mic-ask = The system will ask for microphone access

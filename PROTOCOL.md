@@ -1269,7 +1269,7 @@ without it.
 | 7 | `LineUp` | | "Line up". |
 | 8 | `ShowMouse` | | Shows where the mouse is. |
 | 10 | `Follow` | `on:bool` | Follow the head. |
-| 11 | `ResetArrangement` | | Reset the arrangement (`UNSUPPORTED` in the current client). |
+| 11 | `ResetArrangement` | | The monitors as the chosen preset places them, in front of the user, at their standard size (cinema makes its view anew); answered after they moved. |
 | 12 | `NoLimits` | `on:bool` | "No limits" (changes `Prefs`). |
 | 13 | `RenameProfile` | `profile:str(64), name:str(64)` | Gives profile `profile` (named as for `Profile`) the name `name`, on one line, without spaces around it or characters that turn text around; an empty one gives it back its number (`NO_SUCH_PROFILE`; `BAD_ARGUMENT` for a number only, which names a profile by its place; `NOT_ALLOWED` from a host the headset's menu does not act on). The headset's `Profiles` part shows it before the answer. From 0.2.0 step 7.10; an older headset answers `UNSUPPORTED`. |
 | 16 | `Lock` | `on:bool` | "Locked" on or off: the monitors stay where they are (from 0.2.0 step 8; `UNSUPPORTED` in the current client until its step). |

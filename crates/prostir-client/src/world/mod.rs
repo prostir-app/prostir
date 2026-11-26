@@ -1835,6 +1835,16 @@ impl World {
         self.send_layout(now);
     }
 
+    /// "Reset": the monitors as the chosen layout makes them, in front of the user
+    /// where they look now (`head`, `forward`), at their standard size, and the
+    /// layout's tilt; cinema makes its view anew. Window panels, another PC's
+    /// displays and what the hands held stay out of it (what they held is let go).
+    pub fn reset_arrangement(&mut self, s: &Settings, (head, forward): (Vec3, Vec3), now: Instant) {
+        let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
+        self.center = (head, (-flat.x).atan2(-flat.z));
+        self.preset_chosen(s, now);
+    }
+
     /// The A button: lines up what the user arranged by hand, row by row (see
     /// `layout::line_up`), instead of replacing it with the preset: every row keeps its
     /// place and the way it stands, tilted back or overhead too; but a monitor out of

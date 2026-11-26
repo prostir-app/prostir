@@ -178,6 +178,9 @@ pub fn build(m: &Model) -> UiState {
             .confirm_remove
             .filter(|(_, at)| shown_for(*at, crate::app::CONFIRM_FOR))
             .map(|(id, _)| id),
+        confirm_reset: menu
+            .confirm_reset
+            .is_some_and(|at| shown_for(at, crate::app::CONFIRM_FOR)),
         confirm_save: menu
             .confirm_save
             .filter(|(_, at)| shown_for(*at, crate::app::CONFIRM_FOR))

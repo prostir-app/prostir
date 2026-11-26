@@ -54,6 +54,7 @@ impl Model {
             | Action::SelectMonitor(_)
             | Action::Tidy
             | Action::Recenter
+            | Action::ResetArrangement
             | Action::DetachWindow
             | Action::WindowHere
             | Action::Screenshot

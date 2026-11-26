@@ -355,6 +355,73 @@ fn the_pcs_commands_are_answered() {
     ));
 }
 
+/// Step 8.3: "Reset" puts a monitor moved and made larger by hand back where the
+/// layout places it, at its size; from the menu only on the second press (the first
+/// asks again, and the asking goes after a while), from the PC (command 11) at once,
+/// answered done after the monitors moved.
+#[test]
+fn reset_puts_the_arrangement_back() {
+    use crate::interaction::Scene as _;
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    // As the layout lays them out.
+    let preset = sim.m.settings().preset;
+    sim.menu(Action::Preset(preset));
+    let thing = Thing::Display(k(1));
+    let laid = *sim.m.world().placement(k(1)).expect("placed");
+    let other = *sim.m.world().placement(k(2)).expect("placed");
+    // Where the layout puts a monitor: one of the two places (the order of the PC's
+    // desktop follows what the hand did).
+    let laid_out = |p: &Placement| {
+        [laid, other]
+            .iter()
+            .any(|l| l.position.distance(p.position) < 1e-3)
+    };
+    let at = sim.m.hold(thing).expect("taken");
+    let moved = Placement {
+        position: at.position + Vec3::new(0.1, 0.5, 0.3),
+        width: at.width * 1.3,
+        ..at
+    };
+    sim.m.drag(thing, moved, Vec3::ZERO);
+    sim.m.let_go(sim.now, thing);
+    let here = |sim: &Sim| *sim.m.world().placement(k(1)).expect("placed");
+    assert!(here(&sim).position.distance(laid.position) > 0.3, "moved");
+
+    // The first press asks again; once that is over, the next press asks again too.
+    sim.menu(Action::ResetArrangement);
+    assert!(sim.m.menu().confirm_reset.is_some());
+    assert!(
+        here(&sim).position.distance(laid.position) > 0.3,
+        "asked only"
+    );
+    sim.after(CONFIRM_FOR + Duration::from_millis(10));
+    assert!(sim.m.menu().confirm_reset.is_none(), "the asking went");
+    sim.menu(Action::ResetArrangement);
+    sim.menu(Action::ResetArrangement);
+    assert!(sim.m.menu().confirm_reset.is_none());
+    let back = here(&sim);
+    assert!(laid_out(&back), "{back:?} {laid:?}");
+    assert!((back.width - laid.width).abs() < 1e-4, "its size");
+
+    // From the PC, at once.
+    let at = sim.m.hold(thing).expect("taken");
+    sim.m.drag(
+        thing,
+        Placement {
+            position: at.position + Vec3::new(0.5, 0.0, 0.0),
+            ..at
+        },
+        Vec3::ZERO,
+    );
+    sim.m.let_go(sim.now, thing);
+    sim.take();
+    sim.command(12, Command::ResetArrangement);
+    let fx = sim.take();
+    assert_eq!(reply_of(&fx, 12), Some(&Outcome::Done));
+    assert!(laid_out(&here(&sim)));
+}
+
 /// Scenario 9: a hundred changes in a pass are one save of each file changed, said at
 /// the end of the pass, and nothing when nothing changed.
 #[test]
