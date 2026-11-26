@@ -164,6 +164,14 @@ impl Worker {
                 t("pc-worker-run-encoders-encoders-do-not-respond-no-more")
             );
         }
+        // A window panel keeps the pointer in its frames (see `CursorSource`); any other
+        // output gets it apart while the headsets draw it.
+        let panel = self.wanted.as_ref().is_some_and(|w| {
+            w.screens
+                .iter()
+                .any(|(i, s)| *i == id && matches!(s.what, What::Panel { .. }))
+        });
+        output.set_cursor_apart(self.cursor_apart && !panel);
         let mut source = output.source();
         // A source that failed is tried once more, as it is then (not another encoder:
         // each would fail the same on it).
@@ -209,16 +217,9 @@ impl Worker {
             self.shared
                 .router
                 .add_stream(id, choice.codec, name.to_owned());
-            // A window panel keeps the pointer in its frames (see `CursorSource`).
-            let panel = self.wanted.as_ref().is_some_and(|w| {
-                w.screens
-                    .iter()
-                    .any(|(i, s)| *i == id && matches!(s.what, What::Panel { .. }))
-            });
             self.shared
                 .router
                 .set_stream_output(id, output.key().clone(), panel);
-            output.set_cursor_apart(self.cursor_apart && !panel);
             let router = self.shared.router.clone();
             let (input, gpu) = (source.input.clone(), self.gpu.clone());
             // Left behind after its time, a late encoder sends nothing; nor does one

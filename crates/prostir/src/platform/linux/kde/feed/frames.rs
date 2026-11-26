@@ -797,7 +797,7 @@ mod tests {
 
     /// A buffer as KWin 6.8 sends it when only the pointer moved, made with the pointer
     /// apart: its plane marked corrupted (size left at the whole buffer's), the
-    /// pointer's metadata with a new look (BGRA, premultiplied). It never reaches the
+    /// pointer's metadata with a new look (RGBA, premultiplied). It never reaches the
     /// encoder, and the core hears the look (straight, its hotspot) and the hotspot's
     /// place in the output's pixels.
     #[test]
@@ -805,13 +805,13 @@ mod tests {
         use crate::platform::{CursorEvent, OutputKey};
         let mut given = Given::new(16, 2);
         given.chunk.flags = ss::SPA_CHUNK_FLAG_CORRUPTED as i32;
-        // Two pixels, BGRA premultiplied: blue opaque, red at half.
-        let pixels = [255, 0, 0, 255, 0, 0, 128, 128];
+        // Two pixels, RGBA premultiplied as KWin 6.8 sends them: blue opaque, red at half.
+        let pixels = [0, 0, 255, 255, 128, 0, 0, 128];
         let mut cursor = super::super::meta::tests::cursor_meta(
             1,
             (100, 50),
             (1, 0),
-            Some((ss::SPA_VIDEO_FORMAT_BGRA, 2, 1, &pixels)),
+            Some((ss::SPA_VIDEO_FORMAT_RGBA, 2, 1, &pixels)),
         );
         let mut metas = [ss::spa_meta {
             type_: ss::SPA_META_Cursor,
@@ -843,7 +843,7 @@ mod tests {
         assert_eq!((image.w, image.h, image.hot_x, image.hot_y), (2, 1, 1, 0));
         assert_eq!(image.rgba, [0, 0, 255, 255, 255, 0, 0, 128]);
         assert_eq!(output.as_str(), "Virtual-Prostir-1");
-        assert_eq!((*x, *y, *size), (101, 50, (2560, 1440)));
+        assert_eq!((*x, *y, *size), (100, 50, (2560, 1440)));
     }
 
     /// A frame of the feed takes no memory of Rust's (only GStreamer's, as

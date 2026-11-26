@@ -319,8 +319,10 @@ impl Output for KdeOutput {
         &self.key
     }
 
+    /// Closed also when the stream with the pointer apart (feeding the encoder now)
+    /// was.
     fn health(&self) -> OutputHealth {
-        if self.stream.closed() {
+        if self.stream.closed() || self.apart.as_ref().is_some_and(|(s, _)| s.closed()) {
             OutputHealth::Closed
         } else if let Some((w, h)) = self.stream.resized() {
             OutputHealth::Resized { w, h }
@@ -335,7 +337,11 @@ impl Output for KdeOutput {
             origin: self.origin,
             // PipeWire hands GPU buffers to an encoder that takes them.
             memory: Memory::DmaBuf,
-            cursor: Cursor::InFrame,
+            cursor: if self.wants_apart {
+                Cursor::Separate
+            } else {
+                Cursor::InFrame
+            },
         }
     }
 

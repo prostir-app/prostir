@@ -517,8 +517,12 @@ pub use crate::encoder::GpuDevices;
 pub enum Cursor {
     /// Into the frames.
     InFrame,
-    /// Apart from them (Desktop Duplication, a driver's hardware cursor).
-    #[cfg_attr(not(test), expect(dead_code, reason = "every source draws it in"))]
+    /// Apart from them (KWin's stream with the pointer apart, Desktop Duplication, a
+    /// driver's hardware cursor).
+    #[cfg_attr(
+        all(not(test), feature = "fake-desktop"),
+        expect(dead_code, reason = "the fake desktop draws no pointer in")
+    )]
     Separate,
 }
 
