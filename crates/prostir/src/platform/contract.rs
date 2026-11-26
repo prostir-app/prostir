@@ -111,8 +111,8 @@
 //!   ([`Desktop::scales_for`]); it has a primary monitor ([`DesktopCaps::has_primary`]).
 //! - No way to move windows or find the mouse without a Shell extension:
 //!   [`Desktop::windows`] and [`Desktop::pointer`] give none, so there are no window
-//!   panels and the headset is not offered to move the mouse
-//!   ([`DesktopCaps::moves_pointer`]).
+//!   panels. The mouse is moved and clicked through the RemoteDesktop portal, as on
+//!   KDE ([`Desktop::input`]).
 //! - Without [`Windows`] there is no screenshot tool either: with
 //!   [`DesktopCaps::screenshot_one_output`] false, a monitor's picture comes from its
 //!   own stream.
@@ -122,6 +122,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+
+use prostir_proto::state::DeskRect;
 
 use crate::encoder::{Encoder, Input};
 use crate::errors::UserError;
@@ -182,6 +184,12 @@ pub trait Desktop: Send {
     /// The mouse pointer apart from the frames; none where the desktop draws it into
     /// them and cannot say how it looks and where it is (then it stays in the frames).
     fn cursor(&mut self) -> Option<&mut dyn CursorSource> {
+        None
+    }
+
+    /// How to open its virtual input (see [`Injector`]); none where it has none
+    /// ([`DesktopCaps::injects`] says nothing).
+    fn input(&mut self) -> Option<Arc<dyn OpenInput>> {
         None
     }
 }
@@ -362,14 +370,147 @@ pub struct AppWindow {
     pub output: OutputKey,
 }
 
-/// The mouse.
+/// Where the mouse is. Moving it is the virtual input's ([`Injector::pointer_to`]).
 pub trait Pointer {
     /// Where it is on the desktop, in logical pixels.
     fn position(&mut self) -> Option<(i32, i32)>;
+}
 
-    /// Puts it at `x`,`y` (logical pixels); whether that worked (never, where
-    /// [`DesktopCaps::moves_pointer`] is false).
-    fn move_to(&mut self, x: i32, y: i32) -> bool;
+/// What a desktop's virtual input makes, as if from devices of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Injects {
+    /// The mouse: moved to a point, its buttons and its wheel. Touches too: as touches
+    /// where [`Injector::touches`], else the core makes mouse actions of them.
+    pub pointer: bool,
+    /// Keys (evdev codes; the desktop's own keyboard layout applies).
+    pub keys: bool,
+}
+
+impl Injects {
+    pub const NONE: Self = Self {
+        pointer: false,
+        keys: false,
+    };
+}
+
+/// Opens a desktop's virtual input. Called on the input thread (`crate::input`), never
+/// the worker's: it may wait for the person, as the desktop's own dialog asks once
+/// whether Prostir may control the mouse and the keyboard.
+pub trait OpenInput: Send + Sync {
+    /// The virtual devices, once the desktop made them; an error with [`InputRefused`]
+    /// inside where the person said no (not asked again by itself).
+    fn open(&self) -> Result<Box<dyn Injector>>;
+}
+
+/// The person did not let Prostir control the mouse and the keyboard.
+#[derive(Debug)]
+pub struct InputRefused;
+
+impl std::fmt::Display for InputRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the person did not allow controlling the mouse and keyboard")
+    }
+}
+
+impl std::error::Error for InputRefused {}
+
+/// The person stopped the devices that were open (the desktop's remote control
+/// ended by them): as [`InputRefused`], not opened again by itself.
+#[derive(Debug)]
+pub struct InputStopped;
+
+impl std::fmt::Display for InputStopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the control of the mouse and keyboard was stopped on the PC")
+    }
+}
+
+impl std::error::Error for InputStopped {}
+
+/// A point of the desktop for the mouse or a finger: `x`, `y` in logical pixels of the
+/// desktop (with their fractions), on output `output`, which is at `rect`; `desk` holds
+/// every output, for a device that spans them all.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spot {
+    pub output: OutputKey,
+    pub rect: DeskRect,
+    pub desk: DeskRect,
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Spot {
+    /// The point across its output, each way from 0 to 1.
+    pub fn across(&self) -> (f64, f64) {
+        let part = |v: f64, start: i32, len: u32| {
+            ((v - f64::from(start)) / f64::from(len.max(1))).clamp(0.0, 1.0)
+        };
+        (
+            part(self.x, self.rect.x, self.rect.w),
+            part(self.y, self.rect.y, self.rect.h),
+        )
+    }
+}
+
+/// A mouse button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    Back,
+    Forward,
+}
+
+impl MouseButton {
+    /// Its code in Linux's `input-event-codes.h` (`BTN_LEFT`...), which libei, wlroots
+    /// and uinput take.
+    pub fn evdev(self) -> u16 {
+        match self {
+            Self::Left => 0x110,
+            Self::Right => 0x111,
+            Self::Middle => 0x112,
+            Self::Back => 0x113,
+            Self::Forward => 0x114,
+        }
+    }
+}
+
+/// What a finger does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TouchPhase {
+    Down,
+    Move,
+    Up,
+    /// Gone without counting.
+    Cancel,
+}
+
+/// A desktop's virtual input devices: the mouse, a touch screen, a keyboard. Each call
+/// is one frame of its own, said to the desktop before it returns. The core keeps what
+/// is held and lets it all go when its source goes (`crate::input`): the injector only
+/// makes what it is told. An error means the devices are gone (the desktop closed
+/// them): the core drops the injector and opens a new one when needed. Dropped, its
+/// devices go, and the desktop lets go of what they held.
+pub trait Injector: Send {
+    /// It makes real touches; else the core makes mouse actions of them.
+    fn touches(&self) -> bool;
+    /// The mouse to `at`.
+    fn pointer_to(&mut self, at: &Spot) -> Result<()>;
+    /// The mouse moved by `dx`, `dy` logical pixels, without the desktop's acceleration.
+    fn pointer_by(&mut self, dx: f64, dy: f64) -> Result<()>;
+    fn button(&mut self, button: MouseButton, down: bool) -> Result<()>;
+    /// The wheel, in 1/120 of a notch: `dy` above 0 scrolls down, `dx` above 0 right.
+    fn scroll(&mut self, dx: i32, dy: i32) -> Result<()>;
+    /// Finger `id` (one number for each finger touching at once) at `at`.
+    fn touch(&mut self, id: u32, phase: TouchPhase, at: &Spot) -> Result<()>;
+    /// Key `code` (evdev) pressed or let go.
+    fn key(&mut self, code: u16, down: bool) -> Result<()>;
+    /// Called at least every 100 ms while it is open: reads what the desktop said
+    /// (some desktops ask whether the program is still there).
+    fn pump(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// The key of an output, stable while it exists: on Linux the connector name the
@@ -554,8 +695,8 @@ pub struct DesktopCaps {
     /// [`Windows::screenshot`] can take a single output; if not, a monitor's picture is
     /// decoded from its own stream.
     pub screenshot_one_output: bool,
-    /// [`Pointer::move_to`] works.
-    pub moves_pointer: bool,
+    /// What its virtual input makes ([`Desktop::input`]); nothing where it has none.
+    pub injects: Injects,
     /// Its virtual monitors go by themselves when Prostir is gone (KWin does that; a
     /// driver's watchdog would), so nothing is left to clean up after a crash.
     pub cleans_up_after_crash: bool,
@@ -778,7 +919,10 @@ mod windows_shape {
             scales_in_place: true,
             refresh: vec![60, 72, 90, 120],
             screenshot_one_output: true,
-            moves_pointer: true,
+            injects: Injects {
+                pointer: true,
+                keys: true,
+            },
             cleans_up_after_crash: true,
         }
     }
@@ -793,7 +937,7 @@ mod windows_shape {
         assert!(caps.has_primary && caps.origin_is_primary && caps.cleans_up_after_crash);
         assert!(caps.scales.allows(125) && !caps.scales.allows(130));
         assert_eq!(caps.refresh_for_new(), 60);
-        assert!(caps.screenshot_one_output && caps.moves_pointer);
+        assert!(caps.screenshot_one_output && caps.injects.pointer && caps.injects.keys);
 
         // No driver: the PC's own displays still work, adding a monitor says why not.
         let without = DesktopCaps {

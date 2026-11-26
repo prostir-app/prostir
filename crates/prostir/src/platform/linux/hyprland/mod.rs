@@ -24,9 +24,9 @@ use serde_json::Value;
 use crate::encoder::Encoder;
 use crate::platform::linux::{is_panel, named_virtual};
 use crate::platform::{
-    AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Geometry, GpuDevices, Memory,
-    Origin, Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales,
-    VirtualSpec, Windows,
+    AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Geometry, GpuDevices, Injects,
+    Memory, OpenInput, Origin, Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer,
+    Scales, VirtualSpec, Windows,
 };
 use screencopy::Capture;
 use windows::HyprWindows;
@@ -658,6 +658,8 @@ pub struct Hyprland {
     caps: DesktopCaps,
     windows: HyprWindows,
     rules: Arc<Rules>,
+    /// How to open its virtual input (see `linux/input`).
+    input: Option<Arc<dyn OpenInput>>,
     /// The graphics devices to share (wlr-screencopy hands buffers over: none taken
     /// yet).
     _gpu: GpuDevices,
@@ -671,6 +673,7 @@ impl Hyprland {
         rules.remove_leftovers();
         rules.keep_after_reloads();
         *LIVE.lock().unwrap() = Arc::downgrade(&rules);
+        let input = super::input::for_wlroots();
         Self {
             caps: DesktopCaps {
                 name: "Hyprland",
@@ -682,12 +685,14 @@ impl Hyprland {
                 scales_in_place: true,
                 refresh: vec![60],
                 screenshot_one_output: true,
-                moves_pointer: true,
+                // Virtual pointers and keyboards.
+                injects: input.as_ref().map_or(Injects::NONE, |(i, _)| *i),
                 // Hyprland keeps headless outputs after the program that made them.
                 cleans_up_after_crash: false,
             },
             windows: HyprWindows::new(),
             rules,
+            input: input.map(|(_, open)| open),
             _gpu: gpu,
         }
     }
@@ -754,6 +759,10 @@ impl Desktop for Hyprland {
 
     fn pointer(&mut self) -> Option<&mut dyn Pointer> {
         Some(&mut self.windows)
+    }
+
+    fn input(&mut self) -> Option<Arc<dyn OpenInput>> {
+        self.input.clone()
     }
 }
 

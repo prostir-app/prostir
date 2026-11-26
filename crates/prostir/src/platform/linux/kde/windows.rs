@@ -92,11 +92,6 @@ impl Pointer for KdeWindows {
     fn position(&mut self) -> Option<(i32, i32)> {
         self.scripts.cursor()
     }
-
-    /// KWin scripts cannot move the mouse.
-    fn move_to(&mut self, _x: i32, _y: i32) -> bool {
-        false
-    }
 }
 
 /// Every window, asked of KWin from any thread.

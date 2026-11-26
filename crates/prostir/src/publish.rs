@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use prostir_proto::state::{
     self, Access, DisplayId, Focus, HeadsetCaps, HeadsetState, HostCaps, Limits, Mode, PcInfo,
-    PcState, Prefs, SoundFrom, UpKind, UpWanted, caps, clip,
+    PcState, Prefs, SoundFrom, UpKind, UpWanted, caps, clip, perms,
 };
 use prostir_proto::wire::WireError;
 use prostir_proto::{Codec, HostMsg};
@@ -137,7 +137,7 @@ impl Publisher {
         PcState {
             scale_auto,
             info: Some(pc_info(src.displays)),
-            caps: Some(host_caps(src.displays, src.volume)),
+            caps: Some(host_caps(src.displays, src.volume, self.access)),
             access: Some(self.access),
             limits: Some(self.limits(src.displays, src.no_limits)),
             encoding: Some(src.displays.encoding_part(src.wanted, headset)),
@@ -223,8 +223,8 @@ fn keep_scales_of_every_size(
         .retain(|s| sizes.iter().all(|m| scales_for(m.w, m.h).allows(*s)));
 }
 
-/// What this PC can do.
-fn host_caps(displays: &Displays, volume: bool) -> HostCaps {
+/// What this PC can do, for a headset with `access`.
+fn host_caps(displays: &Displays, volume: bool, access: Access) -> HostCaps {
     let mut features = vec![
         caps::pc::MIC,
         caps::pc::WINDOWS,
@@ -237,8 +237,14 @@ fn host_caps(displays: &Displays, volume: bool) -> HostCaps {
         // Takes the headset's `Gaze` (for now it only writes it in its log).
         caps::pc::GAZE,
     ];
-    if displays.moves_mouse() {
+    // Not while the person refused it; clicks, the wheel and touches not while the
+    // desktop's input does not open, and only for a headset that may use them.
+    let state = displays.input_state();
+    if displays.injects().pointer && state != crate::input::State::Refused {
         features.push(caps::pc::MOVE_MOUSE);
+        if access.may(perms::INPUT) && state == crate::input::State::Fine {
+            features.push(caps::pc::INPUT);
+        }
     }
     if displays.scales_in_place() {
         features.push(caps::pc::SCALE_IN_PLACE);

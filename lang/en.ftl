@@ -231,6 +231,11 @@ pc-session-the-headset-does-not-answer = The headset does not answer
 pc-session-the-headset-disconnected = The headset disconnected
 pc-session-the-desktop-does-not-respond = The desktop does not respond
 
+## src/input/mod.rs
+
+pc-input-not-allowed = Controlling the mouse from the headset is not allowed on this PC. It can be allowed again after Prostir restarts.
+pc-input-unavailable = The PC's desktop could not open its input. Clicks from the headset do nothing for now.
+
 ## src/wake.rs
 
 pc-wake-new-headset-nearby = New headset nearby

@@ -212,12 +212,16 @@ pub mod caps {
         pub const POSES: Feature = Feature(13);
         /// Uses the gaze for which display gets the most bits.
         pub const GAZE: Feature = Feature(14);
+        /// Takes mouse buttons, the wheel and touches from the headset
+        /// (`MouseButton`, `MouseScroll`, `Touch`), named only to a headset with the
+        /// right to input.
+        pub const INPUT: Feature = Feature(15);
         /// Tells the mouse pointer apart from the pictures (`CursorShape`,
         /// `CursorAt`), where every headset with a session draws it itself.
         pub const CURSOR: Feature = Feature(16);
         /// Changes a monitor's scale in place, its output and its windows as they are
         /// (not made anew): the headset may choose scales by itself ("Auto", see
-        /// [`crate::state::ScaleAuto`]). 15 and 16 are taken by other work under way.
+        /// [`crate::state::ScaleAuto`]).
         pub const SCALE_IN_PLACE: Feature = Feature(17);
     }
 

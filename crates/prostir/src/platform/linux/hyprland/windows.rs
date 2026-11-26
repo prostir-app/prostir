@@ -77,10 +77,6 @@ impl Pointer for HyprWindows {
     fn position(&mut self) -> Option<(i32, i32)> {
         cursor()
     }
-
-    fn move_to(&mut self, x: i32, y: i32) -> bool {
-        move_cursor(&mut self.dispatch, x, y)
-    }
 }
 
 impl WindowList for HyprWindowList {
@@ -136,11 +132,6 @@ fn all_windows() -> Vec<AppWindow> {
             })
         })
         .collect()
-}
-
-/// Puts the mouse at `x`,`y` (logical desktop pixels).
-fn move_cursor(d: &mut Dispatcher, x: i32, y: i32) -> bool {
-    d.send(&Cmd::MoveCursor { x, y })
 }
 
 /// Moves window `w` to `output`; `fill`: full screen there (a window panel).
@@ -233,7 +224,6 @@ fn order(known: Option<Dialect>) -> [Dialect; 2] {
 
 /// A dispatcher call, spelled only once the dialect is known.
 enum Cmd<'a> {
-    MoveCursor { x: i32, y: i32 },
     Focus(&'a str),
     MoveWindow(&'a str),
     Fullscreen,
@@ -245,10 +235,6 @@ fn write_cmd(buf: &mut String, dialect: Dialect, cmd: &Cmd<'_>) {
     buf.clear();
     buf.push_str("dispatch ");
     let _ = match (dialect, cmd) {
-        (Dialect::Lua, Cmd::MoveCursor { x, y }) => {
-            write!(buf, "hl.dsp.cursor.move({{x = {x}, y = {y}}})")
-        }
-        (Dialect::Classic, Cmd::MoveCursor { x, y }) => write!(buf, "movecursor {x} {y}"),
         (Dialect::Lua, Cmd::Focus(address)) => {
             write!(buf, "hl.dsp.focus({{window = \"address:{address}\"}})")
         }
@@ -375,10 +361,6 @@ mod tests {
     #[test]
     fn spells_each_dialect() {
         let mut buf = String::from("stale");
-        write_cmd(&mut buf, Dialect::Lua, &Cmd::MoveCursor { x: 3, y: -4 });
-        assert_eq!(buf, "dispatch hl.dsp.cursor.move({x = 3, y = -4})");
-        write_cmd(&mut buf, Dialect::Classic, &Cmd::MoveCursor { x: 3, y: -4 });
-        assert_eq!(buf, "dispatch movecursor 3 -4");
         write_cmd(&mut buf, Dialect::Lua, &Cmd::MoveWindow("DP-1"));
         assert_eq!(buf, "dispatch hl.dsp.window.move({monitor = \"DP-1\"})");
         write_cmd(&mut buf, Dialect::Classic, &Cmd::Focus("0xab"));

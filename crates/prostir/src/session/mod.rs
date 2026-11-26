@@ -408,6 +408,11 @@ impl Session {
         self.answers = answers;
     }
 
+    /// Whether the headset has right `perm` now.
+    pub fn may(&self, perm: u32) -> bool {
+        self.publisher.access.may(perm)
+    }
+
     /// Sends `msg` to the headset in the control lane, after what went before it.
     pub fn send(&self, msg: HostMsg) {
         self.outbox.control(msg);
@@ -531,6 +536,7 @@ impl Session {
     pub fn finish(mut self, goodbye: Option<PcGoodbye>, displays: &Displays) -> Option<Closing> {
         self.end();
         displays.router.detach(self.id);
+        displays.input(crate::input::Ev::Release { from: self.id });
         let closing = Closing {
             id: self.id,
             until: Instant::now() + GOODBYE_WAIT,

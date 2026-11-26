@@ -119,6 +119,9 @@ wire_enum! {
             #[wire(max = MAX_DISPLAY_NAME)]
             name: String,
         },
+        /// "Locked" on or off: the monitors stay where they are, and taking one moves
+        /// nothing (from 0.2.0 step 8; an older headset answers `UNSUPPORTED`).
+        16 => Lock { on: bool },
     }
 }
 
@@ -290,6 +293,7 @@ mod tests {
                 name: "Робота".into(),
             },
             Command::NoLimits { on: true },
+            Command::Lock { on: true },
             Command::RenameProfile {
                 profile: "2".into(),
                 name: "Робота".into(),

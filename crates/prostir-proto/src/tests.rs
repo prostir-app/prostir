@@ -451,6 +451,25 @@ pub(crate) fn client_samples() -> Vec<ClientMsg> {
             u: 1,
             v: 65535,
         },
+        ClientMsg::MouseButton {
+            id: DisplayId(2),
+            u: 7,
+            v: 65535,
+            button: Button::Right,
+            down: true,
+        },
+        ClientMsg::MouseScroll {
+            id: DisplayId(2),
+            dx: -30,
+            dy: 240,
+        },
+        ClientMsg::Touch {
+            id: DisplayId(3),
+            slot: 1,
+            u: 0,
+            v: 32768,
+            phase: TouchPhase::Cancel,
+        },
         ClientMsg::PairBegin {
             headset_shows: true,
             name: "Meta Quest 3".into(),
@@ -1216,6 +1235,47 @@ fn auto_scale_is_additive() {
         );
     }
     assert_eq!(state::caps::pc::SCALE_IN_PLACE, Feature(17));
+}
+
+/// Input from the headset (feature 15) is an addition: new tags from 145, never retired
+/// ones, which an older PC skips, reading on; a button or a phase this build does not
+/// know is refused (a newer one comes with a capability of its own).
+#[test]
+fn input_from_the_headset_is_additive() {
+    use input::{Button, TouchPhase};
+    assert_eq!(state::caps::pc::INPUT, Feature(15));
+    let button = ClientMsg::MouseButton {
+        id: DisplayId(1),
+        u: 2,
+        v: 3,
+        button: Button::Left,
+        down: false,
+    };
+    let scroll = ClientMsg::MouseScroll {
+        id: DisplayId(1),
+        dx: 0,
+        dy: -input::SCROLL_NOTCH,
+    };
+    let touch = ClientMsg::Touch {
+        id: DisplayId(1),
+        slot: 0,
+        u: 4,
+        v: 5,
+        phase: TouchPhase::Down,
+    };
+    for (tag, msg) in [(145, &button), (146, &scroll), (147, &touch)] {
+        assert_eq!(msg.wire_tag(), tag);
+        assert!(!RETIRED_CLIENT_TAGS.contains(&tag));
+        assert_eq!(read_client(&client_bytes(msg)).unwrap(), *msg);
+    }
+    // id, u, v, then a button numbered 9.
+    let mut bytes = client_bytes(&button);
+    let at = bytes.len() - 2;
+    bytes[at] = 9;
+    assert!(read_client(&bytes).is_err());
+    let mut bytes = client_bytes(&touch);
+    *bytes.last_mut().unwrap() = 4;
+    assert!(read_client(&bytes).is_err());
 }
 
 /// A small random number generator, the same numbers on every run.

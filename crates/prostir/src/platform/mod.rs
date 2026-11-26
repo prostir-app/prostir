@@ -5,8 +5,9 @@
 //! signal to quit) goes to the control loop as events (`crate::events`).
 //!
 //! The desktop is a contract (`contract.rs`): the traits [`Desktop`], [`Output`],
-//! [`Windows`], [`Pointer`] and [`CursorSource`], and the data that says what differs
-//! ([`DesktopCaps`], [`FrameSource`], [`OutputHealth`], [`OutputKey`]). It has an
+//! [`Windows`], [`Pointer`], [`CursorSource`] and [`Injector`] (virtual input), and the
+//! data that says what differs ([`DesktopCaps`], [`FrameSource`], [`OutputHealth`],
+//! [`OutputKey`]). It has an
 //! implementation per desktop, picked once when a session starts ([`connect`]), and
 //! the core holds it as a `Box<dyn Desktop>`. Everything else of the platform has one
 //! implementation per build: each operating system has a module of its own (`linux/`,

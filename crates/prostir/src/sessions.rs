@@ -221,6 +221,10 @@ impl Brain {
                 lead: roles.lead == Some(*key),
                 no_limits,
             });
+            if !s.may(prostir_proto::state::perms::INPUT) {
+                // Without the right (any more), nothing it pressed stays pressed.
+                displays.input(input::Ev::Release { from: s.id });
+            }
             fresh.extend(s.take_fresh());
         }
         let worn = self.sessions.values().any(Session::worn);

@@ -62,11 +62,6 @@ impl Worker {
                 self.end();
                 self.done(Done::Job { job, result });
             }
-            Job::MouseTo { id, x, y } => {
-                self.begin("moving the mouse");
-                self.mouse_to(id, x, y);
-                self.end();
-            }
             Job::WindowHere { job, id, .. } => {
                 self.begin(format!("moving the active window to {id}"));
                 let result = self.window_here(id).map(|()| JobOk::Done);
@@ -128,27 +123,6 @@ impl Worker {
                 v: frac(y, g.y, g.h),
             })
             .ok_or_else(|| anyhow::Error::new(UserError::NotOnDisplays))
-    }
-
-    /// Puts the mouse on screen `id` at `x`/`y` across its image (0..=65535).
-    fn mouse_to(&mut self, id: ScreenId, x: u16, y: u16) {
-        let key = self.slots.get(&id).and_then(Slot::key).cloned();
-        let Some((_, g)) = self
-            .geometries()
-            .into_iter()
-            .find(|(k, _)| Some(k) == key.as_ref())
-        else {
-            warn!("mouse: no {id} on the desktop");
-            return;
-        };
-        let at =
-            |start: i32, len: i32, f: u16| start + (f64::from(len) * f64::from(f) / 65535.0) as i32;
-        let (cx, cy) = (at(g.x, g.w - 1, x), at(g.y, g.h - 1, y));
-        if self.desktop.pointer().is_some_and(|p| p.move_to(cx, cy)) {
-            info!("mouse moved to {id} at {cx},{cy}");
-        } else {
-            warn!("could not move the mouse to {cx},{cy}");
-        }
     }
 
     /// Moves the PC's active window to screen `id` (a monitor, or a display of the PC

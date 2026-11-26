@@ -197,6 +197,13 @@
   monitor the headset cannot take.
 - Hyprland: Prostir finds out once which form of commands this Hyprland takes (older and
   newer versions differ), instead of trying two forms for each command.
+- The mouse can follow your gaze on KDE Plasma too, and the PC is ready for clicks,
+  the wheel and touches from the headset (they come with the headset's next steps). On
+  KDE Plasma the desktop asks once whether Prostir may control the mouse and keyboard,
+  the first time it is needed, and remembers the answer; on Hyprland no question is
+  asked. Where the desktop has no touch, a tap is a click, moving a finger scrolls and
+  holding it is a right click. Nothing stays pressed when the headset leaves or is
+  taken off.
 
 ### Picture and video in the headset
 

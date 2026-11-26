@@ -8,6 +8,7 @@ pub mod plasma;
 pub mod virtual_output;
 pub mod windows;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -16,8 +17,8 @@ use log::info;
 use crate::encoder::Encoder;
 use crate::platform::{
     AddModel, Cursor, CursorSink, CursorSource, DeskPlan, Desktop, DesktopCaps, FrameSource,
-    GpuDevices, Memory, Origin, Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer,
-    Scales, VirtualSpec, Windows,
+    GpuDevices, Injects, Memory, OpenInput, Origin, Output, OutputHealth, OutputKey, Outputs,
+    PhysicalDisplay, Pointer, Scales, VirtualSpec, Windows,
 };
 use feed::Feed;
 use feed::pointer::{CursorTap, SinkSlot};
@@ -49,12 +50,15 @@ pub struct Kde {
     shown: u32,
     /// The pointer apart from the pictures: where its streams tell it.
     cursor: KdeCursor,
+    /// How to open its virtual input (see `linux/input`).
+    input: Option<Arc<dyn OpenInput>>,
     /// The graphics devices to share (KWin hands buffers over: none taken yet).
     _gpu: GpuDevices,
 }
 
 impl Kde {
     pub fn connect(gpu: GpuDevices) -> Result<Self> {
+        let input = super::input::for_kde();
         Ok(Self {
             caps: DesktopCaps {
                 name: "KDE Plasma",
@@ -67,8 +71,8 @@ impl Kde {
                 refresh: vec![60],
                 // KDE's screenshot tool cannot take one output by name.
                 screenshot_one_output: false,
-                // KWin scripts cannot move the mouse.
-                moves_pointer: false,
+                // Through the RemoteDesktop portal (KWin scripts cannot move the mouse).
+                injects: input.as_ref().map_or(Injects::NONE, |(i, _)| *i),
                 // KWin removes the outputs of a connection that is gone.
                 cleans_up_after_crash: true,
             },
@@ -79,6 +83,7 @@ impl Kde {
             woke_display_at: None,
             shown: 0,
             cursor: KdeCursor::default(),
+            input: input.map(|(_, open)| open),
             _gpu: gpu,
         })
     }
@@ -258,6 +263,10 @@ impl Desktop for Kde {
 
     fn cursor(&mut self) -> Option<&mut dyn CursorSource> {
         Some(&mut self.cursor)
+    }
+
+    fn input(&mut self) -> Option<Arc<dyn OpenInput>> {
+        self.input.clone()
     }
 }
 

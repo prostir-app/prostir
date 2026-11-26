@@ -30,6 +30,8 @@ desktop = [
     "dep:wayland-protocols",
     "dep:wayland-protocols-plasma",
     "dep:wayland-protocols-wlr",
+    "dep:wayland-protocols-misc",
+    "dep:reis",
 ]
 # For the end-to-end tests only (crates/prostir/tests/e2e): the platform is a fake desktop in
 # memory instead of KDE Plasma or Hyprland (see src/platform/fake). Never in releases.
@@ -78,6 +80,10 @@ gstreamer-allocators = { version = "0.25", features = ["v1_16"], optional = true
 pipewire = { version = "0.10", features = ["v0_3_33"], optional = true }
 serde_json.workspace = true
 wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = true }
+# The virtual keyboard of wlroots desktops (Hyprland).
+wayland-protocols-misc = { version = "0.3", features = ["client"], optional = true }
+# libei's protocol, for virtual input through the RemoteDesktop portal (KDE Plasma).
+reis = { version = "0.7", optional = true }
 
 [dev-dependencies]
 prostir-testkit.workspace = true

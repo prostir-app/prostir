@@ -408,7 +408,7 @@ impl Displays {
     }
 
     /// Where screen `id` is on the desktop now, if it is there.
-    fn desk_rect(&self, id: ScreenId) -> Option<state::DeskRect> {
+    pub(super) fn desk_rect(&self, id: ScreenId) -> Option<state::DeskRect> {
         let screen = self.screens.get(&id)?;
         let name = match &screen.kind {
             ScreenKind::Physical { key, .. } => key.connector.as_str(),
