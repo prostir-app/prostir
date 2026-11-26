@@ -13,7 +13,8 @@ use super::monitors::Take;
 /// How the hands are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HandLook {
-    /// As before step 8: solid, see-through only near a menu.
+    /// As the release build draws them: balls solid, see-through only near a menu; a
+    /// hand the runtime models, as glass (the palette's `hand_mesh_alpha`).
     #[default]
     Solid,
     /// See-through all the time, this many percent opaque.
@@ -116,9 +117,32 @@ pub struct Trial {
     pub look: HandLook,
     #[cfg(any(test, feature = "preview"))]
     pub fx: FxSet,
+    /// The hands drawn as balls along their bones and a dot where a controller is,
+    /// even where the runtime models them (to compare).
+    #[cfg(any(test, feature = "preview"))]
+    pub own_models: bool,
 }
 
 impl Trial {
+    /// The models the runtime gives for the hands and controllers are drawn where it
+    /// gives them (step 8.6); the preview build can turn them off to compare.
+    pub fn runtime_models(&self) -> bool {
+        #[cfg(any(test, feature = "preview"))]
+        return !self.own_models;
+        #[cfg(not(any(test, feature = "preview")))]
+        true
+    }
+
+    /// How opaque a hand drawn as the runtime models it is (`glass`: the palette's):
+    /// glass, or as opaque as the trial says.
+    pub fn mesh_alpha(&self, glass: f32) -> f32 {
+        #[cfg(any(test, feature = "preview"))]
+        if let HandLook::Percent(p) = self.look {
+            return f32::from(p.min(100)) / 100.0;
+        }
+        glass
+    }
+
     /// How much larger than standard each light and ring is drawn.
     pub fn fx_size(&self) -> f32 {
         #[cfg(any(test, feature = "preview"))]
@@ -166,5 +190,15 @@ mod tests {
         assert_eq!(t.look.alpha(true), 0.3);
         assert_eq!((t.fx.size(), t.fx.alpha()), (1.0, 1.0));
         assert_eq!(HandLook::Percent(20).alpha(true), 0.2);
+        // The runtime's models where it has them, as glass of the palette's.
+        assert!(t.runtime_models());
+        assert_eq!(t.mesh_alpha(0.3), 0.3);
+        let t = Trial {
+            look: HandLook::Percent(50),
+            own_models: true,
+            ..Trial::default()
+        };
+        assert!(!t.runtime_models());
+        assert_eq!(t.mesh_alpha(0.3), 0.5);
     }
 }

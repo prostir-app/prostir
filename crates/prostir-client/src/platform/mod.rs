@@ -3,7 +3,8 @@
 //! ([`meta`], [`htc`], each by its own check), the room behind the monitors by
 //! whichever way the runtime offers ([`room`]), what every headset on Android shares
 //! ([`android`]), the streams' video ([`video`]), the sound ([`sound`]) and the store a
-//! build comes from ([`store`]).
+//! build comes from ([`store`]). A controller's model by `XR_MSFT_controller_model`
+//! has a module of its own ([`msft`]).
 //! The core sees none of it: what the headset can do comes to it as [`crate::caps::Caps`],
 //! made here at the start ([`caps`]).
 //!
@@ -23,6 +24,8 @@ pub mod android;
 pub mod htc;
 #[cfg(target_os = "android")]
 pub mod meta;
+#[cfg(target_os = "android")]
+pub mod msft;
 #[cfg(target_os = "android")]
 pub mod openxr;
 #[cfg(target_os = "android")]
@@ -97,6 +100,23 @@ mod found {
         c.hands = hands;
         c.hand_aim = on.ext_hand_interaction;
         c.menu_gesture = hands && on.fb_hand_tracking_aim;
+        c.controller_models = on.fb_render_model || on.msft_controller_model;
+        c.hand_mesh = hands && on.fb_hand_tracking_mesh;
+        info!(
+            "models: controllers {}, hands {}",
+            if on.fb_render_model {
+                "XR_FB_render_model"
+            } else if on.msft_controller_model {
+                "XR_MSFT_controller_model"
+            } else {
+                "none"
+            },
+            if c.hand_mesh {
+                "XR_FB_hand_tracking_mesh"
+            } else {
+                "none"
+            }
+        );
         info!("headset can: {} off; {c:?}", c.missing());
         c
     }

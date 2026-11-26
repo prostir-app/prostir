@@ -43,10 +43,13 @@ headset-dev-move-as-now = Уздовж променя
 # $power (Number): степінь відстані руки (1, 2, 3)
 headset-dev-move-sphere = Сфера, p = { $power }
 headset-dev-hand-look = Вигляд рук
-headset-dev-hand-solid = Суцільні
+headset-dev-hand-standard = Стандартні
 # $percent (Number): наскільки непрозорі, у відсотках
 headset-dev-hand-percent = { $percent } %
 headset-dev-hand-tips = Кінчики пальців
+headset-dev-models = Руки й контролери
+headset-dev-models-runtime = Моделі системи
+headset-dev-models-own = Кульки
 headset-dev-fx = Ефекти
 headset-dev-fx-thin = Тонкі
 headset-dev-fx-standard = Стандартні

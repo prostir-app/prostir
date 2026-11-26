@@ -36,6 +36,8 @@ glam.workspace = true
 log.workspace = true
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 fontdue = "0.9"
+# The runtimes' controller models (glTF binaries) are read with it (`model::glb`).
+serde_json.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 libc.workspace = true

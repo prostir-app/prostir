@@ -128,6 +128,7 @@ impl Model {
             | Action::DevMovement(_)
             | Action::DevHandLook(_)
             | Action::DevFx(_)
+            | Action::DevOwnModels(_)
             | Action::DevRecord
             | Action::DevReadFeel => self.act_dev_input(action),
         }

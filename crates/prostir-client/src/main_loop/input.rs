@@ -87,19 +87,24 @@ pub fn read(
                 let turn = xrutil::quat(l.pose.orientation);
                 (vec3(l.pose.position), turn * -Vec3::Z, turn * Vec3::X)
             });
-    // Tracked hands: joints for drawing, fingertips for touching the menu.
-    let joints: [Option<[(Vec3, f32); 26]>; 2] = match &stage.hand_trackers {
-        Some(trackers) if kept.focused && hand_mode != HandMode::Hidden => {
-            std::array::from_fn(|h| {
-                local
-                    .locate_hand_joints(&trackers[h], time)
-                    .ok()
-                    .flatten()
-                    .and_then(|l| overlay::joints(&l))
-            })
+    // Tracked hands: joints for drawing, fingertips for touching the menu, and their
+    // poses for the hands' models.
+    let mut joints: [Option<[(Vec3, f32); 26]>; 2] = [None, None];
+    let poses = &mut kept.buffers.poses;
+    poses.joints = [None, None];
+    if let Some(trackers) = &stage.hand_trackers
+        && kept.focused
+        && hand_mode != HandMode::Hidden
+    {
+        for h in 0..2 {
+            let Some(l) = local.locate_hand_joints(&trackers[h], time).ok().flatten() else {
+                continue;
+            };
+            joints[h] = overlay::joints(&l);
+            poses.joints[h] = joints[h].and_then(|_| overlay::joint_poses(&l));
         }
-        _ => [None, None],
-    };
+    }
+    poses.grips = shell.controls.grips;
     shell.controls.hands_from_joints(&joints, head, forward);
     // The left hand's menu gesture counts as the menu button.
     let menu_gesture = match &stage.hand_trackers {

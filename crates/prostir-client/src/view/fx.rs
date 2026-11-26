@@ -77,10 +77,41 @@ impl Fx {
     }
 }
 
+/// The models the shell has on the GPU for each side (left 0, right 1), as the runtime
+/// gave them (step 8.6): a controller's, a hand's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Loaded {
+    pub controllers: [bool; 2],
+    pub hands: [bool; 2],
+}
+
+/// A hand drawn as its model: moved by `push` (stopped on a monitor it presses),
+/// tinted `color` (linear, straight alpha).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HandDraw {
+    pub push: Vec3,
+    pub color: [f32; 4],
+}
+
+/// The models the hands' layer draws this frame, besides the list: a controller's
+/// where it is held (in place of its dot), a hand's in place of its balls.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Meshes {
+    pub controllers: [bool; 2],
+    pub hands: [Option<HandDraw>; 2],
+}
+
+impl Meshes {
+    pub fn is_empty(&self) -> bool {
+        self.controllers == [false; 2] && self.hands == [None; 2]
+    }
+}
+
 /// The frame's list, and the palette it was drawn with.
 #[derive(Debug)]
 pub struct Effects {
     list: Vec<Fx>,
+    meshes: Meshes,
     palette: Palette,
     shades: Shades,
 }
@@ -95,30 +126,42 @@ impl Effects {
     pub fn new() -> Self {
         Self {
             list: Vec::with_capacity(CAPACITY),
+            meshes: Meshes::default(),
             palette: Palette::DEFAULT,
             shades: Palette::DEFAULT.shades(),
         }
     }
 
-    /// This frame's list (the shell sorts it in place for each eye).
-    pub fn list(&mut self) -> &mut [Fx] {
-        &mut self.list
+    /// This frame's list (the shell sorts it in place for each eye) and models.
+    pub fn list(&mut self) -> (&mut [Fx], &Meshes) {
+        (&mut self.list, &self.meshes)
     }
 
+    /// Nothing to draw this frame: no effect and no model.
     pub fn is_empty(&self) -> bool {
-        self.list.is_empty()
+        self.list.is_empty() && self.meshes.is_empty()
     }
 
-    /// This frame's list, made anew from the model and the hands.
-    pub fn fill(&mut self, model: &mut Model, hands: &Hands, input: &FrameInput, now: Instant) {
+    /// This frame's list, made anew from the model and the hands, with the models the
+    /// shell has (`loaded`).
+    pub fn fill(
+        &mut self,
+        model: &mut Model,
+        hands: &Hands,
+        input: &FrameInput,
+        loaded: Loaded,
+        now: Instant,
+    ) {
         let palette = model.palette();
         if palette != self.palette {
             self.palette = palette;
             self.shades = palette.shades();
         }
         self.list.clear();
+        self.meshes = Meshes::default();
         let mut d = Draw {
             out: &mut self.list,
+            meshes: &mut self.meshes,
             p: &self.palette,
             c: &self.shades,
         };
@@ -126,13 +169,14 @@ impl Effects {
         d.presses(model, hands, now);
         d.mouse(model);
         d.magnet(model, hands);
-        d.hands(model, hands, input);
+        d.hands(model, hands, input, loaded);
     }
 }
 
 /// The frame's list as it is filled, with the palette.
 struct Draw<'a> {
     out: &'a mut Vec<Fx>,
+    meshes: &'a mut Meshes,
     p: &'a Palette,
     c: &'a Shades,
 }
@@ -321,10 +365,18 @@ impl Draw<'_> {
     /// (the compositor has no depth for them), so near a menu they would cover its
     /// text: the hand holding the palm menu is not drawn, and a hand about to touch a
     /// menu is see-through. A hand pressing a monitor is drawn stopped on its surface.
-    fn hands(&mut self, model: &Model, hands: &Hands, input: &FrameInput) {
+    ///
+    /// Where the shell has the runtime's models (`loaded`), a hand is drawn as its
+    /// model, see-through glass, and a controller as its model in place of its dot;
+    /// with the room behind the monitors, where the person sees their own hands, a
+    /// hand's model would double them: only its fingertips are drawn (the step 8
+    /// note, section 6).
+    fn hands(&mut self, model: &Model, hands: &Hands, input: &FrameInput, loaded: Loaded) {
         let (p, c) = (*self.p, *self.c);
         let world = model.world();
         let trial = model.trial();
+        let runtime_models = trial.runtime_models();
+        let room = model.settings().background.is_room();
         let menu_hand = usize::from(model.settings().left_handed);
         for (h, j) in input.joints.iter().enumerate() {
             let Some(j) = j else { continue };
@@ -332,10 +384,9 @@ impl Draw<'_> {
                 continue;
             }
             let mut j = *j;
-            if let Some(push) = hands.push(h) {
-                for joint in &mut j {
-                    joint.0 += push;
-                }
+            let push = hands.push(h).unwrap_or(Vec3::ZERO);
+            for joint in &mut j {
+                joint.0 += push;
             }
             let tip = j[INDEX_TIP].0;
             let near_palm = world
@@ -343,8 +394,15 @@ impl Draw<'_> {
                 .is_some_and(|w| w.position.distance(tip) < 0.15);
             let near = near_palm || hands.poking(h) || hands.near_monitor(h).is_some();
             let color = [c.hand[0], c.hand[1], c.hand[2], trial.hand_alpha(near)];
-            if trial.tips_only() {
+            let mesh = runtime_models && loaded.hands[h];
+            if trial.tips_only() || (mesh && room) {
                 tip_balls(&j, color, self.out);
+            } else if mesh {
+                let alpha = (trial.mesh_alpha(p.hand_mesh_alpha) * p.strength).clamp(0.0, 1.0);
+                self.meshes.hands[h] = Some(HandDraw {
+                    push,
+                    color: [c.hand[0], c.hand[1], c.hand[2], alpha],
+                });
             } else {
                 hand_balls(&j, color, self.out);
             }
@@ -362,9 +420,14 @@ impl Draw<'_> {
             if let Some(ray) = hand.ray
                 && !hand.is_hand
             {
-                // Where the controller is, since it is not visible otherwise.
-                let color = [c.controller[0], c.controller[1], c.controller[2], 1.0];
-                self.out.push(Fx::ball(ray.origin, p.controller_m, color));
+                if runtime_models && loaded.controllers[h] {
+                    // As it looks, where it is held (the shell places it).
+                    self.meshes.controllers[h] = true;
+                } else {
+                    // Where the controller is, since it is not visible otherwise.
+                    let color = [c.controller[0], c.controller[1], c.controller[2], 1.0];
+                    self.out.push(Fx::ball(ray.origin, p.controller_m, color));
+                }
             }
         }
     }

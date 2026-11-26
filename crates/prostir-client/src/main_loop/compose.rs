@@ -39,6 +39,8 @@ pub struct Buffers {
     views: [xr::View; 2],
     /// The hands, rays and effects of the frame.
     pub effects: Effects,
+    /// Where the controllers' and hands' models go this frame.
+    pub poses: overlay::Poses,
     /// What is shown, where, in which order.
     pub plan: Plan,
     /// Each monitor's colour scale, in the plan's order.
@@ -177,7 +179,7 @@ pub fn end(
         && xrutil::locate_views(session, time, local, &mut buffers.views))
     .then_some(&buffers.views[..]);
     if let Some(ov) = &mut stage.overlay {
-        ov.render(gl, views.unwrap_or(&[]), effects.list())?;
+        ov.render(gl, views.unwrap_or(&[]), effects.list(), &buffers.poses)?;
     }
     let projection_views = stage
         .overlay

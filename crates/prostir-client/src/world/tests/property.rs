@@ -976,9 +976,17 @@ fn an_add_into_the_row_leaves_the_row_over_it_in_view() {
     let sim = &mut desk.sim;
     sim.world.preset_chosen(&sim.s, sim.now);
     desk.sim.after(1000);
-    assert_eq!(desk.out_of_view(false), [], "in view as laid out");
+    assert_eq!(
+        desk.out_of_view(false),
+        Vec::<u32>::new(),
+        "in view as laid out"
+    );
     desk.add(&mut Lcg(1), false);
     desk.sim.after(1000);
-    assert_eq!(desk.out_of_view(false), [], "in view with it");
+    assert_eq!(
+        desk.out_of_view(false),
+        Vec::<u32>::new(),
+        "in view with it"
+    );
     assert_eq!(desk.cutting(), []);
 }

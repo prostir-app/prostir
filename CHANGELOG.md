@@ -260,6 +260,12 @@
   sphere too, staying parallel to the wall.
 - Holding a pinch on something shows a ring under it and one closing in until it is
   taken; taking it shows a short wave, and a small ring marks where the hand holds it.
+- Controllers show as the system's own models of them, where the system gives them
+  (on Quest, and on headsets with `XR_MSFT_controller_model`), in place of the small
+  dot; the buttons do not move yet, and a model's texture in KTX2 is drawn in one grey.
+  Hands show as the system's model of a hand, see-through, where the system gives one
+  (`XR_FB_hand_tracking_mesh`); with the "Room" background only the fingertips, since
+  your own hands are in view. Without these, hands and controllers look as before.
 - "Reset" beside "Layout" on the Monitors page (press twice) and `prostir ctl reset`
   put the monitors back as the layout places them, in front of you, at their standard
   size.

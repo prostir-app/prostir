@@ -15,6 +15,8 @@
 pub enum Role {
     /// The ray (a pose).
     Aim,
+    /// Where the controller is held (a pose): its model is drawn there.
+    Grip,
     /// Click and point (a value from 0 to 1, or a click).
     Select,
     /// Take a monitor (a value, or a click).
@@ -108,6 +110,7 @@ pub const PROFILES: &[Profile] = &[
         hands: false,
         inputs: &[
             each("input/aim/pose", Role::Aim),
+            each("input/grip/pose", Role::Grip),
             each("input/select/click", Role::Select),
             each("output/haptic", Role::Haptic),
             left("input/menu/click", Role::Menu),
@@ -119,6 +122,7 @@ pub const PROFILES: &[Profile] = &[
         hands: false,
         inputs: &[
             each("input/aim/pose", Role::Aim),
+            each("input/grip/pose", Role::Grip),
             each("input/squeeze/value", Role::Grab),
             each("input/trigger/value", Role::Select),
             each("input/thumbstick", Role::Stick),
@@ -134,6 +138,7 @@ pub const PROFILES: &[Profile] = &[
         hands: false,
         inputs: &[
             each("input/aim/pose", Role::Aim),
+            each("input/grip/pose", Role::Grip),
             each("input/squeeze/value", Role::Grab),
             each("input/trigger/value", Role::Select),
             each("input/thumbstick", Role::Stick),
@@ -149,6 +154,7 @@ pub const PROFILES: &[Profile] = &[
         hands: false,
         inputs: &[
             each("input/aim/pose", Role::Aim),
+            each("input/grip/pose", Role::Grip),
             each("input/squeeze/click", Role::Grab),
             each("input/trigger/value", Role::Select),
             each("input/thumbstick", Role::Stick),
@@ -194,7 +200,7 @@ mod tests {
     use super::*;
 
     /// Every profile points and clicks with both hands; every controller opens the
-    /// menu; only the hands' profile has a pinch-ready input.
+    /// menu and says where it is held; only the hands' profile has a pinch-ready input.
     #[test]
     fn every_profile_points_and_clicks() {
         for p in PROFILES {
@@ -211,6 +217,12 @@ mod tests {
             assert_eq!(menu, !p.hands, "{}: a menu button", p.path);
             let ready = p.inputs.iter().any(|i| i.role == Role::PinchReady);
             assert_eq!(ready, p.hands, "{}: pinch-ready", p.path);
+            // A controller's model is drawn where it is held.
+            let grip = p
+                .inputs
+                .iter()
+                .any(|i| i.role == Role::Grip && i.side == Side::Each);
+            assert_eq!(grip, !p.hands, "{}: where it is held", p.path);
         }
     }
 

@@ -131,6 +131,8 @@ pub struct Palette {
     pub ray_alpha: f32,
     /// Where a controller is.
     pub controller_m: f32,
+    /// A hand drawn as the runtime models it: see-through glass, this opaque.
+    pub hand_mesh_alpha: f32,
 }
 
 impl Palette {
@@ -184,6 +186,7 @@ impl Palette {
         ray_m: 0.0018,
         ray_alpha: 0.85,
         controller_m: 0.012,
+        hand_mesh_alpha: 0.3,
     };
 
     /// This palette with every effect `scale` times as large and `strength` times as
