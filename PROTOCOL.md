@@ -544,7 +544,7 @@ fit in 64 KiB), the host once it has sent `Snapshot`.
 ```
 
 - `tag`: which message (see [Message reference](#5-message-reference)). Host→client tags
-  are 1 to 40, client→host tags 101 to 141 (some of them retired).
+  are 1 to 44, client→host tags 101 to 147 (some of them retired).
 - `length`: payload length in bytes, **little-endian**, at most the limit above.
 
 ### Encoding
@@ -1484,6 +1484,12 @@ While the pointer is apart, the host sends:
   down to stream, a look scaled down with it (a look of its own, with its own
   number).
 
+Which desktops tell the pointer apart is the host's (implementation-defined; the
+current host: KDE Plasma, and Sway 1.11+ and other wlroots compositors that offer
+ext-image-copy-capture cursor sessions. On Hyprland the pointer stays in the pictures for now: its
+pointer sessions do not yet give clear pictures of it, so the host does not name
+feature 16 there).
+
 The headset draws the look over the display at that point, the size it has in the
 picture (`w` pixels of the picture's width), and hides it with the display. It can
 draw the pointer where its own `MouseTo` sent it until `CursorAt` catches up
@@ -1522,9 +1528,11 @@ that host goes nowhere, and where it is given (implementation-defined).
   second.
 - **Not worn, nothing pressed:** input from a headset that says it is not worn is
   dropped.
-- **The desktop asks first** where it does (KDE Plasma and GNOME, through the
-  RemoteDesktop portal): once, the first time input is needed, and it keeps the
-  answer. Until then input goes nowhere. Where the person says no, or later stops the
+- **The desktop asks first** where it does (implementation-defined; the current host
+  on KDE Plasma, through the RemoteDesktop portal; on Hyprland it uses the desktop's virtual pointer and
+  keyboard, and where there is none `/dev/uinput`, if it may be written, neither of
+  which asks): once, the first time
+  input is needed, and it keeps the answer. Until then input goes nowhere. Where the person says no, or later stops the
   desktop's remote control, the host sends the headsets with the input right a
   `Problem` with `NOT_ALLOWED` and does not ask again until it starts again; where the
   desktop's input does not open, a `Problem` with `DESKTOP` (each once, until input
@@ -1714,8 +1722,8 @@ is only a label (the host shows it in its local API).
   the app's own layers (the background, the menu, its button, the hands, the dots of
   the two pointing rays and the toast), so pointing or a message never pushes a monitor
   out. The host does not use `layers_max`; it counts streams by `streams_max`.
-- Features 1 (commands), 3 (microphone), 6 (gaze), 7 (displays of the PC) and 8 (window
-  panels) always; 2 (volume) where the system lets the app set the media volume; 9
+- Features 1 (commands), 3 (microphone), 6 (gaze), 7 (displays of the PC), 8 (window
+  panels) and 10 (draws the PC's pointer itself) always; 2 (volume) where the system lets the app set the media volume; 9
   (rows bottom first) where the compositor cannot turn a layer over.
 
 **What it shows.** Each stream is a layer of its own, with the room and the menu around

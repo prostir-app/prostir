@@ -156,10 +156,14 @@ lands in a Prostir folder in your Pictures folder (usually `~/Pictures/Prostir`)
 
 The arrangement can follow your head: turn or move away and, once you have clearly
 looked elsewhere, the monitors glide after you. The mouse can follow your gaze,
-jumping to the monitor you look at. On KDE Plasma the desktop asks once whether
+jumping to the monitor you look at. That needs your yes on the PC: a headset may
+not control the mouse and keyboard until you allow it (the first time it tries, the PC
+asks with a notification, Allow or Not now; the Headsets page of the settings window
+has a switch for each headset). The same yes covers the clicks, the wheel and touches
+the PC is ready for, which the headset's hands do not send yet. On KDE Plasma the desktop then asks once more whether
 Prostir may control the mouse and keyboard (answer with the PC's own mouse or
-keyboard, and let it remember the answer). On both desktops the "Mouse?" button shows
-where the pointer is, with rings.
+keyboard, and let it remember the answer); on Hyprland nothing more is asked. On both
+desktops the "Mouse?" button shows where the pointer is, with rings.
 
 With your hands shown, hold your left palm open towards your face for a quarter of a
 second and a round menu appears on it: In front, Focus, Cinema, Mouse?, Screenshot and

@@ -61,7 +61,6 @@
   monitor. Monitors kept from before are not in Auto until you choose it. A monitor
   added in Auto starts at the scale it needs, and profiles keep which monitors are in
   Auto.
-
 - KDE Plasma 6.0 to 6.7: KWin hides its screencast interface from a program that no
   application shortcut names, so Prostir found no way to add monitors. The shortcut
   now lists the interface and names the program by its real path in every package
@@ -92,6 +91,9 @@
   overlaps the row a little at its ends, the nearer monitor in front, never by more
   than 12 % of a monitor's height; where it would, the monitor is lifted clear). Where
   the two overlap, the picture no longer flickers between them as you move your head.
+  Line up no longer puts monitors into each other: a row leaned back stands with the
+  edges nearer you meeting, and a row is never closed onto the row before it through
+  one of its monitors.
 - A monitor stays in its row while you move it about. A portrait monitor between two
   others no longer jumps into a row of its own when one of them is nudged; a monitor
   leaves its row only when you clearly move it out.
@@ -159,7 +161,7 @@
   with the one it had. A desktop that does not respond for 15 s is said in the
   headset, in the tray and by `prostir ctl status`; after 2 min Prostir quits with an
   error instead of hanging, so that whatever started it can start it again.
-- Sharper text: on a Quest 3, Quest 3S, Quest 2 or Quest Pro a new layout makes each
+- Larger monitors for sharper text: on a Quest 3, Quest 3S, Quest 2 or Quest Pro a new layout makes each
   monitor as large as the headset's own pixels, one pixel of the desktop on one of the
   headset's (a 1920×1080 monitor was shown 30 % smaller than that). The monitors stay
   at the same distance and get larger. Where a layout does not fit around you that
@@ -198,16 +200,20 @@
 - Hyprland: Prostir finds out once which form of commands this Hyprland takes (older and
   newer versions differ), instead of trying two forms for each command.
 - The mouse can follow your gaze on KDE Plasma too, and the PC is ready for clicks,
-  the wheel and touches from the headset (they come with the headset's next steps). On
-  KDE Plasma the desktop asks once whether Prostir may control the mouse and keyboard,
-  the first time it is needed, and remembers the answer; on Hyprland no question is
-  asked. Where the desktop has no touch, a tap is a click, moving a finger scrolls and
-  holding it is a right click. Where it has touch (KDE Plasma), the pointer hides while
-  a finger touches, as on a touch screen, and shows again once the mouse moves. Nothing
-  stays pressed when the headset leaves or is taken off.
+  the wheel and touches from the headset (the headset's hands do not send them yet; all
+  of it needs your yes, see "The mouse and keyboard only with your yes"). Where the
+  desktop has no touch, a tap is a click, moving a finger scrolls and holding it is a
+  right click. Where it has touch (KDE Plasma), the pointer hides while a finger
+  touches, as on a touch screen, and shows again once the mouse moves. Nothing stays
+  pressed when the headset leaves or is taken off.
 
 ### Picture and video in the headset
 
+- On KDE Plasma the headset draws the PC's mouse pointer itself, as a layer over the
+  monitor, so it follows the mouse without waiting for the next picture. The PC's
+  pointer is no longer in the pictures then. It is hidden where the PC hides it (a
+  full-screen video, a game, a touch). When a headset without this is connected, and on Hyprland for now,
+  the pointer stays in the pictures as before.
 - A monitor whose picture breaks starts again by itself: the headset makes its video
   decoder again after a short pause (0.2 s, growing to 5 s), asks the PC for a fresh
   picture, and after a few failures in a row makes its picture surface for the monitor again.
@@ -291,9 +297,6 @@
   monitor in a hand is let go, and the headset says so. The menu and the keyboard window
   still move, and a layout, "Line up" and "Reset" still move the monitors. Off by
   default.
-- "Line up" no longer puts monitors into each other: a row leaned back stands with the
-  edges nearer you meeting, and a row is never closed onto the row before it through
-  one of its monitors.
 
 ### Settings
 
@@ -347,6 +350,9 @@
   headset follows at once. An AI agent over MCP can turn it off but never on.
 - In the headset, a press on a monitor of a PC that has not allowed it says once where
   to turn it on.
+- On KDE Plasma the desktop asks once more, the first time input is needed, whether
+  Prostir may control the mouse and keyboard, and remembers the answer; on Hyprland no
+  such question is asked. Where the person says no, the headset is told.
 - **Existing pairings lose the mouse and keyboard after this update until you allow
   them**: a headset without an `access` line in `settings.txt` now has every right but
   `input` and `clipboard`. A headset with an `access` line keeps exactly the rights its
@@ -481,9 +487,8 @@
 - What the tray asks of the headset (bring the monitors in front, No limits) waits for
   the headset's answer; a headset that does not answer within 30 s is written in the
   log instead of being waited for.
-- A second headset can be given fewer rights with a line in `settings.txt`, for
-  example only moving the mouse; the main headset can do everything, as before. A
-  mistyped line gives that headset no rights rather than all of them.
+- A headset can be given more or fewer rights with a line in `settings.txt` (see the
+  README). A mistyped line gives that headset no rights rather than all of them.
 
 ## 0.1.3 (2026-11-20)
 
