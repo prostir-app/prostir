@@ -164,6 +164,8 @@ pub fn build(m: &Model) -> UiState {
         custom_available: headset.custom_panorama,
         curve_available: world.curve_supported(),
         keyboard_available: caps.offers(Offer::KeyboardWindow),
+        keyboard_tracking: caps.keyboard_tracking,
+        keyboard_follows: m.keyboard_follows(),
         hands_available: caps.offers(Offer::Hands),
         display_rates: caps
             .rate_choice()

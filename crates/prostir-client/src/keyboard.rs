@@ -2,8 +2,9 @@
 //! the window onto the room that settles over it, so the person types without taking
 //! the headset off. The shell reads the keyboard's pose from the runtime
 //! (`XR_FB_keyboard_tracking`, read by the platform's part) and gives it as [`Seen`];
-//! [`Follow`] eases the window towards it, and keeps it where it was when the keyboard
-//! goes out of view. Without a tracked keyboard the window is the one placed by hand.
+//! [`Follow`] eases the window towards it, and keeps it there a moment when the keyboard
+//! goes out of view. Without a tracked keyboard (none, gone, or out of view longer than
+//! [`LOST_AFTER`]) the window is the one placed by hand, and a hand can take it again.
 //!
 //! Nothing here allocates, and the file of the hand-placed window is never written for
 //! it: the tracked place is only for this run.
@@ -19,7 +20,8 @@ use crate::layout::Placement;
 /// The window reaches this far past the keyboard on every side, so the hands show
 /// around it.
 pub const MARGIN: f32 = 0.03;
-/// Out of view longer than this, the window stays where the keyboard was.
+/// Out of view longer than this, the keyboard counts as gone: the window is the one
+/// placed by hand again.
 pub const LOST_AFTER: Duration = Duration::from_secs(2);
 /// A keyboard farther than this from where the window was is not eased to: the window
 /// goes there at once (a new keyboard, or the room moved).
@@ -30,8 +32,10 @@ const EASE: f32 = 14.0;
 const SIDE_MIN: f32 = 0.1;
 const SIDE_MAX: f32 = 1.2;
 
-/// A tracked keyboard, as the runtime places it: the middle of its top face, the
-/// rotation with +Y up from the keys, and the sides along X (width) and Z (depth).
+/// A tracked keyboard, as the runtime places it: the origin in the middle of its top
+/// face (the middle of the box along X and Z, its top along Y: the keyboard lies wholly
+/// below, as the extension's spec says), the rotation with +Y up from the keys, and the
+/// sides along X (width) and Z (depth). The window lies in that top face.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Seen {
     pub position: Vec3,
@@ -86,10 +90,17 @@ pub struct Follow {
 
 impl Follow {
     /// A frame `dt` seconds after the last, at `now`, with the keyboard `seen` (`None`:
-    /// not in view). Where the window goes, once the keyboard has been seen: it stays
-    /// there after the keyboard is gone, which is what [`Follow::lost`] says.
+    /// not in view). Where the window goes: eased over the keyboard, kept where it was
+    /// while the keyboard is out of view for up to [`LOST_AFTER`], then `None` (the
+    /// keyboard is gone: the next sight starts afresh).
     pub fn step(&mut self, now: Instant, dt: f32, seen: Option<Seen>) -> Option<Window> {
         let Some(goal) = seen.filter(Seen::sane).map(|s| s.window()) else {
+            if self
+                .seen_at
+                .is_some_and(|at| now.saturating_duration_since(at) > LOST_AFTER)
+            {
+                self.reset();
+            }
             return self.window;
         };
         self.seen_at = Some(now);
@@ -108,19 +119,6 @@ impl Follow {
             _ => goal,
         });
         self.window
-    }
-
-    /// The keyboard has not been in view for [`LOST_AFTER`], though it was seen before:
-    /// the window is where it was.
-    pub fn lost(&self, now: Instant) -> bool {
-        self.seen_at
-            .is_some_and(|at| now.saturating_duration_since(at) > LOST_AFTER)
-    }
-
-    /// Whether the keyboard is in view now (seen in the last frame or within
-    /// [`LOST_AFTER`]).
-    pub fn tracking(&self, now: Instant) -> bool {
-        self.window.is_some() && !self.lost(now)
     }
 
     /// Forgets where the keyboard was (the follow turned off, or the window hidden): the
@@ -208,23 +206,21 @@ mod tests {
         assert_eq!(far, seen(2.0).window());
     }
 
-    /// Out of view the window stays; after two seconds it is said lost, and a new sight
-    /// is followed again.
+    /// Out of view the window stays a moment; after two seconds the keyboard is gone
+    /// (no window to follow), and a new sight is followed again.
     #[test]
-    fn stays_where_the_keyboard_was() {
+    fn stays_a_moment_then_lets_go() {
         let t0 = Instant::now();
         let mut f = Follow::default();
-        assert!(!f.lost(t0) && !f.tracking(t0));
         let at = f.step(t0, 0.011, Some(seen(0.0))).unwrap();
-        assert!(f.tracking(t0));
         let later = t0 + Duration::from_secs(1);
-        assert_eq!(f.step(later, 0.011, None), Some(at));
-        assert!(f.tracking(later));
+        assert_eq!(f.step(later, 0.011, None), Some(at), "stays a moment");
         let long = t0 + Duration::from_secs(3);
-        assert_eq!(f.step(long, 0.011, None), Some(at), "stays");
-        assert!(f.lost(long) && !f.tracking(long));
-        assert!(f.step(long, 0.011, Some(seen(0.0))).is_some());
-        assert!(f.tracking(long));
+        assert_eq!(f.step(long, 0.011, None), None, "gone: the hand's window");
+        assert_eq!(f.step(long, 0.011, None), None);
+        // Seen again, far from where it was: there at once, not eased from the old place.
+        let back = f.step(long, 0.011, Some(seen(0.2))).unwrap();
+        assert_eq!(back, seen(0.2).window());
         f.reset();
         assert_eq!(f.step(long, 0.011, None), None);
     }

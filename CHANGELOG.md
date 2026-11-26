@@ -268,9 +268,11 @@
   your own hands are in view. Without these, hands and controllers look as before.
 - The keyboard window settles over your own keyboard by itself where the headset
   tracks one (`XR_FB_keyboard_tracking`, on Quest): the camera view sits on the
-  keyboard with a margin of 3 cm so the hands show, and stays there when the keyboard
-  leaves your view. Where the headset does not track it, or will not for the app, the
-  window is placed by hand as before.
+  keyboard with a margin of 3 cm so the hands show, and stays there for two seconds
+  when the keyboard leaves your view; after that, the window placed by hand is back and
+  can be moved again. The menu says whether the window follows the keyboard. Where the
+  headset does not track it, or will not for the app (said once), the window is placed
+  by hand as before.
 - "Reset" beside "Layout" on the Monitors page (press twice) and `prostir ctl reset`
   put the monitors back as the layout places them, in front of you, at their standard
   size.

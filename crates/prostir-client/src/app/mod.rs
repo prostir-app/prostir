@@ -898,6 +898,11 @@ impl Model {
         self.keyboard_window
     }
 
+    /// The window onto the keyboard lies over the keyboard the headset tracks now.
+    pub fn keyboard_follows(&self) -> bool {
+        self.world.keyboard_tracked()
+    }
+
     /// How deep the window onto the keyboard is (metres).
     pub fn keyboard_depth(&self) -> f32 {
         self.keyboard_depth
@@ -1107,7 +1112,8 @@ impl Model {
         // The window onto the keyboard: in front of the user at desk height the first
         // time, then wherever it was moved.
         // With a keyboard the headset tracks, it settles over that one instead (and is
-        // not taken by a hand: it is where the keyboard is).
+        // not taken by a hand: it is where the keyboard is); once the keyboard is gone,
+        // the hand's window is back.
         let shown = self.keyboard_wanted();
         let tracked = shown
             .then(|| {
@@ -1117,6 +1123,10 @@ impl Model {
             .flatten();
         if !shown {
             self.keyboard_follow.reset();
+        }
+        if tracked.is_some() != self.world.keyboard_tracked() {
+            // The menu says whether the window follows the keyboard.
+            self.rev += 1;
         }
         self.world.set_keyboard_tracked(tracked.is_some());
         let shown =
@@ -1364,10 +1374,14 @@ impl Model {
                 self.show_error(text);
             }
             // Not tried again for this run; the window is the one placed by hand.
+            // Said once: the event comes only while the tracking is on.
             PlatformEvent::KeyboardTrackingFailed => {
                 self.headset.caps.keyboard_tracking = false;
                 self.keyboard_follow.reset();
                 self.world.set_keyboard_tracked(false);
+                self.rev += 1;
+                let text = self.texts().t("headset-note-keyboard-untracked").to_owned();
+                self.show_toast(text);
             }
             PlatformEvent::CustomPanorama(there) => self.headset.custom_panorama = there,
             PlatformEvent::LayersHidden(hidden) => self.layers_hidden(hidden),

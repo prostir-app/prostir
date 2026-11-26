@@ -2931,9 +2931,23 @@ impl World {
         self.wrist = place;
     }
 
-    /// The keyboard window is over the keyboard the headset tracks (or not).
+    /// The keyboard window is over the keyboard the headset tracks (or not). When the
+    /// tracking starts, a hand moving the hand-placed window lets go of it where it is
+    /// (the drag is cut short: the window's file is not written for it).
     pub fn set_keyboard_tracked(&mut self, on: bool) {
+        if on && !self.keyboard_tracked {
+            for held in &mut self.held {
+                if *held == Some(Thing::Keyboard) {
+                    *held = None;
+                }
+            }
+        }
         self.keyboard_tracked = on;
+    }
+
+    /// Whether the keyboard window is over the keyboard the headset tracks.
+    pub fn keyboard_tracked(&self) -> bool {
+        self.keyboard_tracked
     }
 
     /// The keyboard window's place: in front of the user at desk height the first

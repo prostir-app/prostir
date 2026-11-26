@@ -1,8 +1,14 @@
 //! The person's keyboard as the headset tracks it (`XR_FB_keyboard_tracking`, step
 //! 8.7): whether the runtime tracks one, which, and where it lies each frame. The
-//! runtime needs no permission of the app for the question to be asked; if it says it
-//! needs one (or does not do it), the tracking is given up for the run
-//! ([`Poll::Unavailable`]) and the window onto the keyboard stays where it was put.
+//! runtime needs no permission of the app for the question to be asked (the manifest
+//! names its tracked-keyboard feature, not required); if it says it needs one (or
+//! does not do it), the tracking is given up for the run ([`Poll::Unavailable`]) and
+//! the window onto the keyboard is the one placed by hand.
+//!
+//! Not `XR_META_dynamic_object_keyboard`, though it is the newer way: it is a preview
+//! extension (an app with it must say it uses experimental features, which the store
+//! refuses), and its keyboard is found by a spatial-entity query, which takes the
+//! scene permission (`USE_SCENE`), a new one the person would be asked for.
 //!
 //! Which keyboard is asked about once in a while, never in every frame; a frame only
 //! locates the space of the one found, and allocates nothing.

@@ -582,6 +582,24 @@ fn a_click_on_the_menu_is_the_pictures_action() {
     assert_eq!(sim.saves(), [persist::File::Settings]);
 }
 
+/// The keyboard seen while a hand moves the hand-placed window: the hand lets go of it,
+/// and the window goes over the keyboard.
+#[test]
+fn a_tracked_keyboard_cuts_a_drag_short() {
+    use crate::interaction::Scene as _;
+    let mut caps = full_caps();
+    caps.keyboard_tracking = true;
+    let mut sim = Sim::of(caps);
+    sim.menu(Action::KeyboardWindow(true));
+    sim.frames_seeing(50 * MS, None);
+    let at = sim.m.hold(Thing::Keyboard).expect("taken");
+    sim.m.drag(Thing::Keyboard, at, Vec3::ZERO);
+    assert!(sim.m.world().holds(Thing::Keyboard));
+    sim.frames_seeing(50 * MS, Some(keyboard_on_desk()));
+    assert!(!sim.m.world().holds(Thing::Keyboard), "let go");
+    assert!(sim.m.keyboard_follows());
+}
+
 /// A stream that ends, and a display gone from the PC's list, drop their streams; a
 /// stream that starts again for the same display is the shell's to keep.
 #[test]
@@ -3072,9 +3090,11 @@ impl Sim {
 }
 
 /// With a keyboard the headset tracks, the window settles over it with the margin, stays
-/// there when the keyboard is out of view, and nothing is saved for it.
+/// there a moment when the keyboard is out of view, then is the hand's window again;
+/// nothing is saved for it.
 #[test]
 fn the_keyboard_window_settles_over_a_tracked_keyboard() {
+    use crate::interaction::Scene as _;
     let mut caps = full_caps();
     caps.keyboard_tracking = true;
     let mut sim = Sim::of(caps);
@@ -3093,9 +3113,19 @@ fn the_keyboard_window_settles_over_a_tracked_keyboard() {
     assert!(at.position.distance(kb.position) < 1e-3);
     assert!((at.width - (0.44 + 2.0 * crate::keyboard::MARGIN)).abs() < 1e-3);
     assert!((sim.m.keyboard_depth() - (0.14 + 2.0 * crate::keyboard::MARGIN)).abs() < 1e-3);
-    // Out of view for long: it stays.
-    sim.frames_seeing(Duration::from_secs(5), None);
+    assert!(sim.m.keyboard_follows());
+    // Out of view a moment: it stays.
+    sim.frames_seeing(Duration::from_secs(1), None);
     assert_eq!(sim.m.keyboard_window(), Some(at));
+    assert!(sim.m.keyboard_follows());
+    // Out of view for long: gone, and the window is the hand's again, which a hand
+    // can take.
+    sim.frames_seeing(Duration::from_secs(3), None);
+    assert_eq!(sim.m.keyboard_window(), Some(by_hand));
+    assert!(!sim.m.keyboard_follows());
+    assert!(sim.m.hold(Thing::Keyboard).is_some(), "taken by a hand");
+    sim.m.let_go(sim.now, Thing::Keyboard);
+    sim.saves();
     // Hidden by the person: gone.
     sim.menu(Action::KeyboardWindow(false));
     sim.frames_seeing(50 * MS, Some(kb));
@@ -3123,6 +3153,12 @@ fn without_tracking_the_window_stays_where_it_was_put() {
     let tracked = sim.m.keyboard_window().expect("shown");
     sim.handle(Event::Platform(PlatformEvent::KeyboardTrackingFailed));
     assert!(!sim.m.keyboard_wanted());
+    let said = sim.m.toast().map(|t| t.text.clone());
+    assert_eq!(
+        said.as_deref(),
+        Some(sim.m.texts().t("headset-note-keyboard-untracked")),
+        "said once"
+    );
     sim.frames_seeing(50 * MS, Some(keyboard_on_desk()));
     let after = sim.m.keyboard_window().expect("shown");
     assert_ne!(after, tracked);

@@ -227,6 +227,10 @@ pub struct UiState {
     pub curve_available: bool,
     /// The headset can show a passthrough window onto the keyboard.
     pub keyboard_available: bool,
+    /// The headset tracks the person's keyboard: the window settles over it.
+    pub keyboard_tracking: bool,
+    /// The window lies over the tracked keyboard now.
+    pub keyboard_follows: bool,
     /// The headset tracks hands: the choice of what they do shows.
     pub hands_available: bool,
     /// The display rates to choose from, usual and saving the battery, in hertz (none:
@@ -3229,6 +3233,18 @@ const SCALES_SHOWN: usize = 5;
 
 /// Scales the PC makes monitors at, where it makes them at more than one: what the
 /// menu offers.
+/// The line under "Keyboard window": whether it follows the keyboard now, may follow
+/// it, or is placed by hand.
+fn keyboard_note(s: &UiState) -> &'static str {
+    if s.keyboard_follows {
+        "headset-keyboard-window-follows"
+    } else if s.keyboard_tracking {
+        "headset-keyboard-window-note-tracked"
+    } else {
+        "headset-keyboard-window-note"
+    }
+}
+
 fn scales_of(s: &UiState) -> &[u16] {
     match &s.limits {
         Some(l) if s.can_scale && l.scales.len() > 1 => &l.scales,
@@ -3867,14 +3883,7 @@ fn build_look(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, rx: f32, rw:
         ],
     );
     y -= 12.0;
-    items.push(text(
-        rx,
-        y,
-        19.0,
-        false,
-        MUTED,
-        l.t("headset-keyboard-window-note"),
-    ));
+    items.push(text(rx, y, 19.0, false, MUTED, l.t(keyboard_note(s))));
     y += 48.0;
     let every = st.rest_every;
     segmented(
@@ -5948,6 +5957,8 @@ mod tests {
             custom_available: false,
             curve_available: true,
             keyboard_available: true,
+            keyboard_tracking: false,
+            keyboard_follows: false,
             hands_available: true,
             display_rates: Some((90, 72)),
             display_rate_now: Some(90),
