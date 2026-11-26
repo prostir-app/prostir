@@ -1,6 +1,8 @@
 //! Captures an output with `wlr-screencopy` (Hyprland, Sway) and feeds the frames to
 //! the encoder's `appsrc`, with the pointer drawn in or left out (`overlay_cursor`)
-//! while `pointer.rs` tells it apart.
+//! as its [`Overlay`] asks while `pointer.rs` tells it apart: switching gives up the
+//! frame waiting for a change and copies one at once, and the overlay hears what went
+//! out.
 //!
 //! Frames go into GPU buffers (dmabuf) allocated with a layout (modifier) the VA-API
 //! converter can read directly, so nothing is copied through the CPU. Without such a
@@ -16,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use super::pointer::Overlay;
 use crate::encoder::{Input, Pause};
 use anyhow::{Context, Result, anyhow, bail};
 use gstreamer as gst;
@@ -75,14 +78,14 @@ pub struct Capture {
 
 impl Capture {
     /// Starts capturing `output` (its compositor name) into `appsrc`. While `paused`
-    /// is set nothing is captured; while `apart` is, frames leave the pointer out (its
-    /// session tells it, see `pointer.rs`), taken anew for each frame.
+    /// is set nothing is captured; frames leave the pointer out or draw it in as
+    /// `overlay` asks (its session tells it apart, see `pointer.rs`).
     pub fn start(
         output: String,
         appsrc: gst_app::AppSrc,
         paused: Arc<Pause>,
         dmabuf: bool,
-        apart: Arc<AtomicBool>,
+        overlay: Arc<Overlay>,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let closed = Arc::new(AtomicBool::new(false));
@@ -92,9 +95,12 @@ impl Capture {
             std::thread::Builder::new()
                 .name(format!("capture-{output}"))
                 .spawn(move || {
-                    if let Err(e) = run(&output, &appsrc, &paused, &stop, dmabuf, &apart) {
+                    overlay.capture(Some(paused.clone()));
+                    if let Err(e) = run(&output, &appsrc, &paused, &stop, dmabuf, &overlay) {
                         warn!("capture of {output} stopped: {e:#}");
                     }
+                    overlay.capture(None);
+                    overlay.not_pushing();
                     closed.store(true, Ordering::Relaxed);
                 })?
         };
@@ -726,7 +732,7 @@ fn run(
     paused: &Pause,
     stop: &AtomicBool,
     want_dmabuf: bool,
-    apart: &AtomicBool,
+    overlay: &Overlay,
 ) -> Result<()> {
     let conn = Connection::connect_to_env().context("no Wayland display")?;
     let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
@@ -770,10 +776,15 @@ fn run(
     // When a new picture went last (a repeat does not count for the gate).
     let mut last_new: Option<Instant> = None;
     let mut failures = 0;
+    // Whether the last frame left the pointer out; the pointer asked in or out other
+    // than in the frame waited for: that frame is given up and one copied at once.
+    let mut last_apart = false;
+    let mut switching = false;
     let gate = paused.gate();
     while !stop.load(Ordering::Relaxed) {
         if paused.is_on() {
-            // Asleep until resumed or stopped (see `Capture`'s drop).
+            // Asleep until resumed or stopped (see `Capture`'s drop): no frame goes out.
+            overlay.not_pushing();
             paused.wait(stop);
             continue;
         }
@@ -782,7 +793,8 @@ fn run(
         // its turn, as the compositor copies with its next frame. Asked again
         // meanwhile, the last one goes; opened (a keyframe asked for), it goes now.
         let mut waited = false;
-        let mut opened = gate.take_open();
+        let switched = std::mem::take(&mut switching);
+        let mut opened = gate.take_open() || switched;
         while !opened {
             let lead = gate.period();
             let since = last_new.filter(|_| last.is_some());
@@ -796,6 +808,7 @@ fn run(
             paused.nap(at - lead, stop);
             opened = gate.take_open();
             if paused.take_again()
+                && overlay.asked() == last_apart
                 && let Some(l) = &last
             {
                 let _ = appsrc.push_buffer(l.clone());
@@ -808,8 +821,10 @@ fn run(
         state.frame = Frame::default();
         let asked = Instant::now();
         // The pointer drawn in, or left out while its session tells it.
-        let overlay = i32::from(!apart.load(Ordering::Relaxed));
-        let frame = manager.capture_output(overlay, &output, &qh, ());
+        let apart = overlay.asked();
+        // Other than the last frame: this one goes at once, not waiting for a change.
+        let switched = switched || (last.is_some() && apart != last_apart);
+        let frame = manager.capture_output(i32::from(!apart), &output, &qh, ());
         let deadline = Instant::now() + Duration::from_secs(2);
         while !(state.frame.described || state.frame.failed) && Instant::now() < deadline {
             wait(&conn, &mut queue, &mut state, Duration::from_millis(100))?;
@@ -869,9 +884,18 @@ fn run(
         let p = pool.as_ref().expect("pool made above");
         let slot = next;
         next = (next + 1) % SLOTS;
-        frame.copy_with_damage(p.buffer(slot));
+        if switched {
+            // The pointer switched: at once, not waiting for a change.
+            frame.copy(p.buffer(slot));
+        } else {
+            frame.copy_with_damage(p.buffer(slot));
+        }
         while !(state.frame.ready || state.frame.failed) && !stop.load(Ordering::Relaxed) {
             wait(&conn, &mut queue, &mut state, Duration::from_millis(100))?;
+            if overlay.asked() != apart {
+                switching = true;
+                break;
+            }
             // Again now when a keyframe was asked of the still screen.
             let again = paused.take_again();
             if (again || last_push.elapsed() >= KEEPALIVE)
@@ -883,6 +907,10 @@ fn run(
             }
         }
         frame.destroy();
+        if switching {
+            // Given up: a frame with the pointer as asked now, at once.
+            continue;
+        }
         // The compositor says nothing changed: the last picture stands for it, unless
         // a keyframe was asked for (the gate open).
         let unchanged =
@@ -897,6 +925,8 @@ fn run(
             }
             let frame = p.frame(slot, state.frame.y_invert)?;
             let _ = appsrc.push_buffer(frame.clone());
+            overlay.pushed(apart);
+            last_apart = apart;
             last = Some(frame);
             last_push = Instant::now();
             last_new = Some(last_push);

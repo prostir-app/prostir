@@ -1,7 +1,7 @@
 //! Hyprland: virtual monitors are headless outputs (`output create headless`), placed
-//! with monitor rules, and captured with `wlr-screencopy` (see `screencopy.rs`); the
-//! pointer apart from the frames through `ext-image-copy-capture` (`pointer.rs`, Hyprland
-//! 0.54 and newer).
+//! with monitor rules, and captured with `wlr-screencopy` (see `screencopy.rs`). The
+//! pointer stays in the frames for now (see [`POINTER_PICTURES_SINCE`]); the pointer
+//! apart through `ext-image-copy-capture` (`pointer.rs`) is ready for when it can go.
 //!
 //! Everything goes through Hyprland's IPC socket, the same one `hyprctl` uses.
 //! Monitor rules are set with Lua (`eval`) on Lua configs (Hyprland 0.53 and newer)
@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -31,7 +31,7 @@ use crate::platform::{
     Geometry, GpuDevices, Injects, Memory, OpenInput, Origin, Output, OutputHealth, OutputKey,
     Outputs, PhysicalDisplay, Pointer, Scales, VirtualSpec, Windows,
 };
-use pointer::{PointerSession, SinkSlot, Units};
+use pointer::{Overlay, PointerHub, SinkSlot, Units};
 use screencopy::Capture;
 use windows::HyprWindows;
 
@@ -698,23 +698,59 @@ impl Hyprland {
             },
             windows: HyprWindows::new(),
             rules,
-            cursor: cursor_apart().then(HyprCursor::default),
+            cursor: cursor_apart().then(HyprCursor::start).flatten(),
             input: input.map(|(_, open)| open),
             _gpu: gpu,
         }
     }
 }
 
-/// Whether the pointer can go apart from the frames: Hyprland offers pointer sessions
-/// (0.54 and newer), and gives Prostir the pointer's place without asking (with
-/// `ecosystem:enforce_permissions` it may not: its pictures would be black and the
-/// pointer gone). Says why not, once.
+/// The first Hyprland whose pointer sessions give the pictures of its own (themed)
+/// pointers: none yet. Up to 0.57 at least they are clear (hyprwm/Hyprland#15895), so
+/// the headset would draw nothing, and the pointer stays in the frames on every
+/// Hyprland. Once one does, its frames are to be checked too: Hyprland draws the
+/// pointer of a headless output in software, and may draw it into captured frames
+/// even with `overlay_cursor` 0.
+const POINTER_PICTURES_SINCE: Option<(u32, u32, u32)> = None;
+
+/// Hyprland's version from `j/version`: `version` (`0.57.2`), else `tag` (`v0.57.2`).
+fn parse_version(reply: &str) -> Option<(u32, u32, u32)> {
+    let v: Value = serde_json::from_str(reply).ok()?;
+    let text = v
+        .get("version")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty())
+        .or_else(|| v.get("tag").and_then(Value::as_str))?;
+    let text = text.trim_start_matches('v');
+    let mut parts = text
+        .split(|c: char| !c.is_ascii_digit())
+        .map(|n| n.parse::<u32>().ok());
+    Some((
+        parts.next()??,
+        parts.next()??,
+        parts.next().flatten().unwrap_or(0),
+    ))
+}
+
+/// Whether Hyprland `version` gives the pointer's pictures (from `since`, if any).
+fn gives_pictures(version: Option<(u32, u32, u32)>, since: Option<(u32, u32, u32)>) -> bool {
+    matches!((version, since), (Some(v), Some(s)) if v >= s)
+}
+
+/// Whether the pointer can go apart from the frames: this Hyprland gives the pointer's
+/// pictures, offers pointer sessions (0.54 and newer), and gives Prostir the pointer's
+/// place without asking (with `ecosystem:enforce_permissions` it may not: its pictures
+/// would be black and the pointer gone). Says why not, once.
 fn cursor_apart() -> bool {
-    let enforced =
-        request("j/getoption ecosystem:enforce_permissions").is_ok_and(|reply| option_on(&reply));
-    let why = if !pointer::offered() {
+    let version = request("j/version").ok().and_then(|r| parse_version(&r));
+    let enforced = || {
+        request("j/getoption ecosystem:enforce_permissions").is_ok_and(|reply| option_on(&reply))
+    };
+    let why = if !gives_pictures(version, POINTER_PICTURES_SINCE) {
+        "its pointer sessions give clear pictures of its own pointers (hyprwm/Hyprland#15895)"
+    } else if !pointer::offered() {
         "no pointer sessions (ext-image-copy-capture, Hyprland 0.54 and newer)"
-    } else if enforced {
+    } else if enforced() {
         "Hyprland enforces permissions (ecosystem:enforce_permissions)"
     } else {
         info!("Hyprland: the pointer can go apart from the frames");
@@ -743,12 +779,25 @@ fn units_of(name: &str) -> Units {
     Units::hyprland(scale, highest)
 }
 
-/// The pointer apart from the frames: each output's pointer session tells the core's
-/// sink, kept here. Switching costs nothing: each frame is captured with the pointer
-/// in or out as asked then.
-#[derive(Default)]
+/// The pointer apart from the frames: the outputs' pointer sessions tell the core's
+/// sink, kept here. Switching needs no new stream: each frame is captured with the
+/// pointer in or out as its output's [`Overlay`] asks.
 struct HyprCursor {
     sink: SinkSlot,
+    hub: Arc<PointerHub>,
+}
+
+impl HyprCursor {
+    fn start() -> Option<Self> {
+        let sink = SinkSlot::default();
+        let hub = PointerHub::start(sink.clone(), Box::new(units_of))
+            .inspect_err(|e| warn!("Hyprland: no pointer sessions: {e:#}"))
+            .ok()?;
+        Some(Self {
+            sink,
+            hub: Arc::new(hub),
+        })
+    }
 }
 
 impl CursorSource for HyprCursor {
@@ -783,7 +832,7 @@ impl Desktop for Hyprland {
         Ok(Box::new(HyprOutput::new(
             name,
             Some(self.rules.clone()),
-            self.cursor.as_ref().map(|c| c.sink.clone()),
+            self.cursor.as_ref().map(|c| c.hub.clone()),
         )))
     }
 
@@ -791,7 +840,7 @@ impl Desktop for Hyprland {
         Ok(Box::new(HyprOutput::new(
             key.to_string(),
             None,
-            self.cursor.as_ref().map(|c| c.sink.clone()),
+            self.cursor.as_ref().map(|c| c.hub.clone()),
         )))
     }
 
@@ -860,36 +909,35 @@ const SCALE_READ: Duration = Duration::from_secs(2);
 
 /// A headless output of ours, or a display of the PC, captured with wlr-screencopy.
 ///
-/// While the pointer is apart (and it is no window panel), its pointer session tells
-/// the pointer and has the capture leave it out of the frames; it runs while the
-/// output does, whatever its encoder does.
+/// While the pointer is apart (and it is no window panel), the pointer hub watches it:
+/// its session tells the pointer and has the capture leave it out of the frames
+/// (through its overlay), while the output lives, whatever its encoder does.
 struct HyprOutput {
     key: OutputKey,
-    // Field order matters: the pointer session ends before the capture.
-    pointer: Option<PointerSession>,
     capture: Option<Capture>,
     /// Ours (removed when dropped, with its rule), not a display of the PC shown as it
     /// is.
     owned: Option<Arc<Rules>>,
     /// When Hyprland was last asked for its scale, and what it said.
     scale_read: Cell<(Option<Instant>, Option<u16>)>,
-    /// The core's sink for the pointer, where Hyprland offers pointer sessions.
-    cursor: Option<SinkSlot>,
-    /// The frames leave the pointer out (its session says so while the headset draws
-    /// it), read for each frame.
-    apart: Arc<AtomicBool>,
+    /// The pointer sessions, where the pointer can go apart, and whether they watch
+    /// this output.
+    hub: Option<Arc<PointerHub>>,
+    watched: bool,
+    /// How its frames have the pointer, read for each frame.
+    overlay: Arc<Overlay>,
 }
 
 impl HyprOutput {
-    fn new(name: String, owned: Option<Arc<Rules>>, cursor: Option<SinkSlot>) -> Self {
+    fn new(name: String, owned: Option<Arc<Rules>>, hub: Option<Arc<PointerHub>>) -> Self {
         Self {
             key: OutputKey::new(name),
-            pointer: None,
             capture: None,
             owned,
             scale_read: Cell::new((None, None)),
-            cursor,
-            apart: Arc::new(AtomicBool::new(false)),
+            hub,
+            watched: false,
+            overlay: Arc::new(Overlay::default()),
         }
     }
 }
@@ -897,7 +945,7 @@ impl HyprOutput {
 impl Drop for HyprOutput {
     fn drop(&mut self) {
         // Stop capturing before the output goes away.
-        self.pointer.take();
+        self.set_cursor_apart(false);
         self.capture.take();
         if let Some(rules) = &self.owned {
             rules.remove(self.key.as_str());
@@ -946,7 +994,7 @@ impl Output for HyprOutput {
             origin: Origin::Capture,
             // GPU buffers for an encoder that takes them, else shared memory.
             memory: Memory::DmaBuf,
-            cursor: if self.pointer.is_some() {
+            cursor: if self.watched {
                 Cursor::Separate
             } else {
                 Cursor::InFrame
@@ -963,29 +1011,23 @@ impl Output for HyprOutput {
             appsrc,
             encoder.paused(),
             encoder.takes_dmabuf(),
-            self.apart.clone(),
+            self.overlay.clone(),
         )?);
         Ok(())
     }
 
-    /// At once, also for the running capture: its session starts or ends (without
-    /// pointer sessions the pointer stays in the frames).
+    /// At once, also for the running capture: the hub watches it or no longer
+    /// (without pointer sessions the pointer stays in the frames).
     fn set_cursor_apart(&mut self, apart: bool) {
-        let Some(sink) = self.cursor.clone().filter(|_| apart) else {
-            self.pointer = None;
+        let Some(hub) = &self.hub else {
             return;
         };
-        if self.pointer.is_some() {
-            return;
+        if apart && !self.watched {
+            hub.watch(self.key.as_str(), self.overlay.clone());
+        } else if !apart && self.watched {
+            hub.unwatch(self.key.as_str());
         }
-        let name = self.key.to_string();
-        let units = {
-            let name = name.clone();
-            Box::new(move || units_of(&name))
-        };
-        self.pointer = PointerSession::start(name, sink, self.apart.clone(), units)
-            .inspect_err(|e| warn!("{}: no pointer session: {e:#}", self.key))
-            .ok();
+        self.watched = apart;
     }
 
     fn detach(&mut self) {
@@ -1038,9 +1080,26 @@ mod tests {
     fn without_pointer_sessions_the_pointer_stays_in_the_frames() {
         let mut output = HyprOutput::new(output_name(1), None, None);
         output.set_cursor_apart(true);
-        assert!(output.pointer.is_none());
+        assert!(!output.watched);
         assert_eq!(output.source().cursor, Cursor::InFrame);
-        assert!(!output.apart.load(Ordering::Relaxed));
+        assert!(!output.overlay.asked());
+    }
+
+    /// Every Hyprland keeps the pointer in the frames until one gives its pictures.
+    #[test]
+    fn hyprland_keeps_the_pointer_in_the_frames_until_it_gives_its_pictures() {
+        let reply = r#"{"branch": "", "commit": "11cbc6c", "version": "0.57.2", "tag": "v0.57.2"}"#;
+        let version = parse_version(reply);
+        assert_eq!(version, Some((0, 57, 2)));
+        assert_eq!(
+            parse_version(r#"{"tag": "v0.54.0-13-gb4ee467"}"#),
+            Some((0, 54, 0))
+        );
+        assert_eq!(parse_version("unknown request"), None);
+        assert!(!gives_pictures(version, POINTER_PICTURES_SINCE));
+        assert!(!gives_pictures(version, Some((0, 58, 0))));
+        assert!(gives_pictures(Some((0, 58, 1)), Some((0, 58, 0))));
+        assert!(!gives_pictures(None, Some((0, 58, 0))));
     }
 
     #[test]

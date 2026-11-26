@@ -30,13 +30,17 @@ hyprland)
     ;;
 sway)
     echo "version: $(sway --version)"
-    echo 'output HEADLESS-1 resolution 1920x1080' >"$T/sway.conf"
+    printf 'output HEADLESS-1 resolution 1920x1080 position 0 0\noutput HEADLESS-2 resolution 1920x1080 position 1920 0\n' >"$T/sway.conf"
     export WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman
     sway -c "$T/sway.conf" >"$T/comp.log" 2>&1 &
     for _ in $(seq 100); do ls "$XDG_RUNTIME_DIR"/wayland-* >/dev/null 2>&1 && break; sleep 0.2; done
     sleep 2
     export WAYLAND_DISPLAY="$(ls "$XDG_RUNTIME_DIR" | grep -m1 '^wayland-[0-9]*$')"
-    out=HEADLESS-1
+    # A second output to the right, for the pointer to go over the edge.
+    export SWAYSOCK="$(ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock | head -1)"
+    swaymsg create_output >/dev/null
+    sleep 1
+    out=HEADLESS-1,HEADLESS-2
     ;;
 esac
 wayland-info >"$T/registry.txt" 2>&1
@@ -57,7 +61,7 @@ if [ -x /t/prostir-test ]; then
             sleep 0.2
         done
     ) &
-    PROSTIR_POINTER_OUTPUT="$out" timeout 30 /t/prostir-test --ignored --nocapture --exact \
+    PROSTIR_POINTER_OUTPUTS="$out" timeout 30 /t/prostir-test --ignored --nocapture --exact \
         platform::linux::hyprland::pointer::tests::pointer_session_live 2>&1 | grep -v "^running\|^$" | head -60
 fi
 tail -5 "$T/comp.log"

@@ -49,6 +49,7 @@ podman run --rm --security-opt label=disable -v "$PWD/tests/env-matrix/inside:/i
 ```
 
 2026-11-26: Sway 1.10.1 (Debian 13) has no pointer sessions (the pointer stays in the
-frames); Sway 1.11 (Fedora 43) and 1.12 (Arch) have them, and the session tells the
-look (24x24 and 10x16) and every move. Hyprland 0.57.2 does not start in a container
-(no KMS device), so it is not checked here.
+frames); Sway 1.11 (Fedora 43) and 1.12 (Arch) have them, and the sessions tell the
+look (24x24 and 10x16) and every move, over the edge of two outputs in order (on the
+next one, then off the last). Hyprland 0.57.2 does not start in a container (no KMS
+device), so it is not checked here.
