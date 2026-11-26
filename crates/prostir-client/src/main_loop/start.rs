@@ -405,7 +405,7 @@ pub fn start<'s>(
             pictures,
             hand_trackers,
             overlay,
-            models: Models::default(),
+            models: Models::new(session),
         },
         net_rx,
         vm,

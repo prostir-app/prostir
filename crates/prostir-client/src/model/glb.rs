@@ -23,6 +23,13 @@ const JSON: u32 = 0x4E4F_534A; // "JSON"
 const BIN: u32 = 0x004E_4942; // "BIN\0"
 /// How deep nodes may nest (a loop of children would otherwise never end).
 const DEPTH_MAX: usize = 32;
+/// How many nodes a model may have, and how many times they may be visited in all (a
+/// node that is the child of several is visited once for each): a model that shares
+/// its children over and over would otherwise keep the reader busy for ever.
+const NODES_MAX: usize = 4096;
+const VISITS_MAX: usize = 4096;
+/// How many pictures a model may have.
+const IMAGES_MAX: usize = 16;
 
 /// How a material's picture is stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,11 +41,12 @@ pub enum ImageKind {
     Other,
 }
 
-/// A material's picture, as the model has it.
+/// A material's picture, as the model has it: its bytes are `at` of the file read
+/// (see [`Model::image_bytes`]), not copied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
     pub kind: ImageKind,
-    pub bytes: Vec<u8>,
+    pub at: Range<usize>,
 }
 
 /// The corners of a primitive whose colour comes from a picture, and which picture.
@@ -64,11 +72,22 @@ impl Model {
     pub fn read(glb: &[u8]) -> Result<Self, Bad> {
         let (json, bin) = chunks(glb)?;
         let doc: Value = serde_json::from_slice(json).map_err(|e| Bad(format!("JSON: {e}")))?;
+        let bin = bin.unwrap_or(0..0);
         let reader = Reader {
             doc: &doc,
-            bin: bin.unwrap_or(&[]),
+            bin_at: bin.start,
+            bin: &glb[bin],
         };
         reader.model()
+    }
+
+    /// The bytes of picture `image` in `glb`, the file the model was read from (empty
+    /// for another file or a picture it does not have).
+    pub fn image_bytes<'a>(&self, glb: &'a [u8], image: usize) -> &'a [u8] {
+        self.images
+            .get(image)
+            .and_then(|i| glb.get(i.at.clone()))
+            .unwrap_or(&[])
     }
 
     /// Gives each corner of the parts coloured by picture `image` the colour of the
@@ -125,8 +144,8 @@ fn texel(t: f32, n: usize) -> usize {
     ((t * n as f32) as usize).min(n - 1)
 }
 
-/// The JSON and the binary chunk of a `.glb`.
-fn chunks(glb: &[u8]) -> Result<(&[u8], Option<&[u8]>), Bad> {
+/// The JSON of a `.glb`, and where its binary chunk is.
+fn chunks(glb: &[u8]) -> Result<(&[u8], Option<Range<usize>>), Bad> {
     let word = |at: usize| -> Option<u32> {
         let b = glb.get(at..at + 4)?;
         Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
@@ -150,7 +169,7 @@ fn chunks(glb: &[u8]) -> Result<(&[u8], Option<&[u8]>), Bad> {
         };
         match kind {
             JSON if json.is_none() => json = Some(&glb[start..end]),
-            BIN if bin.is_none() => bin = Some(&glb[start..end]),
+            BIN if bin.is_none() => bin = Some(start..end),
             _ => {}
         }
         // Chunks are aligned to four bytes.
@@ -164,7 +183,9 @@ fn chunks(glb: &[u8]) -> Result<(&[u8], Option<&[u8]>), Bad> {
 
 struct Reader<'a> {
     doc: &'a Value,
+    /// The binary chunk, and where it starts in the file.
     bin: &'a [u8],
+    bin_at: usize,
 }
 
 /// What one accessor reads.
@@ -326,6 +347,12 @@ impl<'a> Reader<'a> {
 
     fn model(&self) -> Result<Model, Bad> {
         let nodes = self.list("nodes");
+        if nodes.len() > NODES_MAX {
+            return bad("too many nodes");
+        }
+        if self.list("images").len() > IMAGES_MAX {
+            return bad("too many pictures");
+        }
         let roots: Vec<usize> = match self
             .list("scenes")
             .get(uint(self.doc, "scene").unwrap_or(0))
@@ -349,8 +376,9 @@ impl<'a> Reader<'a> {
                 .collect(),
         };
         let mut out = Model::default();
+        let mut visits = 0;
         for root in roots {
-            self.node(root, Mat4::IDENTITY, 0, &mut out)?;
+            self.node(root, Mat4::IDENTITY, 0, &mut visits, &mut out)?;
         }
         if out.mesh.indices.is_empty() {
             return bad("no triangles");
@@ -361,9 +389,20 @@ impl<'a> Reader<'a> {
         Ok(out)
     }
 
-    fn node(&self, n: usize, parent: Mat4, depth: usize, out: &mut Model) -> Result<(), Bad> {
+    fn node(
+        &self,
+        n: usize,
+        parent: Mat4,
+        depth: usize,
+        visits: &mut usize,
+        out: &mut Model,
+    ) -> Result<(), Bad> {
         if depth > DEPTH_MAX {
             return bad("nodes nested too deep");
+        }
+        *visits += 1;
+        if *visits > VISITS_MAX {
+            return bad("nodes visited too many times");
         }
         let Some(node) = self.list("nodes").get(n) else {
             return bad(format!("no node {n}"));
@@ -398,7 +437,7 @@ impl<'a> Reader<'a> {
         }
         if let Some(children) = node.get("children").and_then(Value::as_array) {
             for c in children.iter().filter_map(Value::as_u64) {
-                self.node(c as usize, world, depth + 1, out)?;
+                self.node(c as usize, world, depth + 1, visits, out)?;
             }
         }
         Ok(())
@@ -522,9 +561,16 @@ impl<'a> Reader<'a> {
     /// A material's picture (empty when it cannot be found).
     fn image(&self, image: &Value) -> Image {
         let mime = image.get("mimeType").and_then(Value::as_str).unwrap_or("");
-        let bytes = uint(image, "bufferView")
-            .and_then(|v| self.view(v).ok())
-            .map_or(&[][..], |(b, _)| b);
+        // Its view, checked to lie within the binary chunk, and where that is in the
+        // file.
+        let (bytes, at) = uint(image, "bufferView")
+            .and_then(|v| {
+                let (bytes, _) = self.view(v).ok()?;
+                let start =
+                    self.bin_at + uint(&self.list("bufferViews")[v], "byteOffset").unwrap_or(0);
+                Some((bytes, start..start + bytes.len()))
+            })
+            .unwrap_or((&[][..], 0..0));
         let kind = match mime {
             "image/png" => ImageKind::Png,
             "image/jpeg" => ImageKind::Jpeg,
@@ -534,10 +580,7 @@ impl<'a> Reader<'a> {
             _ if bytes.starts_with(b"\xABKTX 20") => ImageKind::Ktx2,
             _ => ImageKind::Other,
         };
-        Image {
-            kind,
-            bytes: bytes.to_vec(),
-        }
+        Image { kind, at }
     }
 }
 
@@ -590,7 +633,9 @@ mod tests {
         // The pictures: a PNG and a KTX2.
         let kinds: Vec<_> = m.images.iter().map(|i| i.kind).collect();
         assert_eq!(kinds, [ImageKind::Png, ImageKind::Ktx2]);
-        assert!(m.images[0].bytes.starts_with(b"\x89PNG"));
+        assert!(m.image_bytes(SAMPLE, 0).starts_with(b"\x89PNG"));
+        assert!(m.image_bytes(SAMPLE, 1).starts_with(b"\xABKTX 20"));
+        assert!(m.image_bytes(SAMPLE, 2).is_empty());
     }
 
     #[test]
@@ -638,6 +683,40 @@ mod tests {
         }
         assert!(Model::read(b"not a model").is_err());
         assert!(Model::read(&[]).is_err());
+    }
+
+    /// A `.glb` of `json` alone.
+    fn glb(json: &str) -> Vec<u8> {
+        let mut js = json.as_bytes().to_vec();
+        while !js.len().is_multiple_of(4) {
+            js.push(b' ');
+        }
+        let mut out = Vec::new();
+        for w in [MAGIC, 2, (20 + js.len()) as u32, js.len() as u32, JSON] {
+            out.extend_from_slice(&w.to_le_bytes());
+        }
+        out.extend_from_slice(&js);
+        out
+    }
+
+    /// Nodes that share their children (each the child of the one before, twice) would
+    /// be visited a million times: the reader stops early instead.
+    #[test]
+    fn shared_children_are_visited_a_bounded_number_of_times() {
+        let nodes: Vec<String> = (0..20)
+            .map(|i| format!(r#"{{"children":[{0},{0}]}}"#, i + 1))
+            .chain(std::iter::once("{}".to_owned()))
+            .collect();
+        let json = format!(
+            r#"{{"scenes":[{{"nodes":[0]}}],"nodes":[{}]}}"#,
+            nodes.join(",")
+        );
+        let err = Model::read(&glb(&json)).expect_err("refused");
+        assert!(err.0.contains("visited"), "{err}");
+        // Too many pictures, too.
+        let images = vec!["{}"; IMAGES_MAX + 1].join(",");
+        let json = format!(r#"{{"images":[{images}]}}"#);
+        assert!(Model::read(&glb(&json)).is_err());
     }
 
     #[test]

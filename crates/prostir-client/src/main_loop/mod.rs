@@ -255,7 +255,7 @@ fn run(app: &AndroidApp, mut test: Option<&mut Selftest>) -> Result<()> {
         // The controllers' models, when the controllers changed (step 8.6).
         if let Some(ov) = stage.overlay.as_mut() {
             let tint = shell.model.palette().controller.linear();
-            stage.models.refresh(now, &xr, &shell.controls, ov, tint);
+            stage.models.refresh(now, &xr.gl, &shell.controls, ov, tint);
         }
         shell.model.tick(now, &input);
         shell.apply(now);

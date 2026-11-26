@@ -11,6 +11,7 @@ use log::{info, warn};
 use openxr as xr;
 
 use crate::model::hand::{Given, HandMesh, JOINTS};
+use crate::model::{MAX_BYTES, MAX_LISTED, MAX_TRIANGLES, MAX_VERTICES};
 use crate::platform::openxr::{Gfx, quat, vec3};
 
 /// Turns on in `on` each of these extensions that `available` has.
@@ -43,7 +44,7 @@ pub fn controller(session: &xr::Session<Gfx>, side: usize) -> Option<(u64, Strin
     let result = unsafe {
         (ext.enumerate_render_model_paths)(session.as_raw(), 0, &raw mut count, ptr::null_mut())
     };
-    if result.into_raw() < 0 || count == 0 {
+    if result.into_raw() < 0 || count == 0 || count as usize > MAX_LISTED {
         return None;
     }
     let empty = xr::sys::RenderModelPathInfoFB {
@@ -111,7 +112,8 @@ pub fn controller(session: &xr::Session<Gfx>, side: usize) -> Option<(u64, Strin
     // SAFETY: a key the runtime just gave; no room yet, the size comes back.
     let result =
         unsafe { (ext.load_render_model)(session.as_raw(), &raw const info, &raw mut buffer) };
-    if result.into_raw() < 0 || buffer.buffer_count_output == 0 {
+    let size = buffer.buffer_count_output as usize;
+    if result.into_raw() < 0 || size == 0 || size > MAX_BYTES {
         warn!("controller model {name}: {result:?}");
         return None;
     }
@@ -168,7 +170,8 @@ pub fn hand(instance: &xr::Instance, tracker: &xr::HandTracker) -> Option<HandMe
         mesh.vertex_count_output as usize,
         mesh.index_count_output as usize,
     );
-    if joints != JOINTS || vertices == 0 || indices == 0 {
+    let fits = vertices <= MAX_VERTICES && indices <= MAX_TRIANGLES * 3;
+    if joints != JOINTS || vertices == 0 || indices == 0 || !fits {
         warn!("hand mesh of {joints} joints, {vertices} corners, {indices} indices");
         return None;
     }

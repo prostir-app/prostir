@@ -9,6 +9,7 @@ use std::ptr;
 use log::{info, warn};
 use openxr as xr;
 
+use crate::model::MAX_BYTES;
 use crate::platform::openxr::Gfx;
 
 /// Turns the extension on in `on` if `available` has it.
@@ -45,7 +46,7 @@ pub fn controller(session: &xr::Session<Gfx>, hand: xr::Path) -> Option<(u64, Ve
             ptr::null_mut(),
         )
     };
-    if result.into_raw() < 0 || size == 0 {
+    if result.into_raw() < 0 || size == 0 || size as usize > MAX_BYTES {
         warn!("controller model: {result:?}");
         return None;
     }

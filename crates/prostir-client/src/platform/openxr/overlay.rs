@@ -213,6 +213,32 @@ pub struct Poses {
     pub joints: [Option<[Pose; JOINTS]>; 2],
 }
 
+/// A controller's model as the GPU takes it, made away from the frames (see
+/// [`Corners::of`]): its key from the runtime (the same key is the same model), its
+/// corners' floats in the shader's order, its triangles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Corners {
+    pub key: u64,
+    floats: Vec<f32>,
+    indices: Vec<u32>,
+}
+
+impl Corners {
+    pub fn of(key: u64, mesh: Mesh) -> Self {
+        let mut floats = Vec::with_capacity(mesh.positions.len() * STATIC_FLOATS);
+        for ((p, n), c) in mesh.positions.iter().zip(&mesh.normals).zip(&mesh.colors) {
+            floats.extend_from_slice(p);
+            floats.extend_from_slice(n);
+            floats.extend_from_slice(c);
+        }
+        Self {
+            key,
+            floats,
+            indices: mesh.indices,
+        }
+    }
+}
+
 /// The models' program and its uniforms.
 struct MeshProgram {
     program: glow::Program,
@@ -395,31 +421,26 @@ impl Overlay {
         }
     }
 
-    /// Controller `side`'s model as the runtime gave it (`key`, the same key is the
-    /// same model), put on the GPU (`None`: none any more).
+    /// Controller `side`'s model as the runtime gave it, put on the GPU (`None`: none
+    /// any more); the same key again is the same model, not put there again.
     pub fn set_controller(
         &mut self,
         gl: &glow::Context,
         side: usize,
-        model: Option<(u64, &Mesh)>,
+        model: Option<&Corners>,
     ) -> Result<()> {
-        let key = model.map(|(k, _)| k);
+        let key = model.map(|m| m.key);
         if self.controllers[side].as_ref().map(|(k, _)| *k) == key {
             return Ok(());
         }
         if let Some((_, old)) = self.controllers[side].take() {
             old.delete(gl);
         }
-        let Some((key, mesh)) = model else {
+        let Some(m) = model else {
             return Ok(());
         };
-        let mut corners = Vec::with_capacity(mesh.positions.len() * STATIC_FLOATS);
-        for ((p, n), c) in mesh.positions.iter().zip(&mesh.normals).zip(&mesh.colors) {
-            corners.extend_from_slice(p);
-            corners.extend_from_slice(n);
-            corners.extend_from_slice(c);
-        }
-        self.controllers[side] = Some((key, Gpu::new(gl, &corners, &mesh.indices, false)?));
+        let gpu = Gpu::new(gl, &m.floats, &m.indices, false)?;
+        self.controllers[side] = Some((m.key, gpu));
         Ok(())
     }
 

@@ -35,6 +35,10 @@ fn bad<T>(what: impl Into<String>) -> Result<T, Bad> {
 pub const MAX_TRIANGLES: usize = 60_000;
 /// The most corners a model may have.
 pub const MAX_VERTICES: usize = 65_536;
+/// The largest model file taken from a runtime, in bytes.
+pub const MAX_BYTES: usize = 16 << 20;
+/// The most models a runtime may list.
+pub const MAX_LISTED: usize = 64;
 
 /// A model ready for the GPU, in its own space (metres; for a controller, its grip):
 /// a corner's place, normal and colour (linear, straight alpha), three corners to a
