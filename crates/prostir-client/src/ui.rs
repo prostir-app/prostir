@@ -3465,7 +3465,7 @@ fn segmented_rows(
     w: f32,
     y: &mut f32,
     title: &str,
-    options: Vec<(&str, Action, bool, bool)>,
+    options: &[(&str, Action, bool, bool)],
     per: usize,
 ) {
     for (i, row) in options.chunks(per.max(1)).enumerate() {
@@ -5226,7 +5226,7 @@ fn dev_hands_monitors(
         w,
         &mut y,
         l.t("headset-dev-move"),
-        Movement::ALL
+        &Movement::ALL
             .into_iter()
             .zip(&powers)
             .map(|(m, label)| {
@@ -5237,7 +5237,7 @@ fn dev_hands_monitors(
                     true,
                 )
             })
-            .collect(),
+            .collect::<Vec<_>>(),
         2,
     );
 }
@@ -5271,7 +5271,7 @@ fn dev_hands_look(
         w,
         &mut y,
         l.t("headset-dev-hand-look"),
-        HandLook::ALL
+        &HandLook::ALL
             .into_iter()
             .zip(&percents)
             .map(|(look, label)| {
@@ -5282,7 +5282,7 @@ fn dev_hands_look(
                     true,
                 )
             })
-            .collect(),
+            .collect::<Vec<_>>(),
         3,
     );
     let models = |label, own: bool| (label, Action::DevOwnModels(own), t.own_models == own, true);
