@@ -110,7 +110,7 @@ feel! {
     bound_far_m: 6.0, 1.0, 50.0;
     /// Nor wider than this angle as seen from the eye.
     bound_angle_deg: 140.0, 30.0, 175.0;
-    /// Its middle never lower than this under the horizon (where the floor is not
+    /// Its middle never lower than this below eye level (where the floor is not
     /// known).
     bound_below_deg: 70.0, 10.0, 89.0;
     /// Its lower edge at least this above the floor, where the floor is known.

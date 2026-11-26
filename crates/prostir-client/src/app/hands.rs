@@ -232,7 +232,7 @@ impl Scene for Model {
     }
 
     fn resize(&mut self, width: f32) {
-        self.world.resize(&self.settings, width);
+        self.world.resize(&self.settings, width, self.head.0);
         if self.map_moved() {
             self.rev += 1;
         }

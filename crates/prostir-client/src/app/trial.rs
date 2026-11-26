@@ -127,6 +127,7 @@ impl Model {
         if text.is_some() {
             info!("feel.txt: {changed} numbers changed");
         }
+        self.world.set_bounds(crate::layout::Bounds::of(&feel));
         self.feel = feel;
         let small = |n: usize| u8::try_from(n).unwrap_or(u8::MAX);
         self.dev_input.feel_read = Some((text.is_some(), small(changed), small(problems.len())));

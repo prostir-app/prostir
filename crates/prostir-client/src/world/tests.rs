@@ -391,7 +391,7 @@ fn cinema_leaves_the_desk_as_it_was() {
     sim.world.cancel_holds();
     sim.world.hold(Thing::Display(screen), &sim.s);
     sim.world.resize_start(screen);
-    sim.world.resize(&sim.s, 1.0);
+    sim.world.resize(&sim.s, 1.0, sim.head.0);
     sim.world.resize_end();
     sim.world.let_go(Thing::Display(screen), &sim.s, sim.now);
     sim.settled();
@@ -2124,4 +2124,59 @@ fn a_standard_desk_from_the_file_keeps_the_standard_size() {
     };
     let (standard, one) = (run(None), run(Some(25.0)));
     assert!(near(&standard, &one), "{standard:?} {one:?}");
+}
+
+/// Step 8.3: whatever a hand does to a monitor (anywhere, any size, a few hundred
+/// random drags, the same every run), it stands within the bounds after (or, laid out
+/// outside them by the app, no further out than it was), or where it was if the
+/// bounds would have put it into another; a resize with both hands keeps it within
+/// them where it stands.
+#[test]
+fn a_hand_keeps_monitors_within_the_bounds() {
+    let mut sim = Sim::at_desk();
+    let head = sim.head.0;
+    let bounds = layout::Bounds::default();
+    let aspect = 1440.0 / 2560.0;
+    let mut seed: u64 = 11;
+    let mut f = move || {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((seed >> 40) as f32) / (1u64 << 24) as f32
+    };
+    let mut kept = 0;
+    for step in 0..300 {
+        let id = k(1 + (f() * 3.0) as u32 % 3);
+        let thing = Thing::Display(id);
+        if sim.world.hold(thing, &sim.s).is_none() {
+            continue;
+        }
+        let was = sim.place(id);
+        let to = Vec3::new(f() * 16.0 - 8.0, f() * 8.0 - 4.0, f() * 16.0 - 8.0);
+        let p = Placement {
+            position: head + to,
+            rotation: layout::facing(head + to, head),
+            width: f() * 10.0,
+        };
+        sim.world.drag(&sim.s, thing, p, head);
+        let now = sim.place(id);
+        let loose = bounds.loosened_for(&was, aspect, head);
+        kept += usize::from(now == was);
+        assert!(
+            now == was || layout::within(&now, aspect, head, None, &loose),
+            "step {step}: {p:?} came to {now:?} from {was:?}"
+        );
+        if f() < 0.3 && sim.world.resize_start(id).is_some() {
+            // The other hand on it too: wider than the bounds let it be.
+            sim.world.resize(&sim.s, 20.0, head);
+            let resized = sim.place(id);
+            let loose = bounds.loosened_for(&now, aspect, head);
+            assert!(layout::within(&resized, aspect, head, None, &loose));
+            assert_eq!(resized.position, now.position, "where it stood");
+            sim.world.resize_end();
+        }
+        sim.world.let_go(thing, &sim.s, sim.now);
+        sim.after(20);
+    }
+    assert!(kept < 150, "mostly moved: {kept} kept");
 }
