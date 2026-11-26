@@ -63,7 +63,7 @@ so) and does not look for one later.
 | `Recenter`, `LineUp`, `ShowMouse`, `ResetArrangement` | | | commands for the headset |
 | `Profile` | `s name` | | `name`: the profile's name, or its number from 1 as the headset's menu lists them (`headsets[].session.profiles`) |
 | `RenameProfile` | `s profile, s name` | | gives `profile` (its name or number) the name `name`; an empty one: called by its number again |
-| `Cinema`, `Focus`, `Follow`, `NoLimits`, `SetMic` | `b on` | | `SetMic` is refused, see below |
+| `Cinema`, `Focus`, `Follow`, `NoLimits`, `Lock`, `SetMic` | `b on` | | `SetMic` is refused, see below |
 | `Preset` | `y preset` | | |
 | `AddMonitor` | `u w, u h, q scale_percent` | `u id` | |
 | `RemoveMonitor` | `u id` | | |
@@ -179,7 +179,7 @@ only guests are connected, commands are refused with `NotAllowed`. Without a hea
 | `recenter`, `line_up`, `show_mouse`, `reset_arrangement` | |
 | `profile` | `name` (string): the profile's name, or its number from 1 as the headset's menu lists them |
 | `rename_profile` | `profile` (string, its name or number), `name` (string, 64 bytes at most; empty: called by its number again; a number only is `BadArgument`): the new name shows in `headsets[].session.profiles` before the answer |
-| `cinema`, `focus`, `follow`, `no_limits` | `on` (bool) |
+| `cinema`, `focus`, `follow`, `no_limits`, `lock` | `on` (bool) |
 | `preset` | `preset` (0 to 255) |
 
 ### The PC's own state
@@ -372,7 +372,7 @@ prostir ctl watch [--json]                 # what happens, a line each, until Ct
 prostir ctl recenter | lineup | showmouse | reset
 prostir ctl profile N|NAME                 # a profile of the headset: its number, or its name
 prostir ctl profile rename N NEW NAME      # profile N (a number or a one-word name) named NEW NAME
-prostir ctl cinema|focus|follow|mic|nolimits on|off
+prostir ctl cinema|focus|follow|mic|nolimits|lock on|off
 prostir ctl preset N
 prostir ctl monitor list | add WxH[@1.25|@125%] | remove ID | retry ID | primary ID
 prostir ctl screen show|hide ID            # the PC's own displays
@@ -453,7 +453,7 @@ a tool does not take is refused with `BadArgument`.
 | `set_scale` | `id`, `scale` | |
 | `set_scale_auto` | `id`, `on` | |
 | `show_pc_display` | `id`, `shown` | `show_physical` |
-| `recenter`, `line_up`, `show_mouse`, `reset_arrangement`, `profile`, `rename_profile`, `cinema`, `focus`, `follow`, `no_limits`, `preset` | as the requests | commands for the headset |
+| `recenter`, `line_up`, `show_mouse`, `reset_arrangement`, `profile`, `rename_profile`, `cinema`, `focus`, `follow`, `no_limits`, `lock`, `preset` | as the requests | commands for the headset |
 | `set_quality`, `set_sharp`, `set_codec`, `sound_to_headset`, `autostart` | as the requests | |
 | `set_counting` | `counting`: `no` or `unasked` | as the request, but never `yes`: counting needs the person's own yes (the settings window, the tray, `prostir ctl count yes`), so `yes` is `BadArgument`, also through `call` |
 | `set_input` | `headset`, `on` | as the request, but only `on` false: allowing the mouse and keyboard is the person's own choice (the notification, the tray, the settings window, `prostir ctl input on`), so `on` true is `BadArgument`, also through `call` |

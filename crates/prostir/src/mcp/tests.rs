@@ -196,6 +196,7 @@ fn every_tool_is_listed() {
         "show_pc_display",
         "recenter",
         "no_limits",
+        "lock",
         "set_quality",
         "set_codec",
         "pair_new_headset",

@@ -825,6 +825,7 @@ headset-magnet = Прилипання
 headset-drag = Тягнути
 headset-drag-one = Один монітор
 headset-drag-all = Усі разом
+headset-drag-locked = Заблоковано
 headset-cinema-screen = Екран для кінотеатру
 headset-profile-replace = Замінити?
 
@@ -1022,6 +1023,7 @@ headset-note-layout = Монітори розставлено заново
 headset-note-lined-up = Шви прибрано
 headset-note-in-front = Усе перед вами
 headset-note-reset = Монітори стоять так, як їх ставить розкладка
+headset-note-locked = Розстановку заблоковано. Щоб рухати монітори, у меню: Тягнути, Один монітор
 headset-note-mic-headset = Програми на ПК чують мікрофон шолома
 headset-note-mic-pc = Програми на ПК чують мікрофон ПК
 headset-note-mic-ask = Дозвіл на мікрофон спитає система

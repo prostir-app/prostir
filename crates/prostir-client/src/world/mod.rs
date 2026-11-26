@@ -296,8 +296,19 @@ pub struct World {
     /// The palm menu, while the palm is turned to the face.
     wrist: Option<Placement>,
 
-    /// What the hands hold (two at most), and the monitor resized with both.
+    /// What the hands hold (two at most).
     held: [Option<Thing>; 2],
+    /// What goes along with the monitor each hand holds: the rest of the group glued
+    /// to it, when it is the group's anchor (see [`World::hold`]); none otherwise.
+    groups: [Vec<DisplayKey>; 2],
+    /// Where the monitor each hand holds stood when taken, and whether it was resized
+    /// since (with both hands, or a controller's stick): the magnet gives it its
+    /// neighbour's size only when the hand moved it and did not resize it.
+    taken: [Option<(Placement, bool)>; 2],
+    /// The monitors whose size the magnet never gives the one each hand holds: those
+    /// glued to it when it was taken, and the PC's own displays.
+    same_size: [Vec<DisplayKey>; 2],
+    /// The monitor resized with both hands.
     resizing: Option<DisplayKey>,
     /// A display in a hand moved, or the one resized changed size, since it was taken.
     dragged: bool,
@@ -324,6 +335,68 @@ pub struct World {
 /// A window panel, as `listed` says.
 fn window(listed: &HashMap<DisplayKey, Listed>, id: DisplayKey) -> bool {
     listed.get(&id).is_some_and(|l| l.kind == Kind::Window)
+}
+
+/// How much of a monitor outside a group carried one of the group may hide, or be seen
+/// behind, before the group stops (2 %: a seam seen at a slant).
+const GROUP_SLIVER: f64 = 0.02;
+
+/// The turn round `eye` that takes the way to `from` to the way to `to`, upright (no
+/// roll): a group carried with its anchor turns so round the eye, and the eye sees it
+/// as it saw it.
+fn turn_about(eye: Vec3, from: Vec3, to: Vec3) -> Quat {
+    let way = |d: Vec3| {
+        let d = d.normalize_or(Vec3::NEG_Z);
+        Quat::from_rotation_y((-d.x).atan2(-d.z))
+            * Quat::from_rotation_x(d.y.clamp(-1.0, 1.0).asin())
+    };
+    (way(to - eye) * way(from - eye).inverse()).normalize()
+}
+
+/// Where the anchor of a group, at `was`, goes when a hand puts it at `p`, seen from
+/// `eye`: where the hand puts it, turned round the eye as far as it went (so the group
+/// it carries is seen as it was), on a wall as the hand turns it (parallel to it).
+fn anchor_at(was: &Placement, p: Placement, eye: Vec3, wall: bool) -> Placement {
+    if wall {
+        return p;
+    }
+    Placement {
+        rotation: (turn_about(eye, was.position, p.position) * was.rotation).normalize(),
+        ..p
+    }
+}
+
+/// `p` moved as a monitor went from `before` to `after`: turned and carried with it,
+/// `scale` times as large, as far from it.
+fn moved_along(p: &Placement, before: &Placement, after: &Placement, scale: f32) -> Placement {
+    let turn = after.rotation * before.rotation.inverse();
+    Placement {
+        position: after.position + turn * (p.position - before.position) * scale,
+        rotation: (turn * p.rotation).normalize(),
+        width: p.width * scale,
+    }
+}
+
+/// Every one of `placements` that goes `along` moves as a monitor went from `before`
+/// to `after`, one piece: moved, turned and scaled with it. One scale for all, kept so
+/// none goes past the size limits: clamping each on its own would pull them apart.
+fn carry_along(
+    placements: &mut HashMap<DisplayKey, Placement>,
+    along: impl Fn(DisplayKey) -> bool,
+    before: &Placement,
+    after: &Placement,
+) {
+    let mut scale = after.width / before.width.max(1e-3);
+    for (other, p) in placements.iter() {
+        if along(*other) {
+            scale = scale.clamp(0.2 / p.width.max(1e-3), 8.0 / p.width.max(1e-3));
+        }
+    }
+    for (other, p) in placements.iter_mut() {
+        if along(*other) {
+            *p = moved_along(p, before, after, scale);
+        }
+    }
 }
 
 impl World {
@@ -380,6 +453,9 @@ impl World {
             keyboard,
             wrist: None,
             held: [None, None],
+            groups: [Vec::new(), Vec::new()],
+            taken: [None, None],
+            same_size: [Vec::new(), Vec::new()],
             resizing: None,
             dragged: false,
             rearranged: false,
@@ -1134,7 +1210,7 @@ impl World {
             self.placements
                 .retain(|k, _| window(listed, *k) || pc.is_some_and(|pc| pc != k.pc));
             self.placements.extend(view);
-            self.held = [None, None];
+            self.drop_holds();
             return;
         }
         if self.lineup.is_empty() {
@@ -1156,7 +1232,7 @@ impl World {
             self.sized,
         ));
         self.placements.extend(laid);
-        self.held = [None, None];
+        self.drop_holds();
         self.save_layout();
         self.send_layout(now);
     }
@@ -1864,7 +1940,7 @@ impl World {
         };
         self.further_into_view(s, &glued);
         self.rearranged = true;
-        self.held = [None, None];
+        self.drop_holds();
         self.save_layout();
         self.send_layout(now);
     }
@@ -2202,32 +2278,231 @@ impl World {
         if !s.move_all || self.cinema || self.is_window(id) || !self.streams.contains_key(&id) {
             return;
         }
-        let turn = after.rotation * before.rotation.inverse();
-        // One scale for all, kept so no monitor goes past the size limits: clamping
-        // each on its own would pull the arrangement apart.
-        let mut scale = after.width / before.width.max(1e-3);
-        for (other, p) in &self.placements {
-            if *other != id && !window(&self.listed, *other) {
-                scale = scale.clamp(0.2 / p.width.max(1e-3), 8.0 / p.width.max(1e-3));
-            }
-        }
-        for (other, p) in &mut self.placements {
-            if *other == id || window(&self.listed, *other) {
-                continue;
-            }
-            p.position = after.position + turn * (p.position - before.position) * scale;
-            p.rotation = (turn * p.rotation).normalize();
-            p.width *= scale;
+        let listed = &self.listed;
+        carry_along(
+            &mut self.placements,
+            |other| other != id && !window(listed, other),
+            before,
+            after,
+        );
+    }
+
+    /// The hands hold nothing now, and carry no group.
+    fn drop_holds(&mut self) {
+        self.held = [None, None];
+        self.taken = [None, None];
+        for group in &mut self.groups {
+            group.clear();
         }
     }
 
-    /// What moves with the hands now: the held monitors, and with "move all together"
-    /// every monitor that goes along (drawn where it is, not catching up, or the
-    /// arrangement would tear apart while it moves).
+    /// The hand (0 or 1) that holds monitor `id`.
+    fn slot_of(&self, id: DisplayKey) -> Option<usize> {
+        self.held
+            .iter()
+            .position(|h| *h == Some(Thing::Display(id)))
+    }
+
+    /// The group carried with monitor `id`, its anchor, goes along as it went from
+    /// `before` to `after` in a hand: moved, turned and scaled with it, one piece.
+    fn carry_group(&mut self, id: DisplayKey, before: &Placement, after: &Placement) {
+        let Some(slot) = self.slot_of(id) else {
+            return;
+        };
+        let group = &self.groups[slot];
+        carry_along(
+            &mut self.placements,
+            |other| group.contains(&other),
+            before,
+            after,
+        );
+    }
+
+    /// Whether the group carried with monitor `id` stays within the bounds (see
+    /// `layout::limit`) as it goes from `before` to `after`, seen from `head` (one that
+    /// stood outside them goes no further out), and is seen as it was (none of it hides
+    /// more of another, see `layout::seen_as_before`).
+    fn group_within(
+        &self,
+        id: DisplayKey,
+        before: &Placement,
+        after: &Placement,
+        head: Vec3,
+    ) -> bool {
+        let Some(slot) = self.slot_of(id) else {
+            return true;
+        };
+        let scale = after.width / before.width.max(1e-3);
+        let group = &self.groups[slot];
+        // Where the group stood when taken (it is one piece with the anchor): how it is
+        // seen and what it may hide is as there, not a little more each frame.
+        let taken = self.taken[slot].map_or(*before, |t| t.0);
+        let back = taken.width / before.width.max(1e-3);
+        let member = |i: usize, moved: bool| {
+            let (k, at) = match i.checked_sub(1) {
+                None => (id, *before),
+                Some(j) => {
+                    let k = group[j];
+                    (k, self.placements.get(&k).copied().unwrap_or(*before))
+                }
+            };
+            let p = match (moved, i) {
+                (false, _) => moved_along(&at, before, &taken, back),
+                (true, 0) => *after,
+                (true, _) => moved_along(&at, before, after, scale),
+            };
+            (p, p.width * self.aspect_of(k))
+        };
+        let seen = layout::seen_as_before(
+            group.len() + 1,
+            |i| member(i, false),
+            |i| member(i, true),
+            head,
+        );
+        // Of the group or held: those go along or are the hand's.
+        let along = |k: DisplayKey| k == id || group.contains(&k) || self.slot_of(k).is_some();
+        seen && group.iter().all(|f| {
+            let Some(was) = self.placements.get(f) else {
+                return true;
+            };
+            let aspect = self.aspect_of(*f);
+            let bounds = self.bounds.loosened_for(was, aspect, head);
+            let p = moved_along(was, before, after, scale);
+            let at_first = moved_along(was, before, &taken, back);
+            layout::within(&p, aspect, head, self.floor, &bounds)
+                && !self.worse_for(*f, (&at_first, &p), aspect, head, along)
+        })
+    }
+
+    /// Whether monitor `id`, carried from `was` to `p` (`aspect`), goes into a monitor
+    /// not `along` it did not go into, or hides one or is hidden by one, seen from
+    /// `eye`, more than it did (or than [`GROUP_SLIVER`]). Takes no memory.
+    fn worse_for(
+        &self,
+        id: DisplayKey,
+        (was, p): (&Placement, &Placement),
+        aspect: f32,
+        eye: Vec3,
+        along: impl Fn(DisplayKey) -> bool,
+    ) -> bool {
+        use prostir_layout::space::{cuts, hidden_by};
+        let (h0, h) = (was.width * aspect, p.width * aspect);
+        self.sizes.iter().any(|&(other, w, oh)| {
+            let Some(q) = self
+                .placements
+                .get(&other)
+                .filter(|_| other != id && !along(other))
+            else {
+                return false;
+            };
+            let qh = q.width * oh as f32 / w.max(1) as f32;
+            let more = |now: f64, then: f64| now > then.max(GROUP_SLIVER) + 1e-4;
+            (cuts(p, h, q, qh) && !cuts(was, h0, q, qh))
+                || more(hidden_by(p, h, q, qh, eye), hidden_by(was, h0, q, qh, eye))
+                || more(hidden_by(q, qh, p, h, eye), hidden_by(q, qh, was, h0, eye))
+        })
+    }
+
+    /// The monitor of `group` that carries it (its anchor): the main display of the
+    /// PC where it is one of them, else the one nearest the middle of the arrangement as
+    /// the eye sees it.
+    fn anchor_of(&self, group: &[DisplayKey]) -> Option<DisplayKey> {
+        if let Some(primary) = self.primary().filter(|p| group.contains(p)) {
+            return Some(primary);
+        }
+        let frame = layout::frame(self.center, 0.0);
+        group
+            .iter()
+            .filter_map(|id| {
+                let p = self.placements.get(id)?;
+                let local = frame.to_local(p.position);
+                Some((local.angle_between(Vec3::NEG_Z), *id))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+            .map(|(_, id)| id)
+    }
+
+    /// Hand `slot` takes monitor `id`: the rest of the group glued to it goes along
+    /// when it is the group's anchor (see [`World::anchor_of`]); another monitor of a
+    /// group goes alone, and what the other hand carries is not of its group. Groups
+    /// only with the magnet on, without "move all together", not in cinema.
+    fn take_group(&mut self, s: &Settings, id: DisplayKey, slot: usize) {
+        let mut group = std::mem::take(&mut self.groups[slot]);
+        group.clear();
+        let mut same = std::mem::take(&mut self.same_size[slot]);
+        same.clear();
+        if s.magnet && !s.move_all && !self.cinema && !self.is_window(id) && self.streams(id) {
+            layout::glued_group(
+                &self.placements,
+                &self.sizes,
+                self.center.0,
+                id,
+                &mut self.stick,
+                &mut group,
+            );
+            // Glued to it already: the magnet gives it none of their sizes.
+            same.extend(group.iter().filter(|f| **f != id));
+            let other = 1 - slot;
+            let held = self.held[other].and_then(Thing::display);
+            group.retain(|f| {
+                Some(*f) != held
+                    && !self.groups[other].contains(f)
+                    && !window(&self.listed, *f)
+                    && self.streams.contains_key(f)
+            });
+            if self.anchor_of(&group) == Some(id) {
+                group.retain(|f| *f != id);
+            } else {
+                group.clear();
+            }
+        }
+        // Nor the sizes of the PC's own displays, which are as the PC makes them.
+        let listed = &self.listed;
+        same.extend(
+            listed
+                .iter()
+                .filter(|(_, l)| l.kind == Kind::Physical)
+                .map(|(k, _)| *k),
+        );
+        self.groups[slot] = group;
+        self.same_size[slot] = same;
+    }
+
+    /// Whether the magnet may give monitor `id`, held by hand `slot`, its neighbour's
+    /// size: the hand moved it (a centimetre or more) and did not resize it, and it is
+    /// a monitor (not one of the PC's own displays).
+    fn may_resize(&self, id: DisplayKey, slot: Option<usize>) -> bool {
+        let Some((taken, resized)) = slot.and_then(|i| self.taken[i]) else {
+            return false;
+        };
+        !resized
+            && self
+                .listed
+                .get(&id)
+                .is_some_and(|l| l.kind == Kind::Monitor)
+            && self
+                .placements
+                .get(&id)
+                .is_some_and(|p| p.position.distance(taken.position) >= 0.01)
+    }
+
+    /// What moves with the hands now: the held monitors and the groups they carry, and
+    /// with "move all together" every monitor that goes along (drawn where it is, not
+    /// catching up, or the arrangement would tear apart while it moves).
     fn moving_now(&mut self, s: &Settings) {
         self.moving.clear();
         self.moving
             .extend(self.held.iter().flatten().filter_map(|t| t.display()));
+        // A group goes with the hand that holds its anchor (none left over from a
+        // hold that ended otherwise).
+        let (held, groups) = (&self.held, &self.groups);
+        self.moving.extend(
+            groups
+                .iter()
+                .zip(held)
+                .filter(|(_, h)| h.is_some_and(|t| t.display().is_some()))
+                .flat_map(|(g, _)| g.iter().copied()),
+        );
         let carrying = s.move_all
             && !self.cinema
             && self
@@ -2242,9 +2517,45 @@ impl World {
         }
     }
 
-    /// The magnet: where monitor `id`, let go now, would stick (not on a wall, where
-    /// monitors stay in its plane, nor for the laptop screen or window panels).
+    /// The magnet: where monitor `id`, let go now, would stick, with the group it
+    /// carries (on a wall in its plane; not for window panels). Takes no memory once
+    /// the magnet's is large enough.
     pub fn stick_of(&mut self, s: &Settings, id: DisplayKey) -> Option<layout::Stick<DisplayKey>> {
+        let slot = self.slot_of(id);
+        self.stick_with(s, id, slot)
+    }
+
+    /// [`World::stick_of`] for monitor `id` in hand `slot`: the group it carries goes
+    /// along, and it takes its neighbour's size only where [`World::may_resize`] says,
+    /// from none it was glued to when taken nor from the PC's own displays.
+    fn stick_with(
+        &mut self,
+        s: &Settings,
+        id: DisplayKey,
+        slot: Option<usize>,
+    ) -> Option<layout::Stick<DisplayKey>> {
+        let resize = self.may_resize(id, slot);
+        let Some(i) = slot else {
+            return self.stick_among(s, id, &[], None);
+        };
+        let (group, same) = (
+            std::mem::take(&mut self.groups[i]),
+            std::mem::take(&mut self.same_size[i]),
+        );
+        let stick = self.stick_among(s, id, &group, resize.then_some(&same[..]));
+        (self.groups[i], self.same_size[i]) = (group, same);
+        stick
+    }
+
+    /// The magnet for `id` with `followers` going along, its neighbour's size as
+    /// `size_from` says (see `layout::stick_group`).
+    fn stick_among(
+        &mut self,
+        s: &Settings,
+        id: DisplayKey,
+        followers: &[DisplayKey],
+        size_from: Option<&[DisplayKey]>,
+    ) -> Option<layout::Stick<DisplayKey>> {
         // Lying down the monitors are a tilted band the presets keep exact; window
         // panels float on their own.
         if self.cinema
@@ -2257,19 +2568,23 @@ impl World {
             return None;
         }
         if s.preset == Preset::Wall {
-            layout::stick_on_wall(
+            layout::stick_group_on_wall(
                 &self.placements,
                 &self.sizes,
                 self.center,
                 id,
+                followers,
+                size_from,
                 &mut self.stick,
             )
         } else {
-            layout::stick(
+            layout::stick_group(
                 &self.placements,
                 &self.sizes,
                 self.center,
                 id,
+                followers,
+                size_from,
                 &mut self.stick,
             )
         }
@@ -2290,19 +2605,36 @@ impl World {
     /// place goes on from there (its place becomes the drawn one), so it does not jump
     /// under the hand. With "move all together" the same goes for every monitor that
     /// goes along with it (see `moving_now`), or they would jump to where they were
-    /// going. Where it is taken at; `None` for what cannot be taken, for what a hand
-    /// holds already, and while both hands hold something.
+    /// going. The anchor of a group takes the group along (see [`World::take_group`]);
+    /// a monitor of the group the other hand carries comes out of it. Where it is
+    /// taken at; `None` for what cannot be taken, for what a hand holds already, while
+    /// both hands hold something, and for a monitor while the arrangement is locked
+    /// (`Settings::locked`: the menu and the keyboard window are taken still).
     pub fn hold(&mut self, thing: Thing, s: &Settings) -> Option<Placement> {
         if self.holds(thing) {
             return None;
         }
         let free = self.held.iter().position(Option::is_none)?;
         let at = match thing {
+            Thing::Display(_) if s.locked => return None,
             Thing::Display(id) => {
                 let carries = s.move_all
                     && !self.cinema
                     && self.streams.contains_key(&id)
                     && !self.is_window(id);
+                self.placements.get(&id)?;
+                for group in &mut self.groups {
+                    group.retain(|f| *f != id);
+                }
+                self.take_group(s, id, free);
+                let (shown, group) = (&self.shown, &self.groups[free]);
+                for (other, p) in &mut self.placements {
+                    if group.contains(other)
+                        && let Some(drawn) = shown.get(other)
+                    {
+                        *p = *drawn;
+                    }
+                }
                 let target = self.placements.get_mut(&id)?;
                 if let Some(drawn) = self.shown.get(&id) {
                     *target = *drawn;
@@ -2320,8 +2652,13 @@ impl World {
                 }
                 at
             }
-            _ => self.place(thing)?,
+            _ => {
+                let at = self.place(thing)?;
+                self.groups[free].clear();
+                at
+            }
         };
+        self.taken[free] = thing.display().map(|_| (at, false));
         *self.held.get_mut(free)? = Some(thing);
         Some(at)
     }
@@ -2391,6 +2728,16 @@ impl World {
                 }
                 _ => limited,
             };
+            // A group it carries turns round the eye with it, and stays within them too:
+            // where one of it would not, the group stays where it was.
+            if let Some(was) = was
+                && self.slot_of(id).is_some_and(|i| !self.groups[i].is_empty())
+            {
+                p = anchor_at(&was, p, head, wall);
+                if !self.group_within(id, &was, &p, head) {
+                    p = was;
+                }
+            }
         }
         let target = match thing {
             Thing::Menu => &mut self.menu,
@@ -2408,7 +2755,19 @@ impl World {
         *target = p;
         if let Some(id) = thing.display() {
             self.dragged |= before != p;
+            if (before.width - p.width).abs() > 1e-5 {
+                self.resized(id);
+            }
             self.carry_all(s, id, &before, &p);
+            self.carry_group(id, &before, &p);
+        }
+    }
+
+    /// Monitor `id` was resized in a hand (both hands, a controller's stick): the
+    /// magnet keeps its size when it is let go.
+    fn resized(&mut self, id: DisplayKey) {
+        if let Some((_, resized)) = self.slot_of(id).and_then(|i| self.taken[i].as_mut()) {
+            *resized = true;
         }
     }
 
@@ -2416,8 +2775,9 @@ impl World {
     /// head comes back near where it was (the menu and the keyboard do not count);
     /// let go next to another monitor, it sticks to it, edge to edge (true then), and
     /// the desktop's arrangement follows what the eyes see. Resizing ends too. In
-    /// cinema nothing is kept.
+    /// cinema nothing is kept. The group it carries sticks with it, one piece.
     pub fn let_go(&mut self, thing: Thing, s: &Settings, now: Instant) -> bool {
+        let slot = self.held.iter().position(|h| *h == Some(thing));
         for h in &mut self.held {
             if *h == Some(thing) {
                 *h = None;
@@ -2438,13 +2798,23 @@ impl World {
             Thing::Menu if !self.cinema => self.save_layout(),
             Thing::Display(id) if !self.cinema => {
                 let mut moved = std::mem::take(&mut self.dragged);
-                if let Some(st) = self.stick_of(s, id) {
+                if let Some(st) = self.stick_with(s, id, slot) {
                     // Stuck where it stood already (taken and let go): no change.
                     let was = self.placements.insert(id, st.placement);
                     moved |= was.is_none_or(|w| {
                         w.position.distance(st.placement.position) > 1e-4
                             || w.rotation.angle_between(st.placement.rotation) > 1e-4
+                            || (w.width - st.placement.width).abs() > 1e-4
                     });
+                    if let (Some(was), Some(i)) = (was, slot) {
+                        let group = &self.groups[i];
+                        carry_along(
+                            &mut self.placements,
+                            |other| group.contains(&other),
+                            &was,
+                            &st.placement,
+                        );
+                    }
                     stuck = true;
                 }
                 self.rearranged |= moved;
@@ -2458,13 +2828,28 @@ impl World {
             | Thing::Attach(_)
             | Thing::Adding { .. } => {}
         }
+        if let Some(i) = slot {
+            self.groups[i].clear();
+            self.taken[i] = None;
+        }
         stuck
+    }
+
+    /// Every monitor the hands hold is let go (see [`World::let_go`]): the hands then
+    /// hold none, as when locked.
+    pub fn let_go_monitors(&mut self, s: &Settings, now: Instant) {
+        for thing in self.held {
+            if let Some(thing @ Thing::Display(_)) = thing {
+                self.let_go(thing, s, now);
+            }
+        }
     }
 
     /// The other hand took hold of monitor `id` too: both resize it. Its width then.
     pub fn resize_start(&mut self, id: DisplayKey) -> Option<f32> {
         let width = self.placements.get(&id)?.width;
         self.resizing = Some(id);
+        self.resized(id);
         Some(width)
     }
 
@@ -2486,6 +2871,7 @@ impl World {
         let after = *p;
         self.dragged |= before != after;
         self.carry_all(s, id, &before, &after);
+        self.carry_group(id, &before, &after);
     }
 
     /// The second hand let go: resizing ends, and the arrangement is kept.
@@ -2500,7 +2886,7 @@ impl World {
     pub fn cancel_holds(&mut self) {
         // Saved only if something was held: nothing moved otherwise.
         let held = self.held.iter().any(Option::is_some) || self.resizing.is_some();
-        self.held = [None, None];
+        self.drop_holds();
         self.resizing = None;
         if held {
             self.save_layout();
@@ -2986,7 +3372,7 @@ impl World {
         self.radius = before.radius;
         self.tilt = before.tilt;
         self.sized = before.sized;
-        self.held = [None, None];
+        self.drop_holds();
         self.rearranged = true;
         self.save_layout();
         self.send_layout(now);

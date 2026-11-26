@@ -1157,6 +1157,248 @@ fn the_magnet_on_letting_go() {
     }
 }
 
+/// The monitors glued to `id` (step 8.5), `id` first.
+fn group_of(sim: &mut Sim, id: DisplayKey) -> Vec<DisplayKey> {
+    let mut out = Vec::new();
+    let w = &mut sim.world;
+    layout::glued_group(
+        &w.placements,
+        &w.sizes,
+        w.center.0,
+        id,
+        &mut w.stick,
+        &mut out,
+    );
+    out
+}
+
+/// `p` turned round `eye` by `yaw`.
+fn turned(p: &Placement, eye: Vec3, yaw: f32) -> Placement {
+    let turn = Quat::from_rotation_y(yaw);
+    Placement {
+        position: eye + turn * (p.position - eye),
+        rotation: (turn * p.rotation).normalize(),
+        width: p.width,
+    }
+}
+
+/// A row laid out is one group (step 8.5). Its anchor, the PC's main display, carries
+/// it: turned round the eye, every one of it goes along as the eye saw it, and let go
+/// the row is one group still. Another monitor of the row goes alone, out of the group,
+/// and let go back next to it, it sticks to it again.
+#[test]
+fn the_anchor_carries_its_group() {
+    let mut sim = Sim::at_desk();
+    let eye = sim.head.0;
+    let all = group_of(&mut sim, k(1));
+    assert_eq!(all.len(), 3, "the row is one group: {all:?}");
+    let was = sim.places();
+    // The main display, else the one nearest the middle.
+    let primary = sim.world.anchor_of(&all).expect("an anchor");
+    sim.world
+        .hold(Thing::Display(primary), &sim.s)
+        .expect("taken");
+    for step in 1..=10 {
+        let to = turned(&was[&primary], eye, 0.03 * step as f32);
+        sim.world.drag(&sim.s, Thing::Display(primary), to, eye);
+    }
+    sim.world.let_go(Thing::Display(primary), &sim.s, sim.now);
+    for (id, p) in &was {
+        let want = turned(p, eye, 0.3);
+        let now = sim.place(*id);
+        assert!(
+            now.position.distance(want.position) < 1e-3,
+            "{id:?} went along: {now:?}, not {want:?}"
+        );
+    }
+    assert_eq!(group_of(&mut sim, k(1)).len(), 3, "glued still");
+
+    // Another monitor of the row goes alone.
+    let other = *all.iter().find(|id| **id != primary).unwrap();
+    let before = sim.places();
+    sim.world
+        .hold(Thing::Display(other), &sim.s)
+        .expect("taken");
+    let mut away = before[&other];
+    away.position.y += 1.2;
+    sim.world.drag(&sim.s, Thing::Display(other), away, eye);
+    for (id, p) in &before {
+        if *id != other {
+            assert!(near(&sim.place(*id), p), "{id:?} stays");
+        }
+    }
+    sim.world.let_go(Thing::Display(other), &sim.s, sim.now);
+    assert!(
+        !group_of(&mut sim, primary).contains(&other),
+        "out of the group"
+    );
+    // Back almost where it was: it sticks again.
+    sim.world
+        .hold(Thing::Display(other), &sim.s)
+        .expect("taken");
+    let mut back = before[&other];
+    back.position += back.rotation * Vec3::new(0.03, 0.01, 0.0);
+    sim.world.drag(&sim.s, Thing::Display(other), back, eye);
+    assert!(sim.world.let_go(Thing::Display(other), &sim.s, sim.now));
+    assert!(group_of(&mut sim, primary).contains(&other), "glued again");
+}
+
+/// The other hand takes a monitor of the group the first one carries: it comes out of
+/// the group and stays in that hand; with "move all together" or the magnet off, a
+/// monitor carries no group (the first all, the second only itself).
+#[test]
+fn the_other_hand_pulls_one_out_of_the_group() {
+    let mut sim = Sim::at_desk();
+    let eye = sim.head.0;
+    let all = group_of(&mut sim, k(1));
+    let primary = sim.world.anchor_of(&all).unwrap();
+    let was = sim.places();
+    sim.world.hold(Thing::Display(primary), &sim.s).unwrap();
+    let other = *was.keys().find(|id| **id != primary).unwrap();
+    sim.world.hold(Thing::Display(other), &sim.s).unwrap();
+    let to = turned(&was[&primary], eye, 0.2);
+    sim.world.drag(&sim.s, Thing::Display(primary), to, eye);
+    assert!(near(&sim.place(other), &was[&other]), "in the other hand");
+    let third = *was
+        .keys()
+        .find(|id| **id != primary && **id != other)
+        .unwrap();
+    assert!(
+        sim.place(third).position.distance(was[&third].position) > 0.1,
+        "the rest went along"
+    );
+    sim.world.cancel_holds();
+
+    for (move_all, magnet) in [(false, false), (true, true)] {
+        let mut sim = Sim::at_desk();
+        sim.s.move_all = move_all;
+        sim.s.magnet = magnet;
+        sim.world.hold(Thing::Display(primary), &sim.s).unwrap();
+        assert!(sim.world.groups.iter().all(Vec::is_empty));
+    }
+}
+
+/// The magnet gives a monitor its neighbour's size (step 8.5) only when the hand moved
+/// it there: taken and let go where it stands, or resized with both hands, it keeps
+/// its own, and a row never creeps to the size of one of it.
+#[test]
+fn the_magnet_resizes_only_a_monitor_moved_to_its_neighbour() {
+    let mut sim = Sim::at_desk();
+    let eye = sim.head.0;
+    let all = group_of(&mut sim, k(1));
+    let anchor = sim.world.anchor_of(&all).unwrap();
+    let id = *all.iter().find(|id| **id != anchor).unwrap();
+    let standard = sim.place(id).width;
+    // Resized with both hands, 8 % wider (its neighbours' size is within 15 %).
+    sim.world.hold(Thing::Display(id), &sim.s).unwrap();
+    sim.world.resize_start(id).unwrap();
+    sim.world.resize(&sim.s, standard * 1.08, eye);
+    sim.world.resize_end();
+    sim.world.let_go(Thing::Display(id), &sim.s, sim.now);
+    sim.settled();
+    let wider = sim.place(id).width;
+    assert!((wider - standard * 1.08).abs() < 1e-4, "kept: {wider}");
+    // Taken and let go where it stands, again and again: as it is.
+    for _ in 0..3 {
+        sim.world.hold(Thing::Display(id), &sim.s).unwrap();
+        sim.world.let_go(Thing::Display(id), &sim.s, sim.now);
+        sim.settled();
+        assert!((sim.place(id).width - wider).abs() < 1e-4, "in place");
+    }
+    for other in all.iter().filter(|o| **o != id) {
+        assert!(
+            (sim.place(*other).width - standard).abs() < 1e-4,
+            "the row as it was"
+        );
+    }
+    // Moved along the row it is glued to: its own size still.
+    let home = sim.place(id);
+    let mut p = home;
+    p.position.y += 0.03;
+    sim.world.hold(Thing::Display(id), &sim.s).unwrap();
+    sim.world.drag(&sim.s, Thing::Display(id), p, eye);
+    sim.world.let_go(Thing::Display(id), &sim.s, sim.now);
+    sim.settled();
+    assert!((sim.place(id).width - wider).abs() < 1e-4, "glued already");
+    // Taken away from the row, then back next to it: their size.
+    p.position.y += 1.2;
+    sim.world.hold(Thing::Display(id), &sim.s).unwrap();
+    sim.world.drag(&sim.s, Thing::Display(id), p, eye);
+    sim.world.let_go(Thing::Display(id), &sim.s, sim.now);
+    sim.settled();
+    sim.world.hold(Thing::Display(id), &sim.s).unwrap();
+    p.position.y = home.position.y + 0.02;
+    sim.world.drag(&sim.s, Thing::Display(id), p, eye);
+    assert!(sim.world.let_go(Thing::Display(id), &sim.s, sim.now));
+    assert!(
+        (sim.place(id).width - standard).abs() < 1e-3,
+        "their size: {}",
+        sim.place(id).width
+    );
+}
+
+/// A group carried never takes one of it into a monitor outside it: where one would
+/// go through it, the group stays where it was (step 8.5).
+#[test]
+fn a_group_carried_goes_into_no_other_monitor() {
+    let mut sim = Sim::at_desk();
+    let eye = sim.head.0;
+    let all = group_of(&mut sim, k(1));
+    let anchor = sim.world.anchor_of(&all).unwrap();
+    let others: Vec<DisplayKey> = all.iter().copied().filter(|id| *id != anchor).collect();
+    let (out, under) = (others[0], others[1]);
+    // One of the row taken out of it, a metre over another of it: where that one goes
+    // when the row is carried up.
+    let mut lifted = sim.place(under);
+    lifted.position.y += 1.0;
+    sim.world.placements.insert(out, lifted);
+    sim.settled();
+    let was = sim.places();
+    sim.world.hold(Thing::Display(anchor), &sim.s).unwrap();
+    let carried: Vec<DisplayKey> = sim.world.groups.iter().flatten().copied().collect();
+    assert!(carried.contains(&under) && !carried.contains(&out));
+    let mut p = was[&anchor];
+    for _ in 0..20 {
+        p.position.y += 0.05;
+        sim.world.drag(&sim.s, Thing::Display(anchor), p, eye);
+    }
+    sim.world.let_go(Thing::Display(anchor), &sim.s, sim.now);
+    let o = sim.place(out);
+    let h = |p: &Placement| p.width * 1440.0 / 2560.0;
+    for f in &carried {
+        let q = sim.place(*f);
+        assert!(
+            !layout::cuts(&q, h(&q), &o, h(&o)),
+            "{f:?} went into {out:?}"
+        );
+    }
+}
+
+/// Locked (step 8.5): no monitor is taken by a hand, the menu and the keyboard window
+/// are, and "Line up" from the menu moves monitors still.
+#[test]
+fn locked_takes_no_monitor() {
+    let mut sim = Sim::at_desk();
+    sim.s.locked = true;
+    for n in 1..=3 {
+        assert_eq!(sim.world.hold(Thing::Display(k(n)), &sim.s), None);
+    }
+    assert!(!sim.world.holding());
+    assert!(sim.world.hold(Thing::Menu, &sim.s).is_some());
+    sim.world.let_go(Thing::Menu, &sim.s, sim.now);
+    sim.world.keyboard_here(sim.head);
+    assert!(sim.world.hold(Thing::Keyboard, &sim.s).is_some());
+    sim.world.let_go(Thing::Keyboard, &sim.s, sim.now);
+    let mut p = sim.place(k(2));
+    p.position.y += 0.2;
+    sim.world.placements.insert(k(2), p);
+    sim.world.tidy_up(&sim.s, sim.now);
+    assert!(
+        sim.place(k(2)).position.distance(p.position) > 0.1,
+        "lined up"
+    );
+}
+
 /// The chosen layout chosen again lays the monitors out by it anew, as choosing it
 /// does: a monitor moved by hand goes back to its place in the layout.
 #[test]

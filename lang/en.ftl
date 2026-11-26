@@ -852,6 +852,7 @@ headset-magnet = Stick together
 headset-drag = Drag
 headset-drag-one = One monitor
 headset-drag-all = All together
+headset-drag-locked = Locked
 headset-cinema-screen = Cinema screen
 headset-profile-replace = Replace?
 
@@ -1071,6 +1072,7 @@ headset-note-layout = Monitors laid out again
 headset-note-lined-up = Seams closed
 headset-note-in-front = Everything is in front of you
 headset-note-reset = The monitors stand as the layout places them
+headset-note-locked = The arrangement is locked. To move monitors, in the menu: Drag, One monitor
 headset-note-mic-headset = PC apps hear the headset microphone
 headset-note-mic-pc = PC apps hear the PC microphone
 headset-note-mic-ask = The system will ask for microphone access

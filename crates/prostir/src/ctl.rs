@@ -156,7 +156,7 @@ pub fn parse(args: &[String]) -> Result<(Ctl, bool), String> {
                 ),
             }
         }
-        "cinema" | "focus" | "follow" | "mic" | "nolimits" => {
+        "cinema" | "focus" | "follow" | "mic" | "nolimits" | "lock" => {
             takes = 1;
             let on = on(rest.first())?;
             ask(match first {
@@ -164,6 +164,7 @@ pub fn parse(args: &[String]) -> Result<(Ctl, bool), String> {
                 "focus" => Request::Focus { on },
                 "follow" => Request::Follow { on },
                 "mic" => Request::SetMic { on },
+                "lock" => Request::Lock { on },
                 _ => Request::NoLimits { on },
             })
         }
@@ -337,7 +338,7 @@ prostir ctl COMMAND [--json]
                                  them, or its name
   profile rename N NEW NAME      gives profile N (its number, or a one-word name) the
                                  name NEW NAME; with none, its number again
-  cinema | focus | follow | mic | nolimits  on|off
+  cinema | focus | follow | mic | nolimits | lock  on|off
   preset N
   monitor list | add WxH[@1.25|@125%] | remove ID | retry ID | primary ID
   screen show ID | screen hide ID

@@ -488,6 +488,8 @@ pub enum Action {
     Magnet(bool),
     /// Dragging one monitor moves the whole arrangement.
     MoveAll(bool),
+    /// "Locked": the monitors stay where they are, no hand takes one.
+    Lock(bool),
     /// Put the PC's active window on a panel of its own.
     DetachWindow,
     /// Move the PC's active window to the monitor in front.
@@ -3670,6 +3672,8 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
         ],
     );
     y = y.max(y2);
+    // How a hand moves monitors: one (with the group it carries), all together, or
+    // none ("Locked").
     segmented(
         items,
         rx,
@@ -3680,13 +3684,19 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             (
                 l.t("headset-drag-one"),
                 Action::MoveAll(false),
-                !st.move_all,
+                !st.locked && !st.move_all,
                 true,
             ),
             (
                 l.t("headset-drag-all"),
                 Action::MoveAll(true),
-                st.move_all,
+                !st.locked && st.move_all,
+                true,
+            ),
+            (
+                l.t("headset-drag-locked"),
+                Action::Lock(true),
+                st.locked,
                 true,
             ),
         ],
