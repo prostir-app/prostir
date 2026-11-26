@@ -380,6 +380,12 @@ impl Output for KdeOutput {
             return Ok(());
         }
         let tap = CursorTap::new(self.key.clone(), self.sink.clone());
+        // A display of the PC, copied off it (see `feed::pointer`).
+        let tap = if self.origin == Origin::Capture {
+            tap.on_a_pc_display()
+        } else {
+            tap
+        };
         let feed = self
             .apart_stream()
             .and_then(|s| s.feed(appsrc.clone(), encoder.paused(), Some(tap)));

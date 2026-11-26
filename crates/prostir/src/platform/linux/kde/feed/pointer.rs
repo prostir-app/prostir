@@ -10,13 +10,17 @@
 //! premultiplied (RGBA in KWin 6.8). The core hears the hotspot's place, and the
 //! picture straight, only what changed.
 //!
-//! A picture of a size with nothing in it is no look: KWin 6.8 paints a pointer an app
-//! draws itself (kitty's, Dolphin's I-beam, a `wl_surface` of the app's) into the
-//! metadata from its scene (`grabCursorOpenGL`, unlike a pointer of the theme, its
-//! picture as it is), and that can come out clear (over kitty and Dolphin on a display
-//! of the PC), so the pointer vanished from the headset over those apps. The look before stays then, with its
-//! hotspot, until a look with something in it comes. A pointer hidden is a picture of
-//! no size (KWin says so for an app that hides it).
+//! On a display of the PC, a picture of a size with nothing in it is no look: KWin 6.8
+//! paints a pointer an app draws itself (kitty's, Dolphin's I-beam, a `wl_surface` of
+//! the app's) into the metadata from its scene (`grabCursorOpenGL`, unlike a pointer
+//! of the theme, its picture as it is), and that can come out clear there, so the
+//! pointer vanished from the headset over those apps. The metadata does not say which
+//! way a picture was made, so on a display of the PC the look before stays, with its
+//! hotspot, until a look with something in it comes (no time limit: the app's pointer
+//! stays clear while the mouse is over it). The cost: an app hiding the pointer with a
+//! clear picture (an X11 game's blank cursor) shows the look before there. On a
+//! monitor of Prostir a clear picture is the look, as it says. A pointer hidden is a
+//! picture of no size (KWin says so for an app that hides it).
 
 use std::sync::{Arc, Mutex};
 
@@ -49,6 +53,8 @@ pub struct CursorTap {
     /// the hotspot it came with.
     clear: bool,
     look_hot: Option<(i32, i32)>,
+    /// The stream is of a display of the PC: a clear look keeps the one before.
+    keeps_clear: bool,
 }
 
 impl CursorTap {
@@ -65,7 +71,14 @@ impl CursorTap {
             untold: false,
             clear: false,
             look_hot: None,
+            keeps_clear: false,
         }
+    }
+
+    /// For a stream of a display of the PC (see the module).
+    pub fn on_a_pc_display(mut self) -> Self {
+        self.keeps_clear = true;
+        self
     }
 
     /// What one buffer said of the pointer (`meta`), on a picture of `size` pixels:
@@ -96,7 +109,7 @@ impl CursorTap {
                 let clear = shape.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 0);
                 // A clear one: the look before stands for it (see the module), told
                 // again only to show it again.
-                self.clear = clear && self.look.is_some();
+                self.clear = clear && self.keeps_clear && self.look.is_some();
                 self.untold |= !self.clear || self.hidden;
                 if !self.clear {
                     self.look_hot = meta.pointer.map(|p| (p.hot_x, p.hot_y));
@@ -239,7 +252,8 @@ mod tests {
     /// something in it is told as ever.
     #[test]
     fn a_clear_look_keeps_the_one_before() {
-        let mut tap = CursorTap::new(OutputKey::new("HDMI-A-1"), SinkSlot::default());
+        let mut tap =
+            CursorTap::new(OutputKey::new("HDMI-A-1"), SinkSlot::default()).on_a_pc_display();
         let mut heard = |x, hot, shape| {
             let meta = CursorMeta {
                 pointer: Some(Pointer {
@@ -296,6 +310,23 @@ mod tests {
             panic!("{events:?}");
         };
         assert_eq!((beam.w, beam.hot_x), (24, 11));
+    }
+
+    /// On a monitor of Prostir a clear look is the look (an app hiding the pointer so).
+    #[test]
+    fn on_a_monitor_a_clear_look_is_the_look() {
+        let mut tap = CursorTap::new(OutputKey::new("Virtual-Prostir-1"), SinkSlot::default());
+        let look = |alpha: u8| Shape {
+            w: 4,
+            h: 4,
+            rgba: [0, 0, 0, alpha].repeat(16),
+        };
+        assert_eq!(heard(&mut tap, &at(10, 20, Some(look(255)))).len(), 2);
+        let events = heard(&mut tap, &at(10, 20, Some(look(0))));
+        let [CursorEvent::Shape(clear)] = &events[..] else {
+            panic!("{events:?}");
+        };
+        assert!(clear.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 0));
     }
 
     /// At the edge between two outputs side by side (640 wide each), KWin says the
