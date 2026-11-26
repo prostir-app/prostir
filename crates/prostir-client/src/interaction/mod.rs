@@ -907,8 +907,8 @@ impl Hands {
                 _ => None,
             }
             .map(|g| match frame.head {
-                Some(full) if input.is_hand => self.reach(g, ray, full, hand),
-                _ => g,
+                Some(full) => self.reach(g, ray, full, hand, input.is_hand),
+                None => g,
             });
             if let Some(grab) = grabbed {
                 scene.haptic(hand);

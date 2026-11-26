@@ -1,6 +1,5 @@
 //! A thing held by a controller or a hand, moved along its ray (its numbers in
-//! [`Feel`]); or, to try (step 8, 8.0a), a monitor in a hand moved on a sphere round
-//! the eye.
+//! [`Feel`]); or a monitor moved on a sphere round the eye (step 8.3).
 
 use glam::{Quat, Vec2, Vec3};
 
@@ -29,11 +28,14 @@ pub struct Grab {
     sphere: Option<OnSphere>,
 }
 
-/// A monitor in a hand moved on a sphere round the eye as it was when taken (the
-/// pivot): it turns about the pivot as the direction from the shoulder to the hand
-/// turns (the wrist's turn does not move it), and comes nearer or goes further only
-/// as the hand does from the shoulder, to the power `power`, past a dead zone. It
-/// faces the pivot, upright.
+/// A monitor moved on a sphere round the eye as it was when taken (the pivot), facing
+/// it, upright. In a hand it turns about the pivot as the direction from the shoulder
+/// to the hand turns (the wrist's turn does not move it), and comes nearer or goes
+/// further only as the hand reaches in or out from the shoulder (a move that goes
+/// across as much does not count, see [`Feel::reach_dominance`]), to the power
+/// `power`, past a dead zone. By a controller it turns as the controller's ray does,
+/// and its stick sets the distance and the size. Near the nearest and the furthest a
+/// monitor may stand it slows down and stops ([`Feel::bound_soft_m`]).
 #[derive(Debug, Clone, Copy)]
 struct OnSphere {
     pivot: Vec3,
@@ -41,10 +43,32 @@ struct OnSphere {
     /// The grabbed point's direction and distance from the pivot when taken.
     dir0: Vec3,
     d0: f32,
-    /// The hand's direction and distance from the shoulder when taken.
+    /// The hand's direction and distance from the shoulder when taken (by a
+    /// controller: its ray's direction).
     hand_dir0: Vec3,
     r0: f32,
     power: f32,
+    /// By a controller's ray; its distance now (the stick's).
+    by_ray: Option<f32>,
+    /// How far the hand reached in or out since it took it, counting only the moves
+    /// that went mostly that way, and where it was from the shoulder a frame ago.
+    reached: f32,
+    last_arm: Vec3,
+}
+
+/// `d` within `lo` to `hi`, slowing down over the last `knee` before each.
+fn soft_clamp(d: f32, lo: f32, hi: f32, knee: f32) -> f32 {
+    let knee = knee.min((hi - lo) / 2.0).max(0.0);
+    if knee <= 0.0 {
+        return d.clamp(lo, hi);
+    }
+    if d < lo + knee {
+        lo + knee * ((d - lo - knee) / knee).exp()
+    } else if d > hi - knee {
+        hi - knee * (-(d - hi + knee) / knee).exp()
+    } else {
+        d
+    }
 }
 
 impl Grab {
@@ -85,6 +109,29 @@ impl Grab {
             hand_dir0: arm.normalize_or(Vec3::NEG_Z),
             r0: arm.length().max(0.05),
             power,
+            by_ray: None,
+            reached: 0.0,
+            last_arm: arm,
+        });
+        self
+    }
+
+    /// For a controller taking a monitor along `ray`: moved on a sphere round `eye`
+    /// as its ray turns, nearer, further and larger by its stick (see [`OnSphere`]).
+    pub fn on_sphere_by_ray(mut self, ray: Ray, eye: Vec3) -> Self {
+        let point = ray.origin + ray.dir * self.distance;
+        let d0 = point.distance(eye).max(0.05);
+        self.sphere = Some(OnSphere {
+            pivot: eye,
+            shoulder: ray.origin,
+            dir0: (point - eye).normalize_or(Vec3::NEG_Z),
+            d0,
+            hand_dir0: ray.dir,
+            r0: 1.0,
+            power: 1.0,
+            by_ray: Some(d0),
+            reached: 0.0,
+            last_arm: Vec3::ZERO,
         });
         self
     }
@@ -111,18 +158,42 @@ impl Grab {
         dt: f32,
         feel: &Feel,
     ) {
-        if let Some(s) = self.sphere {
+        if let Some(mut s) = self.sphere {
             let f = feel;
-            let arm = ray.origin - s.shoulder;
-            let turn = Quat::from_rotation_arc(s.hand_dir0, arm.normalize_or(s.hand_dir0));
-            let dir = turn * s.dir0;
-            // Only reaching in or out moves it nearer or further, past a dead zone.
-            let dr = arm.length() - s.r0;
-            let dr = dr.signum() * (dr.abs() - f.reach_dead_m).max(0.0);
-            let d = (s.d0 * ((s.r0 + dr) / s.r0).max(0.05).powf(s.power))
-                .clamp(f.distance_min_m, f.distance_max_m);
+            let dead = |v: f32| if v.abs() < f.stick_dead { 0.0 } else { v };
+            let (dir, d) = match s.by_ray {
+                Some(d) => {
+                    let turn = Quat::from_rotation_arc(s.hand_dir0, ray.dir);
+                    let d = (d * (1.0 + dead(stick.y) * f.stick_distance_per_s * dt))
+                        .clamp(f.bound_near_m, f.bound_far_m);
+                    s.by_ray = Some(d);
+                    placement.width = (placement.width
+                        * (1.0 + dead(stick.x) * f.stick_width_per_s * dt))
+                        .clamp(f.width_min_m, f.width_max_m);
+                    (turn * s.dir0, d)
+                }
+                None => {
+                    let arm = ray.origin - s.shoulder;
+                    let turn = Quat::from_rotation_arc(s.hand_dir0, arm.normalize_or(s.hand_dir0));
+                    // Only reaching in or out moves it nearer or further: a move that
+                    // goes mostly that way, past a dead zone.
+                    let radial = arm.length() - s.last_arm.length();
+                    let step = (arm - s.last_arm).length();
+                    let across = (step * step - radial * radial).max(0.0).sqrt();
+                    if radial.abs() > f.reach_dominance * across {
+                        s.reached += radial;
+                    }
+                    s.last_arm = arm;
+                    let dr = s.reached;
+                    let dr = dr.signum() * (dr.abs() - f.reach_dead_m).max(0.0);
+                    let d = s.d0 * ((s.r0 + dr) / s.r0).max(0.05).powf(s.power);
+                    (turn * s.dir0, d)
+                }
+            };
+            let d = soft_clamp(d, f.bound_near_m, f.bound_far_m, f.bound_soft_m);
             let point = s.pivot + dir * d;
             self.distance = point.distance(ray.origin);
+            self.sphere = Some(s);
             let offset = (self.anchor * placement.width).extend(0.0);
             for _ in 0..2 {
                 placement.position = point - placement.rotation * offset;
@@ -235,7 +306,10 @@ mod tests {
         );
         assert!((p.position.distance(eye) - at.distance(eye)).abs() < 1e-3);
         assert!(p.position.distance(at) > 0.3, "{:?}", p.position);
-        // Out by 10 cm: 8 past the dead zone, the distance by as much as the reach.
+        // Back round the shoulder, then out by 10 cm: 8 past the dead zone, the
+        // distance by as much as the reach.
+        g.update(&mut p, ray, eye, Vec2::ZERO, 0.01, &f);
+        assert!(p.position.distance(at) < 1e-3, "{:?}", p.position);
         let arm = hand - shoulder;
         let out = shoulder + arm * ((arm.length() + 0.1) / arm.length());
         g.update(
@@ -252,5 +326,139 @@ mod tests {
         let normal = p.rotation * Vec3::Z;
         assert!(normal.dot((eye - p.position).normalize()) > 0.999);
         assert!((p.rotation * Vec3::X).y.abs() < 1e-4);
+    }
+
+    /// A monitor 1.5 m ahead taken by a hand on the sphere, with `p` there, the hand
+    /// and the shoulder.
+    fn taken_by_hand() -> (Grab, Placement, Vec3, Vec3, Vec3, Ray) {
+        let f = Feel::DEFAULT;
+        let eye = Vec3::new(0.0, 1.6, 0.0);
+        let shoulder = Vec3::new(0.17, 1.42, 0.0);
+        let hand = Vec3::new(0.2, 1.3, -0.4);
+        let at = Vec3::new(0.0, 1.6, -1.5);
+        let p = Placement {
+            position: at,
+            rotation: facing(at, eye),
+            width: 1.0,
+        };
+        let ray = Ray {
+            origin: hand,
+            dir: (at - hand).normalize(),
+        };
+        let g = Grab::start(Thing::Menu, at.distance(hand), Vec2::ZERO, &p)
+            .on_sphere(ray, eye, shoulder, 1.0, &f);
+        (g, p, eye, shoulder, hand, ray)
+    }
+
+    /// A hand moving as much across as in or out (diagonally, in small steps) does not
+    /// change the distance: only a move mostly in or out does.
+    #[test]
+    fn only_reaching_in_or_out_changes_the_distance() {
+        let f = Feel::DEFAULT;
+        let (mut g, mut p, eye, shoulder, hand, ray) = taken_by_hand();
+        let d0 = p.position.distance(eye);
+        // Each step 5 mm out from the shoulder and 5 mm across.
+        let mut at = hand;
+        for _ in 0..30 {
+            let out = (at - shoulder).normalize();
+            let side = out.cross(Vec3::Y).normalize();
+            at += (out + side) * 0.005;
+            g.update(&mut p, Ray { origin: at, ..ray }, eye, Vec2::ZERO, 0.01, &f);
+        }
+        assert!(
+            (p.position.distance(eye) - d0).abs() < 1e-3,
+            "diagonally: {} from {d0}",
+            p.position.distance(eye)
+        );
+        // Straight out from there by 10 cm, in small steps: further.
+        let from = at;
+        for i in 1..=20 {
+            let at = from + (from - shoulder).normalize() * (i as f32 * 0.005);
+            g.update(&mut p, Ray { origin: at, ..ray }, eye, Vec2::ZERO, 0.01, &f);
+        }
+        assert!(p.position.distance(eye) > d0 + 0.2, "out");
+    }
+
+    /// However far a hand reaches, the monitor stops at the bounds of the distance,
+    /// slowing down before them.
+    #[test]
+    fn a_monitor_on_the_sphere_stops_at_the_bounds() {
+        let f = Feel::DEFAULT;
+        let (mut g, mut p, eye, shoulder, hand, ray) = taken_by_hand();
+        let arm = (hand - shoulder).normalize();
+        let mut last = p.position.distance(eye);
+        // Further than an arm reaches, to be sure.
+        for i in 1..=300 {
+            let at = hand + arm * (i as f32 * 0.01);
+            g.update(&mut p, Ray { origin: at, ..ray }, eye, Vec2::ZERO, 0.01, &f);
+            let d = p.position.distance(eye);
+            assert!(
+                d <= f.bound_far_m + 1e-4 && d >= last - 1e-4,
+                "{d} after {last}"
+            );
+            last = d;
+        }
+        assert!(
+            last > f.bound_far_m - f.bound_soft_m,
+            "near the bound: {last}"
+        );
+        for i in 1..=80 {
+            let at = hand - arm * (i as f32 * 0.004);
+            g.update(&mut p, Ray { origin: at, ..ray }, eye, Vec2::ZERO, 0.01, &f);
+            let d = p.position.distance(eye);
+            assert!(d >= f.bound_near_m - 1e-4, "{d}");
+        }
+    }
+
+    /// By a controller: its ray turned turns the monitor about the eye at the same
+    /// distance; its stick takes it further and makes it larger.
+    #[test]
+    fn a_controller_moves_a_monitor_on_the_sphere() {
+        let f = Feel::DEFAULT;
+        let eye = Vec3::new(0.0, 1.6, 0.0);
+        let at = Vec3::new(0.0, 1.6, -2.0);
+        let controller = Vec3::new(0.2, 1.2, -0.3);
+        let mut p = Placement {
+            position: at,
+            rotation: facing(at, eye),
+            width: 1.0,
+        };
+        let ray = Ray {
+            origin: controller,
+            dir: (at - controller).normalize(),
+        };
+        let mut g = Grab::start(Thing::Menu, at.distance(controller), Vec2::ZERO, &p)
+            .on_sphere_by_ray(ray, eye);
+        let turned = Ray {
+            dir: Quat::from_rotation_y(0.5) * ray.dir,
+            ..ray
+        };
+        g.update(&mut p, turned, eye, Vec2::ZERO, 0.01, &f);
+        assert!(
+            (p.position.distance(eye) - 2.0).abs() < 1e-3,
+            "{:?}",
+            p.position
+        );
+        let seen = (p.position - eye).normalize().angle_between(Vec3::NEG_Z);
+        assert!((seen - 0.5).abs() < 0.05, "turned by {seen}");
+        for _ in 0..10 {
+            g.update(&mut p, turned, eye, Vec2::new(1.0, 1.0), 0.05, &f);
+        }
+        assert!(p.position.distance(eye) > 2.5, "{:?}", p.position);
+        assert!(p.width > 1.3, "{}", p.width);
+    }
+
+    #[test]
+    fn soft_clamp_slows_down_before_each_bound() {
+        assert_eq!(soft_clamp(1.0, 0.35, 6.0, 0.05), 1.0);
+        assert!(soft_clamp(9.0, 0.35, 6.0, 0.05) <= 6.0);
+        assert!(soft_clamp(9.0, 0.35, 6.0, 0.05) > 5.99);
+        assert!(soft_clamp(-3.0, 0.35, 6.0, 0.05) >= 0.35);
+        let (a, b) = (
+            soft_clamp(5.97, 0.35, 6.0, 0.05),
+            soft_clamp(5.98, 0.35, 6.0, 0.05),
+        );
+        assert!(a < b && b - a < 0.01);
+        assert_eq!(soft_clamp(7.0, 0.35, 6.0, 0.0), 6.0);
     }
 }

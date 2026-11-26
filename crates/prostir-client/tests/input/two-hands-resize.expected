@@ -8,47 +8,47 @@
 0.088 resize to 1.200
 0.088 drag display 1 at (-0.00, 1.75, -1.50)
 0.099 resize to 1.230
-0.099 drag display 1 at (-0.01, 1.75, -1.50)
+0.099 drag display 1 at (-0.00, 1.75, -1.50)
 0.110 resize to 1.260
-0.110 drag display 1 at (-0.02, 1.75, -1.50)
+0.110 drag display 1 at (-0.00, 1.75, -1.50)
 0.121 resize to 1.290
-0.121 drag display 1 at (-0.03, 1.75, -1.50)
+0.121 drag display 1 at (-0.00, 1.75, -1.50)
 0.132 resize to 1.320
-0.132 drag display 1 at (-0.04, 1.75, -1.50)
+0.132 drag display 1 at (-0.00, 1.75, -1.50)
 0.143 resize to 1.350
-0.143 drag display 1 at (-0.05, 1.75, -1.50)
+0.143 drag display 1 at (-0.00, 1.75, -1.50)
 0.154 resize to 1.380
-0.154 drag display 1 at (-0.06, 1.75, -1.50)
+0.154 drag display 1 at (-0.00, 1.75, -1.50)
 0.165 resize to 1.410
-0.165 drag display 1 at (-0.07, 1.75, -1.50)
+0.165 drag display 1 at (-0.00, 1.75, -1.50)
 0.176 resize to 1.440
-0.176 drag display 1 at (-0.08, 1.75, -1.50)
+0.176 drag display 1 at (-0.00, 1.75, -1.50)
 0.187 resize to 1.470
-0.187 drag display 1 at (-0.09, 1.75, -1.50)
+0.187 drag display 1 at (-0.00, 1.75, -1.50)
 0.198 resize to 1.500
-0.198 drag display 1 at (-0.10, 1.75, -1.50)
+0.198 drag display 1 at (-0.00, 1.75, -1.50)
 0.209 resize to 1.530
-0.209 drag display 1 at (-0.10, 1.75, -1.50)
+0.209 drag display 1 at (-0.00, 1.75, -1.50)
 0.220 resize to 1.560
-0.220 drag display 1 at (-0.10, 1.75, -1.50)
+0.220 drag display 1 at (-0.00, 1.75, -1.50)
 0.231 resize to 1.590
-0.231 drag display 1 at (-0.10, 1.75, -1.50)
+0.231 drag display 1 at (-0.00, 1.75, -1.50)
 0.242 resize to 1.620
-0.242 drag display 1 at (-0.10, 1.75, -1.50)
+0.242 drag display 1 at (-0.00, 1.75, -1.50)
 0.253 resize to 1.650
-0.253 drag display 1 at (-0.10, 1.75, -1.50)
+0.253 drag display 1 at (-0.00, 1.75, -1.50)
 0.264 resize to 1.680
-0.264 drag display 1 at (-0.10, 1.75, -1.50)
+0.264 drag display 1 at (-0.00, 1.75, -1.50)
 0.275 resize to 1.710
-0.275 drag display 1 at (-0.10, 1.75, -1.50)
+0.275 drag display 1 at (-0.00, 1.75, -1.50)
 0.286 resize to 1.740
-0.286 drag display 1 at (-0.10, 1.75, -1.50)
+0.286 drag display 1 at (-0.00, 1.75, -1.50)
 0.297 resize to 1.770
-0.297 drag display 1 at (-0.10, 1.75, -1.50)
+0.297 drag display 1 at (-0.00, 1.75, -1.50)
 0.308 resize to 1.800
-0.308 drag display 1 at (-0.10, 1.75, -1.50)
+0.308 drag display 1 at (-0.00, 1.75, -1.50)
 0.319 resize to 1.800
-0.319 drag display 1 at (-0.10, 1.75, -1.50)
+0.319 drag display 1 at (-0.00, 1.75, -1.50)
 0.319 resize-end
-0.330..0.341 drag display 1 x2 at (-0.10, 1.75, -1.50)
+0.330..0.341 drag display 1 x2 at (-0.00, 1.75, -1.50)
 0.352 let-go display 1

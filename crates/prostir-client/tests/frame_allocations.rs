@@ -820,9 +820,10 @@ fn a_drag_over_a_seam_takes_no_memory() {
     let corner = one.position + Vec3::new(-one.width / 2.0, h(&one) / 2.0, 0.0);
     let over = corner + Vec3::new(0.1, h(&three) / 2.0 + 0.02, 0.0);
     // The grip pressed on the third monitor, then held while the ray goes from it to
-    // over the seam, and stays there swaying a little. The hand halfway between, so
-    // the monitor, held at the distance it was taken at, goes there.
-    let hand = (three.position + over) / 2.0;
+    // over the seam, and stays there swaying a little. The controller just under the
+    // eye, so the monitor, moved on the sphere round the eye as its ray turns, goes
+    // there.
+    let hand = Vec3::new(0.0, -0.05, 0.0);
     let drag = move |i: u32| {
         let mut grab = Button::default();
         grab.update(1.0);

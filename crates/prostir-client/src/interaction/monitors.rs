@@ -769,7 +769,7 @@ impl Hands {
                     scene.haptic(h);
                     self.took(now, ray.origin + ray.dir * grab.distance);
                     self.hands[h].phase =
-                        Phase::Carry(Carry::by_ray(self.reach(grab, ray, head, h)));
+                        Phase::Carry(Carry::by_ray(self.reach(grab, ray, head, h, hs.is_hand)));
                 }
                 return;
             }
@@ -858,7 +858,7 @@ impl Hands {
                 scene.haptic(h);
                 self.took(now, at);
                 self.hands[h].phase = Phase::Carry(Carry {
-                    grab: self.reach(grab, ray, head, h),
+                    grab: self.reach(grab, ray, head, h, true),
                     palm: Some(gesture),
                     turn: Quat::from_rotation_arc(palm.dir, toward),
                     lost: None,
@@ -1119,16 +1119,24 @@ impl Hands {
 }
 
 impl Hands {
-    /// A monitor taken by hand `h` along `ray`: moved on a sphere where the modes say
-    /// so, else by the hand's reach as before step 8.
-    pub(super) fn reach(&self, grab: Grab, ray: Ray, head: Head, h: usize) -> Grab {
+    /// A monitor taken by hand `h` along `ray` (`is_hand`: a hand, not a controller):
+    /// moved on a sphere where the modes say so (step 8.3), else as before step 8 (a
+    /// hand's by its reach, a controller's along its ray). The menu and the keyboard
+    /// window move as before.
+    pub(super) fn reach(&self, grab: Grab, ray: Ray, head: Head, h: usize, is_hand: bool) -> Grab {
         let f = &self.feel;
         match self.m.modes.movement {
+            Movement::Sphere(_) if grab.id.display().is_some() && !is_hand => {
+                grab.on_sphere_by_ray(ray, head.position)
+            }
             Movement::Sphere(p) if grab.id.display().is_some() => {
                 let shoulder = signals::shoulder(head.position, head.forward, h == 0, f);
                 grab.on_sphere(ray, head.position, shoulder, f32::from(p), f)
             }
-            Movement::Sphere(_) | Movement::AsNow => grab.with_reach(ray.origin, head.position, f),
+            Movement::Sphere(_) | Movement::AsNow if is_hand => {
+                grab.with_reach(ray.origin, head.position, f)
+            }
+            Movement::Sphere(_) | Movement::AsNow => grab,
         }
     }
 }
