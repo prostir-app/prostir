@@ -422,6 +422,44 @@ fn reset_puts_the_arrangement_back() {
     assert!(laid_out(&here(&sim)));
 }
 
+/// "Locked" (step 8.5), off at first: from the PC (command 16) on, answered done and
+/// kept in the settings; a hand then takes no monitor and the user is told why, the
+/// menu is taken still; choosing how a hand moves monitors in the menu unlocks them,
+/// and the PC turns it off too.
+#[test]
+fn locked_from_the_pc_and_the_menu() {
+    use crate::interaction::Scene as _;
+    let mut sim = Sim::new();
+    sim.connect(&[1, 2]);
+    assert!(!sim.m.settings().locked, "off at first");
+    sim.take();
+    sim.command(16, Command::Lock { on: true });
+    let fx = sim.take();
+    assert_eq!(reply_of(&fx, 16), Some(&Outcome::Done));
+    assert!(sim.m.settings().locked);
+    let mut text = String::new();
+    sim.m.write_file(persist::File::Settings, &mut text);
+    assert!(text.contains("locked on"), "kept: {text}");
+    let thing = Thing::Display(k(1));
+    assert_eq!(sim.m.hold(thing), None);
+    let said = sim.m.toast().map(|t| t.text.clone());
+    assert_eq!(
+        said.as_deref(),
+        Some(sim.m.texts().t("headset-note-locked"))
+    );
+    assert!(sim.m.hold(Thing::Menu).is_some(), "the menu is taken");
+    sim.m.let_go(sim.now, Thing::Menu);
+    sim.menu(Action::MoveAll(false));
+    assert!(!sim.m.settings().locked, "unlocked by the menu");
+    assert!(sim.m.hold(thing).is_some(), "taken again");
+    sim.m.let_go(sim.now, thing);
+    sim.command(17, Command::Lock { on: true });
+    sim.command(18, Command::Lock { on: false });
+    let fx = sim.take();
+    assert_eq!(reply_of(&fx, 18), Some(&Outcome::Done));
+    assert!(!sim.m.settings().locked);
+}
+
 /// Scenario 9: a hundred changes in a pass are one save of each file changed, said at
 /// the end of the pass, and nothing when nothing changed.
 #[test]

@@ -287,7 +287,8 @@ impl Draw<'_> {
         self.out.push(glow);
     }
 
-    /// The magnet while dragging: the edge the monitor would stick to lights up.
+    /// The magnet while dragging: the edge the monitor would stick to lights up, and
+    /// where it takes its neighbour's size, the outline of that size where it goes.
     fn magnet(&mut self, model: &mut Model, hands: &Hands) {
         let (p, c) = (*self.p, *self.c);
         for h in 0..2 {
@@ -313,6 +314,33 @@ impl Draw<'_> {
                 let at = n.position + n.rotation * local;
                 let glow = Fx::glow(at, p.guide_m, rgba(c.guide, p.guide_alpha));
                 self.out.push(glow);
+            }
+            let Some(now) = world.shown(id) else {
+                continue;
+            };
+            let to = s.placement;
+            if (to.width - now.width).abs() <= 1e-3 * now.width {
+                continue;
+            }
+            let (half_w, half_h) = (
+                to.width / 2.0,
+                world.height_of(id) * to.width / now.width.max(1e-3) / 2.0,
+            );
+            let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+            let steps = 10;
+            for (i, &(ax, ay)) in corners.iter().enumerate() {
+                let (bx, by) = corners[(i + 1) % 4];
+                for j in 0..steps {
+                    let k = j as f32 / steps as f32;
+                    let local = Vec3::new(
+                        (ax + (bx - ax) * k) * half_w,
+                        (ay + (by - ay) * k) * half_h,
+                        0.01,
+                    );
+                    let at = to.position + to.rotation * local;
+                    let glow = Fx::glow(at, p.guide_m, rgba(c.guide, p.guide_alpha * 0.6));
+                    self.out.push(glow);
+                }
             }
         }
     }

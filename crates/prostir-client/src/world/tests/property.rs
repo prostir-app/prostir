@@ -4,8 +4,10 @@
 //! apart; and as laid out, after monitors arrive and after the magnet, no monitor
 //! hides another from the eye (rays from the eye to a grid on each). Each desk is laid
 //! out as its monitors' pictures come, one by one, then goes through random steps: a
-//! monitor dropped next to another with the magnet on, one or two monitors added (the
-//! second asked before the first one's picture comes), two swapped, a stream coming
+//! monitor dropped next to another with the magnet on, a monitor carried round the eye
+//! (the anchor of a group with its group, which keeps its seams), one or two monitors
+//! added (the second asked before the first one's picture comes), two swapped, a stream
+//! coming
 //! back at another resolution, "Line up", and the PC's own displays shown as one group. With monitors far wider than the circle
 //! (5120x1440) among them, every such monitor added is also in view, and after "Line
 //! up" no monitor is alone in a row out of view; after a preset nothing is out of view,
@@ -187,8 +189,11 @@ struct Trial {
     pcs: Vec<(u32, (u32, u32), [i32; 4])>,
     /// The sizes monitors added and refitted get.
     sizes: &'static [(u32, u32)],
-    /// The monitor dropped last.
-    dropped: Option<u32>,
+    /// The monitors dropped last (one, or the group its anchor carried).
+    dropped: Vec<u32>,
+    /// Monitors of a group carried that came apart from its anchor: the anchor, the
+    /// one, how far (metres or radians).
+    torn: Vec<(u32, u32, f32)>,
 }
 
 impl Trial {
@@ -222,7 +227,8 @@ impl Trial {
             req: 0,
             pcs: Vec::new(),
             sizes: later,
-            dropped: None,
+            dropped: Vec::new(),
+            torn: Vec::new(),
         }
     }
 
@@ -325,14 +331,15 @@ impl Trial {
     }
 
     /// A random monitor dropped by hand next to another with the magnet on, where it
-    /// cuts into nothing as dropped: what it came to.
+    /// cuts into nothing as dropped: what it came to. The anchor of a group carries the
+    /// group (step 8.5): then the group as dropped cuts into nothing, and the monitor
+    /// it is dropped by is not of it.
     fn drop_near(&mut self, rng: &mut Lcg) -> Option<String> {
         let ms = self.monitors();
         if ms.len() < 2 {
             return None;
         }
         let m = ms[rng.below(ms.len())];
-        self.dropped = Some(m);
         let mut o = ms[rng.below(ms.len())];
         if o == m {
             o = ms[(ms.iter().position(|x| *x == o)? + 1) % ms.len()];
@@ -363,28 +370,54 @@ impl Trial {
             rotation: (turn * op.rotation).normalize(),
             width: mp.width,
         };
-        // Only a drop that cuts into nothing as dropped, hides nothing and is hidden by
-        // nothing: what the magnet makes of it is what is checked.
-        let others = self.list.iter().filter(|d| d.id.0 != m).filter_map(|d| {
-            let q = *self.sim.world.placement(k(d.id.0))?;
-            Some((q, self.height(d.id.0, &q)))
-        });
-        let eye = self.sim.world.center.0;
-        if others.collect::<Vec<_>>().iter().any(|(q, qh)| {
-            cut(&p, mh, q, *qh)
-                || hidden_by(eye, (&p, mh), (q, *qh)) > HIDDEN
-                || hidden_by(eye, (q, *qh), (&p, mh)) > HIDDEN
-        }) {
-            return None;
-        }
         let sim = &mut self.sim;
         sim.s.magnet = true;
         sim.s.move_all = false;
-        sim.world.hold(Thing::Display(k(m)), &sim.s);
+        sim.world.hold(Thing::Display(k(m)), &sim.s)?;
+        let group: Vec<u32> = sim.world.groups.iter().flatten().map(|f| f.id.0).collect();
+        // Carrying a group, it turns round the eye as it goes.
+        let p = if group.is_empty() {
+            p
+        } else {
+            anchor_at(&mp, p, sim.head.0, false)
+        };
+        // Only a drop that cuts into nothing as dropped, hides nothing and is hidden by
+        // nothing: what the magnet makes of it is what is checked.
+        let moved: Vec<(Placement, f32)> = std::iter::once((p, mh))
+            .chain(group.iter().filter_map(|&f| {
+                let q = *self.sim.world.placement(k(f))?;
+                let q = moved_along(&q, &mp, &p, 1.0);
+                Some((q, self.height(f, &q)))
+            }))
+            .collect();
+        let others: Vec<(Placement, f32)> = self
+            .list
+            .iter()
+            .filter(|d| d.id.0 != m && !group.contains(&d.id.0))
+            .filter_map(|d| {
+                let q = *self.sim.world.placement(k(d.id.0))?;
+                Some((q, self.height(d.id.0, &q)))
+            })
+            .collect();
+        let eye = self.sim.world.center.0;
+        let troubles = moved.iter().any(|(p, ph)| {
+            others.iter().any(|(q, qh)| {
+                cut(p, *ph, q, *qh)
+                    || hidden_by(eye, (p, *ph), (q, *qh)) > HIDDEN
+                    || hidden_by(eye, (q, *qh), (p, *ph)) > HIDDEN
+            })
+        });
+        if troubles || group.contains(&o) {
+            self.sim.world.cancel_holds();
+            return None;
+        }
+        self.dropped = std::iter::once(m).chain(group.iter().copied()).collect();
+        let sim = &mut self.sim;
         sim.world.drag(&sim.s, Thing::Display(k(m)), p, sim.head.0);
         let stuck = sim.world.let_go(Thing::Display(k(m)), &sim.s, sim.now);
         Some(format!(
-            "drop {m} by {o} (side {side}, along {along:.2}, gap {gap:.3}, stuck {stuck})"
+            "drop {m} by {o} with {group:?} (side {side}, along {along:.2}, gap {gap:.3}, \
+             stuck {stuck})"
         ))
     }
 
@@ -477,6 +510,87 @@ impl Trial {
         Some("line up".into())
     }
 
+    /// A random monitor carried by hand round the eye, nearer or further, in small
+    /// steps, then let go with the magnet on (step 8.5): the anchor of a group carries
+    /// it, each of it standing to the anchor as it stood, through the drag and the
+    /// magnet (its seams kept; what is not kept goes into `torn`). A carry that cuts
+    /// into or hides another as dragged is put back: where a hand puts them is its own.
+    fn carry(&mut self, rng: &mut Lcg) -> Option<String> {
+        let ms = self.monitors();
+        let m = ms[rng.below(ms.len())];
+        let before = self.sim.world.placements.clone();
+        let sim = &mut self.sim;
+        sim.s.magnet = true;
+        sim.s.move_all = false;
+        let from = sim.world.hold(Thing::Display(k(m)), &sim.s)?;
+        let group: Vec<u32> = sim.world.groups.iter().flatten().map(|f| f.id.0).collect();
+        let eye = sim.head.0;
+        let (yaw, pitch) = ((rng.f() - 0.5) * 1.2, (rng.f() - 0.5) * 0.5);
+        let reach = 1.0 + (rng.f() - 0.5) * 0.3;
+        let d = from.position - eye;
+        let r = d.length();
+        let (y0, p0) = ((-d.x).atan2(-d.z), (d.y / r).clamp(-1.0, 1.0).asin());
+        for i in 1..=12 {
+            let t = i as f32 / 12.0;
+            let (y, p) = (y0 + yaw * t, p0 + pitch * t);
+            let way = Vec3::new(-y.sin() * p.cos(), p.sin(), -y.cos() * p.cos());
+            let at = eye + way * r * (1.0 + (reach - 1.0) * t);
+            let p = Placement {
+                position: at,
+                rotation: layout::facing(at, eye),
+                width: from.width,
+            };
+            sim.world.drag(&sim.s, Thing::Display(k(m)), p, eye);
+        }
+        let moved: Vec<u32> = std::iter::once(m).chain(group.iter().copied()).collect();
+        let shown = |n: u32, w: &World| {
+            let q = *w.placement(k(n))?;
+            Some((q, self.height(n, &q)))
+        };
+        let troubles = moved
+            .iter()
+            .filter_map(|&a| shown(a, &self.sim.world))
+            .any(|(p, ph)| {
+                self.list
+                    .iter()
+                    .filter(|d| !moved.contains(&d.id.0))
+                    .filter_map(|d| shown(d.id.0, &self.sim.world))
+                    .any(|(q, qh)| {
+                        cut(&p, ph, &q, qh)
+                            || hidden_by(eye, (&p, ph), (&q, qh)) > HIDDEN
+                            || hidden_by(eye, (&q, qh), (&p, ph)) > HIDDEN
+                    })
+            });
+        if troubles {
+            self.sim.world.placements = before;
+            self.sim.world.cancel_holds();
+            return None;
+        }
+        self.dropped = moved;
+        let sim = &mut self.sim;
+        let stuck = sim.world.let_go(Thing::Display(k(m)), &sim.s, sim.now);
+        // Each of the group as it stood to the anchor, in the anchor's own terms.
+        let to_anchor = |a: &Placement, f: &Placement| {
+            let inv = a.rotation.inverse();
+            (inv * (f.position - a.position), inv * f.rotation)
+        };
+        let (a0, a1) = (from, *self.sim.world.placement(k(m))?);
+        for &f in &group {
+            let (Some(f0), Some(f1)) = (before.get(&k(f)), self.sim.world.placement(k(f))) else {
+                continue;
+            };
+            let ((o0, t0), (o1, t1)) = (to_anchor(&a0, f0), to_anchor(&a1, f1));
+            let apart = o0.distance(o1).max(t0.angle_between(t1));
+            if apart > 1e-3 {
+                self.torn.push((m, f, apart));
+            }
+        }
+        Some(format!(
+            "carry {m} with {group:?} (yaw {yaw:.2}, pitch {pitch:.2}, reach {reach:.2}, stuck \
+             {stuck})"
+        ))
+    }
+
     /// One to three of the PC's own displays shown, side by side on its desktop.
     fn show_pc_displays(&mut self, rng: &mut Lcg) -> Option<String> {
         if !self.pcs.is_empty() {
@@ -510,6 +624,7 @@ enum Step {
     Refit,
     LineUp,
     PcDisplays,
+    Carry,
 }
 
 /// `cases` random desks of two to four monitors (the same every run), each through six
@@ -542,8 +657,8 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
         }
         for _ in 0..6 {
             let kind = steps[rng.below(steps.len())];
-            let dropped = kind == Step::Drop;
-            let looked = matches!(kind, Step::Drop | Step::Add | Step::AddTwice);
+            let dropped = matches!(kind, Step::Drop | Step::Carry);
+            let looked = matches!(kind, Step::Drop | Step::Add | Step::AddTwice | Step::Carry);
             let hidden_before = if looked { desk.hiding() } else { Vec::new() };
             let step = match kind {
                 Step::Drop => desk.drop_near(&mut rng),
@@ -553,6 +668,7 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
                 Step::Refit => desk.refit(&mut rng),
                 Step::LineUp => desk.line_up(),
                 Step::PcDisplays => desk.show_pc_displays(&mut rng),
+                Step::Carry => desk.carry(&mut rng),
             };
             let Some(step) = step else { continue };
             desk.sim.after(1000);
@@ -564,7 +680,7 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
             let hiding: Vec<_> = if looked {
                 let was = |a: u32, b: u32| hidden_before.iter().any(|h| (h.0, h.1) == (a, b));
                 let may_hide = |hidden: u32| {
-                    if dropped && Some(hidden) == desk.dropped {
+                    if dropped && desk.dropped.contains(&hidden) {
                         SEAM_HIDDEN
                     } else {
                         HIDDEN
@@ -577,10 +693,12 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
             } else {
                 Vec::new()
             };
-            if !cutting.is_empty() || !unglued.is_empty() || !hiding.is_empty() {
+            let torn = std::mem::take(&mut desk.torn);
+            if !cutting.is_empty() || !unglued.is_empty() || !hiding.is_empty() || !torn.is_empty()
+            {
                 failures.push(format!(
                     "{ppd:?} case {case} {first:?}: {done:?}: cut {cutting:?}, glued apart \
-                     {unglued:?}, hidden (by, share, meeting) {hiding:?}"
+                     {unglued:?}, hidden (by, share, meeting) {hiding:?}, torn {torn:?}"
                 ));
                 if std::env::var_os("PROSTIR_CUT_DEBUG").is_some() {
                     for (n, p) in &desk.sim.world.placements {
@@ -604,6 +722,18 @@ fn holds_through_on(ppd: Option<f32>, sizes: &'static [(u32, u32)], steps: &[Ste
 #[test]
 fn the_magnet_cuts_into_nothing() {
     holds_through(&[Step::Drop], 300);
+}
+
+/// Groups carried by their anchors and single monitors carried out of them, round the
+/// eye, nearer and further, let go with the magnet, and monitors dropped next to others
+/// (step 8.5), on many desks, with wide monitors, and at 25 and 20 pixels a degree: none
+/// cuts into another, none hides another it did not, and every group keeps its seams.
+#[test]
+fn groups_carried_keep_their_seams_on_many_desks() {
+    for ppd in [None, Some(25.0), Some(20.0)] {
+        holds_through_on(ppd, &SIZES, &[Step::Carry, Step::Drop], 500);
+        holds_through_on(ppd, &WIDE, &[Step::Carry, Step::Drop], 200);
+    }
 }
 
 /// Monitors arriving one by one each go next to the others, and none goes through

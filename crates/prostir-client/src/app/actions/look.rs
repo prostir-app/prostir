@@ -39,11 +39,17 @@ impl Model {
                 self.saves.mark(persist::File::Settings);
             }
             Action::MoveAll(on) => {
+                // A choice of how a hand moves monitors: they are not locked then.
                 self.settings.move_all = on;
+                self.settings.locked = false;
                 self.saves.mark(persist::File::Settings);
             }
             Action::Magnet(on) => {
                 self.settings.magnet = on;
+                self.saves.mark(persist::File::Settings);
+            }
+            Action::Lock(on) => {
+                self.settings.locked = on;
                 self.saves.mark(persist::File::Settings);
             }
             Action::Follow(on) => {

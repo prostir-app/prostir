@@ -557,6 +557,10 @@ impl Object {
         self.done(Request::NoLimits { on }).await
     }
 
+    async fn lock(&self, on: bool) -> Result<(), BusError> {
+        self.done(Request::Lock { on }).await
+    }
+
     async fn preset(&self, preset: u8) -> Result<(), BusError> {
         self.done(Request::Preset { preset }).await
     }

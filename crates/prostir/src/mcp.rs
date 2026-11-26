@@ -1123,6 +1123,11 @@ static TOOLS: &[Tool] = &[
     ),
     asks("no_limits", "Headset command: no limits on or off.", &[ON]),
     asks(
+        "lock",
+        "Headset command: the arrangement locked (no hand moves a monitor) or not.",
+        &[ON],
+    ),
+    asks(
         "preset",
         "Headset command: the headset's preset of this number.",
         &[Arg::of("preset", "integer", "the preset's number").within(0, 255)],

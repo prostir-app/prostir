@@ -44,6 +44,7 @@ fn commands_read_as_requests() {
     assert_eq!(asks("follow on"), Request::Follow { on: true });
     assert_eq!(asks("mic off"), Request::SetMic { on: false });
     assert_eq!(asks("nolimits on"), Request::NoLimits { on: true });
+    assert_eq!(asks("lock on"), Request::Lock { on: true });
     assert_eq!(asks("preset 4"), Request::Preset { preset: 4 });
     let monitor = |w, h, scale| Request::AddMonitor { w, h, scale };
     assert_eq!(asks("monitor add 2560x1440"), monitor(2560, 1440, 100));
