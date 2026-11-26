@@ -17,10 +17,15 @@ struct Recorder {
     touches: bool,
     /// Fails every call from now on.
     broken: Arc<std::sync::atomic::AtomicBool>,
+    /// The person stopped it.
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Recorder {
     fn say(&self, what: String) -> anyhow::Result<()> {
+        if self.stop.load(Ordering::Relaxed) {
+            return Err(InputStopped.into());
+        }
         anyhow::ensure!(
             !self.broken.load(Ordering::Relaxed),
             "closed by the desktop"
@@ -61,6 +66,7 @@ struct Opener {
     refuse: bool,
     asked: AtomicU32,
     broken: Arc<std::sync::atomic::AtomicBool>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl OpenInput for Opener {
@@ -73,6 +79,7 @@ impl OpenInput for Opener {
             told: self.told.clone(),
             touches: self.touches,
             broken: self.broken.clone(),
+            stop: self.stop.clone(),
         }))
     }
 }
@@ -84,6 +91,7 @@ fn opener(touches: bool, refuse: bool) -> Arc<Opener> {
         refuse,
         asked: AtomicU32::new(0),
         broken: Arc::default(),
+        stop: Arc::default(),
     })
 }
 
@@ -105,7 +113,7 @@ fn at(x: f64) -> Spot {
 
 /// A run with `opener`, its devices opened by a first move.
 fn opened(opener: &Arc<Opener>) -> Run {
-    let mut run = Run::new(Arc::new(Router::new()));
+    let mut run = Run::new(Box::new(|_| {}), Arc::default());
     run.set_opener(Some(opener.clone()));
     let now = Instant::now();
     run.event(
@@ -186,6 +194,7 @@ fn what_a_session_holds_goes_with_it() {
             slot: 0,
             phase: TouchPhase::Down,
             at: Some(at(7.0)),
+            came: now,
         },
         now,
     );
@@ -210,20 +219,20 @@ fn a_desktop_without_touch_gets_mouse_actions() {
     let o = opener(false, false);
     let mut run = opened(&o);
     let now = Instant::now();
-    let touch = |phase, x| Ev::Touch {
+    let touch = |phase, x, came| Ev::Touch {
         from: 1,
         slot: 0,
         phase,
         at: Some(at(x)),
+        came,
     };
-    run.event(touch(TouchPhase::Down, 100.0), now);
-    run.event(
-        touch(TouchPhase::Up, 100.0),
-        now + Duration::from_millis(80),
-    );
+    run.event(touch(TouchPhase::Down, 100.0, now), now);
+    let soon = now + Duration::from_millis(80);
+    run.event(touch(TouchPhase::Up, 100.0, soon), soon);
     assert_eq!(told(&o), ["to 100,10", "Left down", "Left up"]);
-    run.event(touch(TouchPhase::Down, 100.0), now);
-    run.event(touch(TouchPhase::Move, 200.0), now + Duration::from_secs(1));
+    run.event(touch(TouchPhase::Down, 100.0, now), now);
+    let later = now + Duration::from_secs(1);
+    run.event(touch(TouchPhase::Move, 200.0, later), later);
     assert_eq!(told(&o), ["to 100,10", "Left down", "to 200,10"]);
     run.event(Ev::Release { from: 1 }, now);
     assert_eq!(told(&o), ["Left up"]);
@@ -292,4 +301,77 @@ fn moves_in_a_row_go_as_the_last() {
         })
         .collect();
     assert_eq!(left, ["1 2", "2 9", "1 4", "click", "1 6"]);
+}
+
+/// A person who stops devices that were open (the desktop's remote control ended):
+/// as a no, not opened again, and said once.
+#[test]
+fn devices_the_person_stopped_are_not_opened_again() {
+    let o = opener(true, false);
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let mut run = {
+        let told = told.clone();
+        Run::new(
+            Box::new(move |n| told.lock().unwrap().push(n)),
+            Arc::default(),
+        )
+    };
+    run.set_opener(Some(o.clone()));
+    run.event(
+        Ev::To {
+            from: 1,
+            at: at(1.0),
+        },
+        Instant::now(),
+    );
+    wait_open(&mut run);
+    o.stop.store(true, Ordering::Relaxed);
+    run.event(click(1, true), Instant::now());
+    assert!(run.injector.is_none() && run.refused);
+    assert_eq!(
+        State::of(run.shared.state.load(Ordering::Relaxed)),
+        State::Refused
+    );
+    o.stop.store(false, Ordering::Relaxed);
+    for _ in 0..3 {
+        run.event(click(1, true), Instant::now() + REOPEN_MAX);
+        run.tick(Instant::now());
+    }
+    assert_eq!(o.asked.load(Ordering::Relaxed), 1);
+    assert_eq!(*told.lock().unwrap(), [News::Refused]);
+}
+
+/// A pass that panics lets go of what is held (as far as it can), drops the devices
+/// and keeps the thread going.
+#[test]
+fn a_pass_that_panics_lets_go_and_goes_on() {
+    let o = opener(true, false);
+    let mut run = opened(&o);
+    run.event(click(1, true), Instant::now());
+    told(&o);
+    let pass = catch_unwind(AssertUnwindSafe(|| panic!("a bug")));
+    assert!(pass.is_err());
+    run.recover();
+    assert!(run.injector.is_none() && !run.held.any());
+    assert_eq!(told(&o), ["Left up"]);
+}
+
+/// A press on a display gone is dropped; a release there still lets go.
+#[test]
+fn a_press_nowhere_is_dropped_and_a_release_lets_go() {
+    let o = opener(true, false);
+    let mut run = opened(&o);
+    let now = Instant::now();
+    let nowhere = |down| Ev::Button {
+        from: 1,
+        at: None,
+        button: MouseButton::Left,
+        down,
+    };
+    run.event(nowhere(true), now);
+    assert!(told(&o).is_empty());
+    run.event(click(1, true), now);
+    told(&o);
+    run.event(nowhere(false), now);
+    assert_eq!(told(&o), ["Left up"]);
 }

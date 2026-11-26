@@ -408,6 +408,11 @@ impl Session {
         self.answers = answers;
     }
 
+    /// Whether the headset has right `perm` now.
+    pub fn may(&self, perm: u32) -> bool {
+        self.publisher.access.may(perm)
+    }
+
     /// Sends `msg` to the headset in the control lane, after what went before it.
     pub fn send(&self, msg: HostMsg) {
         self.outbox.control(msg);

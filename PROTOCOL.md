@@ -1509,11 +1509,16 @@ display's picture as in `MouseTo` and `CursorAt`.
   nothing at all for 2 s while it holds something: a headset holding a button or a
   finger still sends where it is (`MouseTo` or `Touch` `Move`) at least once a
   second.
+- **Not worn, nothing pressed:** input from a headset that says it is not worn is
+  dropped.
 - **The desktop asks first** where it does (KDE Plasma and GNOME, through the
   RemoteDesktop portal): once, the first time input is needed, and it keeps the
-  answer. Until then input goes nowhere. Where the person says no, the host sends a
+  answer. Until then input goes nowhere. Where the person says no, or later stops the
+  desktop's remote control, the host sends the headsets with the input right a
   `Problem` with `NOT_ALLOWED` and does not ask again until it starts again; where the
-  desktop's input does not open, a `Problem` with `DESKTOP`.
+  desktop's input does not open, a `Problem` with `DESKTOP` (each once, until input
+  works again). Meanwhile a new session is not offered feature 15, nor feature 1
+  after a no.
 
 ### Sound
 

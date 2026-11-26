@@ -27,6 +27,13 @@ pub struct Feel {
     pub stop_below: f64,
     /// A finger that rested this long before it lifted does not throw the page.
     pub rested: Duration,
+    /// The speed is measured over at least this long (moves that came together are
+    /// one).
+    pub sample: Duration,
+    /// The page is never thrown faster (logical pixels a second).
+    pub fastest: f64,
+    /// At most this many notches each way for one step of a thrown page.
+    pub notches_per_step: i32,
 }
 
 pub const FEEL: Feel = Feel {
@@ -36,6 +43,9 @@ pub const FEEL: Feel = Feel {
     coast: Duration::from_millis(350),
     stop_below: 40.0,
     rested: Duration::from_millis(100),
+    sample: Duration::from_millis(4),
+    fastest: 5000.0,
+    notches_per_step: 4,
 };
 
 #[derive(Debug, Clone)]
@@ -51,8 +61,11 @@ enum State {
     Scrolling {
         slot: u8,
         last: (f64, f64),
+        /// When it last moved.
         at: Instant,
         speed: (f64, f64),
+        /// Where and when the speed was last measured.
+        sampled: ((f64, f64), Instant),
     },
     Dragging {
         slot: u8,
@@ -122,6 +135,7 @@ impl TouchMouse {
                         last: (start.x, start.y),
                         at: since,
                         speed: (0.0, 0.0),
+                        sampled: ((start.x, start.y), since),
                     };
                     self.scroll_to(at, now)
                 }
@@ -169,20 +183,31 @@ impl TouchMouse {
 
     /// The page moved with the finger to `at`.
     fn scroll_to(&mut self, at: &Spot, now: Instant) -> Vec<Act> {
+        let feel = self.feel;
         let State::Scrolling {
             last,
             at: then,
             speed,
+            sampled,
             ..
         } = &mut self.state
         else {
             return Vec::new();
         };
         let moved = (at.x - last.0, at.y - last.1);
-        let dt = now.duration_since(*then).as_secs_f64();
-        if dt > 0.0 {
-            let fresh = (moved.0 / dt, moved.1 / dt);
-            *speed = (0.6 * fresh.0 + 0.4 * speed.0, 0.6 * fresh.1 + 0.4 * speed.1);
+        let since = now.saturating_duration_since(sampled.1);
+        if since >= feel.sample {
+            let dt = since.as_secs_f64();
+            let fresh = ((at.x - sampled.0.0) / dt, (at.y - sampled.0.1) / dt);
+            let blended = (0.6 * fresh.0 + 0.4 * speed.0, 0.6 * fresh.1 + 0.4 * speed.1);
+            let fast = blended.0.hypot(blended.1);
+            let cut = if fast > feel.fastest {
+                feel.fastest / fast
+            } else {
+                1.0
+            };
+            *speed = (blended.0 * cut, blended.1 * cut);
+            *sampled = ((at.x, at.y), now);
         }
         *last = (at.x, at.y);
         *then = now;
@@ -218,7 +243,15 @@ impl TouchMouse {
         let slower = (speed.0 * fall, speed.1 * fall);
         // The distance gone meanwhile, at the speed falling all the way.
         let gone = self.feel.coast.as_secs_f64() * (1.0 - fall);
-        let acts = self.wheel((speed.0 * gone, speed.1 * gone));
+        let most = self.feel.notches_per_step * prostir_proto::input::SCROLL_NOTCH;
+        let acts: Vec<Act> = self
+            .wheel((speed.0 * gone, speed.1 * gone))
+            .into_iter()
+            .map(|a| match a {
+                Act::Scroll(dx, dy) => Act::Scroll(dx.clamp(-most, most), dy.clamp(-most, most)),
+                other => other,
+            })
+            .collect();
         self.state = if slower.0.hypot(slower.1) < self.feel.stop_below {
             State::Idle
         } else {
@@ -395,6 +428,48 @@ mod tests {
         assert!(m.moving());
         m.touch(0, TouchPhase::Down, &at(5.0, 5.0), ms(t, 40));
         assert!(!m.moving());
+    }
+
+    /// Moves that came together (the thread takes them at once, microseconds apart)
+    /// throw the page no faster than the finger went: a short flick of 32 pixels in
+    /// 50 ms coasts for a few notches, not thousands.
+    #[test]
+    fn moves_taken_together_do_not_throw_the_page_far() {
+        let t = Instant::now();
+        let mut m = TouchMouse::new(FEEL);
+        m.touch(0, TouchPhase::Down, &at(500.0, 500.0), t);
+        let mut sent = 0;
+        // Eight moves of 4 pixels, all taken 5 microseconds apart.
+        for i in 1..=8u32 {
+            let now = t + Duration::from_micros(5 * u64::from(i));
+            for a in m.touch(
+                0,
+                TouchPhase::Move,
+                &at(500.0, 500.0 - 4.0 * f64::from(i)),
+                now,
+            ) {
+                if let Act::Scroll(_, dy) = a {
+                    sent += dy;
+                }
+            }
+        }
+        m.touch(
+            0,
+            TouchPhase::Up,
+            &at(500.0, 468.0),
+            t + Duration::from_micros(50),
+        );
+        let mut now = t;
+        for _ in 0..400 {
+            now += Duration::from_millis(16);
+            for a in m.tick(now) {
+                let Act::Scroll(_, dy) = a else { continue };
+                assert!(dy <= FEEL.notches_per_step * 120, "{dy} in one step");
+                sent += dy;
+            }
+        }
+        assert!(!m.moving());
+        assert!(sent < 120 * 40, "{sent}: a short flick goes a short way");
     }
 
     /// A second finger does nothing while the first acts, nor one never seen down.

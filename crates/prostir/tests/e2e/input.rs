@@ -281,3 +281,55 @@ fn devices_the_desktop_closed_open_again() {
     pc.wait_log(SOON, "fake desktop: button Left down");
     pc.quit();
 }
+
+/// A headset taken off while it holds a button: the PC lets go at once, and takes
+/// nothing more from it until it is worn again.
+#[test]
+fn taking_the_headset_off_lets_go() {
+    let (_dir, mut pc, _keys, mut headset) = session("input-off", &with_input("touch"));
+    let one = display_of_width(&headset, 640);
+    open_input(&mut pc, &mut headset, one);
+    headset
+        .send(&button(one, 0, 0, Button::Left, true))
+        .unwrap();
+    pc.wait_log(SOON, "fake desktop: button Left down");
+    headset.send(&crate::worn(false)).unwrap();
+    pc.wait_log(SOON, "fake desktop: button Left up");
+    headset
+        .send(&button(one, 0, 0, Button::Right, true))
+        .unwrap();
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    assert_eq!(pc.count_log("fake desktop: button Right"), 0);
+    pc.quit();
+}
+
+/// A flick whose moves come in one burst (as a busy network gives them): the page
+/// goes the way the finger went and stops soon, a few notches, never thousands.
+#[test]
+fn a_burst_of_moves_scrolls_a_short_way() {
+    let (_dir, mut pc, _keys, mut headset) = session("input-burst", &with_input("mouse"));
+    let one = display_of_width(&headset, 640);
+    open_input(&mut pc, &mut headset, one);
+    headset
+        .send(&touch(one, 0, 32_768, 32_768, TouchPhase::Down))
+        .unwrap();
+    // Eight moves of about 4 pixels each, sent together.
+    for i in 1..=8u16 {
+        headset
+            .send(&touch(one, 0, 32_768, 32_768 - 730 * i, TouchPhase::Move))
+            .unwrap();
+    }
+    headset
+        .send(&touch(one, 0, 32_768, 32_768 - 730 * 8, TouchPhase::Up))
+        .unwrap();
+    pc.wait_log(SOON, "fake desktop: scroll 0,");
+    headset.take_for(Duration::from_secs(3)).unwrap();
+    let total: i32 = pc
+        .lines("fake desktop: scroll 0,")
+        .iter()
+        .filter_map(|l| l.rsplit(',').next()?.trim().parse::<i32>().ok())
+        .sum();
+    assert!(total > 0, "down, as the finger went up");
+    assert!(total < 120 * 20, "{total}: a short way");
+    pc.quit();
+}

@@ -225,7 +225,7 @@ pc-session-the-desktop-does-not-respond = Стільниця не відпові
 ## src/input/mod.rs
 
 pc-input-not-allowed = Керувати мишею з шолома на цьому ПК не дозволено. Дозволити знову можна після перезапуску Prostir.
-pc-input-unavailable = Стільниця ПК не дала Prostir керувати мишею. Кліки з шолома поки не діють.
+pc-input-unavailable = Стільниця ПК не змогла відкрити введення. Кліки з шолома поки не діють.
 
 ## src/wake.rs
 

@@ -234,7 +234,7 @@ pc-session-the-desktop-does-not-respond = The desktop does not respond
 ## src/input/mod.rs
 
 pc-input-not-allowed = Controlling the mouse from the headset is not allowed on this PC. It can be allowed again after Prostir restarts.
-pc-input-unavailable = The PC's desktop did not let Prostir control the mouse. Clicks from the headset do nothing for now.
+pc-input-unavailable = The PC's desktop could not open its input. Clicks from the headset do nothing for now.
 
 ## src/wake.rs
 

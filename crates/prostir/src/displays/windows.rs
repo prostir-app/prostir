@@ -21,6 +21,10 @@ impl Displays {
     /// left) on the desktop, while it is there: the middle of its first pixel to the
     /// middle of its last, as `CursorAt` says it back (see `cursor.rs`).
     pub fn spot(&self, id: ScreenId, u: u16, v: u16) -> Option<Spot> {
+        // Only a display the headsets are shown.
+        if !matches!(self.screens.get(&id)?.state, ScreenState::Running) {
+            return None;
+        }
         let rect = self.desk_rect(id)?;
         let output = OutputKey::new(self.output_of(id)?);
         let at = |start: i32, len: u32, f: u16| {

@@ -35,8 +35,9 @@
 //!   that pixel of the output's picture; `cursor-hide`: it is hidden (until the next
 //!   look). Only with `PROSTIR_FAKE_CURSOR=1`, where the desktop tells the pointer
 //!   apart from the pictures; said to the core only while it asks for that;
-//! - `input-refuse`, `input-close`: the person does not allow the virtual input the
-//!   next time it opens; the desktop closes it (see `input.rs`);
+//! - `input-refuse`, `input-close`, `input-stop`: the person does not allow the
+//!   virtual input the next time it opens; the desktop closes it; the person stops it
+//!   (see `input.rs`);
 //! - `hang make 20`, `hang place 20`, `hang encoder-stop 20`, `hang sound-start 20`:
 //!   the next monitor made, layout placed, encoder stopped or sound to the headset
 //!   started takes that many seconds, as a desktop, a driver or a sound system that
@@ -787,6 +788,11 @@ fn command(line: &str) -> Result<()> {
     if let ["input-refuse"] = words[..] {
         super::input::refuse_next();
         info!("fake desktop: the person will not allow the virtual input");
+        return Ok(());
+    }
+    if let ["input-stop"] = words[..] {
+        super::input::stop();
+        info!("fake desktop: the person stops the virtual input");
         return Ok(());
     }
     if let ["input-close"] = words[..] {

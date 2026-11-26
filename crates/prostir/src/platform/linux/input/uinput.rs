@@ -237,7 +237,10 @@ impl Injector for Uinput {
     /// The fine steps, and whole notches for programs that read only those.
     fn scroll(&mut self, dx: i32, dy: i32) -> Result<()> {
         let notch = prostir_proto::input::SCROLL_NOTCH;
-        self.wheel = (self.wheel.0 + dx, self.wheel.1 + dy);
+        self.wheel = (
+            self.wheel.0.saturating_add(dx),
+            self.wheel.1.saturating_add(dy),
+        );
         let whole = (self.wheel.0 / notch, self.wheel.1 / notch);
         self.wheel = (self.wheel.0 % notch, self.wheel.1 % notch);
         // The wheel counts up for scrolling up, the protocol for down.

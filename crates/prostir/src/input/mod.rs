@@ -16,24 +16,29 @@
 //!
 //! Nothing stays pressed: a session's end, its headset taken off and two seconds of
 //! silence from a session holding something let everything it holds go; devices that
-//! are gone let go with them (the desktop does that).
+//! are gone let go with them (the desktop does that). A pass of the thread that
+//! panics lets go of everything and drops the devices; the thread goes on. Dropped,
+//! the handle waits a moment for the thread to let go of everything.
+//!
+//! Devices the person closed (they stopped the desktop's remote control) count as a
+//! no: not opened again by themselves. Only devices that did not open are tried again.
 
 pub mod held;
 pub mod touch_mouse;
 
 use std::collections::BTreeMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use log::{info, warn};
-use prostir_proto::HostMsg;
-use prostir_proto::state::ErrorCode;
+use log::{error, info, warn};
 
 use crate::events::SessionId;
-use crate::i18n::t;
-use crate::platform::{Injector, InputRefused, MouseButton, OpenInput, Spot, TouchPhase};
-use crate::router::Router;
+use crate::platform::{
+    Injector, InputRefused, InputStopped, MouseButton, OpenInput, Spot, TouchPhase,
+};
 use held::{Act, Held};
 use touch_mouse::TouchMouse;
 
@@ -45,6 +50,46 @@ const REOPEN_MAX: Duration = Duration::from_secs(120);
 const PUMP_EVERY: Duration = Duration::from_millis(100);
 /// How often a page thrown with a finger moves on.
 const COAST_EVERY: Duration = Duration::from_millis(16);
+/// Moves waiting for the thread at most: more are dropped (the newest will do).
+const MOVES_WAITING: usize = 32;
+/// How long a handle dropped waits for the thread to let go of everything.
+const LET_GO_WITHIN: Duration = Duration::from_millis(500);
+
+/// What the person is to hear of the input (each once, until it works again).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum News {
+    /// The person did not allow it, or stopped it.
+    Refused,
+    /// The desktop's devices did not open.
+    Unavailable,
+}
+
+/// How the input is, for the capabilities named to new sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    /// Open, or not tried yet.
+    Fine,
+    Refused,
+    Unavailable,
+}
+
+impl State {
+    fn of(v: u8) -> Self {
+        match v {
+            1 => Self::Refused,
+            2 => Self::Unavailable,
+            _ => Self::Fine,
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Self::Fine => 0,
+            Self::Refused => 1,
+            Self::Unavailable => 2,
+        }
+    }
+}
 
 /// What a session asks of the input.
 #[derive(Debug, Clone, PartialEq)]
@@ -62,12 +107,14 @@ pub enum Ev {
     /// The wheel, in 1/120 of a notch.
     Scroll { from: SessionId, dx: i32, dy: i32 },
     /// Finger `slot` of the session (none: on a display gone meanwhile, which lifts
-    /// it where it was).
+    /// it where it was), as it came from the headset at `came`: gestures are timed by
+    /// when they came, not by when the thread takes them (several at once).
     Touch {
         from: SessionId,
         slot: u8,
         phase: TouchPhase,
         at: Option<Spot>,
+        came: Instant,
     },
     /// Everything the session holds, let go (its end, the headset taken off).
     Release { from: SessionId },
@@ -78,33 +125,80 @@ enum Msg {
     Ev(Ev),
 }
 
+/// What the thread and its handle share.
+#[derive(Default)]
+struct Shared {
+    state: AtomicU8,
+    /// Moves sent and not taken yet.
+    moves: AtomicUsize,
+}
+
 /// The control loop's side of the input thread. Dropped, the thread lets go of
-/// everything and closes the devices.
+/// everything and closes the devices, and the handle waits a moment for that.
 pub struct Input {
-    tx: Sender<Msg>,
+    tx: Option<Sender<Msg>>,
+    shared: Arc<Shared>,
+    ended: Option<Receiver<()>>,
 }
 
 impl Input {
-    /// The input thread, without devices until [`Input::set_opener`]; what goes wrong
-    /// for the person is said to every headset through `router`.
-    pub fn start(router: Arc<Router>) -> Self {
+    /// The input thread, without devices until [`Input::set_opener`]; what the person
+    /// is to hear goes to `tell`.
+    pub fn start(tell: impl Fn(News) + Send + 'static) -> Self {
         let (tx, rx) = mpsc::channel();
+        let (end_tx, ended) = mpsc::channel();
+        let shared = Arc::new(Shared::default());
+        let run = Run::new(Box::new(tell), shared.clone());
         let spawned = std::thread::Builder::new()
             .name("input".into())
-            .spawn(move || Run::new(router).run(&rx));
+            .spawn(move || {
+                run.run(&rx);
+                let _ = end_tx.send(());
+            });
         if let Err(e) = spawned {
             warn!("no thread for the input from the headset: {e}");
         }
-        Self { tx }
+        Self {
+            tx: Some(tx),
+            shared,
+            ended: Some(ended),
+        }
     }
 
     /// How to open the desktop's devices (none: it has none).
     pub fn set_opener(&self, opener: Option<Arc<dyn OpenInput>>) {
-        let _ = self.tx.send(Msg::Opener(opener));
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Msg::Opener(opener));
+        }
     }
 
+    /// Hands `ev` over, never waiting; a move while many wait is dropped.
     pub fn send(&self, ev: Ev) {
-        let _ = self.tx.send(Msg::Ev(ev));
+        if matches!(ev, Ev::To { .. }) {
+            if self.shared.moves.load(Ordering::Relaxed) >= MOVES_WAITING {
+                return;
+            }
+            self.shared.moves.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Msg::Ev(ev));
+        }
+    }
+
+    /// How the input is now.
+    pub fn state(&self) -> State {
+        State::of(self.shared.state.load(Ordering::Relaxed))
+    }
+}
+
+impl Drop for Input {
+    fn drop(&mut self) {
+        drop(self.tx.take());
+        if let Some(ended) = self.ended.take()
+            && ended.recv_timeout(LET_GO_WITHIN).is_err()
+        {
+            warn!("input: the thread did not end in time");
+        }
     }
 }
 
@@ -112,7 +206,10 @@ impl Input {
 type Opening = Receiver<anyhow::Result<Box<dyn Injector>>>;
 
 struct Run {
-    router: Arc<Router>,
+    tell: Box<dyn Fn(News) + Send>,
+    shared: Arc<Shared>,
+    /// What the person heard last, not said again until the input works.
+    said: Option<News>,
     opener: Option<Arc<dyn OpenInput>>,
     injector: Option<Box<dyn Injector>>,
     opening: Option<Opening>,
@@ -125,9 +222,11 @@ struct Run {
 }
 
 impl Run {
-    fn new(router: Arc<Router>) -> Self {
+    fn new(tell: Box<dyn Fn(News) + Send>, shared: Arc<Shared>) -> Self {
         Self {
-            router,
+            tell,
+            shared,
+            said: None,
             opener: None,
             injector: None,
             opening: None,
@@ -153,21 +252,51 @@ impl Run {
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => break,
             };
-            // Devices opened meanwhile take these events.
-            self.opened(Instant::now());
             let batch: Vec<Msg> = first.into_iter().chain(rx.try_iter()).collect();
-            for m in coalesce(batch) {
-                match m {
-                    Msg::Opener(opener) => self.set_opener(opener),
-                    Msg::Ev(ev) => self.event(ev, Instant::now()),
-                }
+            let moves = batch
+                .iter()
+                .filter(|m| matches!(m, Msg::Ev(Ev::To { .. })))
+                .count();
+            // Each was counted before it was sent, and only this thread takes them off.
+            self.shared.moves.fetch_sub(moves, Ordering::Relaxed);
+            let pass = catch_unwind(AssertUnwindSafe(|| self.pass(batch)));
+            if pass.is_err() {
+                self.recover();
             }
-            self.tick(Instant::now());
         }
+        let _ = catch_unwind(AssertUnwindSafe(|| self.release_everything()));
+        info!("input: the thread ends");
+    }
+
+    /// One pass: the events that came, then what time does.
+    fn pass(&mut self, batch: Vec<Msg>) {
+        // Devices opened meanwhile take these events.
+        self.opened(Instant::now());
+        for m in coalesce(batch) {
+            match m {
+                Msg::Opener(opener) => self.set_opener(opener),
+                Msg::Ev(ev) => self.event(ev, Instant::now()),
+            }
+        }
+        self.tick(Instant::now());
+    }
+
+    fn release_everything(&mut self) {
         for from in self.held.sessions() {
             self.release(from);
         }
-        info!("input: the thread ends");
+    }
+
+    /// A pass panicked: everything held let go, as far as that goes, and the devices
+    /// dropped (the desktop lets go of what they still held).
+    fn recover(&mut self) {
+        error!("input: a pass of the input thread failed: letting go of everything");
+        let _ = catch_unwind(AssertUnwindSafe(|| self.release_everything()));
+        self.injector = None;
+        self.opening = None;
+        self.held.clear();
+        self.mice.clear();
+        self.later(Instant::now());
     }
 
     fn set_opener(&mut self, opener: Option<Arc<dyn OpenInput>>) {
@@ -176,8 +305,22 @@ impl Run {
         self.held.clear();
         self.mice.clear();
         self.refused = false;
+        self.said = None;
+        self.set_state(State::Fine);
         self.reopen = (Instant::now(), REOPEN_FIRST);
         self.opener = opener;
+    }
+
+    fn set_state(&self, state: State) {
+        self.shared.state.store(state.code(), Ordering::Relaxed);
+    }
+
+    /// Tells the person `news`, unless it was the last thing they heard.
+    fn say(&mut self, news: News) {
+        if self.said != Some(news) {
+            self.said = Some(news);
+            (self.tell)(news);
+        }
     }
 
     /// The devices, if open; else they start opening, where they may.
@@ -228,31 +371,30 @@ impl Run {
                 );
                 self.injector = Some(injector);
                 self.reopen.1 = REOPEN_FIRST;
+                self.said = None;
+                self.set_state(State::Fine);
             }
-            Err(e) if e.downcast_ref::<InputRefused>().is_some() => {
-                warn!("input: {e:#}; not asked again until Prostir starts again");
-                self.refused = true;
-                self.problem(ErrorCode::NOT_ALLOWED, t("pc-input-not-allowed"));
-            }
+            Err(e) if refused(&e) => self.refuse(&e),
             Err(e) => {
                 warn!("input: the desktop's virtual devices did not open: {e:#}");
                 self.later(now);
-                self.problem(ErrorCode::DESKTOP, t("pc-input-unavailable"));
+                self.set_state(State::Unavailable);
+                self.say(News::Unavailable);
             }
         }
+    }
+
+    /// The person said no, or stopped it: not opened again by itself.
+    fn refuse(&mut self, e: &anyhow::Error) {
+        warn!("input: {e:#}; not asked again until Prostir starts again");
+        self.refused = true;
+        self.set_state(State::Refused);
+        self.say(News::Refused);
     }
 
     /// Not opened again for a while, longer each time.
     fn later(&mut self, now: Instant) {
         self.reopen = (now + self.reopen.1, (self.reopen.1 * 2).min(REOPEN_MAX));
-    }
-
-    fn problem(&self, error: ErrorCode, detail: &str) {
-        self.router.send_all(&HostMsg::Problem {
-            error,
-            detail: detail.into(),
-            display: None,
-        });
     }
 
     fn event(&mut self, ev: Ev, now: Instant) {
@@ -264,9 +406,18 @@ impl Run {
             | Ev::Release { from } => *from,
         };
         self.held.heard(from, now);
-        if let Ev::Release { from } = ev {
-            self.release(from);
-            return;
+        match ev {
+            Ev::Release { from } => {
+                self.release(from);
+                return;
+            }
+            // Pressed on a display gone meanwhile: nowhere to press.
+            Ev::Button {
+                at: None,
+                down: true,
+                ..
+            } => return,
+            _ => {}
         }
         if !self.devices(now) {
             return;
@@ -283,8 +434,12 @@ impl Run {
             }
             Ev::Scroll { dx, dy, .. } => vec![Act::Scroll(dx, dy)],
             Ev::Touch {
-                slot, phase, at, ..
-            } => self.touch(from, slot, phase, at, touches, now),
+                slot,
+                phase,
+                at,
+                came,
+                ..
+            } => self.touch(from, slot, phase, at, touches, came),
             Ev::Release { .. } => Vec::new(),
         };
         self.act(acts);
@@ -378,7 +533,11 @@ impl Run {
         self.injector = None;
         self.held.clear();
         self.mice.clear();
-        self.later(Instant::now());
+        if refused(e) {
+            self.refuse(e);
+        } else {
+            self.later(Instant::now());
+        }
     }
 
     fn tick(&mut self, now: Instant) {
@@ -402,6 +561,11 @@ impl Run {
             self.lost(&e);
         }
     }
+}
+
+/// Whether `e` is the person's no (to the dialog, or by stopping the devices).
+fn refused(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<InputRefused>().is_some() || e.downcast_ref::<InputStopped>().is_some()
 }
 
 /// Consecutive moves of one session as the last of them: the mouse goes where it was

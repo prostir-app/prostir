@@ -135,6 +135,7 @@ impl OpenInput for WlrOpen {
             plain: None,
             last: None,
             keyboard: None,
+            down_on: HashMap::new(),
             wheel: (0, 0),
             started: Instant::now(),
         }))
@@ -167,6 +168,8 @@ struct Wlr {
     /// The pointer that moved last: buttons and the wheel go through it.
     last: Option<ZwlrVirtualPointerV1>,
     keyboard: Option<ZwpVirtualKeyboardV1>,
+    /// The pointer each button held went down on.
+    down_on: HashMap<MouseButton, ZwlrVirtualPointerV1>,
     /// Parts of a notch of the wheel not sent yet, in 1/120 of one.
     wheel: (i32, i32),
     started: Instant,
@@ -226,10 +229,21 @@ impl Wlr {
             .map(|(o, _)| o.clone())
     }
 
-    fn last(&self) -> Result<ZwlrVirtualPointerV1> {
-        self.last
-            .clone()
-            .context("the mouse was not moved yet: no pointer")
+    /// The pointer that moved last; before any moved, the one for the whole desktop.
+    fn last(&mut self) -> ZwlrVirtualPointerV1 {
+        if let Some(p) = &self.last {
+            return p.clone();
+        }
+        let qh = self.queue.handle();
+        let p = self
+            .plain
+            .get_or_insert_with(|| {
+                self.pointers
+                    .create_virtual_pointer(Some(&self.seat), &qh, ())
+            })
+            .clone();
+        self.last = Some(p.clone());
+        p
     }
 
     /// The virtual keyboard, made with the seat's layout on first use.
@@ -288,14 +302,25 @@ impl Injector for Wlr {
     }
 
     fn pointer_by(&mut self, dx: f64, dy: f64) -> Result<()> {
-        let p = self.last()?;
+        let p = self.last();
         p.motion(self.time(), dx, dy);
         p.frame();
         self.flush()
     }
 
+    /// Let go on the pointer it went down on (the mouse may have moved to another
+    /// output's pointer meanwhile).
     fn button(&mut self, button: MouseButton, down: bool) -> Result<()> {
-        let p = self.last()?;
+        let p = if down {
+            let p = self.last();
+            self.down_on.insert(button, p.clone());
+            p
+        } else {
+            match self.down_on.remove(&button) {
+                Some(p) => p,
+                None => self.last(),
+            }
+        };
         let state = if down {
             wl_pointer::ButtonState::Pressed
         } else {
@@ -307,8 +332,11 @@ impl Injector for Wlr {
     }
 
     fn scroll(&mut self, dx: i32, dy: i32) -> Result<()> {
-        let p = self.last()?;
-        self.wheel = (self.wheel.0 + dx, self.wheel.1 + dy);
+        let p = self.last();
+        self.wheel = (
+            self.wheel.0.saturating_add(dx),
+            self.wheel.1.saturating_add(dy),
+        );
         let notch = prostir_proto::input::SCROLL_NOTCH;
         let whole = (self.wheel.0 / notch, self.wheel.1 / notch);
         if whole == (0, 0) {
@@ -362,5 +390,21 @@ impl Injector for Wlr {
         }
         self.queue.dispatch_pending(&mut self.state)?;
         Ok(())
+    }
+}
+
+/// Buttons still down let go where they went down, before the connection closes.
+impl Drop for Wlr {
+    fn drop(&mut self) {
+        let time = self.time();
+        for (button, p) in self.down_on.drain() {
+            p.button(
+                time,
+                u32::from(button.evdev()),
+                wl_pointer::ButtonState::Released,
+            );
+            p.frame();
+        }
+        let _ = self.conn.flush();
     }
 }

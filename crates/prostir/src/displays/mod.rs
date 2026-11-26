@@ -259,7 +259,12 @@ impl Displays {
             events.clone(),
         );
         let sound = Sound::start(router.clone(), events.clone(), desk.generation());
-        let input = crate::input::Input::start(router.clone());
+        let input = {
+            let events = events.clone();
+            crate::input::Input::start(move |news| {
+                events.send(crate::events::Event::Input(news));
+            })
+        };
         let mut displays = Self {
             screens: BTreeMap::new(),
             detaching: BTreeMap::new(),

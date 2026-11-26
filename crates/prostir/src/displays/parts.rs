@@ -93,6 +93,11 @@ impl Displays {
             .map_or(crate::platform::Injects::NONE, |f| f.caps.injects)
     }
 
+    /// How the input from the headset is now (refused, not opening).
+    pub fn input_state(&self) -> crate::input::State {
+        self.input.state()
+    }
+
     /// Whether the desktop tells the mouse pointer apart from the pictures.
     pub fn tells_cursor(&self) -> bool {
         self.facts.as_ref().is_some_and(|f| f.cursor)

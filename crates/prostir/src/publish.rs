@@ -237,11 +237,12 @@ fn host_caps(displays: &Displays, volume: bool, access: Access) -> HostCaps {
         // Takes the headset's `Gaze` (for now it only writes it in its log).
         caps::pc::GAZE,
     ];
-    let injects = displays.injects();
-    if injects.pointer {
+    // Not while the person refused it; clicks, the wheel and touches not while the
+    // desktop's input does not open, and only for a headset that may use them.
+    let state = displays.input_state();
+    if displays.injects().pointer && state != crate::input::State::Refused {
         features.push(caps::pc::MOVE_MOUSE);
-        // Clicks, the wheel and touches: only where the headset may use them.
-        if access.may(perms::INPUT) {
+        if access.may(perms::INPUT) && state == crate::input::State::Fine {
             features.push(caps::pc::INPUT);
         }
     }

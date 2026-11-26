@@ -17,7 +17,7 @@ use reis::PendingRequestResult;
 use reis::ei::{self, button::ButtonState, keyboard::KeyState};
 use reis::event::{DeviceCapability, EiEvent, EiEventConverter};
 
-use crate::platform::{Injector, MouseButton, Spot, TouchPhase};
+use crate::platform::{Injector, InputStopped, MouseButton, Spot, TouchPhase};
 
 /// A device of the desktop and whether it takes events now.
 struct Dev {
@@ -55,6 +55,37 @@ fn readable(fd: &impl AsRawFd, limit: Duration) -> bool {
     unsafe { libc::poll(&raw mut poll, 1, ms) > 0 }
 }
 
+/// The handshake as a sender, given up at `until`.
+fn handshake(context: &ei::Context, until: Instant) -> Result<reis::handshake::HandshakeResp> {
+    let mut handshaker =
+        reis::handshake::EiHandshaker::new("Prostir", ei::handshake::ContextType::Sender);
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        anyhow::ensure!(
+            !left.is_zero() && readable(context, left),
+            "libei: the desktop did not answer the handshake"
+        );
+        match context.read() {
+            Ok(_) => {}
+            Err(e) => return Err(e).context("libei: the handshake"),
+        }
+        while let Some(result) = context.pending_event() {
+            match result {
+                PendingRequestResult::Request(event) => {
+                    if let Some(resp) = handshaker
+                        .handle_event(event)
+                        .map_err(|e| anyhow::anyhow!("libei: the handshake: {e}"))?
+                    {
+                        return Ok(resp);
+                    }
+                }
+                PendingRequestResult::ParseError(e) => bail!("libei: the handshake: {e}"),
+                PendingRequestResult::InvalidObject(_) => {}
+            }
+        }
+    }
+}
+
 /// Now on the monotonic clock in microseconds, as libei's frames take it.
 fn now_us() -> u64 {
     let mut t = libc::timespec {
@@ -72,16 +103,7 @@ impl Ei {
     pub fn connect(socket: UnixStream, limit: Duration) -> Result<Self> {
         let context = ei::Context::new(socket).context("libei: the socket")?;
         let until = Instant::now() + limit;
-        anyhow::ensure!(
-            readable(&context, limit),
-            "libei: the desktop did not answer"
-        );
-        let resp = reis::handshake::ei_handshake_blocking(
-            &context,
-            "Prostir",
-            ei::handshake::ContextType::Sender,
-        )
-        .context("libei: the handshake")?;
+        let resp = handshake(&context, until)?;
         let converter = EiEventConverter::new(&context, resp);
         let mut ei = Self {
             context,
@@ -121,7 +143,8 @@ impl Ei {
         match self.context.read() {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                bail!("libei: the desktop closed the connection")
+                return Err(anyhow::Error::new(InputStopped)
+                    .context("libei: the desktop closed the connection"));
             }
             Err(e) => return Err(e).context("libei: reading"),
         }
@@ -160,11 +183,13 @@ impl Ei {
             EiEvent::DeviceResumed(d) => self.mark(&d.device, true),
             EiEvent::DevicePaused(d) => self.mark(&d.device, false),
             EiEvent::DeviceRemoved(d) => self.devices.retain(|x| x.device != d.device),
-            EiEvent::Disconnected(d) => bail!(
-                "libei: the desktop disconnected ({:?}{})",
-                d.reason,
-                d.explanation.map(|e| format!(": {e}")).unwrap_or_default()
-            ),
+            EiEvent::Disconnected(d) => {
+                return Err(anyhow::Error::new(InputStopped).context(format!(
+                    "libei: the desktop disconnected ({:?}{})",
+                    d.reason,
+                    d.explanation.map(|e| format!(": {e}")).unwrap_or_default()
+                )));
+            }
             _ => {}
         }
         Ok(())

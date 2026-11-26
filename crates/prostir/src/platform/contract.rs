@@ -414,6 +414,19 @@ impl std::fmt::Display for InputRefused {
 
 impl std::error::Error for InputRefused {}
 
+/// The person stopped the devices that were open (the desktop's remote control
+/// ended by them): as [`InputRefused`], not opened again by itself.
+#[derive(Debug)]
+pub struct InputStopped;
+
+impl std::fmt::Display for InputStopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the control of the mouse and keyboard was stopped on the PC")
+    }
+}
+
+impl std::error::Error for InputStopped {}
+
 /// A point of the desktop for the mouse or a finger: `x`, `y` in logical pixels of the
 /// desktop (with their fractions), on output `output`, which is at `rect`; `desk` holds
 /// every output, for a device that spans them all.

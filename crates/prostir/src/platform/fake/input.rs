@@ -4,7 +4,8 @@
 //! Only with `PROSTIR_FAKE_INPUT`: `touch` (or `1`) for a desktop with touch, `mouse`
 //! for one without (the core makes mouse actions of touches). A test's commands (see
 //! `desktop.rs`): `input-refuse`, the person says no the next time the devices open;
-//! `input-close`, the desktop closes the devices open now.
+//! `input-close`, the desktop closes the devices open now; `input-stop`, the person
+//! stops them (not opened again by themselves).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,10 +13,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Result, ensure};
 use log::info;
 
-use crate::platform::{Injector, Injects, InputRefused, MouseButton, OpenInput, Spot, TouchPhase};
+use crate::platform::{
+    Injector, Injects, InputRefused, InputStopped, MouseButton, OpenInput, Spot, TouchPhase,
+};
 
 static REFUSE: AtomicBool = AtomicBool::new(false);
 static CLOSE: AtomicBool = AtomicBool::new(false);
+static STOP: AtomicBool = AtomicBool::new(false);
+
+/// The person stops the devices open now (as stopping the desktop's remote control).
+pub fn stop() {
+    STOP.store(true, Ordering::Relaxed);
+}
 
 /// The person says no the next time the devices open.
 pub fn refuse_next() {
@@ -53,6 +62,7 @@ impl OpenInput for FakeOpen {
             return Err(InputRefused.into());
         }
         CLOSE.store(false, Ordering::Relaxed);
+        STOP.store(false, Ordering::Relaxed);
         info!("fake desktop: virtual input open");
         Ok(Box::new(FakeInjector {
             touches: self.touches,
@@ -66,6 +76,9 @@ struct FakeInjector {
 
 impl FakeInjector {
     fn say(&self, what: &str) -> Result<()> {
+        if STOP.load(Ordering::Relaxed) {
+            return Err(anyhow::Error::new(InputStopped).context("the person stopped it"));
+        }
         ensure!(
             !CLOSE.load(Ordering::Relaxed),
             "the fake desktop closed the virtual input"

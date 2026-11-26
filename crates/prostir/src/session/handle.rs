@@ -147,6 +147,15 @@ impl Session {
             {
                 info!("the headset has no right to move the mouse");
             }
+            // Off the head nothing is pressed (and what was held was let go).
+            ClientMsg::MouseTo { .. }
+            | ClientMsg::MouseButton { .. }
+            | ClientMsg::MouseScroll { .. }
+            | ClientMsg::Touch { .. }
+                if !self.worn() =>
+            {
+                debug!("input from a headset not worn: dropped");
+            }
             ClientMsg::MouseTo { id, u, v } => {
                 let id = ScreenId::from_wire(id);
                 match displays.spot(id, u, v) {
@@ -168,8 +177,8 @@ impl Session {
             }),
             ClientMsg::MouseScroll { dx, dy, .. } => displays.input(input::Ev::Scroll {
                 from: self.id,
-                dx,
-                dy,
+                dx: dx.clamp(-SCROLL_MOST, SCROLL_MOST),
+                dy: dy.clamp(-SCROLL_MOST, SCROLL_MOST),
             }),
             ClientMsg::Touch {
                 id,
@@ -182,6 +191,7 @@ impl Session {
                 slot,
                 phase: touch_phase(phase),
                 at: displays.spot(ScreenId::from_wire(id), u, v),
+                came,
             }),
             // Said when the monitor looked at changes, at most four times a second: the
             // monitor looked at gets every frame, the others fewer (see
@@ -218,6 +228,9 @@ impl Session {
         false
     }
 }
+
+/// The most of the wheel one `MouseScroll` turns, each way: 50 notches.
+const SCROLL_MOST: i32 = 50 * prostir_proto::input::SCROLL_NOTCH;
 
 /// The PC's button for the headset's.
 fn mouse_button(b: prostir_proto::input::Button) -> platform::MouseButton {

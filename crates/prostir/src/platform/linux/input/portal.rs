@@ -17,13 +17,15 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use log::{info, warn};
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{ObjectPath, OwnedFd, OwnedValue, Value};
 
 use super::ei::Ei;
-use crate::platform::{Injector, InputRefused, MouseButton, OpenInput, Spot, TouchPhase};
+use crate::platform::{
+    Injector, InputRefused, InputStopped, MouseButton, OpenInput, Spot, TouchPhase,
+};
 
 const DEST: &str = "org.freedesktop.portal.Desktop";
 const PATH: &str = "/org/freedesktop/portal/desktop";
@@ -38,6 +40,10 @@ const PERSISTENT: u32 = 2;
 
 /// How long libei may take to give its devices once the session started.
 const DEVICES_WITHIN: Duration = Duration::from_secs(5);
+/// How long the portal may take to answer a request that asks nobody.
+const ANSWER_WITHIN: Duration = Duration::from_secs(30);
+/// How long the desktop's dialog may wait for the person.
+const PERSON_WITHIN: Duration = Duration::from_secs(300);
 
 /// Whether the session bus has the portal with libei (`ConnectToEIS`, version 2).
 pub fn available() -> bool {
@@ -101,6 +107,7 @@ fn ask<B>(
     method: &str,
     token: &str,
     body: &B,
+    within: Duration,
 ) -> Result<(u32, HashMap<String, OwnedValue>)>
 where
     B: serde::Serialize + zbus::zvariant::DynamicType,
@@ -116,7 +123,18 @@ where
     portal
         .call_method(method, body)
         .with_context(|| method.to_owned())?;
-    let answer = answers.next().context("the portal went away")?;
+    // The iterator has no time limit: it waits on a thread of its own, left behind
+    // (until the portal answers or goes) when the answer is too late.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("input-portal".into())
+        .spawn(move || {
+            let _ = tx.send(answers.next());
+        })?;
+    let answer = rx
+        .recv_timeout(within)
+        .map_err(|_| anyhow::anyhow!("the portal did not answer {method} in time"))?
+        .context("the portal went away")?;
     Ok(answer.body().deserialize()?)
 }
 
@@ -128,7 +146,14 @@ fn start_session(conn: &Connection, portal: &Proxy<'_>, types: u32) -> Result<St
         ("handle_token", Value::from(t.as_str())),
         ("session_handle_token", Value::from(s.as_str())),
     ]);
-    let (code, results) = ask(conn, portal, "CreateSession", &t, &(options,))?;
+    let (code, results) = ask(
+        conn,
+        portal,
+        "CreateSession",
+        &t,
+        &(options,),
+        ANSWER_WITHIN,
+    )?;
     ensure!(code == 0, "the portal did not create a session ({code})");
     let session = results
         .get("session_handle")
@@ -149,7 +174,14 @@ fn start_session(conn: &Connection, portal: &Proxy<'_>, types: u32) -> Result<St
     if let Some(kept) = &kept {
         options.insert("restore_token", Value::from(kept.as_str()));
     }
-    let (code, _) = ask(conn, portal, "SelectDevices", &t, &(&path, options))?;
+    let (code, _) = ask(
+        conn,
+        portal,
+        "SelectDevices",
+        &t,
+        &(&path, options),
+        ANSWER_WITHIN,
+    )?;
     ensure!(code == 0, "the portal did not take the devices ({code})");
 
     let t = token();
@@ -157,11 +189,22 @@ fn start_session(conn: &Connection, portal: &Proxy<'_>, types: u32) -> Result<St
     if kept.is_none() {
         info!("input: the desktop asks the person whether Prostir may control the input");
     }
-    let (code, results) = ask(conn, portal, "Start", &t, &(&path, "", options))?;
+    let (code, results) = ask(
+        conn,
+        portal,
+        "Start",
+        &t,
+        &(&path, "", options),
+        PERSON_WITHIN,
+    )?;
     match code {
         0 => {}
         1 => return Err(InputRefused.into()),
-        _ => bail!("the portal did not start the session ({code})"),
+        // Ended another way (the dialog closed): as the person's no.
+        _ => {
+            return Err(anyhow::Error::new(InputStopped)
+                .context(format!("the portal did not start the session ({code})")));
+        }
     }
     match results
         .get("restore_token")
@@ -197,6 +240,8 @@ fn save_token(token: &str) {
             std::fs::create_dir_all(dir)?;
         }
         let new = file.with_extension("new");
+        // One left behind could be readable by others: made anew, for the user alone.
+        let _ = std::fs::remove_file(&new);
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
