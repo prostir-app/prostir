@@ -3026,8 +3026,9 @@ impl World {
     /// over it, see `layout::DRAW_HOLD`): the first hit from the top of the stack wins.
     /// Of the rest and that monitor the nearest hit wins, and of two as near the one
     /// higher in the stack: the palm menu, "Attach", the menu, its button, the
-    /// placeholder, the monitors (flat ones over curved ones, each far to near), the
-    /// keyboard window (under the monitors). A monitor is hit where it is drawn (see
+    /// placeholder, the keyboard window (over the monitors: where it is met, no
+    /// monitor is, however near), the monitors (flat ones over curved ones, each far
+    /// to near). A monitor is hit where it is drawn (see
     /// `shown`). `hidden`: monitors not shown (asked to go). Nothing is allocated.
     pub fn pick(
         &self,
@@ -3076,17 +3077,16 @@ impl World {
                 layout::hit_surface(ray, &a.place, a.height(), None),
             );
         }
-        if let Some(m) = self.top_monitor(ray, s, &hidden) {
+        // The keyboard window is drawn over the monitors: where the ray meets it, it
+        // covers any of them, even one nearer.
+        let keys = (s.keyboard_window && !self.keyboard_tracked)
+            .then_some(self.keyboard.as_ref())
+            .flatten()
+            .and_then(|k| layout::hit_surface(ray, k, k.width * KEYBOARD_ASPECT, None));
+        if keys.is_some() {
+            consider(Thing::Keyboard, keys);
+        } else if let Some(m) = self.top_monitor(ray, s, &hidden) {
             consider(Thing::Display(m.id), Some(m.hit));
-        }
-        if s.keyboard_window
-            && !self.keyboard_tracked
-            && let Some(k) = &self.keyboard
-        {
-            consider(
-                Thing::Keyboard,
-                layout::hit_surface(ray, k, k.width * KEYBOARD_ASPECT, None),
-            );
         }
         best
     }

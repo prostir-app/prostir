@@ -51,19 +51,54 @@ struct OnSphere {
     /// By a controller's ray; its distance now (the stick's).
     by_ray: Option<f32>,
     /// How far the hand reached in or out since it took it, counting only the moves
-    /// that went mostly that way, and where it was from the shoulder when a move was
-    /// last counted (a move is judged once it went [`REACH_STEP`]: the tracking's
-    /// jitter, which goes nowhere, never adds up).
+    /// that went mostly that way, frame by frame, of the hand's place from the
+    /// shoulder smoothed (so the tracking's jitter, which goes nowhere, does not add
+    /// up).
     reached: f32,
-    last_arm: Vec3,
+    arm: OneEuro,
+    /// The dead zone, passed once at the start: the reach it takes off from then on
+    /// (none before; so the distance goes on smoothly from there).
+    past_dead: Option<f32>,
     /// The nearest and the furthest it may go: the bounds, or where it was taken if
     /// that is outside them (it does not jump when taken, and goes no further out).
     lo: f32,
     hi: f32,
 }
 
-/// How far a hand moves before the move is judged as reaching in or out, or across.
-const REACH_STEP: f32 = 0.01;
+/// A point smoothed by a one-euro filter (Casiez et al. 2012): held still, only a slow
+/// drift gets through; moving fast, it follows with little lag.
+#[derive(Debug, Clone, Copy)]
+struct OneEuro {
+    at: Vec3,
+    speed: Vec3,
+}
+
+impl OneEuro {
+    fn new(at: Vec3) -> Self {
+        Self {
+            at,
+            speed: Vec3::ZERO,
+        }
+    }
+
+    /// The share of the way to the new value a sample at `cutoff` hertz goes.
+    fn alpha(cutoff: f32, dt: f32) -> f32 {
+        let tau = 1.0 / (std::f32::consts::TAU * cutoff.max(1e-3));
+        1.0 / (1.0 + tau / dt)
+    }
+
+    /// The new place for `x` after `dt` seconds.
+    fn next(&mut self, x: Vec3, dt: f32, min_hz: f32, beta: f32) -> Vec3 {
+        if dt <= 0.0 {
+            return self.at;
+        }
+        let speed = (x - self.at) / dt;
+        self.speed += (speed - self.speed) * Self::alpha(1.0, dt);
+        let cutoff = min_hz + beta * self.speed.length();
+        self.at += (x - self.at) * Self::alpha(cutoff, dt);
+        self.at
+    }
+}
 
 impl OnSphere {
     /// The distance `d` within its bounds, slowing down over the last `knee` before
@@ -128,7 +163,8 @@ impl Grab {
             power,
             by_ray: None,
             reached: 0.0,
-            last_arm: arm,
+            arm: OneEuro::new(arm),
+            past_dead: None,
             lo: feel.bound_near_m.min(d0),
             hi: feel.bound_far_m.max(d0),
         });
@@ -150,7 +186,8 @@ impl Grab {
             power: 1.0,
             by_ray: Some(d0),
             reached: 0.0,
-            last_arm: Vec3::ZERO,
+            arm: OneEuro::new(Vec3::ZERO),
+            past_dead: None,
             lo: feel.bound_near_m.min(d0),
             hi: feel.bound_far_m.max(d0),
         });
@@ -194,22 +231,26 @@ impl Grab {
                     (turn * s.dir0, d)
                 }
                 None => {
-                    let arm = ray.origin - s.shoulder;
-                    let turn = Quat::from_rotation_arc(s.hand_dir0, arm.normalize_or(s.hand_dir0));
+                    // The direction as the hand is now (no lag across); the reach from
+                    // its place smoothed.
+                    let raw = ray.origin - s.shoulder;
+                    let turn = Quat::from_rotation_arc(s.hand_dir0, raw.normalize_or(s.hand_dir0));
+                    let last = s.arm.at;
+                    let arm = s
+                        .arm
+                        .next(raw, dt, f.carry_smooth_hz, f.carry_smooth_beta * 100.0);
                     // Only reaching in or out moves it nearer or further: a move that
-                    // goes mostly that way, judged once it went a centimetre, past a
-                    // dead zone.
-                    let step = (arm - s.last_arm).length();
-                    if step >= REACH_STEP {
-                        let radial = arm.length() - s.last_arm.length();
-                        let across = (step * step - radial * radial).max(0.0).sqrt();
-                        if radial.abs() > f.reach_dominance * across {
-                            s.reached += radial;
-                        }
-                        s.last_arm = arm;
+                    // goes mostly that way, past a dead zone passed once.
+                    let step = (arm - last).length();
+                    let radial = arm.length() - last.length();
+                    let across = (step * step - radial * radial).max(0.0).sqrt();
+                    if radial.abs() > f.reach_dominance * across {
+                        s.reached += radial;
                     }
-                    let dr = s.reached;
-                    let dr = dr.signum() * (dr.abs() - f.reach_dead_m).max(0.0);
+                    if s.past_dead.is_none() && s.reached.abs() >= f.reach_dead_m {
+                        s.past_dead = Some(s.reached.signum() * f.reach_dead_m);
+                    }
+                    let dr = s.past_dead.map_or(0.0, |dead| s.reached - dead);
                     let d = s.d0 * ((s.r0 + dr) / s.r0).max(0.05).powf(s.power);
                     (turn * s.dir0, d)
                 }
@@ -316,34 +357,23 @@ mod tests {
             p.position
         );
         // Round the shoulder, as far from it: as far from the eye, turned.
+        // (Held there a while: the hand's place is smoothed.)
         let round = shoulder + Quat::from_rotation_y(0.3) * (hand - shoulder);
-        g.update(
-            &mut p,
-            Ray {
-                origin: round,
-                ..ray
-            },
-            eye,
-            Vec2::ZERO,
-            0.01,
-            &f,
-        );
+        let hold = |g: &mut Grab, p: &mut Placement, origin: Vec3| {
+            for _ in 0..300 {
+                g.update(p, Ray { origin, ..ray }, eye, Vec2::ZERO, 0.01, &f);
+            }
+        };
+        hold(&mut g, &mut p, round);
         assert!((p.position.distance(eye) - at.distance(eye)).abs() < 1e-3);
         assert!(p.position.distance(at) > 0.3, "{:?}", p.position);
         // Back round the shoulder, then out by 10 cm: 8 past the dead zone, the
         // distance by as much as the reach.
-        g.update(&mut p, ray, eye, Vec2::ZERO, 0.01, &f);
+        hold(&mut g, &mut p, hand);
         assert!(p.position.distance(at) < 1e-3, "{:?}", p.position);
         let arm = hand - shoulder;
         let out = shoulder + arm * ((arm.length() + 0.1) / arm.length());
-        g.update(
-            &mut p,
-            Ray { origin: out, ..ray },
-            eye,
-            Vec2::ZERO,
-            0.01,
-            &f,
-        );
+        hold(&mut g, &mut p, out);
         let want = at.distance(eye) * (arm.length() + 0.08) / arm.length();
         assert!((p.position.distance(eye) - want).abs() < 1e-3);
         // Facing the eye, upright.
@@ -401,6 +431,34 @@ mod tests {
             g.update(&mut p, Ray { origin: at, ..ray }, eye, Vec2::ZERO, 0.01, &f);
         }
         assert!(p.position.distance(eye) > d0 + 0.2, "out");
+    }
+
+    /// A steady reach out, then holding still: the distance grows smoothly, a little
+    /// every frame and never by a jump, then stays.
+    #[test]
+    fn a_steady_reach_moves_it_smoothly() {
+        let f = Feel::DEFAULT;
+        let (mut g, mut p, eye, shoulder, hand, ray) = taken_by_hand();
+        let out = (hand - shoulder).normalize();
+        let mut last = p.position.distance(eye);
+        let mut steps = Vec::new();
+        // 20 cm/s for a second at 90 frames a second, then held.
+        let dt = 1.0 / 90.0;
+        for i in 1..=180 {
+            let t = (i as f32 * dt).min(1.0);
+            let at = hand + out * (0.2 * t);
+            g.update(&mut p, Ray { origin: at, ..ray }, eye, Vec2::ZERO, dt, &f);
+            let d = p.position.distance(eye);
+            assert!(d >= last - 1e-5, "frame {i}: {d} after {last}");
+            steps.push(d - last);
+            last = d;
+        }
+        let moving: Vec<f32> = steps.iter().copied().filter(|s| *s > 1e-5).collect();
+        assert!(moving.len() > 60, "moves every frame: {}", moving.len());
+        let most = moving.iter().copied().fold(0.0, f32::max);
+        let mean = moving.iter().sum::<f32>() / moving.len() as f32;
+        assert!(most < 3.0 * mean, "no jumps: {most} against {mean}");
+        assert!(steps[170..].iter().all(|s| s.abs() < 1e-3), "then stays");
     }
 
     /// However far a hand reaches, the monitor stops at the bounds of the distance,
@@ -554,5 +612,30 @@ mod tests {
             "{} from {d0}",
             p.position.distance(eye)
         );
+        // Past the dead zone (reached out by 10 cm and held there), it does not
+        // drift either.
+        let arm = hand - shoulder_of(&g);
+        let out = hand + arm.normalize() * 0.1;
+        for _ in 0..300 {
+            g.update(
+                &mut p,
+                Ray { origin: out, ..ray },
+                eye,
+                Vec2::ZERO,
+                0.01,
+                &f,
+            );
+        }
+        let d1 = p.position.distance(eye);
+        for _ in 0..2000 {
+            let at = out + Vec3::new(k(), k(), k()) * 0.006;
+            g.update(&mut p, Ray { origin: at, ..ray }, eye, Vec2::ZERO, 0.01, &f);
+        }
+        let d = p.position.distance(eye);
+        assert!((d - d1).abs() < 0.01, "past the dead zone: {d} from {d1}");
+    }
+
+    fn shoulder_of(g: &Grab) -> Vec3 {
+        g.sphere.expect("on the sphere").shoulder
     }
 }

@@ -8,20 +8,21 @@
 //! 1. what stands behind everything ([`Layer::Background`]: the room through the
 //!    cameras, the black layer that dims a room blended with the frame, or the
 //!    panorama);
-//! 2. the window onto the keyboard;
-//! 3. the monitors on cylinders, then the flat ones, far to near (as
+//! 2. the monitors on cylinders, then the flat ones, far to near (as
 //!    `World::draw_list` has them, the one in a hand last), of every PC together,
 //!    each PC's mouse pointer right after its monitor (so a nearer monitor covers it
 //!    as it covers that monitor);
-//! 4. what is wrong with a monitor's picture: over it while it recovers, in its place
+//! 3. what is wrong with a monitor's picture: over it while it recovers, in its place
 //!    while it cannot be shown;
+//! 4. the window onto the keyboard: the real keyboard is nearer than any monitor, so
+//!    no monitor covers it;
 //! 5. the placeholder of a monitor being added, the numbers next to the monitor looked
 //!    at (the preview build's "For development");
 //! 6. the menu's button, the menu, the toast, "Attach", the palm menu;
 //! 7. the hands and rays, then the pointer dots.
 //!
 //! Room is left for what is planned: the monitors' frames drawn together in one layer
-//! go right after the keyboard's window, ranked with the background; a frame around
+//! go right after the background, ranked with it; a frame around
 //! the menu is drawn in the menu's own picture.
 //!
 //! **Over budget** (more wanted than the compositor takes), what goes first:
@@ -331,9 +332,6 @@ pub fn plan(model: &Model, hands: &Hands, ready: &impl Ready, plan: &mut Plan) {
     if ready.background() {
         plan.push(Layer::Background, Rank::Room(1));
     }
-    if ready.keyboard_window() {
-        plan.push(Layer::KeyboardWindow, Rank::Room(0));
-    }
     // The monitors: curved ones first, then the flat ones (windows always flat),
     // each group far to near.
     let curve = world.curve_radius(settings);
@@ -400,6 +398,10 @@ pub fn plan(model: &Model, hands: &Hands, ready: &impl Ready, plan: &mut Plan) {
             Rank::Monitor(near)
         };
         plan.push(Layer::Trouble { id, quad }, rank);
+    }
+    // The real keyboard is nearer than the monitors: its window over them.
+    if ready.keyboard_window() {
+        plan.push(Layer::KeyboardWindow, Rank::Room(0));
     }
     if let Some(a) = world.adding().filter(|_| ready.placeholder()) {
         let quad = Quad {

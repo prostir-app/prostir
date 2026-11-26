@@ -33,8 +33,10 @@ use crate::world::{panel_height, panel_width, wrist_menu_height};
 use super::feel::Feel;
 use super::trial::Movement;
 
-/// The first line of a recording.
-pub const FORMAT: &str = "prostir-input 1";
+/// The first line of a recording (2: with the keyboard the headset tracks).
+pub const FORMAT: &str = "prostir-input 2";
+/// The first line of the recordings made before, read as well.
+const FORMAT_1: &str = "prostir-input 1";
 /// How long "Record the input" records.
 #[cfg(any(test, feature = "preview"))]
 pub const RECORD_FOR: Duration = Duration::from_secs(30);
@@ -43,7 +45,7 @@ pub const RECORD_FOR: Duration = Duration::from_secs(30);
 const RATE_MAX: u32 = 120;
 /// The most bytes one frame takes.
 #[cfg(any(test, feature = "preview"))]
-const FRAME_MAX: usize = 4 + 1 + 4 + 36 + 2 * (2 + 24 + 8 + 26 * 16);
+const FRAME_MAX: usize = 4 + 1 + 4 + 36 + 36 + 2 * (2 + 24 + 8 + 26 * 16);
 
 // ---- What stood in the room ----
 
@@ -604,7 +606,7 @@ impl Recording {
             .ok_or("no \"frames\" line")?;
         let text = std::str::from_utf8(&bytes[..split]).map_err(|_| "the head is not text")?;
         let mut lines = text.lines();
-        if lines.next() != Some(FORMAT) {
+        if !matches!(lines.next(), Some(FORMAT | FORMAT_1)) {
             return Err(format!("not \"{FORMAT}\""));
         }
         let mut app = String::new();
@@ -681,6 +683,14 @@ impl Reader<'_> {
         input.menu_button = flags & 4 != 0;
         input.menu_gesture = flags & 8 != 0;
         input.align = flags & 16 != 0;
+        if flags & 32 != 0 {
+            input.keyboard = Some(crate::keyboard::Seen {
+                position: self.vec3()?,
+                rotation: Quat::from_xyzw(self.f32()?, self.f32()?, self.f32()?, self.f32()?),
+                width: self.f32()?,
+                depth: self.f32()?,
+            });
+        }
         for h in 0..2 {
             let bits = u16::from_le_bytes(self.take()?);
             let button = |shift: u16| Button {
@@ -757,8 +767,9 @@ impl Recorder {
     }
 
     /// This frame's input, at `now`: the time from the start in microseconds (u32),
-    /// flags (head, focused, menu button, menu gesture, "Line up"), `dt` (f32), the
-    /// head (9 f32), then each hand: its bits (ray, a tracked hand, select's and grab's
+    /// flags (head, focused, menu button, menu gesture, "Line up", the keyboard), `dt`
+    /// (f32), the head (9 f32), the keyboard the headset tracks (its place, its turn
+    /// as x, y, z, w, its width and depth: 9 f32), then each hand: its bits (ray, a tracked hand, select's and grab's
     /// down, pressed, released, joints; u16), the ray (6 f32), the stick (2 f32), the
     /// joints (26 times position and radius, f32). Nothing once it is over.
     pub fn push(&mut self, now: Instant, input: &FrameInput) {
@@ -773,7 +784,8 @@ impl Recorder {
             | u8::from(input.focused) << 1
             | u8::from(input.menu_button) << 2
             | u8::from(input.menu_gesture) << 3
-            | u8::from(input.align) << 4;
+            | u8::from(input.align) << 4
+            | u8::from(input.keyboard.is_some()) << 5;
         b.push(flags);
         b.extend_from_slice(&input.dt.to_le_bytes());
         let v = |v: Vec3, b: &mut Vec<u8>| {
@@ -785,6 +797,14 @@ impl Recorder {
             v(h.position, b);
             v(h.forward, b);
             v(h.right, b);
+        }
+        if let Some(k) = input.keyboard {
+            v(k.position, b);
+            for x in k.rotation.to_array() {
+                b.extend_from_slice(&x.to_le_bytes());
+            }
+            b.extend_from_slice(&k.width.to_le_bytes());
+            b.extend_from_slice(&k.depth.to_le_bytes());
         }
         for (hand, joints) in input.hands.iter().zip(&input.joints) {
             let button = |x: Button, shift: u16| {

@@ -681,6 +681,41 @@ fn of_two_as_near_the_higher_is_hit() {
     );
 }
 
+/// The keyboard window is drawn over the monitors: where a ray meets it, it is what is
+/// hit, even with a monitor nearer on the way; past its edge, the monitor is.
+#[test]
+fn the_keyboard_window_covers_the_monitors() {
+    let mut sim = Sim::at_desk();
+    sim.s.keyboard_window = true;
+    let m = sim.place(k(2));
+    let ahead = m.position.normalize();
+    // The window 2 m out along the ray, the monitor at 1 m, both facing the eye.
+    sim.world.keyboard = Some(Placement {
+        position: ahead * 2.0,
+        rotation: layout::facing(ahead * 2.0, Vec3::ZERO),
+        width: 0.5,
+    });
+    let nearer = Placement {
+        position: ahead,
+        rotation: layout::facing(ahead, Vec3::ZERO),
+        ..m
+    };
+    sim.world.placements.insert(k(2), nearer);
+    sim.world.shown.insert(k(2), nearer);
+    let pick = |sim: &Sim, ray| {
+        sim.world
+            .pick(ray, &sim.s, Pickable::default(), |_| false)
+            .map(|t| t.thing)
+    };
+    assert_eq!(pick(&sim, towards(ahead)), Some(Thing::Keyboard));
+    // Just past the window's side, still on the monitor.
+    let side = nearer.rotation * Vec3::X;
+    let past = towards(ahead * 2.0 + side * 0.3);
+    assert_eq!(pick(&sim, past), Some(Thing::Display(k(2))));
+    sim.s.keyboard_window = false;
+    assert_eq!(pick(&sim, towards(ahead)), Some(Thing::Display(k(2))));
+}
+
 /// Two monitors overlapping, the one drawn over the other 4 cm further away (a
 /// monitor glued over a row stays drawn over it, see `layout::DRAW_HOLD`): where they
 /// overlap the person sees the one on top, and that is what the ray and the gaze hit,

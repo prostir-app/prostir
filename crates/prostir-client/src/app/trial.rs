@@ -26,6 +26,8 @@ pub struct DevInput {
     wall: Option<Moment>,
     /// What reading `feel.txt` came to: found, the numbers changed, the lines not read.
     pub feel_read: Option<(bool, u8, u8)>,
+    /// The page of it shown.
+    page: u8,
 }
 
 impl DevInput {
@@ -42,6 +44,7 @@ impl Model {
             trial: self.dev_input.trial,
             recording: self.dev_input.recording(),
             feel: self.dev_input.feel_read,
+            page: self.dev_input.page,
         }
     }
 
@@ -56,6 +59,7 @@ impl Model {
             Action::DevOwnModels(own) => t.own_models = own,
             Action::DevRecord => self.start_recording(),
             Action::DevReadFeel => self.effects.push(Effect::System(SystemCmd::ReadFeel)),
+            Action::DevHandsPage(page) => self.dev_input.page = page,
             // The others are not this part's (see `Model::act`).
             _ => return,
         }

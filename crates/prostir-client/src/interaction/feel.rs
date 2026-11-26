@@ -84,6 +84,13 @@ feel! {
     /// And a hand's move counts as reaching in or out only while it goes this many
     /// times faster towards or away from the shoulder than across.
     reach_dominance: 1.5, 1.0, 5.0;
+    /// Moving on a sphere, the reach is judged from the hand's place smoothed
+    /// (one-euro; its direction is not): held still, its tremor is let through only
+    /// below this many hertz...
+    carry_smooth_hz: 1.0, 0.05, 30.0;
+    /// ...and the faster it moves, the less it lags: this many hertz more for each
+    /// centimetre a second.
+    carry_smooth_beta: 0.2, 0.0, 2.0;
     /// What a hand holds is never nearer than this.
     distance_min_m: 0.3, 0.1, 2.0;
     /// Nor further than this.
@@ -208,6 +215,20 @@ feel! {
     /// The mouse following the gaze waits while a ray or a finger acts on a monitor,
     /// and this long after.
     gaze_quiet_ms: 1000.0, 0.0, 10000.0;
+    /// A hand rests (typing: its ray neither moves the mouse nor presses nor takes a
+    /// monitor) with its palm turned down this much (the cosine with straight down)...
+    rest_palm_down: 0.6, 0.0, 1.0;
+    /// ...and goes on resting until it turns up past this.
+    rest_palm_off: 0.4, 0.0, 1.0;
+    /// And it is on the keyboard window: over it, or no further than this beyond its
+    /// sides, and no higher than this above it...
+    rest_keyboard_m: 0.15, 0.0, 0.5;
+    /// ...and goes on resting until further than this.
+    rest_keyboard_off_m: 0.22, 0.0, 0.8;
+    /// Where there is no keyboard window: this far below the eyes...
+    rest_below_m: 0.35, 0.0, 1.5;
+    /// ...and goes on resting until nearer than this.
+    rest_below_off_m: 0.28, 0.0, 1.5;
     /// A scroll of one notch for this much of the hand (or a swipe) moving.
     scroll_notch_m: 0.01, 0.002, 0.1;
     /// A controller's stick fully over scrolls this many notches a second.
