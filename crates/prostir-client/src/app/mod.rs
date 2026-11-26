@@ -450,6 +450,7 @@ pub struct Model {
     /// at each look.
     auto: crate::autoscale::Auto,
     auto_list: Vec<crate::autoscale::Monitor>,
+    auto_asks: Vec<(DisplayKey, u16)>,
 
     // The frame.
     /// Head position and gaze.
@@ -598,6 +599,7 @@ impl Model {
             volume,
             auto: crate::autoscale::Auto::default(),
             auto_list: Vec::new(),
+            auto_asks: Vec::new(),
             head: (Vec3::ZERO, -Vec3::Z),
             head_right: Vec3::X,
             view_eye: None,

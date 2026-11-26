@@ -205,20 +205,26 @@ impl Auto {
         true
     }
 
-    /// The scale to ask now for one of `monitors` (in Auto, of one PC, with their
-    /// groups) out of `scales` (the PC's), if one is due: the first due, one a call.
-    /// `moving`: something is in a hand, nothing is asked and the wait starts again.
+    /// The scales to ask now for `monitors` (in Auto, of one PC, with their groups) out
+    /// of `scales` (the PC's), into `asks` (emptied first; nothing allocated once long
+    /// enough). The margin either way is the group's: where one of its monitors would
+    /// change, each takes the scale chosen for the group, else all stay. A group is
+    /// asked for whole, in one look, once each of its changes held [`SETTLE`] and none
+    /// was asked in the last [`EVERY`], so its seams never stand mismatched and the
+    /// desktop is laid out once. `moving`: something is in a hand, nothing is asked and
+    /// the wait starts again.
     pub fn due(
         &mut self,
         monitors: &[Monitor],
         scales: &[u16],
         moving: bool,
         now: Instant,
-    ) -> Option<(DisplayKey, u16)> {
+        asks: &mut Vec<(DisplayKey, u16)>,
+    ) {
+        asks.clear();
         let n = monitors.len().min(MAX);
         let line = self.line();
-        let mut chosen = [100_u16; MAX];
-        let mut own = [100_u16; MAX];
+        let mut target = [100_u16; MAX];
         let mut ps = [0.0_f32; MAX];
         let mut members = [0_usize; MAX];
         let mut out = [100_u16; MAX];
@@ -236,14 +242,20 @@ impl Auto {
                 }
             }
             for_group(&ps[..m], scales, line, &mut out[..m]);
+            let moves = members[..m].iter().enumerate().any(|(j, &i)| {
+                let mon = &monitors[i];
+                let own = smallest(mon.p, scales, line).unwrap_or(100);
+                settle_by(line, mon.p, mon.now, out[j], own) != mon.now
+            });
             for (j, &i) in members[..m].iter().enumerate() {
-                chosen[i] = out[j];
-                own[i] = smallest(ps[j], scales, line).unwrap_or(100);
+                target[i] = if moves { out[j] } else { monitors[i].now };
             }
         }
-        let mut asked = None;
+        // Each monitor: what it wants, since when; whether it holds a group back.
+        let mut waits = [false; MAX];
+        let mut wants = [false; MAX];
         for (i, mon) in monitors.iter().enumerate().take(n) {
-            let to = settle_by(line, mon.p, mon.now, chosen[i], own[i]);
+            let to = target[i];
             let track = self.tracks.entry(mon.key).or_default();
             // A refusal holds while the monitor keeps its size.
             if track.refused.is_some_and(|(_, size)| size != mon.size) {
@@ -261,23 +273,36 @@ impl Auto {
                 track.want = None;
                 continue;
             }
+            wants[i] = true;
             let since = match track.want {
                 Some((s, since)) if s == to && !moving => since,
                 _ => {
                     track.want = Some((to, now));
+                    waits[i] = true;
                     continue;
                 }
             };
             let recent = track
                 .asked
                 .is_some_and(|(_, at)| now.saturating_duration_since(at) < EVERY);
-            if asked.is_some() || recent || now.saturating_duration_since(since) < SETTLE {
+            waits[i] = recent || now.saturating_duration_since(since) < SETTLE;
+        }
+        for (g, first) in monitors.iter().enumerate().take(n) {
+            if first.group != g {
                 continue;
             }
-            track.asked = Some((to, now));
-            asked = Some((mon.key, to));
+            let group = || (0..n).filter(move |&i| monitors[i].group == g);
+            if !group().any(|i| wants[i]) || group().any(|i| wants[i] && waits[i]) {
+                continue;
+            }
+            for i in group().filter(|&i| wants[i]) {
+                let mon = &monitors[i];
+                if let Some(track) = self.tracks.get_mut(&mon.key) {
+                    track.asked = Some((target[i], now));
+                }
+                asks.push((mon.key, target[i]));
+            }
         }
-        asked
     }
 
     /// The scale last asked for monitor `key`, while no answer said otherwise.
@@ -345,6 +370,18 @@ mod tests {
     use prostir_proto::state::DisplayId;
 
     const SCALES: [u16; 5] = [100, 125, 150, 175, 200];
+
+    /// `Auto::due` of one call: the scales it asks.
+    fn due_of(
+        auto: &mut Auto,
+        monitors: &[Monitor],
+        moving: bool,
+        now: Instant,
+    ) -> Vec<(DisplayKey, u16)> {
+        let mut asks = Vec::new();
+        auto.due(monitors, &SCALES, moving, now, &mut asks);
+        asks
+    }
 
     fn key(id: u32) -> DisplayKey {
         DisplayKey::new(PcId([1; 8]), DisplayId(id))
@@ -427,43 +464,43 @@ mod tests {
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
         let monitors = [monitor(1, 0.59, 100)];
-        assert_eq!(auto.due(&monitors, &SCALES, true, at(0)), None);
+        assert_eq!(due_of(&mut auto, &monitors, true, at(0)), []);
         assert_eq!(
-            auto.due(&monitors, &SCALES, true, at(2000)),
-            None,
+            due_of(&mut auto, &monitors, true, at(2000)),
+            [],
             "in a hand"
         );
         assert_eq!(
-            auto.due(&monitors, &SCALES, false, at(2100)),
-            None,
+            due_of(&mut auto, &monitors, false, at(2100)),
+            [],
             "just let go"
         );
-        assert_eq!(auto.due(&monitors, &SCALES, false, at(2700)), None);
+        assert_eq!(due_of(&mut auto, &monitors, false, at(2700)), []);
         assert_eq!(
-            auto.due(&monitors, &SCALES, false, at(2850)),
-            Some((key(1), 150))
+            due_of(&mut auto, &monitors, false, at(2850)),
+            [(key(1), 150)]
         );
-        assert_eq!(auto.due(&monitors, &SCALES, false, at(3200)), None, "asked");
+        assert_eq!(due_of(&mut auto, &monitors, false, at(3200)), [], "asked");
         // Given: nothing more.
         let given = [monitor(1, 0.59, 150)];
-        assert_eq!(auto.due(&given, &SCALES, false, at(9000)), None);
+        assert_eq!(due_of(&mut auto, &given, false, at(9000)), []);
         // Refused at this size: not asked again; at another size it is.
         auto.refused(key(1), 200, (2560, 1440));
         let smaller = [monitor(1, 0.45, 150)];
-        assert_eq!(auto.due(&smaller, &SCALES, false, at(10_000)), None);
-        assert_eq!(auto.due(&smaller, &SCALES, false, at(20_000)), None);
+        assert_eq!(due_of(&mut auto, &smaller, false, at(10_000)), []);
+        assert_eq!(due_of(&mut auto, &smaller, false, at(20_000)), []);
         let resized = [Monitor {
             size: (1920, 1080),
             ..monitor(1, 0.45, 150)
         }];
-        assert_eq!(auto.due(&resized, &SCALES, false, at(21_000)), None);
+        assert_eq!(due_of(&mut auto, &resized, false, at(21_000)), []);
         assert_eq!(
-            auto.due(&resized, &SCALES, false, at(22_000)),
-            Some((key(1), 200))
+            due_of(&mut auto, &resized, false, at(22_000)),
+            [(key(1), 200)]
         );
         // Answered but never at it: not given, not asked again at that size.
-        assert_eq!(auto.due(&resized, &SCALES, false, at(28_000)), None);
-        assert_eq!(auto.due(&resized, &SCALES, false, at(40_000)), None);
+        assert_eq!(due_of(&mut auto, &resized, false, at(28_000)), []);
+        assert_eq!(due_of(&mut auto, &resized, false, at(40_000)), []);
     }
 
     /// Another line from "For development": the same monitor wants more; back at
@@ -487,6 +524,44 @@ mod tests {
         assert_eq!(auto.line(), LINE, "not one of the lines");
     }
 
+    /// The margin is the group's: two glued monitors, one past the margin and one
+    /// not, both change, asked for in the same look; neither past it, both stay.
+    #[test]
+    fn a_group_changes_together() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let glued = |a: (f32, u16), b: (f32, u16)| {
+            [
+                monitor(1, a.0, a.1),
+                Monitor {
+                    group: 0,
+                    ..monitor(2, b.0, b.1)
+                },
+            ]
+        };
+        // Up: 0.84 is enough alone, 0.80 is not: both to 125 %.
+        let mut auto = Auto::default();
+        let up = glued((0.84, 100), (0.80, 100));
+        assert!(due_of(&mut auto, &up, false, at(0)).is_empty());
+        assert_eq!(
+            due_of(&mut auto, &up, false, at(1000)),
+            [(key(1), 125), (key(2), 125)]
+        );
+        // Down: at 125 % one keeps 0.88, the other not quite: both go.
+        let mut auto = Auto::default();
+        let down = glued((0.705, 150), (0.70, 150));
+        assert!(due_of(&mut auto, &down, false, at(0)).is_empty());
+        assert_eq!(
+            due_of(&mut auto, &down, false, at(1000)),
+            [(key(1), 125), (key(2), 125)]
+        );
+        // Neither past the margin: both stay, nothing asked.
+        let mut auto = Auto::default();
+        let stay = glued((0.84, 100), (0.83, 100));
+        assert!(due_of(&mut auto, &stay, false, at(0)).is_empty());
+        assert!(due_of(&mut auto, &stay, false, at(5000)).is_empty());
+    }
+
     /// A headset model not in the table has no `p`: the app puts no such monitor in
     /// the list, so nothing is asked. Groups join through a monitor between two.
     #[test]
@@ -506,6 +581,6 @@ mod tests {
         let groups: Vec<usize> = list.iter().map(|m| m.group).collect();
         assert_eq!(groups, [0, 0, 0, 3]);
         let mut auto = Auto::default();
-        assert_eq!(auto.due(&[], &SCALES, false, Instant::now()), None);
+        assert!(due_of(&mut auto, &[], false, Instant::now()).is_empty());
     }
 }

@@ -1237,9 +1237,10 @@ monitors were in Auto: switched to, the headset turns Auto on for those and give
 others the profile's scale.
 
 The host gives a scale its desktop does not take for that size as the nearest it takes
-among `Limits.scales`, larger first (Hyprland takes only scales that make whole
-logical pixels: 2560x1440 at 150 % is not one). A scale the desktop refuses leaves the
-monitor at the one it has, which `Displays` shows.
+among `Limits.scales`, the larger of two as near (Hyprland takes only scales that make
+whole logical pixels: 2560x1440 at 150 % is not one). A scale the desktop refuses
+leaves the monitor at the one it has, which `Displays` shows, and the layout goes on
+without it.
 
 ### Commands
 

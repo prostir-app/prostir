@@ -465,7 +465,7 @@ impl Displays {
     /// The scale the main headset chose for monitor `id` in Auto, percent, of `offered`
     /// (the scales offered to headsets): set in place, the monitor staying in Auto.
     /// One the desktop does not give its size becomes the nearest it gives of
-    /// `offered`, larger first (text no smaller than asked). Whether it changed: a
+    /// `offered` (the larger of two as near). Whether it changed: a
     /// monitor not in Auto stays as it is.
     pub fn auto_scale(&mut self, id: ScreenId, percent: u16, offered: &[u16]) -> Result<bool> {
         match self.screens.get(&id) {
@@ -657,8 +657,8 @@ impl Displays {
 }
 
 /// The scale to give for `asked` among `offered` where `gives` says which the desktop
-/// gives: `asked` itself, else the smallest given above it, else the largest given
-/// below it; none where it gives none of them.
+/// gives: `asked` itself, else the nearest given (the larger of two as near); none
+/// where it gives none of them.
 pub(super) fn nearest_scale(
     asked: u16,
     offered: &[u16],
@@ -667,9 +667,9 @@ pub(super) fn nearest_scale(
     if gives(asked) {
         return Some(asked);
     }
-    let given = || offered.iter().copied().filter(|p| gives(*p));
-    given()
-        .filter(|p| *p > asked)
-        .min()
-        .or_else(|| given().filter(|p| *p < asked).max())
+    offered
+        .iter()
+        .copied()
+        .filter(|p| gives(*p))
+        .min_by_key(|p| (p.abs_diff(asked), std::cmp::Reverse(*p)))
 }

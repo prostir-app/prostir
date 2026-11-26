@@ -3433,9 +3433,15 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
             let r = at(i + usize::from(auto));
             let on = !(auto && s.add_auto) && s.add_scale == scale;
             let action = Action::AddScale(scale);
+            // More than three: numbers alone, as the PC's window shows them.
+            let label = if shown > 3 {
+                scale.to_string()
+            } else {
+                l.f("headset-percent", &[("value", scale.into())])
+            };
             let mut b = button(
                 r,
-                &l.f("headset-percent", &[("value", scale.into())]),
+                &label,
                 if on { Style::Selected } else { Style::Normal },
                 (!on).then_some(action),
             );
@@ -6351,6 +6357,22 @@ mod tests {
                 st.active_profile = Some(1);
                 st.error = Some(lang.f("headset-monitors-at-most", &[("count", 6.into())]));
                 states.push(st.clone());
+                // Auto and five scales, and three (a PC that does not give 150 % every size).
+                if tab == Tab::Monitors {
+                    for scales in [vec![100, 125, 150, 175, 200], vec![100, 125, 200]] {
+                        for auto in [true, false] {
+                            let mut a = st.clone();
+                            a.confirm_remove = None;
+                            if let Some(l) = a.limits.as_mut() {
+                                l.scales.clone_from(&scales);
+                            }
+                            a.can_auto = true;
+                            a.add_auto = auto;
+                            a.auto = if auto { vec![k(103)] } else { Vec::new() };
+                            states.push(a);
+                        }
+                    }
+                }
                 // Twenty languages, every page of them.
                 if tab == Tab::Settings(Section::Language) {
                     for page in 0..3 {

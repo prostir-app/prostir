@@ -194,7 +194,8 @@ fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     let can = !v.ui.unsupported.contains("set_scale") && !matches!(d.kind, DisplayKind::Physical);
     if d.kind == DisplayKind::Virtual && !v.ui.unsupported.contains("set_scale_auto") {
         let label = tk.t("window-mon-scale-auto");
-        let desc = if d.auto_scale {
+        // The headset chooses: while none is connected, the switch says so.
+        let desc = if d.auto_scale && s.connected().is_some() {
             tk.f(
                 "window-mon-scale-auto-at",
                 &[("scale", d.mode.scale.into())],

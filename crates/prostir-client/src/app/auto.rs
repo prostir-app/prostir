@@ -49,9 +49,10 @@ impl Model {
     }
 
     /// Looks at the main PC's monitors in Auto (every `autoscale::LOOK_EVERY` at most)
-    /// and asks for the scale one of them wants, if one is due: only this headset is
-    /// the main one there, the PC changes scales in place and the headset knows its
-    /// pixels per degree (else no monitor has a `p`, and nothing is asked).
+    /// and asks for the scales they want, a glued group whole, where due: only this
+    /// headset is the main one there, the PC changes scales in place, the headset
+    /// knows its pixels per degree (else no monitor has a `p`, and nothing is asked),
+    /// and not in cinema.
     pub(super) fn auto_scale(&mut self) {
         let now = self.now;
         if !self.auto.look_due(now) {
@@ -71,7 +72,8 @@ impl Model {
         ) else {
             return;
         };
-        if !main || !self.can_auto() || auto.auto.is_empty() {
+        // Not in cinema: each change would lay the PC's windows out again for nothing.
+        if !main || !self.can_auto() || auto.auto.is_empty() || self.world.cinema() {
             return;
         }
         let list = &mut self.auto_list;
@@ -100,13 +102,15 @@ impl Model {
         let world = &self.world;
         autoscale::group(list, |a, b| world.glued(a, b));
         let moving = world.moving();
-        let due = self.auto.due(list, &limits.scales, moving, now);
+        let mut asks = std::mem::take(&mut self.auto_asks);
+        self.auto.due(list, &limits.scales, moving, now, &mut asks);
         // Gone monitors are forgotten (no allocation).
         let listed = |k: DisplayKey| k.pc != pc || auto.has(k.id);
         self.auto.retain(listed);
-        if let Some((key, scale)) = due {
+        for &(key, scale) in &asks {
             self.ask_auto_scale(key, scale);
         }
+        self.auto_asks = asks;
     }
 
     /// Asks the PC for `scale` for monitor `key` in Auto: no note in the menu, which

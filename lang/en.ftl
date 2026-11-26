@@ -448,7 +448,7 @@ window-mon-size = { $w } × { $h }
 window-mon-size-scaled = { $w } × { $h }, scale { $scale }%
 window-mon-size-at-scale = { $w } × { $h } · { $scale }%
 window-mon-scale = Scale
-window-mon-scale-auto-desc = The headset picks the scale from how large it shows the monitor.
+window-mon-scale-auto-desc = While the headset is connected, it picks the scale from how large it shows the monitor.
 window-mon-scale-percent = Scale, %
 window-mon-scale-auto = Auto
 # $scale (Number): the scale chosen for the monitor, percent

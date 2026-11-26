@@ -392,20 +392,39 @@ impl Worker {
             &geometries,
         );
         if let Err(e) = placed {
-            // The scales are not asked again: the monitors stay at the ones they
-            // have, and the layout is tried again without them.
-            for r in &rescales {
-                warn!(
-                    "the desktop did not take {} % for {} in place: it stays at {} %",
-                    r.to, r.key, r.from
-                );
-                self.scale_refused.insert(r.id, r.to);
-                self.done(Done::ScaleRefused {
-                    id: r.id,
-                    percent: r.from,
-                });
+            if rescales.is_empty() {
+                return Err(e);
             }
-            return Err(e);
+            // Laid out again at once without the new scales: where the desktop takes
+            // that, it refused the scales (not asked again: the monitors stay at the
+            // ones they have, and nobody is told the desktop failed); where it does
+            // not, the layout failed whatever the scales, which are asked again with
+            // the next try.
+            warn!("{e:#}: laying the outputs out without the new scales");
+            for r in &rescales {
+                self.scale_refused.insert(r.id, r.to);
+            }
+            return match self.place_now() {
+                Ok(on_desk) => {
+                    for r in &rescales {
+                        warn!(
+                            "the desktop did not take {} % for {} in place: it stays at {} %",
+                            r.to, r.key, r.from
+                        );
+                        self.done(Done::ScaleRefused {
+                            id: r.id,
+                            percent: r.from,
+                        });
+                    }
+                    Ok(on_desk)
+                }
+                Err(again) => {
+                    for r in &rescales {
+                        self.scale_refused.remove(&r.id);
+                    }
+                    Err(again)
+                }
+            };
         }
         for r in &rescales {
             info!("{}: {} % in place (was {} %)", r.key, r.to, r.from);

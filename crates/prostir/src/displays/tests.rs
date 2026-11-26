@@ -206,15 +206,23 @@ fn rows_list_each_monitor_once() {
 }
 
 /// The headset's choice in Auto where the desktop does not give that size the scale:
-/// the next one up it gives, else the next one down; as asked where it gives it.
+/// the nearest it gives, the larger of two as near; as asked where it gives it.
 #[test]
 fn auto_takes_the_nearest_scale_the_desktop_gives() {
     use super::arrange::nearest_scale;
     let offered = [100, 125, 150, 175, 200];
     // Hyprland and 2560x1440: whole logical pixels only.
     let hyprland = |p: u16| matches!(p, 100 | 125 | 200);
-    assert_eq!(nearest_scale(150, &offered, hyprland), Some(200));
+    assert_eq!(nearest_scale(150, &offered, hyprland), Some(125));
     assert_eq!(nearest_scale(175, &offered, hyprland), Some(200));
+    // 1366x768 on Hyprland gives 100 % and 200 %: 125 % is nearer 100 %.
+    let laptop = |p: u16| matches!(p, 100 | 200);
+    assert_eq!(nearest_scale(125, &offered, laptop), Some(100));
+    assert_eq!(
+        nearest_scale(150, &offered, laptop),
+        Some(200),
+        "as near: larger"
+    );
     assert_eq!(nearest_scale(125, &offered, hyprland), Some(125));
     let up_to_150 = |p: u16| p <= 150;
     assert_eq!(nearest_scale(200, &offered, up_to_150), Some(150));
