@@ -182,6 +182,8 @@ impl Model {
                 self.sessions.remove(&pc);
                 self.videos.pc_ended(pc);
                 self.cursors.forget(pc);
+                // What was pressed on it the PC let go of itself.
+                self.held.forget(pc);
                 // Its streams went with it, also one whose end the network never said.
                 self.effects.extend(
                     self.world

@@ -4,20 +4,19 @@
 use std::time::Instant;
 
 use glam::{Vec2, Vec3};
-use log::debug;
 use prostir_proto::state::caps;
 
 use super::{By, Effect, Model, SystemCmd};
 use crate::ids::{DisplayKey, PcId, Target, Thing};
 use crate::interaction::record::{Piece, Stage};
-use crate::interaction::{Feel, Modes, PcInput, Scene, TouchPhase, Touched};
+use crate::interaction::{Feel, Modes, PcInput, Scene, Touched};
 use crate::layout::{self, Placement, Ray};
 use crate::ui::{self, Action};
 use crate::world::Pickable;
 
 impl Model {
     /// PC `pc` lets the headset move its mouse.
-    fn pc_moves_mouse(&self, pc: PcId) -> bool {
+    pub(super) fn pc_moves_mouse(&self, pc: PcId) -> bool {
         self.session.pc(pc).is_some_and(|p| {
             p.state
                 .caps
@@ -256,24 +255,9 @@ impl Scene for Model {
     }
 
     /// The mouse goes where the hand sends it, where the PC lets the headset move it
-    /// (one pointer, drawn at once where the ray is). Its buttons, scrolls and touches
-    /// have no message to the PC yet (step 8.4a brings them): they are written to the
-    /// log.
+    /// (one pointer, drawn at once where the ray is); its buttons, scrolls and touches
+    /// to a PC that takes them (see `pc_input`).
     fn pc(&mut self, now: Instant, input: PcInput) {
-        self.now = now;
-        self.pc_acted = Some(now);
-        let f = |v: f32| (v.clamp(0.0, 1.0) * 65535.0) as u16;
-        match input {
-            PcInput::Move { id, uv } => {
-                if self.pc_moves_mouse(id.pc) {
-                    self.mouse_to(id, f(uv.x), f(uv.y));
-                }
-            }
-            PcInput::Touch {
-                phase: TouchPhase::Move,
-                ..
-            } => {}
-            other => debug!("hands: {other:?} (no message to the PC yet)"),
-        }
+        self.act_on_pc(now, input);
     }
 }

@@ -9,6 +9,10 @@
 //!   (sound would be late anyway, the acknowledgements are for latency figures only);
 //!   the start and end of an up stream go in the same lane, in order, and are never
 //!   dropped.
+//!
+//! The input's small messages (the mouse, its buttons, the wheel, fingers), sent up to
+//! once a frame, are written into the bodies of those sent before: queuing one takes
+//! no new memory.
 
 #![expect(
     clippy::disallowed_methods,
@@ -43,6 +47,17 @@ fn in_sound_lane(msg: &ClientMsg) -> bool {
     )
 }
 
+/// The input's small messages, written into the bodies of those sent before.
+fn is_input(msg: &ClientMsg) -> bool {
+    matches!(
+        msg,
+        ClientMsg::MouseTo { .. }
+            | ClientMsg::MouseButton { .. }
+            | ClientMsg::MouseScroll { .. }
+            | ClientMsg::Touch { .. }
+    )
+}
+
 /// Messages it costs little to lose when the network is stuck.
 fn lossy(msg: &ClientMsg) -> bool {
     matches!(msg, ClientMsg::Up { .. } | ClientMsg::FrameShown { .. })
@@ -65,11 +80,15 @@ struct State {
     /// Bodies of microphone slices sent, to be filled again (see
     /// [`Outbox::up_buffer`]).
     spare: Vec<Vec<u8>>,
+    /// Bodies of the input's small messages sent, to be filled again.
+    spare_input: Vec<Vec<u8>>,
 }
 
 /// How many bodies of microphone slices sent are kept to be filled again: as many as
 /// may wait, and a few more on their way.
 const SPARE_UP: usize = MAX_LOSSY + 4;
+/// How many bodies of the input's small messages sent are kept: a few frames of them.
+const SPARE_INPUT: usize = 16;
 
 #[derive(Default)]
 pub struct Outbox {
@@ -115,7 +134,12 @@ impl Outbox {
     /// the session is over, or the message cannot be sent at all.
     pub fn push(&self, msg: ClientMsg) -> io::Result<()> {
         let (sound, is_lossy) = (in_sound_lane(&msg), lossy(&msg));
-        let msg = msg.encode()?;
+        let body = if is_input(&msg) {
+            self.state.lock().unwrap().spare_input.pop()
+        } else {
+            None
+        };
+        let msg = msg.encode_into(body.unwrap_or_default())?;
         let mut s = self.state.lock().unwrap();
         if s.closed || s.leaving {
             return Err(io::ErrorKind::BrokenPipe.into());
@@ -152,13 +176,19 @@ impl Outbox {
         }
     }
 
-    /// Message `msg` was sent: the body of a slice of the microphone is kept to be
-    /// filled again.
+    /// Message `msg` was sent: the body of a slice of the microphone, or of one of the
+    /// input's small messages, is kept to be filled again.
     pub fn sent(&self, msg: Encoded) {
-        if msg.tag() == ClientMsg::UP_TAG {
+        let tag = msg.tag();
+        if tag == ClientMsg::UP_TAG {
             let mut s = self.state.lock().unwrap();
             if s.spare.len() < SPARE_UP {
                 s.spare.push(msg.into_body());
+            }
+        } else if ClientMsg::INPUT_TAGS.contains(&tag) {
+            let mut s = self.state.lock().unwrap();
+            if s.spare_input.len() < SPARE_INPUT {
+                s.spare_input.push(msg.into_body());
             }
         }
     }
@@ -352,6 +382,55 @@ mod tests {
         // Only the microphone's: a control message's body is not kept.
         let fresh = o.up_buffer(960);
         assert_ne!(fresh.as_ptr(), at);
+    }
+
+    /// The input's small messages are written into the bodies of those sent: in
+    /// order, as they were, and once one of each went out, with no more kept than a
+    /// few.
+    #[test]
+    fn the_inputs_messages_are_filled_again() {
+        use prostir_proto::input::{Button, TouchPhase};
+        let o = Outbox::default();
+        let id = DisplayId(3);
+        let msgs = [
+            ClientMsg::MouseTo { id, u: 1, v: 2 },
+            ClientMsg::MouseButton {
+                id,
+                u: 1,
+                v: 2,
+                button: Button::Left,
+                down: true,
+            },
+            ClientMsg::MouseScroll {
+                id,
+                dx: 0,
+                dy: -120,
+            },
+            ClientMsg::Touch {
+                id,
+                slot: 1,
+                u: 3,
+                v: 4,
+                phase: TouchPhase::Move,
+            },
+        ];
+        for _ in 0..2 {
+            for m in &msgs {
+                o.push(m.clone()).unwrap();
+            }
+            let got: Vec<ClientMsg> = sent(&o).into_iter().map(|(_, m)| m).collect();
+            assert_eq!(got, msgs);
+            assert_eq!(o.state.lock().unwrap().spare_input.len(), msgs.len());
+        }
+        for _ in 0..SPARE_INPUT * 2 {
+            o.push(msgs[0].clone()).unwrap();
+        }
+        sent(&o);
+        assert_eq!(o.state.lock().unwrap().spare_input.len(), SPARE_INPUT);
+        // Not a control message's.
+        o.push(worn(false)).unwrap();
+        sent(&o);
+        assert_eq!(o.state.lock().unwrap().spare_input.len(), SPARE_INPUT);
     }
 
     #[test]
