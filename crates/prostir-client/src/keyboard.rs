@@ -1,7 +1,7 @@
 //! The person's own keyboard, as the headset tracks it (step 8.7): where it lies, and
 //! the window onto the room that settles over it, so the person types without taking
 //! the headset off. The shell reads the keyboard's pose from the runtime
-//! (`XR_FB_keyboard_tracking`, `platform::meta::keyboard`) and gives it as [`Seen`];
+//! (`XR_FB_keyboard_tracking`, read by the platform's part) and gives it as [`Seen`];
 //! [`Follow`] eases the window towards it, and keeps it where it was when the keyboard
 //! goes out of view. Without a tracked keyboard the window is the one placed by hand.
 //!
