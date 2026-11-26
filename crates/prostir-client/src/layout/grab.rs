@@ -231,14 +231,14 @@ impl Grab {
                     (turn * s.dir0, d)
                 }
                 None => {
+                    // The direction as the hand is now (no lag across); the reach from
+                    // its place smoothed.
+                    let raw = ray.origin - s.shoulder;
+                    let turn = Quat::from_rotation_arc(s.hand_dir0, raw.normalize_or(s.hand_dir0));
                     let last = s.arm.at;
-                    let arm = s.arm.next(
-                        ray.origin - s.shoulder,
-                        dt,
-                        f.carry_smooth_hz,
-                        f.carry_smooth_beta * 100.0,
-                    );
-                    let turn = Quat::from_rotation_arc(s.hand_dir0, arm.normalize_or(s.hand_dir0));
+                    let arm = s
+                        .arm
+                        .next(raw, dt, f.carry_smooth_hz, f.carry_smooth_beta * 100.0);
                     // Only reaching in or out moves it nearer or further: a move that
                     // goes mostly that way, past a dead zone passed once.
                     let step = (arm - last).length();

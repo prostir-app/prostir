@@ -50,9 +50,14 @@ fn stage() -> Stage {
             piece(2, Vec3::new(1.4, 1.6, -1.1), 1.0, 0.56, false),
             piece(5, Vec3::new(-1.2, 1.7, -1.0), 0.5, 0.4, true),
             piece(3, Vec3::new(0.45, 1.0, -0.5), 0.5, 0.3, false),
+            // Lying on the desk, face up, as the keyboard window lies.
             Piece {
                 thing: Thing::Keyboard,
-                place: placed(Vec3::new(0.0, 0.75, -0.45), 0.4),
+                place: Placement {
+                    position: Vec3::new(0.0, 0.75, -0.45),
+                    rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                    width: 0.4,
+                },
                 height: 0.15,
                 window: false,
             },
@@ -570,18 +575,24 @@ fn palm_down(palm: Vec3, left: bool) -> Joints {
     j
 }
 
-/// `n` frames of both hands at height `y` as on a keyboard, palms down, their rays on
-/// monitor 1 wandering a little, the right one pinching now and then.
-fn typing(s: &mut Script, y: f32, n: u32) {
+/// Where the palms are on the stage's keyboard (its window lies at 0.75 m).
+const ON_KEYS: [Vec3; 2] = [Vec3::new(-0.12, 0.85, -0.42), Vec3::new(0.08, 0.85, -0.42)];
+
+/// `n` frames of both hands at `palms` as on a keyboard, palms down, their rays on
+/// monitor 1 wandering a little, the right one pinching every `pinch` frames (0:
+/// as it is).
+fn typing(s: &mut Script, palms: [Vec3; 2], n: u32, pinch: u32) {
     for i in 0..n {
         let k = i as f32 * 0.4;
-        for (h, x) in [(0, -0.22), (1, -0.02)] {
-            let palm = Vec3::new(x + 0.01 * k.sin(), y, -0.3 + 0.01 * k.cos());
+        for (h, at) in palms.into_iter().enumerate() {
+            let palm = at + Vec3::new(0.01 * k.sin(), 0.0, 0.01 * k.cos());
             s.hand(h, true).joints(h, Some(&palm_down(palm, h == 0)));
             let aim = monitor(1) + Vec3::new(0.05 * k.sin(), 0.03 * k.cos(), 0.0);
             s.ray_from(h, palm, aim);
         }
-        s.select(1, if i % 30 == 10 { 1.0 } else { 0.0 });
+        if pinch > 0 {
+            s.select(1, if i % pinch == 10 { 1.0 } else { 0.0 });
+        }
         s.frames(1);
     }
 }
@@ -614,12 +625,33 @@ fn monitor_scripts(out: &mut Vec<(&'static str, Script)>) {
     // runtime calls them ready to pinch) on monitor 1 by chance, a pinch now and then.
     add("monitors-typing-on-the-keyboard", &|s| {
         s.monitors(Take::Hold);
-        typing(s, 0.85, 120);
+        typing(s, ON_KEYS, 120, 30);
     });
     // The same hand raised, palm still down: it points, and the mouse goes.
     add("monitors-raised-hand-points", &|s| {
         s.monitors(Take::Hold);
-        typing(s, 1.3, 20);
+        typing(s, [ON_KEYS[0], ON_KEYS[1] + Vec3::Y * 0.45], 20, 30);
+    });
+    // Typing, a pinch held: no monitor is taken (nor clicked).
+    add("monitors-typing-pinch-held", &|s| {
+        s.monitors(Take::Hold);
+        typing(s, ON_KEYS, 10, 0);
+        s.select(1, 1.0);
+        typing(s, ON_KEYS, 60, 0);
+        s.select(1, 0.0).frames(5);
+    });
+    // Typing on a keyboard the headset tracks, away from where its window was put:
+    // the hands rest on that one.
+    add("monitors-typing-on-a-tracked-keyboard", &|s| {
+        s.monitors(Take::Hold);
+        s.input.keyboard = Some(crate::keyboard::Seen {
+            position: Vec3::new(-0.6, 0.75, -0.35),
+            rotation: Quat::IDENTITY,
+            width: 0.36,
+            depth: 0.13,
+        });
+        let away = Vec3::new(-0.6, 0.0, 0.0);
+        typing(s, ON_KEYS.map(|p| p + away), 120, 30);
     });
     add("monitors-touch-tap", &|s| {
         s.monitors(Take::Hold);
@@ -744,6 +776,8 @@ fn the_scripts_play_as_they_did() {
             "pinch-held-drifting-onto-the-menu",
             "monitors-touch-from-behind",
             "monitors-typing-on-the-keyboard",
+            "monitors-typing-pinch-held",
+            "monitors-typing-on-a-tracked-keyboard",
         ];
         if quiet.contains(&name) {
             assert!(journal.is_empty(), "{name} did something: {journal:?}");

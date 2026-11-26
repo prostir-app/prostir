@@ -5152,6 +5152,19 @@ fn build_dev_hands(
     }
 }
 
+/// The first title of a page of "Hands (trial)", left of its pager: a group of
+/// [`segmented`] with no title of its own goes on under it.
+#[cfg(feature = "preview")]
+fn beside_pager(items: &mut Vec<Item>, x: f32, w: f32, y: &mut f32, title: &str) {
+    items.push(text_in(
+        w - PAGER_W - 20.0,
+        text(x, *y, 21.0, true, SECTION, title),
+    ));
+    // As `segmented` goes on after its title (18), less what it takes off when there
+    // is none (30).
+    *y += 48.0;
+}
+
 /// "Hands (trial)", its first page: monitors touched and clicked, how a hand takes
 /// one and how it moves in the hand.
 #[cfg(feature = "preview")]
@@ -5167,12 +5180,13 @@ fn dev_hands_monitors(
     use crate::interaction::Take;
     use crate::interaction::trial::Movement;
     let l = &s.texts;
+    beside_pager(items, x, w, &mut y, l.t("headset-dev-monitors"));
     segmented(
         items,
         x,
         w,
         &mut y,
-        l.t("headset-dev-monitors"),
+        "",
         vec![
             (
                 l.t("headset-off"),
@@ -5265,12 +5279,13 @@ fn dev_hands_look(
             HandLook::Tips => l.t("headset-dev-hand-tips").to_owned(),
         })
         .collect();
+    beside_pager(items, x, w, &mut y, l.t("headset-dev-hand-look"));
     segmented_rows(
         items,
         x,
         w,
         &mut y,
-        l.t("headset-dev-hand-look"),
+        "",
         &HandLook::ALL
             .into_iter()
             .zip(&percents)

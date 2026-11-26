@@ -25,7 +25,7 @@ use super::signals::{self, Gestures};
 use super::trial::Movement;
 use super::{Feel, FrameInput, Hands, Head, INDEX_TIP, Joints, Mark, Phase, Scene};
 use crate::ids::{DisplayKey, Target, Thing};
-use crate::layout::{Grab, Ray};
+use crate::layout::{Grab, Placement, Ray};
 use crate::world::{panel_height, panel_width};
 
 use super::feel::ms;
@@ -237,6 +237,8 @@ pub(super) struct HandMonitors {
     /// The monitor under the fingertip in the last frame and how far in front.
     last_z: Option<(DisplayKey, f32)>,
     stick_acc: f32,
+    /// It rests on the keyboard, typing (see [`resting`]).
+    resting: bool,
     // ---- This frame ----
     /// Where it points or presses on a monitor (for the mouse): the ray's direction
     /// (none: not a ray).
@@ -266,9 +268,18 @@ impl Shared {
     }
 }
 
-/// Whether a hand (`right` or the left) rests as it types: its palm turned down, low
-/// below the eyes or on the keyboard the headset tracks (see [`Feel::rest_palm_down`]).
-fn resting(joints: Option<&Joints>, right: bool, head: Head, input: &FrameInput, f: &Feel) -> bool {
+/// Whether a hand (`right` or the left) rests as it types (`was`: it did last frame):
+/// its palm turned down, on the keyboard window (`keyboard`, lying in its plane) or,
+/// with none, low below the eyes (see [`Feel::rest_palm_down`]). Each with a margin
+/// to come out of it, so it does not flicker.
+fn resting(
+    was: bool,
+    joints: Option<&Joints>,
+    right: bool,
+    head: Head,
+    keyboard: Option<Placement>,
+    f: &Feel,
+) -> bool {
     let Some(j) = joints else {
         return false;
     };
@@ -279,17 +290,37 @@ fn resting(joints: Option<&Joints>, right: bool, head: Head, input: &FrameInput,
     if right {
         normal = -normal;
     }
-    if normal.dot(Vec3::NEG_Y) < f.rest_palm_down {
+    let down = if was {
+        f.rest_palm_off
+    } else {
+        f.rest_palm_down
+    };
+    if normal.dot(Vec3::NEG_Y) < down {
         return false;
     }
-    let on_keyboard = input.keyboard.is_some_and(|k| {
-        let local = k.rotation.inverse() * (palm - k.position);
-        let m = f.rest_keyboard_m;
-        local.x.abs() <= k.width / 2.0 + m
-            && local.z.abs() <= k.depth / 2.0 + m
-            && (-m..=2.0 * m).contains(&local.y)
-    });
-    on_keyboard || head.position.y - palm.y > f.rest_below_m
+    match keyboard {
+        Some(k) => {
+            let m = if was {
+                f.rest_keyboard_off_m
+            } else {
+                f.rest_keyboard_m
+            };
+            // The window lies with its face up: x along it, y across, z up.
+            let local = k.rotation.inverse() * (palm - k.position);
+            let depth = k.width * crate::world::KEYBOARD_ASPECT;
+            local.x.abs() <= k.width / 2.0 + m
+                && local.y.abs() <= depth / 2.0 + m
+                && (-m..=m).contains(&local.z)
+        }
+        None => {
+            let below = if was {
+                f.rest_below_off_m
+            } else {
+                f.rest_below_m
+            };
+            head.position.y - palm.y > below
+        }
+    }
 }
 
 /// Degrees between two directions.
@@ -606,6 +637,15 @@ impl Hands {
         }
         let f = self.feel;
         let hs = input.hands[h];
+        // The keyboard window as the headset tracks it, else as it was put.
+        let keyboard = input
+            .keyboard
+            .map(|k| k.window().place)
+            .or_else(|| scene.place(Thing::Keyboard));
+        let was = self.hands[h].m.resting;
+        let resting =
+            hs.is_hand && resting(was, input.joints[h].as_ref(), h == 1, head, keyboard, &f);
+        self.hands[h].m.resting = resting;
         // The same as the input before step 8: the source changing, a hand that just
         // touched pinching.
         let switched = self.hands[h].was_hand.is_some_and(|was| was != hs.is_hand);
@@ -636,10 +676,21 @@ impl Hands {
             Phase::Idle => {}
             _ => return false,
         }
-        // What the ray points at on a monitor (not a detached window); nothing for a
-        // hand resting on the keyboard (typing: its ray points by chance).
-        let resting = hs.is_hand && resting(input.joints[h].as_ref(), h == 1, head, input, &f);
-        let on = match self.picks[h].filter(|_| !resting) {
+        // A hand resting on the keyboard (typing: its ray points by chance) points at
+        // no monitor, for this input nor the one before step 8.
+        if resting
+            && matches!(
+                self.picks[h],
+                Some(Target {
+                    thing: Thing::Display(_),
+                    ..
+                })
+            )
+        {
+            self.picks[h] = None;
+        }
+        // What the ray points at on a monitor (not a detached window).
+        let on = match self.picks[h] {
             Some(Target {
                 thing: Thing::Display(id),
                 hit,
@@ -1201,4 +1252,77 @@ fn start_grab(scene: &mut impl Scene, id: DisplayKey, ray: Ray) -> Option<Grab> 
     };
     let local = at.rotation.inverse() * (ray.origin + ray.dir * t - at.position);
     Some(Grab::start(thing, t, Vec2::new(local.x, local.y), &at))
+}
+
+#[cfg(test)]
+mod rest_tests {
+    use super::*;
+
+    /// A hand at `palm`, its palm turned down (`left` or the right), fingers forward.
+    fn palm_down(palm: Vec3, left: bool) -> Joints {
+        let mut j = [(palm, 0.01); 26];
+        j[1].0 = palm + Vec3::new(0.0, 0.0, 0.06);
+        let side = if left { 1.0 } else { -1.0 };
+        j[7].0 = palm + Vec3::new(0.03 * side, 0.0, -0.03);
+        j[22].0 = palm + Vec3::new(-0.03 * side, 0.0, -0.03);
+        j
+    }
+
+    fn head(y: f32) -> Head {
+        Head {
+            position: Vec3::new(0.0, y, 0.0),
+            forward: Vec3::NEG_Z,
+            right: Vec3::X,
+        }
+    }
+
+    /// The keyboard window lying face up at `y`, 40 cm in front.
+    fn keys(y: f32) -> Option<Placement> {
+        Some(Placement {
+            position: Vec3::new(0.0, y, -0.4),
+            rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            width: 0.4,
+        })
+    }
+
+    /// Seated (eyes at 1.2 m, the keyboard at 0.72 m, the palm 0.42 m below the eyes)
+    /// and standing (eyes at 1.7 m, a standing desk at 1.05 m): typing rests, with the
+    /// keyboard window and without; the hand raised to point does not; on the way up
+    /// it rests a little longer than it started to.
+    #[test]
+    fn typing_rests_seated_and_standing() {
+        let f = Feel::DEFAULT;
+        for (eyes, desk) in [(1.2, 0.72), (1.7, 1.05)] {
+            let typing = palm_down(Vec3::new(-0.1, desk + 0.06, -0.4), true);
+            let r = |was, j: &Joints, k| resting(was, Some(j), false, head(eyes), k, &f);
+            assert!(r(false, &typing, keys(desk)), "{eyes}: on the keyboard");
+            assert!(r(false, &typing, None), "{eyes}: without its window");
+            let raised = palm_down(Vec3::new(-0.1, eyes - 0.22, -0.4), true);
+            assert!(!r(true, &raised, keys(desk)), "{eyes}: raised");
+            assert!(
+                !r(true, &raised, None),
+                "{eyes}: raised, without its window"
+            );
+            // 18 cm above the keyboard: still resting, not starting to.
+            let lifted = palm_down(Vec3::new(-0.1, desk + 0.18, -0.4), true);
+            assert!(r(true, &lifted, keys(desk)));
+            assert!(!r(false, &lifted, keys(desk)));
+            // Turned up past the margin: no longer.
+            let mut turned = typing;
+            turned[7].0.y -= 0.1;
+            turned[22].0.y += 0.1;
+            assert!(!r(true, &turned, keys(desk)), "{eyes}: turned");
+        }
+        // The right hand, mirrored, rests as well; no joints, never.
+        let right = palm_down(Vec3::new(0.1, 0.78, -0.4), false);
+        assert!(resting(
+            false,
+            Some(&right),
+            true,
+            head(1.2),
+            keys(0.72),
+            &f
+        ));
+        assert!(!resting(true, None, true, head(1.2), keys(0.72), &f));
+    }
 }
