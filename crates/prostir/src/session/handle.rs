@@ -35,6 +35,9 @@ impl Session {
             notify_battery(b.percent);
         }
         let prefs = self.publisher.prefs();
+        // Where every headset on the head has "Focus", the monitors nobody looks at
+        // get 5 frames a second.
+        displays.router.set_focus_mode(self.id, prefs.focus_mode);
         self.notifications = if prefs.notifications && access.may(perms::PRIVATE) {
             self.notifications.take().or_else(|| {
                 let outbox = self.outbox.clone();
@@ -135,12 +138,20 @@ impl Session {
                 displays.mouse_to(ScreenId::from_wire(id), u, v);
             }
             ClientMsg::MouseTo { .. } => info!("the headset has no right to move the mouse"),
-            // Said when the monitor looked at changes, at most four times a second. Used
-            // for priorities from step 10 on; until then only the log shows it.
-            ClientMsg::Gaze { display, u, v } => match display {
-                Some(id) => debug!("gaze: the headset looks at display {} at {u},{v}", id.0),
-                None => debug!("gaze: the headset looks at none of the displays"),
-            },
+            // Said when the monitor looked at changes, at most four times a second: the
+            // monitor looked at gets every frame, the others fewer (see
+            // `router/priority.rs`).
+            ClientMsg::Gaze { display, u, v } => {
+                match display {
+                    Some(id) => {
+                        debug!("gaze: the headset looks at display {} at {u},{v}", id.0);
+                    }
+                    None => debug!("gaze: the headset looks at none of the displays"),
+                }
+                displays
+                    .router
+                    .gaze(self.id, display.map(ScreenId::from_wire));
+            }
             // Off the head and asleep: the session ends without the grace.
             ClientMsg::Asleep if !self.worn() => {
                 info!("the headset went to sleep");

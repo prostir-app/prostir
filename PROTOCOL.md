@@ -966,9 +966,13 @@ what it can say, and the host does not need it. No right is needed.
 - The headset's "where the user looks" is the head's forward ray, the same one its
   menu pointing and the mouse that follows the gaze work from, not eye tracking. It is
   worked out only while the headset app has the focus.
-- The current host only writes the message at debug level in its log; nothing on the PC
-  depends on it yet. The rate and the 150 ms are the current headset's
-  (implementation-defined); a host must take any rate.
+- The current host gives the display looked at every frame and the others fewer (half
+  their rate, 5 a second where every headset on the head has `Prefs.focus_mode`); a
+  display the gaze left keeps every frame for 2 s. Until a headset that names feature
+  6 sends its first `Gaze`, and for a headset that does not name it, every display gets
+  every frame. None of this changes a message: only the frames come less often. The
+  rate and the 150 ms are the current headset's (implementation-defined); a host must
+  take any rate.
 
 ### Steady state
 
@@ -1122,7 +1126,7 @@ are marked as such (their bytes never change). "Part" marks a part of the state 
 | 140 | `Up` | `up:u8, data:bytes*` | A piece of up stream `up`. Lane 1. |
 | 141 | `UpEnd` | `up:u8` | Up stream `up` ended. Lane 1. |
 | 133 | `Arrange` | `rows:list<Row>(max 32)` | How the displays stand around the user (see [Layout](#7-layout)). |
-| 137 | `Gaze` | `display:opt<DisplayId>, u:u16, v:u16` | The display the user looks at, and where on it (0 to 65535 from the top left); none (with `u` and `v` 0): none of this host's displays. The headset sends it only to a host that listed feature 14, only when the display looked at has changed and rested a moment (not for a move across one display), and at most four times a second (see [Gaze](#gaze)). The current host only logs it. |
+| 137 | `Gaze` | `display:opt<DisplayId>, u:u16, v:u16` | The display the user looks at, and where on it (0 to 65535 from the top left); none (with `u` and `v` 0): none of this host's displays. The headset sends it only to a host that listed feature 14, only when the display looked at has changed and rested a moment (not for a move across one display), and at most four times a second (see [Gaze](#gaze)). The current host gives the display looked at more frames. |
 | 131 | `Request` | `req:u32, kind:u8, fields` | A change of the host's state (see [Requests](#requests)). |
 | 132 | `Reply` | `req:u32, outcome:Outcome` | The answer to the host's `Command` `req`, after the parts it changed. |
 | 124 | `MouseTo` | `id:DisplayId, u:u16, v:u16` | Put the mouse on display `id`, at `u`, `v` across its picture (0 to 65535). |

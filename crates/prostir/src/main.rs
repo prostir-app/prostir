@@ -170,6 +170,11 @@ impl Brain {
                     .as_ref()
                     .filter(|_| !self.sessions.is_empty())
                     .and_then(Displays::still_due),
+                // A monitor the gaze left gets fewer frames 2 s later, on time.
+                self.displays
+                    .as_ref()
+                    .filter(|_| !self.sessions.is_empty())
+                    .and_then(|d| d.router.priority_due()),
                 self.door.due(),
                 // Looked at again now and then, by a program that leaves when idle,
                 // while a Quest on USB waits for its `adb reverse` or, with nothing
@@ -426,6 +431,7 @@ impl Brain {
             s.publish(displays, &self.store, self.focus);
         }
         displays.still_keyframes();
+        displays.router.priorities();
         displays.push();
         self.store.flush();
         let busy = started.elapsed();
@@ -449,6 +455,8 @@ impl Brain {
         };
         if clocks.focus(now) {
             self.focus = displays.active_output();
+            // The monitor with the active window gets every frame.
+            displays.router.set_active(self.focus);
             displays.look_at_focus();
             for s in self.sessions.values_mut() {
                 s.look_at_sound(displays);

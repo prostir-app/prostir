@@ -605,8 +605,9 @@ impl Output for FakeOutput {
 
     fn detach(&mut self) {}
 
-    /// The encoder reads the picture itself.
-    fn attach(&mut self, _encoder: &Encoder) -> Result<()> {
+    /// The encoder reads the picture itself, through its gate.
+    fn attach(&mut self, encoder: &Encoder) -> Result<()> {
+        self.screen.set_gate(encoder.gate().clone());
         Ok(())
     }
 }

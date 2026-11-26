@@ -227,6 +227,8 @@ struct Setup {
 struct State {
     label: String,
     appsrc: gst_app::AppSrc,
+    /// The encoder's pause, and the gate of its frames.
+    pause: Arc<Pause>,
     seen: Sightings,
     /// Where what each buffer says of the pointer goes (the pointer apart).
     cursor: Option<CursorTap>,
@@ -389,10 +391,15 @@ fn tell_cursor(state: &Shared, cursor: Option<&[u8]>) {
 }
 
 /// KWin sent frames: the pointer and the changed parts of each are seen, and the
-/// newest picture goes to the encoder; the rest go back at once.
+/// newest picture goes to the encoder (when its gate lets it, see
+/// [`Pictures::push`]); the rest go back at once. Pictures KWin says nothing changed
+/// on go back too, once there is a picture to send again: the last one stands for
+/// them (sent again on a still screen and when a keyframe is asked of it).
 fn frames_came(stream: &Stream, state: &Shared) {
     let seen = state.borrow().seen.clone();
     let mut newest: Option<(*mut pw::sys::pw_buffer, Option<frames::Crop>)> = None;
+    // A picture among them changed something (or did not say).
+    let mut changed = false;
     loop {
         // SAFETY: a stream of this thread.
         let b = unsafe { stream.dequeue_raw_buffer() };
@@ -404,6 +411,7 @@ fn frames_came(stream: &Stream, state: &Shared) {
         // SAFETY: as above.
         let picture = unsafe { frames::has_picture(b, metas.header) };
         let crop = metas.crop.and_then(frames::read_crop);
+        changed |= picture && !metas.damage.is_some_and(meta::nothing_changed);
         seen.saw_frame(metas.cursor, metas.damage, picture);
         tell_cursor(state, metas.cursor);
         if picture && let Some((older, _)) = newest.replace((b, crop)) {
@@ -420,7 +428,13 @@ fn frames_came(stream: &Stream, state: &Shared) {
     let frame = {
         let mut st = state.borrow_mut();
         let st = &mut *st;
+        let gate = st.pause.gate();
         match &st.layout {
+            // Nothing new to encode; a keyframe asked for (the gate open) takes it.
+            Some(_) if !changed && st.pictures.has_last() && !gate.is_open() => {
+                gate.unchanged();
+                None
+            }
             Some(layout) if !st.paused && !st.over => {
                 // SAFETY: dequeued, and queued back only once the frame is let go (or
                 // when PipeWire removes it).
@@ -525,8 +539,9 @@ fn run(setup: Setup, hear: mpsc::Receiver<Say>) {
     };
     let state: Shared = Rc::new(RefCell::new(State {
         label: label.clone(),
-        pictures: Pictures::new(appsrc.clone(), every),
+        pictures: Pictures::new(appsrc.clone(), every, pause.gate().clone()),
         appsrc,
+        pause: pause.clone(),
         seen,
         cursor,
         started: Some(started),

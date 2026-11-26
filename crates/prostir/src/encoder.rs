@@ -24,10 +24,12 @@ use log::{debug, error, info, warn};
 use prostir_proto::Codec;
 
 mod choice;
+mod gate;
 mod gpu;
 mod probe;
 
 pub use choice::{Backend, Choice, Kind, Wanted, codec_label, note};
+pub use gate::{Gate, Level};
 pub use gpu::GpuDevices;
 #[cfg(not(feature = "fake-desktop"))]
 pub use probe::file_identity;
@@ -806,6 +808,8 @@ impl Encoder {
         let last_size = Mutex::new((0u32, 0u32));
         let tuning = Arc::new(Mutex::new(Tuning::new(cfg)));
         let probe = Arc::new(Mutex::new(Probe::default()));
+        // What the capture follows: the pause, and the gate of the frames.
+        let paused = Arc::new(Pause::default());
         // Frames enter the encoder in order and (no B-frames) leave in order, so a FIFO
         // of arrival times pairs them up despite the encoder rewriting timestamps.
         if let Some(pad) = pipeline
@@ -818,11 +822,20 @@ impl Encoder {
             let node = node.clone();
             let tuning = tuning.clone();
             let enc = pipeline.by_name("enc").map(|e| e.downgrade());
+            let gate = paused.gate().clone();
             pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
                 if let Some(event) = info.event()
                     && let gst::EventView::Caps(c) = event.view()
                 {
                     info!("{node}: frames come as {}", c.caps());
+                    // The monitor's full rate, as the encoder budgets by it.
+                    if let Some(rate) = c
+                        .caps()
+                        .structure(0)
+                        .and_then(|s| s.get::<gst::Fraction>("framerate").ok())
+                    {
+                        gate.set_rate(rate.numer(), rate.denom());
+                    }
                     // GPU buffers' caps (`DMA_DRM`) are no `VideoInfo`.
                     let size = c.caps().structure(0).and_then(|s| {
                         Some((
@@ -862,6 +875,7 @@ impl Encoder {
             let node = node.clone();
             let encoded = encoded.clone();
             let tuned = tuning.clone();
+            let pause = paused.clone();
             // An encoder a test asked to break: once it sent a frame, it fails as a
             // driver can in the middle of a stream.
             #[cfg(feature = "fake-desktop")]
@@ -896,7 +910,7 @@ impl Encoder {
                                     kbps,
                                     sharpens,
                                 }) {
-                                    request_keyframe(sink);
+                                    request_keyframe(sink, &pause);
                                 }
                             }
                         }
@@ -911,7 +925,7 @@ impl Encoder {
                             data: map.as_slice().to_vec(),
                             timing,
                         }) {
-                            request_keyframe(sink);
+                            request_keyframe(sink, &pause);
                         }
                         #[cfg(feature = "fake-desktop")]
                         if let Some(enc) = breaker.as_ref().and_then(gst::glib::WeakRef::upgrade)
@@ -1032,7 +1046,7 @@ impl Encoder {
             pipeline,
             sink,
             stop,
-            paused: Arc::default(),
+            paused,
             restart_on_resume,
             takes_dmabuf: cfg.backend.takes_dmabuf(),
             bus_thread: Some(bus_thread),
@@ -1153,6 +1167,15 @@ impl Encoder {
         self.paused.clone()
     }
 
+    /// The gate its frames go through (see `gate.rs`).
+    #[cfg_attr(
+        not(feature = "fake-desktop"),
+        expect(dead_code, reason = "the captures have it from the pause")
+    )]
+    pub fn gate(&self) -> &Arc<Gate> {
+        self.paused.gate()
+    }
+
     /// Changes the target bitrate while running: `kbps`, and `large_kbps` for a
     /// picture of 2560x1440 or more where another (see [`EncoderConfig::large_kbps`]).
     /// Returns the one it encodes at now.
@@ -1222,9 +1245,10 @@ impl Encoder {
         }
     }
 
-    /// Asks the encoder to emit an IDR frame (with parameter sets) as soon as possible.
+    /// Asks the encoder to emit an IDR frame (with parameter sets) as soon as possible:
+    /// the next frame passes its gate at once.
     pub fn force_keyframe(&self) {
-        request_keyframe(&self.sink);
+        request_keyframe(&self.sink, &self.paused);
     }
 
     /// A handle that asks it for a keyframe from any thread, while it runs.
@@ -1237,7 +1261,8 @@ impl Encoder {
 }
 
 /// Whether an encoder is paused, which a capture feeding it sleeps on, or hears of
-/// through [`Pause::tell`] when it waits in a loop of its own.
+/// through [`Pause::tell`] when it waits in a loop of its own; and the gate its frames
+/// go through (see `gate.rs`).
 #[derive(Debug, Default)]
 pub struct Pause {
     on: Mutex<bool>,
@@ -1251,6 +1276,8 @@ pub struct Pause {
     fresh: AtomicBool,
     /// Called after each change, on the thread that made it.
     told: Told,
+    /// How many of the capture's frames go to the encoder.
+    gate: Arc<Gate>,
 }
 
 /// What a capture asked to be called with when its encoder's pause changes.
@@ -1287,15 +1314,33 @@ impl Pause {
         *self.on.lock().unwrap()
     }
 
+    /// The gate the capture's frames go through.
+    pub fn gate(&self) -> &Arc<Gate> {
+        &self.gate
+    }
+
     /// The capture is to send its last picture again at once.
     pub fn picture_again(&self) {
         self.again.store(true, Ordering::Relaxed);
+        self.open_gate();
+    }
+
+    /// The capture's next frame goes through the gate at once (a keyframe was asked
+    /// for, or a picture), and a capture that waits for a frame's turn hears so.
+    pub fn open_gate(&self) {
+        self.gate.open();
+        {
+            let _on = self.on.lock().unwrap();
+            self.changed.notify_all();
+        }
         self.poke();
     }
 
     pub(crate) fn set(&self, on: bool) {
         if !on {
             self.fresh.store(true, Ordering::Relaxed);
+            // The first frame after the pause goes at once.
+            self.gate.open();
         }
         *self.on.lock().unwrap() = on;
         self.changed.notify_all();
@@ -1328,6 +1373,28 @@ impl Pause {
         self.changed.notify_all();
     }
 
+    /// Sleeps until `until` (a frame's turn at the gate), or until the gate opens, a
+    /// picture is asked again, the encoder pauses, or it is woken with `stop` set.
+    #[cfg_attr(
+        feature = "fake-desktop",
+        expect(dead_code, reason = "the fake desktop pushes no frames")
+    )]
+    pub fn nap(&self, until: Instant, stop: &AtomicBool) {
+        let mut on = self.on.lock().unwrap();
+        loop {
+            let now = Instant::now();
+            if *on
+                || now >= until
+                || stop.load(Ordering::Relaxed)
+                || self.gate.is_open()
+                || self.again.load(Ordering::Relaxed)
+            {
+                return;
+            }
+            on = self.changed.wait_timeout(on, until - now).unwrap().0;
+        }
+    }
+
     /// Sleeps while paused, until resumed or woken with `stop` set.
     #[cfg_attr(
         all(feature = "fake-desktop", not(test)),
@@ -1351,8 +1418,14 @@ pub struct Keyframer {
 }
 
 impl Keyframer {
+    /// Asks for a keyframe: the next frame passes its gate at once.
     pub fn ask(&self) {
-        request_keyframe(&self.sink);
+        request_keyframe(&self.sink, &self.pause);
+    }
+
+    /// The gate of its frames.
+    pub fn gate(&self) -> &Arc<Gate> {
+        self.pause.gate()
     }
 
     /// The source is to send its picture again at once (a keyframe asked of a still
@@ -1362,7 +1435,10 @@ impl Keyframer {
     }
 }
 
-fn request_keyframe(sink: &gst_app::AppSink) {
+/// Asks the encoder of `sink` for a keyframe, which comes with the next frame: that one
+/// passes the gate of `pause` at once.
+fn request_keyframe(sink: &gst_app::AppSink, pause: &Pause) {
+    pause.open_gate();
     let event = gst_video::UpstreamForceKeyUnitEvent::builder()
         .all_headers(true)
         .build();

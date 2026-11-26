@@ -12,6 +12,9 @@
 //!   changed for that long, in the same memory, as PipeWire's source does with its
 //!   `keepalive-time` (without it, never: a test sees a still screen send nothing).
 //!
+//! - a change waits for its turn at the encoder's gate (see `encoder/gate.rs`), as
+//!   the captures do, and the picture sent then is the newest.
+//!
 //! Every start is logged (`fake screen NAME: started`), so a test sees how often the
 //! core started a stream over.
 //!
@@ -79,6 +82,8 @@ pub struct Screen {
     resized: Mutex<Option<((u32, u32), bool)>>,
     /// The desktop closed its output (a test's `close`).
     closed: std::sync::atomic::AtomicBool,
+    /// The gate of the encoder that reads it now.
+    gate: Mutex<Option<Arc<crate::encoder::Gate>>>,
 }
 
 impl Screen {
@@ -99,6 +104,7 @@ impl Screen {
             changed: Condvar::new(),
             resized: Mutex::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),
+            gate: Mutex::new(None),
         });
         SCREENS
             .lock()
@@ -152,6 +158,11 @@ impl Screen {
     /// The size another program gave the output, while it has it.
     pub fn resized(&self) -> Option<(u32, u32)> {
         self.resized.lock().unwrap().map(|(size, _)| size)
+    }
+
+    /// Its changes go through `gate` from now on (the encoder reading it now).
+    pub fn set_gate(&self, gate: Arc<crate::encoder::Gate>) {
+        *self.gate.lock().unwrap() = Some(gate);
     }
 
     /// Something on the screen moved.
@@ -234,6 +245,10 @@ mod imp {
         /// never comes in its memory, so the encoder tells a new one from the same
         /// one sent again.
         last: Option<gst::Buffer>,
+        /// When a picture went last, for the gate.
+        went: Option<std::time::Instant>,
+        /// The change last counted as held by the gate.
+        held: Option<u64>,
     }
 
     #[derive(Default)]
@@ -356,6 +371,8 @@ mod imp {
                 sent: None,
                 flushing: false,
                 last: None,
+                went: None,
+                held: None,
             };
             Ok(())
         }
@@ -431,8 +448,29 @@ mod imp {
                     if state.flushing {
                         return Err(gst::FlowError::Flushing);
                     }
+                    // A change waits for its turn at the gate; a newer one meanwhile
+                    // goes in its place.
+                    let gate = screen.gate.lock().unwrap().clone();
+                    let now = std::time::Instant::now();
+                    let turn = gate
+                        .as_ref()
+                        .filter(|_| state.sent != Some(*changes))
+                        .and_then(|g| g.turn(state.went, now).map(|at| (g, at)));
+                    if let Some((gate, at)) = turn {
+                        if state.held != Some(*changes) {
+                            state.held = Some(*changes);
+                            gate.held();
+                        }
+                        drop(state);
+                        // Woken in a few ms at most: a keyframe asked for opens the
+                        // gate without a word to the screen.
+                        let nap = (at - now).min(std::time::Duration::from_millis(5));
+                        changes = screen.changed.wait_timeout(changes, nap).unwrap().0;
+                        continue;
+                    }
                     if state.sent != Some(*changes) {
                         state.sent = Some(*changes);
+                        state.went = Some(now);
                         let now = *changes;
                         drop(state);
                         drop(changes);
@@ -451,8 +489,9 @@ mod imp {
                 let (woken, waited) = screen.changed.wait_timeout(changes, every).unwrap();
                 changes = woken;
                 if waited.timed_out() {
-                    let state = self.state.lock().unwrap();
+                    let mut state = self.state.lock().unwrap();
                     if let (false, Some(last)) = (state.flushing, state.last.clone()) {
+                        state.went = Some(std::time::Instant::now());
                         return Ok(gst_base::subclass::base_src::CreateSuccess::NewBuffer(last));
                     }
                 }

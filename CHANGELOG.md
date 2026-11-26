@@ -216,8 +216,19 @@
   farthest monitor is hidden for now" once. Room is kept for the background, the menu,
   its button, the hands, the dots of the pointing rays and that message, so pointing or a
   message never pushes a monitor out, and the menu and your hands are the last to go.
-- The headset tells the PC which of its monitors you look at. Nothing changes in the
-  picture for now.
+- The headset tells the PC which of its monitors you look at. The monitor you look at,
+  and the one with the active window, get every frame (at the monitor's refresh rate);
+  the others get half as many, and 5 a second with Focus on. A monitor you look at
+  speeds up with its next frame; one you look away from slows down 2 s later, so moving
+  your head across the monitors changes nothing. The last change of a slowed monitor
+  always comes, a little later, and no extra keyframes are sent. With several headsets
+  a monitor gets what the headset that needs most of it needs; a headset that does not
+  say where it looks sees every monitor at full rate. The PC's log says, every 10 s,
+  how many frames each monitor's rate held back, and when an encoder is too slow for its
+  monitor's refresh rate.
+- On KDE Plasma and Hyprland, a picture the desktop says nothing changed on is not
+  encoded again (the repeat of a still screen and a fresh picture asked by the headset
+  still go).
 
 ### Settings
 
