@@ -355,6 +355,7 @@ impl Run {
     }
 
     fn release_everything(&mut self) {
+        self.edge.stop();
         for from in self.held.sessions() {
             self.release(from);
         }
@@ -366,6 +367,7 @@ impl Run {
         error!("input: a pass of the input thread failed: letting go of everything");
         let _ = catch_unwind(AssertUnwindSafe(|| self.release_everything()));
         self.injector = None;
+        self.edge.stop();
         self.opening = None;
         self.held.clear();
         self.mice.clear();
@@ -570,6 +572,8 @@ impl Run {
     /// Everything `from` holds, let go.
     fn release(&mut self, from: SessionId) {
         let now = Instant::now();
+        // The mouse at an edge is pushed on no more (by whom it was put there).
+        self.edge.stop();
         let dragged = self
             .mice
             .remove(&from)
@@ -592,7 +596,8 @@ impl Run {
         let mut pointing = None;
         for a in acts {
             match &a {
-                Act::To(at) => self.edge.moved(at, Instant::now()),
+                Act::To(at) if injector.relative() => self.edge.moved(at, Instant::now()),
+                Act::To(_) => {}
                 Act::Touch(..) => self.edge.stop(),
                 _ => {}
             }
@@ -649,8 +654,10 @@ impl Run {
         for (_, acts) in coasting {
             self.act(acts);
         }
+        // Pushed only by a device whose relative moves the desktop takes as a mouse's.
         if let Some((dx, dy)) = self.edge.due(now)
             && let Some(injector) = self.injector.as_mut()
+            && injector.relative()
             && let Err(e) = injector.pointer_by(dx, dy)
         {
             self.lost(&e);

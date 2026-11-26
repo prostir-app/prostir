@@ -539,6 +539,12 @@ pub trait Injector: Send {
     fn pointer_to(&mut self, at: &Spot) -> Result<()>;
     /// The mouse moved by `dx`, `dy` logical pixels, without the desktop's acceleration.
     fn pointer_by(&mut self, dx: f64, dy: f64) -> Result<()>;
+    /// It moves the mouse by relative moves the desktop takes as a real mouse's (a
+    /// libei pointer device): the mouse held at a screen edge is pushed on only then
+    /// (see `input::edge`).
+    fn relative(&self) -> bool {
+        false
+    }
     fn button(&mut self, button: MouseButton, down: bool) -> Result<()>;
     /// The wheel, in 1/120 of a notch: `dy` above 0 scrolls down, `dx` above 0 right.
     fn scroll(&mut self, dx: i32, dy: i32) -> Result<()>;

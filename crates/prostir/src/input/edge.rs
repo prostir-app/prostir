@@ -7,7 +7,12 @@
 //! attempt lapses (`ElectricBorderCooldown`, 350 ms). The headset puts the mouse there
 //! once and says nothing more while its ray stays: so the mouse put on the last pixel
 //! of an open side of its output (no other output against it, as KWin finds its edges)
-//! is pushed on towards it a few times, by a small move relative to where it is.
+//! is pushed on towards it a few times, by a small move relative to where it is
+//! (only where the desktop takes relative moves as a mouse's: libei).
+//!
+//! Never near a corner (within [`CORNER`] of one, or at both edges at once): KWin's
+//! corners have actions of their own (the Overview, by default), which a mouse resting
+//! there would set off.
 
 use std::time::{Duration, Instant};
 
@@ -19,6 +24,8 @@ const PUSHES: u8 = 4;
 /// How far each push goes, in logical pixels (the desktop keeps the mouse on its
 /// output; KWin pushes it back 1 by default).
 const PUSH: f64 = 4.0;
+/// How near a corner of its output the mouse is not pushed, in logical pixels.
+pub const CORNER: i64 = 48;
 
 /// The pushes due for the mouse put at an edge (see the module).
 #[derive(Debug, Default)]
@@ -56,11 +63,12 @@ impl EdgePush {
 
 /// Which way `at` is against an open side of its output, each way -1, 0 or 1: on the
 /// side's last pixel (where the desktop rounds the point to), none where it is not.
+/// Not within [`CORNER`] of a corner: along the edge, that far from both its ends.
 fn towards(at: &Spot) -> Option<(f64, f64)> {
     let r = at.rect;
-    let way = |p: f64, start: i32, len: u32, open: (bool, bool)| {
+    let ends = |start: i32, len: u32| (i64::from(start), i64::from(start) + i64::from(len) - 1);
+    let way = |p: f64, (start, end): (i64, i64), open: (bool, bool)| {
         let px = p.round() as i64;
-        let (start, end) = (i64::from(start), i64::from(start) + i64::from(len) - 1);
         if open.0 && px <= start {
             -1.0
         } else if open.1 && px >= end {
@@ -69,12 +77,20 @@ fn towards(at: &Spot) -> Option<(f64, f64)> {
             0.0
         }
     };
+    let away = |p: f64, (start, end): (i64, i64)| {
+        let px = p.round() as i64;
+        px - start >= CORNER && end - px >= CORNER
+    };
+    let (xs, ys) = (ends(r.x, r.w), ends(r.y, r.h));
     let o = at.open;
-    let d = (
-        way(at.x, r.x, r.w, (o.left, o.right)),
-        way(at.y, r.y, r.h, (o.top, o.bottom)),
-    );
-    (d != (0.0, 0.0)).then_some(d)
+    match (
+        way(at.x, xs, (o.left, o.right)),
+        way(at.y, ys, (o.top, o.bottom)),
+    ) {
+        (dx, 0.0) if dx != 0.0 && away(at.y, ys) => Some((dx, 0.0)),
+        (0.0, dy) if dy != 0.0 && away(at.x, xs) => Some((0.0, dy)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -179,11 +195,40 @@ mod tests {
             top: true,
             bottom: true,
         };
-        push.moved(&spot(2320.0, 2560.0, all), t0);
-        assert_eq!(push.due(t0 + PUSH_EVERY), Some((-4.0, -4.0)));
-        push.moved(&spot(4239.0, 3639.0, all), t0);
-        assert_eq!(push.due(t0 + PUSH_EVERY), Some((4.0, 4.0)));
+        push.moved(&spot(2320.0, 3000.0, all), t0);
+        assert_eq!(push.due(t0 + PUSH_EVERY), Some((-4.0, 0.0)));
+        push.moved(&spot(4239.0, 3000.0, all), t0);
+        assert_eq!(push.due(t0 + PUSH_EVERY), Some((4.0, 0.0)));
         push.stop();
         assert_eq!(push.due(t0 + PUSH_EVERY), None);
+    }
+
+    /// Never at a corner (KWin's Overview), nor within 48 px of one along the edge;
+    /// 48 px away, pushed.
+    #[test]
+    fn a_corner_is_never_pushed_at() {
+        let t0 = Instant::now();
+        let mut push = EdgePush::default();
+        let all = Sides {
+            left: true,
+            right: true,
+            top: true,
+            bottom: true,
+        };
+        for (x, y) in [
+            (2320.0, 2560.0),
+            (4239.0, 3639.0),
+            (2320.0 + 47.0, 3639.0),
+            (4239.0 - 47.0, 3639.0),
+            (4239.0, 2560.0 + 47.0),
+            (2320.0, 3639.0 - 47.0),
+        ] {
+            push.moved(&spot(x, y, all), t0);
+            assert_eq!(push.next(), None, "at {x},{y}");
+        }
+        push.moved(&spot(2320.0 + 48.0, 3639.0, all), t0);
+        assert_eq!(push.due(t0 + PUSH_EVERY), Some((0.0, 4.0)));
+        push.moved(&spot(4239.0, 3639.0 - 48.0, all), t0);
+        assert_eq!(push.due(t0 + PUSH_EVERY), Some((4.0, 0.0)));
     }
 }
