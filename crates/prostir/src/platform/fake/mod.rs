@@ -856,6 +856,9 @@ pub mod tray {
     #[derive(Clone)]
     pub struct Handle;
 
+    /// The key of the headset the tray asks about, as last shown (its item names it).
+    static ASKING: std::sync::Mutex<Option<[u8; 32]>> = std::sync::Mutex::new(None);
+
     pub fn spawn(events: EventSink) -> Option<Handle> {
         super::watch_file("fake-tray", move |text| {
             for item in text.lines() {
@@ -876,7 +879,15 @@ pub mod tray {
                     "sharp off" => TrayCommand::SetSharp(false),
                     "quality 15" => TrayCommand::SetBitrate(15),
                     "quality 50" => TrayCommand::SetBitrate(50),
-                    "allow input" => TrayCommand::AllowInput,
+                    // The headset the tray asks about as it was last shown.
+                    "allow input" => {
+                        let asking = *ASKING.lock().unwrap();
+                        let Some(key) = asking else {
+                            log::warn!("fake tray: no headset is asked about");
+                            continue;
+                        };
+                        TrayCommand::AllowInput(key)
+                    }
                     other => {
                         log::warn!("fake tray: no item {other:?}");
                         continue;
@@ -909,7 +920,8 @@ pub mod tray {
                 "fine"
             }
         );
-        if let Some(name) = &status.input_ask {
+        *ASKING.lock().unwrap() = status.input_ask.as_ref().map(|(key, _)| *key);
+        if let Some((_, name)) = &status.input_ask {
             log::info!("fake tray: allow {name} the mouse and keyboard?");
         }
     }

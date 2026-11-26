@@ -16,7 +16,7 @@ pub(super) struct Control {
     pub(crate) for_headset: VecDeque<(Asked<Command>, Option<api::Reply>)>,
     /// The name of the headset the tray asks about: may it use the mouse and
     /// keyboard (see `allow_input`).
-    pub(crate) input_ask: Option<String>,
+    pub(crate) input_ask: Option<([u8; 32], String)>,
 }
 
 impl Control {
@@ -136,8 +136,9 @@ impl Brain {
                 info!("pairing a new headset: from the tray");
             }
             TrayCommand::StopPairing => self.door.stop_pairing(),
-            TrayCommand::AllowInput => {
-                if let Some(key) = self.input_asks.first_waiting() {
+            TrayCommand::AllowInput(key) => {
+                // Only the headset the menu named, and only while it is asked about.
+                if self.input_asks.waits(&key) {
                     info!("the person at the PC allows the mouse and keyboard: from the tray");
                     self.set_input(&key, true);
                 }

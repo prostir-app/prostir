@@ -444,6 +444,9 @@ fn not_now_is_not_asked_again() {
         headset.take_for(Duration::from_millis(200)).unwrap();
     }
     assert_eq!(pc.count_log("notification: Mouse and keyboard"), 1);
+    // Answered: the tray asks no more, and its item allows nothing.
+    pc.tray("allow input");
+    pc.wait_log(SOON, "fake tray: no headset is asked about");
     assert!(!may_click(headset.view()));
 
     let Some(ctl) = pc.ctl(&["input", "on", "headset"]) else {

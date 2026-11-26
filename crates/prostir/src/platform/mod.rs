@@ -271,9 +271,9 @@ pub enum TrayCommand {
     /// for the PC) for a while.
     PairNewHeadset,
     StopPairing,
-    /// The headset the tray asks about (see [`TrayStatus::input_ask`]) may use the
-    /// mouse and keyboard.
-    AllowInput,
+    /// The headset with this key, which the tray asks about (see
+    /// [`TrayStatus::input_ask`]), may use the mouse and keyboard.
+    AllowInput([u8; 32]),
     Quit,
 }
 
@@ -313,9 +313,9 @@ pub struct TrayStatus {
     /// The desktop is there but Prostir cannot use it, and the settings window says
     /// what to do (see [`Unusable`]).
     pub desktop_unusable: bool,
-    /// The name of a headset that tried to use the mouse without the right, while the
-    /// person at the PC is asked whether it may.
-    pub input_ask: Option<String>,
+    /// The key and the name of a headset that tried to use the mouse without the
+    /// right, while the person at the PC is asked whether it may.
+    pub input_ask: Option<([u8; 32], String)>,
 }
 
 /// What came of a notification with buttons (see `dialogs::notice`).

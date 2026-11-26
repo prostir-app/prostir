@@ -44,6 +44,11 @@ impl Asks {
         }
     }
 
+    /// This headset was asked while Prostir runs.
+    pub fn asked(&self, key: &[u8; 32]) -> bool {
+        self.0.contains_key(key)
+    }
+
     /// The question for this headset waits for an answer.
     pub fn waits(&self, key: &[u8; 32]) -> bool {
         self.0.get(key).copied().unwrap_or(false)
@@ -59,9 +64,12 @@ impl Brain {
     /// Headset `key` tried to use the mouse without the right: the person at the PC
     /// is asked, once (see the module).
     pub(crate) fn ask_input(&mut self, key: [u8; 32]) {
-        if self.store.wanted().access_of(&key).may(perms::INPUT) || !self.input_asks.ask(key) {
+        // Asked already: no need to look at the settings (this comes with every message
+        // of a headset without the right).
+        if self.input_asks.asked(&key) || self.store.wanted().access_of(&key).may(perms::INPUT) {
             return;
         }
+        self.input_asks.ask(key);
         let name = self.headset_label(&key);
         info!(
             "headset {} would use the mouse and keyboard: asking the person at the PC",
@@ -167,6 +175,7 @@ mod tests {
         let (one, two) = ([1; 32], [2; 32]);
         assert!(asks.ask(one));
         assert!(!asks.ask(one), "once");
+        assert!(asks.asked(&one) && !asks.asked(&[2; 32]));
         assert!(asks.waits(&one) && !asks.waits(&two));
         assert_eq!(asks.first_waiting(), Some(one));
         assert!(asks.ask(two));

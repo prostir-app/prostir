@@ -257,7 +257,7 @@ impl Brain {
         self.control.input_ask = self
             .input_asks
             .first_waiting()
-            .map(|key| self.headset_label(&key));
+            .map(|key| (key, self.headset_label(&key)));
         self.control.show(
             self.displays.as_ref(),
             &self.store,

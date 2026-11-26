@@ -222,12 +222,13 @@ impl ksni::Tray for Tray {
             );
             items.push(MenuItem::Separator);
         }
-        if let Some(name) = &self.status.input_ask {
+        if let Some((key, name)) = &self.status.input_ask {
+            let key = *key;
             items.push(
                 StandardItem {
                     label: crate::i18n::f("pc-tray-allow-input", &[("name", name.as_str().into())]),
-                    activate: Box::new(|tray: &mut Self| {
-                        tray.commands.tray(Command::AllowInput);
+                    activate: Box::new(move |tray: &mut Self| {
+                        tray.commands.tray(Command::AllowInput(key));
                     }),
                     ..Default::default()
                 }
