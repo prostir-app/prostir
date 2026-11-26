@@ -14,8 +14,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod feel;
+pub mod record;
 #[cfg(test)]
 mod tests;
+
+pub use feel::Feel;
 
 use std::time::{Duration, Instant};
 
