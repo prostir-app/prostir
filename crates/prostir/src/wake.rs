@@ -86,7 +86,7 @@ pub fn new_headset_notice() -> Option<Notice> {
     dialogs::notice(
         t("pc-wake-new-headset-nearby"),
         t("pc-wake-pair-it"),
-        t("pc-wake-pair"),
+        &[t("pc-wake-pair")],
         t("pc-wake-to-pair-it-choose-pair-a"),
     )
 }
@@ -216,16 +216,9 @@ impl Sorter {
     /// The notice's descriptor is readable: [`Wake::Pair`] for its button.
     fn notice_said(&mut self) -> Option<Wake> {
         let (notice, _) = self.notice.as_mut()?;
-        match notice.check()? {
-            true => {
-                self.notice = None;
-                Some(Wake::Pair)
-            }
-            false => {
-                self.notice = None;
-                None
-            }
-        }
+        let said = notice.check()?;
+        self.notice = None;
+        (said == crate::platform::Said::Button(0)).then_some(Wake::Pair)
     }
 
     /// At `now`: the notice given up on at its time. When that is.

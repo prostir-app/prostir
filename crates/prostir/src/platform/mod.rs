@@ -44,8 +44,8 @@
 //! - The local API's transport (`local_api` on Linux: D-Bus): `serve`, and a
 //!   `Client` for `prostir ctl`.
 //! - `dialogs`: `ask_code` (the pairing code typed on the PC), `notify` and
-//!   `notify_and_wait` (desktop notifications), `notice` (a notification with a
-//!   button, as a `Notice` whose descriptor the watcher sleeps on).
+//!   `notify_and_wait` (desktop notifications), `notice` (a notification with
+//!   buttons, as a `Notice` whose descriptor the watcher sleeps on).
 //! - System: `config_home`, `single_instance` (with who holds it) and `watcher`,
 //!   `clean_up_after_crash`, `give_memory_back`, `hostname`, `local_addresses`,
 //!   `screenshot_path`, `import_session_environment`. The private runtime dir, and
@@ -271,6 +271,9 @@ pub enum TrayCommand {
     /// for the PC) for a while.
     PairNewHeadset,
     StopPairing,
+    /// The headset with this key, which the tray asks about (see
+    /// [`TrayStatus::input_ask`]), may use the mouse and keyboard.
+    AllowInput([u8; 32]),
     Quit,
 }
 
@@ -310,6 +313,18 @@ pub struct TrayStatus {
     /// The desktop is there but Prostir cannot use it, and the settings window says
     /// what to do (see [`Unusable`]).
     pub desktop_unusable: bool,
+    /// The key and the name of a headset that tried to use the mouse without the
+    /// right, while the person at the PC is asked whether it may.
+    pub input_ask: Option<([u8; 32], String)>,
+}
+
+/// What came of a notification with buttons (see `dialogs::notice`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Said {
+    /// Its button with this number (from 0, in the order given) was pressed.
+    Button(usize),
+    /// It closed without a button: dismissed, timed out, or shown without buttons.
+    Closed,
 }
 
 /// Why there is no pairing code typed on the PC (see `dialogs::ask_code`).

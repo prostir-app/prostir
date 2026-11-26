@@ -8,7 +8,7 @@ use std::time::Duration;
 use log::warn;
 
 use crate::i18n::t;
-use crate::platform::{NoCode, run, run_until};
+use crate::platform::{NoCode, Said, run, run_until};
 
 /// Asks for the code the headset shows, in a small dialog on the PC, closed when
 /// `gone` says the headset is gone.
@@ -81,9 +81,9 @@ pub fn notify_and_wait(title: &str, body: &str) -> bool {
     .is_ok_and(|out| out.status.success())
 }
 
-/// A desktop notification with a button, while it is up (notify-send with an action,
-/// which says the action's name when the button is pressed and ends when the
-/// notification closes). Dropping it stops waiting for the button.
+/// A desktop notification with buttons, while it is up (notify-send with actions,
+/// which says the action's name when a button is pressed and ends when the
+/// notification closes). Dropping it stops waiting for a button.
 pub struct Notice {
     child: std::process::Child,
     out: std::process::ChildStdout,
@@ -92,12 +92,16 @@ pub struct Notice {
     plain: (String, String),
 }
 
-/// Shows `title` and `body` with `button`; `plain` is the body to show instead where
+/// Shows `title` and `body` with `buttons`; `plain` is the body to show instead where
 /// notifications cannot have buttons. `None` without notify-send.
-pub fn notice(title: &str, body: &str, button: &str, plain: &str) -> Option<Notice> {
+pub fn notice(title: &str, body: &str, buttons: &[&str], plain: &str) -> Option<Notice> {
+    let actions = buttons
+        .iter()
+        .enumerate()
+        .map(|(i, label)| format!("--action=b{i}={label}"));
     let mut child = Command::new("notify-send")
         .args(["--app-name=Prostir", "--icon=prostir"])
-        .arg(format!("--action=pair={button}"))
+        .args(actions)
         .args([title, body])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -115,15 +119,15 @@ pub fn notice(title: &str, body: &str, button: &str, plain: &str) -> Option<Noti
 }
 
 impl Notice {
-    /// What to wait on: readable once the button is pressed or the notice closed.
+    /// What to wait on: readable once a button is pressed or the notice closed.
     pub fn fd(&self) -> std::os::fd::RawFd {
         use std::os::fd::AsRawFd;
         self.out.as_raw_fd()
     }
 
-    /// Once [`Self::fd`] is readable: `Some(true)` the button was pressed,
-    /// `Some(false)` the notice closed without it, `None` not yet.
-    pub fn check(&mut self) -> Option<bool> {
+    /// Once [`Self::fd`] is readable: which button was pressed, or that the notice
+    /// closed without one; `None` not yet.
+    pub fn check(&mut self) -> Option<Said> {
         use std::io::Read;
         let mut buf = [0u8; 64];
         match self.out.read(&mut buf) {
@@ -134,7 +138,10 @@ impl Notice {
                     self.said.drain(..128);
                 }
                 let said = String::from_utf8_lossy(&self.said);
-                return said.lines().any(|l| l.trim() == "pair").then_some(true);
+                return said
+                    .lines()
+                    .find_map(|l| l.trim().strip_prefix('b')?.parse().ok())
+                    .map(Said::Button);
             }
             Err(e) if e.kind() == ErrorKind::Interrupted => return None,
             Err(_) => {}
@@ -143,7 +150,7 @@ impl Notice {
         if self.child.wait().is_ok_and(|s| !s.success()) {
             notify(&self.plain.0, &self.plain.1);
         }
-        Some(false)
+        Some(Said::Closed)
     }
 }
 

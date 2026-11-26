@@ -91,6 +91,8 @@ impl Session {
                 let what = format!("{asked:?}");
                 let answer = match asked {
                     Asked::Known(request) => {
+                        self.wants_input |= requests::needs_input(&request)
+                            && !self.publisher.access.may(perms::INPUT);
                         let limits = self.publisher.limits(displays, self.standing.no_limits);
                         let asker = requests::Asker {
                             caps: self.publisher.caps(),
@@ -145,7 +147,11 @@ impl Session {
             | ClientMsg::Touch { .. }
                 if !self.publisher.access.may(perms::INPUT) =>
             {
-                info!("the headset has no right to move the mouse");
+                // Said once a session: a ray sends many a second.
+                if !std::mem::replace(&mut self.no_input_said, true) {
+                    info!("the headset has no right to move the mouse");
+                }
+                self.wants_input = true;
             }
             // Off the head nothing is pressed (and what was held was let go).
             ClientMsg::MouseTo { .. }

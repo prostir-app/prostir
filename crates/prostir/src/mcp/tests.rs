@@ -169,7 +169,7 @@ fn every_tool_is_listed() {
     let reply = ask(&mut server, "tools/list", &json!({}));
     let tools = reply["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), TOOLS.len());
-    assert_eq!(tools.len(), 38);
+    assert_eq!(tools.len(), 39);
     let mut names = std::collections::BTreeSet::new();
     for t in tools {
         let name = t["name"].as_str().unwrap();
@@ -315,7 +315,39 @@ fn errors_of_tools() {
         assert_eq!(got["error"], "BadArgument");
         assert!(got["text"].as_str().unwrap().contains("person"), "{got}");
     }
+    // So does the mouse and keyboard from a headset: an agent can take them only.
+    for asked in [
+        tool(
+            &mut s,
+            "set_input",
+            &json!({"headset": "Quest 3", "on": true}),
+        ),
+        tool(
+            &mut s,
+            "call",
+            &json!({"request": {"request": "set_input", "headset": "Quest 3", "on": true}}),
+        ),
+    ] {
+        let (failed, content) = asked;
+        assert!(failed);
+        let got = said(&content);
+        assert_eq!(got["error"], "BadArgument");
+        assert!(got["text"].as_str().unwrap().contains("person"), "{got}");
+    }
     assert!(fake.asked.borrow().is_empty());
+    let (failed, _) = tool(
+        &mut s,
+        "set_input",
+        &json!({"headset": "Quest 3", "on": false}),
+    );
+    assert!(!failed);
+    assert_eq!(
+        fake.asked.borrow_mut().drain(..).collect::<Vec<_>>(),
+        [Request::SetInput {
+            headset: "Quest 3".into(),
+            on: false
+        }]
+    );
     let (failed, _) = tool(&mut s, "set_counting", &json!({"counting": "no"}));
     assert!(!failed);
     assert_eq!(

@@ -258,6 +258,16 @@ pub fn parse(args: &[String]) -> Result<(Ctl, bool), String> {
                 ask(Request::ForgetHeadset { headset })
             }
         }
+        "input" => {
+            takes = rest.len();
+            let on = on(rest.first())?;
+            let headset = rest[1..].join(" ");
+            if headset.is_empty() {
+                Err("expected input on|off HEADSET (its key or name)".to_owned())
+            } else {
+                ask(Request::SetInput { headset, on })
+            }
+        }
         "autostart" => {
             takes = 1;
             match rest.first().copied() {
@@ -337,6 +347,8 @@ prostir ctl COMMAND [--json]
   sound headset|pc
   pair | pair stop
   headsets | forget HEADSET | forget --all
+  input on|off HEADSET           the mouse and keyboard from that headset (its key or
+                                 name), allowed or not
   autostart on|off|status
   count yes|no|unasked|status    count this PC among users (unasked: ask again)
   settings
@@ -698,7 +710,12 @@ fn headset_line(h: &api::Headset) -> String {
     } else {
         ""
     };
-    format!("{}\t{}\t{role}{connected}", h.key, h.name)
+    let input = if h.rights.iter().any(|r| r == "input") {
+        t("pc-ctl-input-allowed")
+    } else {
+        ""
+    };
+    format!("{}\t{}\t{role}{input}{connected}", h.key, h.name)
 }
 
 /// `watch`: a line for each event and each change of what `status` says, until

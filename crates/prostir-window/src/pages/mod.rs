@@ -174,6 +174,47 @@ fn counting_question(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     ui.add_space(tk.th.shape.section_gap);
 }
 
+/// A headset that tried to use the mouse without the right, on the overview: may it?
+/// The Headsets page asks the same by the headset, next to its switch.
+fn input_question(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
+    if v.ui.unsupported.contains("set_input") {
+        return;
+    }
+    let tk = v.tk;
+    let p = tk.p;
+    for h in s
+        .headsets
+        .iter()
+        .filter(|h| h.asks_input && !h.rights.iter().any(|r| r == "input"))
+    {
+        w::card_accent(ui, tk, |ui| {
+            text(
+                ui,
+                tk.f("window-hs-input-ask", &[("name", (&h.name).into())]),
+                tk.body_m(),
+                p.text,
+            );
+            ui.add_space(tk.th.shape.padding);
+            ui.horizontal(|ui| {
+                let set = |on| {
+                    Action::Send(Request::SetInput {
+                        headset: h.key.clone(),
+                        on,
+                    })
+                };
+                if w::button(ui, tk, &tk.t("window-hs-input-allow"), Kind::Primary, true).clicked()
+                {
+                    v.out.push(set(true));
+                }
+                if w::button(ui, tk, &tk.t("window-hs-input-later"), Kind::Quiet, true).clicked() {
+                    v.out.push(set(false));
+                }
+            });
+        });
+        ui.add_space(tk.th.shape.section_gap);
+    }
+}
+
 /// A large title with a coloured dot for the state in front of it.
 fn hero(ui: &mut Ui, tk: &Tk<'_>, color: Option<Color32>, title: &str) {
     ui.horizontal(|ui| {

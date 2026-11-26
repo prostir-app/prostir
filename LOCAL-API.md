@@ -72,6 +72,7 @@ so) and does not look for one later.
 | `PairNewHeadset` | | `u seconds_left` | opens the pairing window |
 | `StopPairing`, `ShowSettings`, `Quit` | | | |
 | `ForgetHeadset` | `s fingerprint_or_name` | | |
+| `SetInput` | `s fingerprint_or_name, b on` | | |
 
 The typed methods are for hot keys and scripts (`busctl`, `gdbus`, `qdbus6`); each is
 the same as the request of the same name through `Call`. A failure is a D-Bus error
@@ -212,6 +213,7 @@ exist, monitor requests change the set kept for the next headset (its monitors s
 | `window_look` | `theme` (`system`, `light`, `dark`), `palette` (a word: `ink`, `graphite`), `language` (a code or `null`) | the settings window's look, kept in `settings.txt` |
 | `forget_headset` | `headset`: its `key`, its whole key (64 hex digits) or its name | its session ends |
 | `forget_all` | | every paired headset |
+| `set_input` | `headset` (as `forget_headset`), `on` | the input right of that headset (its clicks, the wheel, touches, the mouse following its gaze, a window moved to a monitor), as the person at the PC chooses: kept in its `access` line in `settings.txt` (one is written with the rights it had, where it had none), and its session has it at once. A headset without an `access` line has no input right; the first time it tries to use the mouse, the PC asks the person (a notification with "Allow" and "Not now", the tray, the settings window, `headsets[].asks_input`), once while Prostir runs: off also answers "Not now". `BadArgument` for a headset whose `access` line is mistyped (it stays as it is) |
 | `show_settings` | | starts the settings window, `prostir window`, a process of its own (it keeps one window per user itself) |
 | `quit` | | Prostir quits after answering, as the tray's "Quit": nothing waits for the headset afterwards (the sockets' watcher quits too; under systemd the socket stops until the next login) |
 
@@ -321,7 +323,8 @@ change older clients would misread.
 | `headsets[].model` | what it says it is, while connected |
 | `headsets[].app` | its Prostir app's version as it last connected (`0.2.0`), empty where not known: two apps on one headset (a release and a test build) are two headsets, each with its own key |
 | `headsets[].last_seen` | when it last connected or left, Unix seconds; `null` where not known (it has not connected since the PC began to keep this) |
-| `headsets[].role`, `rights` | from its line in `settings.txt` (`main` with every right without one); rights: `input`, `mic`, `camera`, `clipboard`, `changes`, `private` |
+| `headsets[].role`, `rights` | from its line in `settings.txt` (without one: `main`, with every right but `input` and `clipboard`); rights: `input`, `mic`, `camera`, `clipboard`, `changes`, `private` |
+| `headsets[].asks_input` | it tried to use the mouse without the input right, and the PC asks the person whether it may, until `set_input` answers or its session ends |
 | `headsets[].session` | while connected: `via` (`wifi`, `usb`; from 127.0.0.1 counts as USB), `worn`, `battery`, `profiles` (the profiles saved in the headset, in its menu's order: the name each was given, empty for one called by its number; empty where the headset does not say), `profile` (the one in use: its name, else its number; `null`: none, or not said), `mic_allowed` (whether the headset's system lets it record; `null`: not known), `mic_on` (its switch), `main` (the main headset now: its arrangement is the desktop's, commands go to it), `commands` (it takes commands), `no_limits` (where it takes commands) |
 | `connecting` | a headset being connected now, by name (not yet) |
 | `displays` | in the order of the rows, then the rest |
@@ -378,6 +381,7 @@ prostir ctl quality MBIT | sharp on|off | codec h264|hevc|auto [--cpu]
 prostir ctl sound headset|pc
 prostir ctl pair | pair stop
 prostir ctl headsets | forget HEADSET | forget --all
+prostir ctl input on|off HEADSET           # the mouse and keyboard from that headset, allowed or not
 prostir ctl autostart on|off|status
 prostir ctl count yes|no|unasked|status   # count this PC among users (unasked: ask again)
 prostir ctl settings
@@ -452,6 +456,7 @@ a tool does not take is refused with `BadArgument`.
 | `recenter`, `line_up`, `show_mouse`, `reset_arrangement`, `profile`, `rename_profile`, `cinema`, `focus`, `follow`, `no_limits`, `lock`, `preset` | as the requests | commands for the headset |
 | `set_quality`, `set_sharp`, `set_codec`, `sound_to_headset`, `autostart` | as the requests | |
 | `set_counting` | `counting`: `no` or `unasked` | as the request, but never `yes`: counting needs the person's own yes (the settings window, the tray, `prostir ctl count yes`), so `yes` is `BadArgument`, also through `call` |
+| `set_input` | `headset`, `on` | as the request, but only `on` false: allowing the mouse and keyboard is the person's own choice (the notification, the tray, the settings window, `prostir ctl input on`), so `on` true is `BadArgument`, also through `call` |
 | `pair_new_headset`, `stop_pairing`, `forget_headset`, `forget_all`, `show_settings`, `quit` | as the requests | |
 | `call` | `request`: a request object | any request as it is, also those no tool covers |
 | `screenshot_monitor` | `id`, `keep` (false) | `screenshot`; the picture as MCP `image` content (`image/png`), after a text `{"id", "whole", "bytes", "revision", "path"}`; the file is removed afterwards unless `keep` (then `path` names it). A picture over 5 MB is not sent: its file is kept and `path` names it. Only a picture Prostir saved is read: a regular file (no link) ending in `.png`, right in `Prostir` of the Pictures folder as this program finds it, that begins as a PNG; anything else is `Capture`, and the file is left as it is |

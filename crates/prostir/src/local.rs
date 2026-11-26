@@ -353,8 +353,8 @@ impl Brain {
                 while let Some(left) = until.checked_duration_since(Instant::now()) {
                     match platform::sockets::readable(&[notice.fd()], Some(left)) {
                         Ok(ready) if ready[0] => {
-                            if let Some(p) = notice.check() {
-                                pressed = p;
+                            if let Some(said) = notice.check() {
+                                pressed = said == platform::Said::Button(0);
                                 break;
                             }
                         }
@@ -507,6 +507,7 @@ impl Brain {
                 done()
             }
             Request::ForgetHeadset { headset } => self.forget(&headset),
+            Request::SetInput { headset, on } => self.input_of(&headset, on),
             Request::ForgetAll => {
                 self.tray(platform::TrayCommand::ForgetHeadsets);
                 done()
@@ -736,43 +737,9 @@ impl Brain {
     /// Forgets the paired headset `which` names (its fingerprint, its whole key or its
     /// name); its session ends.
     fn forget(&mut self, which: &str) -> CtlReply {
-        let which = which.trim();
-        let found: Vec<[u8; 32]> = {
-            let trusted = self.security.trusted.lock().unwrap();
-            let by_key: Vec<[u8; 32]> = trusted
-                .entries()
-                .iter()
-                .filter(|(key, _)| {
-                    prostir_proto::secure::fingerprint(key).eq_ignore_ascii_case(which)
-                        || prostir_proto::secure::to_hex(key).eq_ignore_ascii_case(which)
-                })
-                .map(|(key, _)| *key)
-                .collect();
-            if by_key.is_empty() {
-                trusted
-                    .entries()
-                    .iter()
-                    .filter(|(_, name)| name == which)
-                    .map(|(key, _)| *key)
-                    .collect()
-            } else {
-                by_key
-            }
-        };
-        let key = match found.as_slice() {
-            [key] => *key,
-            [] => {
-                return CtlReply::failed(
-                    ApiError::BadArgument,
-                    format!("{} {which}", t("pc-local-no-paired-headset")),
-                );
-            }
-            _ => {
-                return CtlReply::failed(
-                    ApiError::BadArgument,
-                    t("pc-local-several-headsets-have-this-name-give"),
-                );
-            }
+        let key = match self.paired_headset(which) {
+            Ok(key) => key,
+            Err(reply) => return reply,
         };
         let removed = self.security.trusted.lock().unwrap().remove(&key);
         if let Err(e) = removed {
@@ -805,6 +772,57 @@ impl Brain {
         done()
     }
 
+    /// The input right of the paired headset `which` names, as the person chose.
+    fn input_of(&mut self, which: &str, on: bool) -> CtlReply {
+        let key = match self.paired_headset(which) {
+            Ok(key) => key,
+            Err(reply) => return reply,
+        };
+        match self.set_input(&key, on) {
+            Some(_) => done(),
+            None => CtlReply::failed(ApiError::BadArgument, t("pc-local-access-line-mistyped")),
+        }
+    }
+
+    /// The paired headset `which` names: its fingerprint, its whole key, or else its
+    /// name; why there is none otherwise.
+    fn paired_headset(&self, which: &str) -> Result<[u8; 32], CtlReply> {
+        let which = which.trim();
+        let found: Vec<[u8; 32]> = {
+            let trusted = self.security.trusted.lock().unwrap();
+            let by_key: Vec<[u8; 32]> = trusted
+                .entries()
+                .iter()
+                .filter(|(key, _)| {
+                    prostir_proto::secure::fingerprint(key).eq_ignore_ascii_case(which)
+                        || prostir_proto::secure::to_hex(key).eq_ignore_ascii_case(which)
+                })
+                .map(|(key, _)| *key)
+                .collect();
+            if by_key.is_empty() {
+                trusted
+                    .entries()
+                    .iter()
+                    .filter(|(_, name)| name == which)
+                    .map(|(key, _)| *key)
+                    .collect()
+            } else {
+                by_key
+            }
+        };
+        match found.as_slice() {
+            [key] => Ok(*key),
+            [] => Err(CtlReply::failed(
+                ApiError::BadArgument,
+                format!("{} {which}", t("pc-local-no-paired-headset")),
+            )),
+            _ => Err(CtlReply::failed(
+                ApiError::BadArgument,
+                t("pc-local-several-headsets-have-this-name-give"),
+            )),
+        }
+    }
+
     /// When each headset was seen is kept for the paired ones only.
     pub(crate) fn keep_seen_of_paired(&mut self) {
         let paired: Vec<[u8; 32]> = {
@@ -828,6 +846,8 @@ impl Brain {
     /// A headset's session ended: said on the local API.
     pub(crate) fn headset_left(&mut self, key: &[u8; 32], why: api::Reason) {
         self.worn_told.remove(key);
+        // Its question, if any, is not shown any more (nor asked again).
+        self.input_asks.done(key);
         self.api
             .send(api::Note::Event(api::Event::HeadsetDisconnected {
                 headset: prostir_proto::secure::fingerprint(key),
@@ -901,6 +921,7 @@ impl Brain {
                             api::Role::Guest
                         },
                         rights: crate::store::perm_words(access.perms),
+                        asks_input: self.input_asks.waits(key),
                         session: session.map(crate::session::Session::api_session),
                     }
                 })

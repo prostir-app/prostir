@@ -9,16 +9,18 @@ use std::time::Duration;
 
 use prostir_proto::ClientMsg;
 use prostir_proto::input::{Button, TouchPhase};
-use prostir_proto::state::{DisplayId, caps};
+use prostir_proto::state::{DisplayId, caps, perms};
 use prostir_testkit::{FakeHeadset, View};
 
 use crate::pc::{Options, Pc, TestDir};
 use crate::{SOON, START, connect, session};
 
-/// The PC with the fake desktop's input, with touch (`touch`) or without (`mouse`).
+/// The PC with the fake desktop's input, with touch (`touch`) or without (`mouse`),
+/// and the fake headset allowed to use it.
 pub(crate) fn with_input(kind: &str) -> Options {
     Options {
         env: vec![("PROSTIR_FAKE_INPUT".into(), kind.into())],
+        input: true,
         ..Options::default()
     }
 }
@@ -184,7 +186,11 @@ fn a_headset_without_the_right_moves_nothing() {
     let mut keys = dir.pair();
     let key = prostir_proto::secure::to_hex(&keys.identity.public);
     dir.save_settings(&format!("mirror off\naccess {key} main\n"));
-    let mut pc = Pc::start(&dir, &with_input("touch"));
+    let options = Options {
+        input: false,
+        ..with_input("touch")
+    };
+    let mut pc = Pc::start(&dir, &options);
     let mut headset = connect(&pc, &mut keys);
     headset
         .wait(START, "every monitor showing", View::all_monitors_show)
@@ -331,5 +337,151 @@ fn a_burst_of_moves_scrolls_a_short_way() {
         .sum();
     assert!(total > 0, "down, as the finger went up");
     assert!(total < 120 * 20, "{total}: a short way");
+    pc.quit();
+}
+
+/// Whether the fake headset may click now: the PC names feature 15 and gives it the
+/// input right.
+fn may_click(v: &View) -> bool {
+    v.pc.caps.as_ref().is_some_and(|c| c.has(caps::pc::INPUT))
+        && v.pc.access.is_some_and(|a| a.may(perms::INPUT))
+}
+
+/// A headset paired anew has no input right: its clicks reach nothing, and the PC
+/// asks the person once, in a notification with Allow and Not now and in the tray.
+/// Allowed, the right is in `settings.txt` and the headset has it at once (feature 15
+/// named during the session): then its click lands.
+#[test]
+fn a_fresh_pairing_clicks_only_once_allowed() {
+    let options = Options {
+        input: false,
+        ..with_input("touch")
+    };
+    let (dir, mut pc, keys, mut headset) = session("input-ask", &options);
+    let view = headset.view();
+    let pc_caps = view.pc.caps.clone().unwrap();
+    assert!(pc_caps.has(caps::pc::MOVE_MOUSE), "{pc_caps:?}");
+    assert!(!may_click(view), "{view:?}");
+    let access = view.pc.access.unwrap();
+    assert!(access.is_main() && access.may(perms::CHANGES | perms::MIC));
+    assert!(!access.may(perms::CLIPBOARD));
+    let one = display_of_width(&headset, 640);
+    for _ in 0..3 {
+        headset
+            .send(&button(one, 0, 0, Button::Left, true))
+            .unwrap();
+        headset
+            .send(&button(one, 0, 0, Button::Left, false))
+            .unwrap();
+        headset
+            .send(&ClientMsg::MouseTo {
+                id: one,
+                u: 0,
+                v: 0,
+            })
+            .unwrap();
+    }
+    pc.wait_log(
+        SOON,
+        "notification: Mouse and keyboard: headset wants to control the mouse and keyboard \
+         on this PC. Allow? [Allow] [Not now]",
+    );
+    pc.wait_log(SOON, "fake tray: allow headset the mouse and keyboard?");
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    assert_eq!(pc.count_log("notification: Mouse and keyboard"), 1, "once");
+    assert_eq!(pc.count_log("fake desktop: button"), 0);
+    assert_eq!(pc.count_log("virtual input open"), 0);
+
+    pc.notice("click");
+    headset.wait(SOON, "the input right", may_click).unwrap();
+    pc.wait_log(SOON, "the mouse and keyboard allowed");
+    let key = prostir_proto::secure::to_hex(&keys.identity.public);
+    let line = format!("access {key} main input mic camera changes private\n");
+    let saved = (0..50).find_map(|_| {
+        let text = dir.saved("settings.txt");
+        if text.contains(&line) {
+            return Some(text);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        None
+    });
+    assert!(saved.is_some(), "{}", dir.saved("settings.txt"));
+    open_input(&mut pc, &mut headset, one);
+    headset
+        .send(&button(one, 10_256, 9_128, Button::Left, true))
+        .unwrap();
+    in_order(
+        &mut pc,
+        &["pointer to Fake-1 at 100,50", "button Left down"],
+    );
+    pc.quit();
+}
+
+/// Not now: the right stays off and nothing asks again while Prostir runs. The
+/// person allows it later with `prostir ctl input on`, and the headset has it at
+/// once; taken back, what it holds is let go and feature 15 is gone.
+#[test]
+fn not_now_is_not_asked_again() {
+    let options = Options {
+        input: false,
+        ..with_input("touch")
+    };
+    let (_dir, mut pc, _keys, mut headset) = session("input-not-now", &options);
+    let one = display_of_width(&headset, 640);
+    headset
+        .send(&button(one, 0, 0, Button::Left, true))
+        .unwrap();
+    pc.wait_log(SOON, "notification: Mouse and keyboard");
+    pc.notice("click 1");
+    pc.wait_log(
+        SOON,
+        "the person at the PC does not allow the mouse and keyboard now",
+    );
+    for _ in 0..3 {
+        headset
+            .send(&button(one, 0, 0, Button::Left, true))
+            .unwrap();
+        headset.take_for(Duration::from_millis(200)).unwrap();
+    }
+    assert_eq!(pc.count_log("notification: Mouse and keyboard"), 1);
+    // Answered: the tray asks no more, and its item allows nothing.
+    pc.tray("allow input");
+    pc.wait_log(SOON, "fake tray: no headset is asked about");
+    assert!(!may_click(headset.view()));
+
+    let Some(ctl) = pc.ctl(&["input", "on", "headset"]) else {
+        return pc.quit();
+    };
+    assert_eq!(ctl.code, 0, "{}", ctl.err);
+    headset.wait(SOON, "the input right", may_click).unwrap();
+    let rights = pc.ctl(&["headsets", "--json"]).unwrap().json();
+    assert!(
+        rights[0]["rights"]
+            .as_array()
+            .unwrap()
+            .contains(&"input".into()),
+        "{rights}"
+    );
+    assert_eq!(rights[0]["asks_input"], false);
+    open_input(&mut pc, &mut headset, one);
+    headset
+        .send(&button(one, 0, 0, Button::Left, true))
+        .unwrap();
+    pc.wait_log(SOON, "fake desktop: button Left down");
+    assert_eq!(pc.ctl(&["input", "off", "headset"]).unwrap().code, 0);
+    headset
+        .wait(SOON, "no input right", |v| !may_click(v))
+        .unwrap();
+    pc.wait_log(SOON, "fake desktop: button Left up");
+    headset
+        .send(&button(one, 0, 0, Button::Right, true))
+        .unwrap();
+    headset.take_for(Duration::from_millis(500)).unwrap();
+    assert_eq!(pc.count_log("fake desktop: button Right"), 0);
+    assert_eq!(
+        pc.count_log("notification: Mouse and keyboard"),
+        1,
+        "not asked again"
+    );
     pc.quit();
 }

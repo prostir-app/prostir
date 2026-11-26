@@ -254,6 +254,10 @@ impl Brain {
         };
         let others = self.sessions.len().saturating_sub(1);
         let pairing = self.door.pairing_open();
+        self.control.input_ask = self
+            .input_asks
+            .first_waiting()
+            .map(|key| (key, self.headset_label(&key)));
         self.control.show(
             self.displays.as_ref(),
             &self.store,

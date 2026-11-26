@@ -405,6 +405,18 @@ impl Store {
         self.settings_changed |= self.settings != before;
     }
 
+    /// The input right of the headset with key `key`, as the person at the PC chose
+    /// it: kept in its `access` line. `None` for a headset whose line is mistyped,
+    /// which stays as it was for the person to put right; else whether it changed.
+    pub fn set_input(&mut self, key: &[u8; 32], on: bool) -> Option<bool> {
+        if self.settings_kept.mistyped.contains(&hex(key)) {
+            return None;
+        }
+        let mut changed = false;
+        self.change(|s| changed = s.set_input(key, on));
+        Some(changed)
+    }
+
     /// Video quality chosen while running: from now on it holds, over the command line.
     pub fn set_bitrate(&mut self, mbps: u32) {
         self.run.bitrate = None;

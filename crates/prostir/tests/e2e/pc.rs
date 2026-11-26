@@ -209,6 +209,15 @@ impl TestDir {
         self.save("settings.txt", text);
     }
 
+    /// Gives the fake headset `name` the input right, as the person at the PC does:
+    /// its `access` line with every other right of a headset without one.
+    pub fn allow_input(&self, name: &str) {
+        let key = prostir_proto::secure::to_hex(&self.keys_of(name).identity.public);
+        let before = self.saved("settings.txt");
+        let text = format!("{before}access {key} main input mic camera changes private\n");
+        self.save("settings.txt", &text);
+    }
+
     fn save(&self, name: &str, text: &str) {
         let path = self.config().join("prostir").join(name);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -279,6 +288,9 @@ pub struct Options {
     pub discovery: bool,
     /// Started as systemd starts it, by `systemd-socket-activate` holding its sockets.
     pub activate: Option<Activate>,
+    /// The fake headset (`headset`) has the input right, as once allowed on the PC: its
+    /// `access` line goes into `settings.txt` (after what is there).
+    pub input: bool,
 }
 
 /// The PC app started by `systemd-socket-activate`, as `prostir.socket` starts it: it
@@ -380,6 +392,7 @@ impl Default for Options {
             watcher: false,
             discovery: false,
             activate: None,
+            input: false,
         }
     }
 }
@@ -607,6 +620,9 @@ impl Pc {
     }
 
     pub fn start(dir: &TestDir, options: &Options) -> Self {
+        if options.input {
+            dir.allow_input("headset");
+        }
         let root = dir.path();
         for sub in ["config", "run", "home", "cache"] {
             std::fs::create_dir_all(root.join(sub)).unwrap();

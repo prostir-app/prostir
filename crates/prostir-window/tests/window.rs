@@ -146,6 +146,37 @@ fn forgetting_a_headset_asks_first() {
     );
 }
 
+/// A headset that tried to use the mouse without the right: the window asks, and
+/// allowing it sends the right; the switch takes it back.
+#[test]
+fn a_headset_is_allowed_the_mouse_and_keyboard() {
+    let mock = Mock::connected().edit(|s| {
+        s.headsets.truncate(1);
+        s.headsets[0].rights.retain(|r| r != "input");
+        s.headsets[0].asks_input = true;
+    });
+    let (mut h, handle) = window(mock, Setup::default());
+    open(&mut h, Page::Headsets);
+    h.get_by_label("Quest 3 хоче керувати мишею й клавіатурою на цьому ПК. Дозволити?");
+    h.get_by_label("Не зараз");
+    press(&mut h, "Дозволити");
+    let allowed = Request::SetInput {
+        headset: "5f2a9c".into(),
+        on: true,
+    };
+    assert_eq!(handle.calls(), [allowed]);
+    h.run_steps(4);
+    assert!(h.query_by_label("Не зараз").is_none(), "answered");
+    press_as(&mut h, Some(Role::Switch), "Керування мишею й клавіатурою");
+    assert_eq!(
+        handle.calls().last(),
+        Some(&Request::SetInput {
+            headset: "5f2a9c".into(),
+            on: false
+        })
+    );
+}
+
 #[test]
 fn monitors_by_name_and_keyboard() {
     let (mut h, handle) = window(Mock::connected(), Setup::default());

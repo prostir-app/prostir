@@ -228,6 +228,57 @@ fn without_feature_15_or_the_right_only_the_mouse_moves() {
     assert_eq!(input_sent(&sim.take()), [], "not said again");
 }
 
+/// A PC that takes input from its desktop but does not give this headset the right:
+/// the first press on its monitor says where the right is turned on, once; given and
+/// taken again, it is said again. A PC that cannot take input at all says nothing.
+#[test]
+fn a_press_without_the_right_says_where_to_turn_it_on() {
+    let press = |sim: &mut Sim| {
+        let now = sim.now;
+        for down in [true, false] {
+            let input = PcInput::Button {
+                id: k(1),
+                uv: Vec2::new(0.5, 0.5),
+                button: MouseButton::Left,
+                down,
+            };
+            Scene::pc(&mut sim.m, now, input);
+        }
+        let sent = input_sent(&sim.take());
+        let toast = sim.m.toast().map(|t| (t.text.clone(), t.n));
+        (sent, toast)
+    };
+    let no_right = state::Access {
+        role: state::role::MAIN,
+        perms: state::perms::ALL & !(state::perms::INPUT | state::perms::CLIPBOARD),
+    };
+    let mut sim = Sim::new();
+    sim.connect(&[1]);
+    sim.menu(Action::Close);
+    sim.host_can(Vec::new());
+    sim.access(no_right);
+    assert_eq!(press(&mut sim).1, None, "a PC without input says nothing");
+    sim.host_can(vec![caps::pc::MOVE_MOUSE]);
+    let off = sim.m.texts().t("headset-pc-input-off").to_owned();
+    let (sent, first) = press(&mut sim);
+    assert_eq!(sent, [], "no click sent");
+    assert_eq!(first.as_ref().map(|t| &t.0), Some(&off));
+    assert_eq!(press(&mut sim).1, first, "once");
+    // Given: the click goes; taken again: said again.
+    sim.host_can(vec![caps::pc::MOVE_MOUSE, caps::pc::INPUT]);
+    sim.access(state::Access::MAIN);
+    let (sent, toast) = press(&mut sim);
+    let clicks = sent
+        .iter()
+        .filter(|m| matches!(m, ClientMsg::MouseButton { .. }));
+    assert_eq!(clicks.count(), 2, "{sent:?}");
+    assert_eq!(toast, first);
+    sim.host_can(vec![caps::pc::MOVE_MOUSE]);
+    sim.access(no_right);
+    let (_, again) = press(&mut sim);
+    assert!(again.is_some_and(|t| t.0 == off && t.1 != first.unwrap().1));
+}
+
 /// Step 8's hands (the preview build's trial): a controller's trigger on a monitor
 /// presses the PC's left button at once and holds it, said again while held; the
 /// system menu over the app, the controller lost, or a hand taking its place let go

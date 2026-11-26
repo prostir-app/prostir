@@ -212,10 +212,36 @@ impl Model {
         takes_input(&self.session, pc)
     }
 
+    /// A press on a monitor of PC `pc`, which takes input from the desktop (feature 1)
+    /// but does not give this headset the right to it: the user is told once where it
+    /// is turned on (until the PC gives the right, then takes it again).
+    fn say_input_off(&mut self, pc: PcId) {
+        let Some(p) = self.session.pc_mut(pc) else {
+            return;
+        };
+        let moves = p
+            .state
+            .caps
+            .as_ref()
+            .is_some_and(|c| c.has(caps::pc::MOVE_MOUSE));
+        let right = p.state.access.is_some_and(|a| a.may(perms::INPUT));
+        if !moves || right || std::mem::replace(&mut p.input_off_said, true) {
+            return;
+        }
+        let text = self.texts().t("headset-pc-input-off").to_owned();
+        self.show_toast(text);
+    }
+
     /// A hand acts on a PC's monitor (see the module).
     pub(super) fn act_on_pc(&mut self, now: Instant, input: PcInput) {
         self.now = now;
         self.pc_acted = Some(now);
+        // Taken again: should the right go, the user is told again.
+        if self.takes_input(input.pc())
+            && let Some(p) = self.session.pc_mut(input.pc())
+        {
+            p.input_off_said = false;
+        }
         match input {
             PcInput::Move { id, uv } => {
                 if self.pc_moves_mouse(id.pc) {
@@ -230,6 +256,17 @@ impl Model {
             } if !self.takes_input(input.pc()) => {}
             other if !self.takes_input(other.pc()) => {
                 debug!("hands: {other:?} (the PC takes no input from the headset)");
+                if matches!(
+                    other,
+                    PcInput::Button { down: true, .. }
+                        | PcInput::Scroll { .. }
+                        | PcInput::Touch {
+                            phase: TouchPhase::Down,
+                            ..
+                        }
+                ) {
+                    self.say_input_off(other.pc());
+                }
                 // Let go there: nothing is held on it (pressed while it still took
                 // input, the PC lets go by itself).
                 if matches!(

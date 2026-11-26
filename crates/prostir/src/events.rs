@@ -53,6 +53,10 @@ pub enum Event {
     /// The notice of a new headset nearby: its button was pressed (`true`), or it is
     /// gone.
     Notice(bool),
+    /// The notice asking whether the headset with this key may use the mouse and
+    /// keyboard: allowed (`Some(true)`), not now (`Some(false)`), or gone without an
+    /// answer (the tray and the settings window still ask).
+    InputAnswer([u8; 32], Option<bool>),
     /// The settings window came onto the session bus (`true`) or left it: while it is
     /// there, the program stays.
     Window(bool),
