@@ -250,6 +250,11 @@ impl StreamStats {
 /// counts as behind (see [`StreamStats::behind`]).
 const BEHIND_DROPS: u32 = 10;
 
+/// A stream whose encoder is behind this long, in every window of the report, goes to
+/// the faster preset (about one window of [`REPORT_EVERY`]: a window is a little
+/// short or long).
+const SLOW_DOWN_AFTER_MS: u32 = 9_000;
+
 /// What a stream's encoder made since the last report.
 #[derive(Debug, Default)]
 struct Tally {
@@ -361,6 +366,12 @@ struct StreamSlot {
     gate: Option<Arc<Gate>>,
     /// Its encoder was said to fall behind its monitor's full rate.
     behind: bool,
+    /// For how long, in milliseconds, its encoder was behind in every window of the
+    /// report since (see [`StreamSlot::note_window`]).
+    behind_ms: u32,
+    /// It fell back to the faster preset for dropping frames (see
+    /// [`Router::report`]).
+    slowed: bool,
 }
 
 /// A frame larger than this many frames of the stream's bitrate is big: the picture
@@ -384,6 +395,18 @@ const HEADSET_KEYFRAMES: Duration = Duration::from_millis(300);
 const FLOWING: Duration = Duration::from_millis(500);
 
 impl StreamSlot {
+    /// A window of the report ended with `stats`: whether its encoder, with the slower
+    /// preset, was behind in every window for [`SLOW_DOWN_AFTER_MS`] now, and is to go
+    /// to the faster one.
+    fn note_window(&mut self, stats: &StreamStats) -> bool {
+        if stats.frames > 0 && stats.behind() {
+            self.behind_ms = self.behind_ms.saturating_add(stats.window_ms);
+        } else {
+            self.behind_ms = 0;
+        }
+        self.sharpens && !self.slowed && self.behind_ms >= SLOW_DOWN_AFTER_MS
+    }
+
     /// Whether a keyframe a headset asked for within 300 ms of the one before is to be
     /// asked for now; then it counts as asked.
     fn pending_due(&mut self, now: Instant) -> bool {
@@ -993,7 +1016,7 @@ impl Router {
             stats: crate::outbox::OutboxStats,
             streams: Vec<(ScreenId, String, Histogram, u32)>,
         }
-        let (window, encoded, silent, lines) = {
+        let (window, encoded, slow, silent, lines) = {
             let mut inner = self.inner.lock().unwrap();
             let RouterInner {
                 streams,
@@ -1011,9 +1034,10 @@ impl Router {
             };
             let silent = std::mem::take(&mut quiet.held);
             // What each encoder made, whoever got it.
+            let mut slow = Vec::new();
             let encoded: Vec<(String, StreamStats, Option<bool>)> = streams
-                .values_mut()
-                .map(|s| {
+                .iter_mut()
+                .map(|(id, s)| {
                     let mut stats = s.tally.take(now);
                     stats.gate = s.gate.as_ref().map(|g| {
                         let counts = g.take_counts();
@@ -1033,6 +1057,11 @@ impl Router {
                         .filter(|b| *b != s.behind);
                     if let Some(b) = news {
                         s.behind = b;
+                    }
+                    if s.note_window(&stats)
+                        && let Some(k) = s.keyframer.clone()
+                    {
+                        slow.push((*id, s.name.clone(), k, stats.window_ms / 1000));
                     }
                     (s.name.clone(), stats, news)
                 })
@@ -1054,7 +1083,7 @@ impl Router {
                         .collect(),
                 })
                 .collect();
-            (window, encoded, silent, lines)
+            (window, encoded, slow, silent, lines)
         };
         // Logged without the lock, which every encoded frame takes.
         for (name, stats, behind) in encoded {
@@ -1073,6 +1102,22 @@ impl Router {
                 ),
                 Some(false) => info!("{name}: the encoder keeps up with {hz:.0} Hz again"),
                 None => {}
+            }
+        }
+        // The stream that keeps dropping frames goes to the faster preset, at a keyframe
+        // asked for now; said once, here.
+        for (id, name, keyframer, secs) in slow {
+            if !keyframer.slow_down() {
+                continue;
+            }
+            warn!(
+                "{name}: the encoder kept dropping frames for {secs} s with target-usage 4 \
+                 (sharper text): switched to target-usage 6, which is faster"
+            );
+            if let Some(slot) = self.inner.lock().unwrap().streams.get_mut(&id) {
+                slot.slowed = true;
+                slot.sharpens = false;
+                slot.coarse = false;
             }
         }
         let several = lines.len() > 1;
@@ -1145,6 +1190,17 @@ impl Router {
         self.inner.lock().unwrap().streams.get(&id)?.measured
     }
 
+    /// Whether the encoder of stream `id` fell back to the faster preset for dropping
+    /// frames with the slower one.
+    pub fn slowed(&self, id: ScreenId) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .streams
+            .get(&id)
+            .is_some_and(|s| s.slowed)
+    }
+
     /// The size stream `id` goes out at, once its encoder has said.
     pub fn stream_size(&self, id: ScreenId) -> Option<(u32, u32)> {
         self.inner.lock().unwrap().streams.get(&id)?.size
@@ -1193,6 +1249,8 @@ impl Router {
             coarse: false,
             gate: None,
             behind: false,
+            behind_ms: 0,
+            slowed: false,
         };
         inner.streams.insert(id, slot);
         for r in inner.receivers.values_mut() {
@@ -1226,6 +1284,8 @@ impl Router {
         if let Some(slot) = inner.streams.get_mut(&id) {
             slot.gate = Some(gate);
             slot.behind = false;
+            slot.behind_ms = 0;
+            slot.slowed = false;
             inner.set_levels(Instant::now());
         }
     }
@@ -1442,12 +1502,15 @@ impl Router {
             .min()
     }
 
-    /// The encoder of stream `id` encodes at `kbps` from now on, and sharpens a still
-    /// picture with a keyframe or not (see `StreamSlot::sharpens`).
-    pub fn set_tuning(&self, id: ScreenId, kbps: u32, sharpens: bool) {
+    /// The encoder of stream `id` encodes at `kbps` from now on, sharpens a still
+    /// picture with a keyframe or not (see `StreamSlot::sharpens`), and fell back to
+    /// the faster preset for dropping frames or not.
+    pub fn set_tuning(&self, id: ScreenId, kbps: u32, sharpens: bool, slowed: bool) {
         if let Some(slot) = self.inner.lock().unwrap().streams.get_mut(&id) {
             slot.kbps = kbps;
             slot.sharpens = sharpens;
+            slot.slowed = slowed;
+            slot.behind_ms = 0;
             slot.coarse &= sharpens;
         }
     }

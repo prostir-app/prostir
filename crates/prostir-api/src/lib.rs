@@ -889,8 +889,8 @@ pub struct Encoding {
     /// the quality is not chosen.
     pub large: Option<u32>,
     pub sharp: bool,
-    /// Clearer text is not chosen: on only for monitors smaller than 2560x1440, which
-    /// it fits in the time of a frame.
+    /// Clearer text is not chosen: on for every monitor, and off for one whose encoder
+    /// keeps dropping frames with it (`slowed` of its output).
     pub sharp_by_size: bool,
     /// As chosen.
     pub codec: Codec,
@@ -917,6 +917,9 @@ pub struct OutputEncoding {
     /// Why it is not on the best encoder this PC has for it, in the PC's language;
     /// `null` when it is.
     pub note: Option<String>,
+    /// Its encoder kept dropping frames with clearer text and went to the faster
+    /// setting, until clearer text is chosen again.
+    pub slowed: bool,
     /// What its encoder made over the last window of the PC's report (about 10 s,
     /// while a headset is connected); `null` before one ended.
     pub stats: Option<StreamStats>,
@@ -1336,6 +1339,7 @@ mod tests {
                     hardware: false,
                     copies: true,
                     note: Some("y".into()),
+                    slowed: true,
                     stats: Some(StreamStats {
                         window_ms: 10_000,
                         frames: 600,
@@ -1398,7 +1402,7 @@ mod tests {
             r#""codec":"h265","#,
             r#""cpu":false,"#,
             r#""using":{"codec":"h264","hardware":true},"outputs":[{"display":103,"#,
-            r#""encoder":"x264","codec":"h264","hardware":false,"copies":true,"note":"y","#,
+            r#""encoder":"x264","codec":"h264","hardware":false,"copies":true,"note":"y","slowed":true,"#,
             r#""stats":{"window_ms":10000,"frames":600,"repeats":5,"bytes":30000000,"#,
             r#""keyframes":1,"keyframe_max":750000,"encode_us_avg":4300,"#,
             r#""encode_us_max":9100}}]},"#,

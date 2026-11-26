@@ -607,7 +607,7 @@ fn only_an_encoder_that_sharpens_is_asked_early() {
     router.publish(1, &BTreeSet::from([s]));
     router.add_stream(s, Codec::H265, "test".into());
     keyframe(&router, s);
-    router.set_tuning(s, 30_000, false);
+    router.set_tuning(s, 30_000, false, false);
     sized(&router, s, false, false, BIG);
     std::thread::sleep(EARLY + Duration::from_millis(10));
     assert_eq!(router.still_keyframes(STILL, EARLY), 0, "not early");
@@ -615,14 +615,14 @@ fn only_an_encoder_that_sharpens_is_asked_early() {
     assert_eq!(router.still_keyframes(STILL, EARLY), 1, "the usual one");
     assert_eq!(counted(&router, s).sharpened, 0);
     sized(&router, s, true, true, BIG);
-    router.set_tuning(s, 30_000, true);
+    router.set_tuning(s, 30_000, true, false);
     sized(&router, s, false, false, BIG);
     std::thread::sleep(EARLY + Duration::from_millis(10));
     assert_eq!(router.still_keyframes(STILL, EARLY), 1, "early");
     // A big change, then the encoder no longer sharpens: nothing early.
     sized(&router, s, true, true, BIG);
     sized(&router, s, false, false, BIG);
-    router.set_tuning(s, 30_000, false);
+    router.set_tuning(s, 30_000, false, false);
     std::thread::sleep(EARLY + Duration::from_millis(10));
     assert_eq!(router.still_keyframes(STILL, EARLY), 0);
 }
@@ -1142,4 +1142,53 @@ fn the_report_says_what_the_gate_held() {
         !slow_only.behind(),
         "slow to come out, but every frame encoded"
     );
+}
+
+/// A stream whose encoder is behind in the windows of one report for about 10 s, with
+/// the slower preset, is to go to the faster one; a window that keeps up starts the
+/// count again, and a stream already on the faster preset is left alone.
+#[test]
+fn a_stream_behind_for_ten_seconds_goes_to_the_faster_preset() {
+    let router = Router::new();
+    let s = id(5);
+    router.add_stream(s, Codec::H265, "test".into());
+    router.set_tuning(s, 30_000, true, false);
+    let window = |dropped| StreamStats {
+        window_ms: 10_000,
+        frames: 560,
+        gate: Some(GateStats {
+            level: Level::Full,
+            rate_mhz: 60_000,
+            fps_mhz: 60_000,
+            held: 0,
+            unchanged: 0,
+            dropped,
+        }),
+        ..StreamStats::default()
+    };
+    let note = |stats: &StreamStats| {
+        let mut inner = router.inner.lock().unwrap();
+        inner.streams.get_mut(&s).unwrap().note_window(stats)
+    };
+    assert!(!note(&window(2)), "a few frames");
+    assert!(note(&window(40)), "40 of 600 dropped over 10 s");
+    // A shorter window of dropping is not yet 10 s, and one that keeps up resets it.
+    let short = StreamStats {
+        window_ms: 4_000,
+        ..window(40)
+    };
+    assert!(!note(&window(2)));
+    assert!(!note(&short) && !note(&short), "8 s");
+    assert!(note(&short), "12 s");
+    assert!(!note(&StreamStats::default()), "no frames: nothing counted");
+    // Not with the faster preset (nothing to fall back from), nor once fell back.
+    router.set_tuning(s, 30_000, false, false);
+    assert!(!note(&window(40)));
+    router.set_tuning(s, 30_000, true, true);
+    assert!(router.slowed(s));
+    assert!(!note(&window(40)));
+    // The person chose again: the encoder tunes anew.
+    router.set_tuning(s, 30_000, true, false);
+    assert!(!router.slowed(s));
+    assert!(note(&window(40)));
 }
