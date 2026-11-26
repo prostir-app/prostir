@@ -520,9 +520,9 @@ impl Run {
         now: Instant,
     ) -> Vec<Act> {
         let Some(at) = at else {
-            // On a display gone: lifted without counting.
+            // On a display gone: lifted without counting, where it was.
             let acts = if touches {
-                Vec::new()
+                self.held.lift(from, slot).into_iter().collect()
             } else {
                 self.mice
                     .get_mut(&from)

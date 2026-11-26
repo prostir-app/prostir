@@ -228,7 +228,10 @@ impl Pointer {
     }
 
     /// The desktop told a move of the pointer at `now` (see [`Pointer::take`]): once
-    /// the fingers lifted a moment ago, the mouse moved it, and it shows again.
+    /// the fingers lifted a moment ago, the mouse moved it, and it shows again. A move
+    /// told after a [`Pointer::clear`] or a change of the output's size counts too
+    /// (the place differs from the one kept), so the pointer may come back then
+    /// without the mouse: the safe way, never hidden for good.
     pub fn desktop_moved(&mut self, now: Instant) {
         if let ByTouch::Lifted(at) = self.by_touch
             && now.saturating_duration_since(at) >= LIFT_SETTLES

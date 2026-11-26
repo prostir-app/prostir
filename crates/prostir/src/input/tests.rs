@@ -456,3 +456,32 @@ fn real_touches_hide_the_pointer_until_the_mouse_moves() {
     assert_eq!(told(&o), ["to 50,10", "Left down", "Left up"]);
     assert_eq!(said_now(), [Pointing::Mouse]);
 }
+
+/// A finger lifted on a display gone meanwhile (no point for it): on a desktop with
+/// touch it is cancelled where it last was, so nothing stays down and the pointer no
+/// longer hides for it; one never down tells nothing.
+#[test]
+fn a_finger_lifted_on_a_display_gone_is_cancelled_where_it_was() {
+    let said = Arc::new(Mutex::new(Vec::new()));
+    let o = opener(true, false);
+    let mut run = opened(&o);
+    {
+        let said = said.clone();
+        run.pointing = Box::new(move |p| said.lock().unwrap().push(p));
+    }
+    let now = Instant::now();
+    let touch = |phase, at| Ev::Touch {
+        from: 1,
+        slot: 0,
+        phase,
+        at,
+        came: now,
+    };
+    run.event(touch(TouchPhase::Down, Some(at(50.0))), now);
+    run.event(touch(TouchPhase::Up, None), now);
+    assert_eq!(told(&o), ["touch 0 Down 50,10", "touch 0 Cancel 50,10"]);
+    assert_eq!(*said.lock().unwrap(), [Pointing::Touch, Pointing::Lifted]);
+    assert!(!run.held.any());
+    run.event(touch(TouchPhase::Up, None), now);
+    assert!(told(&o).is_empty());
+}
