@@ -102,6 +102,25 @@ pub fn hand_spheres(joints: &[(Vec3, f32); 26], alpha: f32, out: &mut Vec<Sphere
     }
 }
 
+/// Only the fingertips of one tracked hand (the five tips, a little larger than their
+/// joints), `alpha` below 1 see-through.
+pub fn tip_spheres(joints: &[(Vec3, f32); 26], alpha: f32, out: &mut Vec<Sphere>) {
+    for tip in [5, 10, 15, 20, 25] {
+        let (center, radius) = joints[tip];
+        out.push(Sphere {
+            center,
+            radius: radius * 1.4,
+            color: [
+                HAND_COLOR[0],
+                HAND_COLOR[1],
+                HAND_COLOR[2],
+                HAND_COLOR[3] * alpha,
+            ],
+            kind: Kind::Ball,
+        });
+    }
+}
+
 /// A dotted pointer ray from `origin` for `length` metres.
 pub fn ray_spheres(origin: Vec3, dir: Vec3, length: f32, out: &mut Vec<Sphere>) {
     let steps = (length / 0.025) as usize;

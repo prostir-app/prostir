@@ -1,0 +1,100 @@
+//! What the preview build lets the owner try in the headset before step 8 settles it
+//! (plans/step-8-interaction.md, section 9, 8.0a and 8.0b), chosen in "For development",
+//! kept in memory only: touching and clicking monitors and how a hand takes one, how
+//! the hands are drawn, how strong the effects are. Every choice's default is the input
+//! and the look as they were before step 8.
+
+#![forbid(unsafe_code)]
+
+use super::monitors::Take;
+
+/// How the hands are drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HandLook {
+    /// As before step 8: solid, see-through only near a menu.
+    #[default]
+    Solid,
+    /// See-through all the time, this many percent opaque.
+    Percent(u8),
+    /// Only the fingertips.
+    Tips,
+}
+
+impl HandLook {
+    /// The choices, in the menu's order.
+    pub const ALL: [HandLook; 5] = [
+        HandLook::Solid,
+        HandLook::Percent(50),
+        HandLook::Percent(30),
+        HandLook::Percent(20),
+        HandLook::Tips,
+    ];
+
+    /// How opaque a hand is drawn (`near`: near a menu, where a solid hand would cover
+    /// its text).
+    pub fn alpha(self, near: bool) -> f32 {
+        match self {
+            HandLook::Solid if near => 0.3,
+            HandLook::Solid | HandLook::Tips => 1.0,
+            HandLook::Percent(p) => f32::from(p.min(100)) / 100.0,
+        }
+    }
+}
+
+/// How strong the lights, rings and rays are drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FxSet {
+    Thin,
+    /// As before step 8.
+    #[default]
+    Standard,
+    Bold,
+}
+
+impl FxSet {
+    pub const ALL: [FxSet; 3] = [FxSet::Thin, FxSet::Standard, FxSet::Bold];
+
+    /// How much larger than standard each light and ring is drawn.
+    pub fn size(self) -> f32 {
+        match self {
+            FxSet::Thin => 0.7,
+            FxSet::Standard => 1.0,
+            FxSet::Bold => 1.4,
+        }
+    }
+
+    /// How much more opaque.
+    pub fn alpha(self) -> f32 {
+        match self {
+            FxSet::Thin => 0.7,
+            FxSet::Standard => 1.0,
+            FxSet::Bold => 1.25,
+        }
+    }
+}
+
+/// The choices of "Hands (trial)".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Trial {
+    /// Monitors are touched and clicked (see `monitors`).
+    pub monitors: bool,
+    pub take: Take,
+    pub look: HandLook,
+    pub fx: FxSet,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The defaults are the look before step 8.
+    #[test]
+    fn the_defaults_are_as_before() {
+        let t = Trial::default();
+        assert!(!t.monitors);
+        assert_eq!(t.look.alpha(false), 1.0);
+        assert_eq!(t.look.alpha(true), 0.3);
+        assert_eq!((t.fx.size(), t.fx.alpha()), (1.0, 1.0));
+        assert_eq!(HandLook::Percent(20).alpha(true), 0.2);
+    }
+}

@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use super::*;
 use crate::ids::PcId;
+use crate::interaction::signals;
 use prostir_proto::state::DisplayId;
 
 const FRAME: Duration = Duration::from_millis(11);
@@ -32,7 +33,8 @@ fn placed(position: Vec3, width: f32) -> Placement {
 }
 
 /// The room of every script: the menu open low on the left, a monitor in front, one to
-/// the right, a detached window high on the left.
+/// the right, a detached window high on the left, a small monitor within reach low on
+/// the right (for touching it).
 fn stage() -> Stage {
     let piece = |n, at, width, height, window| Piece {
         thing: Thing::Display(display(n)),
@@ -47,6 +49,7 @@ fn stage() -> Stage {
             piece(1, Vec3::new(0.0, 1.75, -1.5), 1.2, 0.675, false),
             piece(2, Vec3::new(1.4, 1.6, -1.1), 1.0, 0.56, false),
             piece(5, Vec3::new(-1.2, 1.7, -1.0), 0.5, 0.4, true),
+            piece(3, Vec3::new(0.45, 1.0, -0.5), 0.5, 0.3, false),
         ],
     )
 }
@@ -99,6 +102,7 @@ struct Script {
     select: [f32; 2],
     grab: [f32; 2],
     left_handed: bool,
+    modes: Modes,
 }
 
 impl Script {
@@ -118,7 +122,25 @@ impl Script {
             select: [0.0; 2],
             grab: [0.0; 2],
             left_handed: false,
+            modes: Modes::default(),
         }
+    }
+
+    /// Step 8's modes on, taking a monitor with `take`.
+    fn monitors(&mut self, take: Take) -> &mut Self {
+        self.modes = Modes {
+            monitors: true,
+            take,
+            hands: true,
+        };
+        self
+    }
+
+    /// Hand `h` posed (see [`pose`]).
+    fn pose(&mut self, h: usize, palm: Vec3, p: Pose) -> &mut Self {
+        self.input.hands[h].is_hand = true;
+        self.input.joints[h] = Some(pose(palm, p));
+        self
     }
 
     /// Hand `h`'s ray from beside the body to `target` (a controller unless
@@ -137,6 +159,17 @@ impl Script {
             origin,
             dir: (target - origin).normalize(),
         });
+        self
+    }
+
+    /// `n` frames with the ray of hand `h` turning right by `deg` each.
+    fn turn(&mut self, h: usize, n: u32, deg: f32) -> &mut Self {
+        for _ in 0..n {
+            if let Some(r) = self.input.hands[h].ray.as_mut() {
+                r.dir = Quat::from_rotation_y(-deg.to_radians()) * r.dir;
+            }
+            self.frames(1);
+        }
         self
     }
 
@@ -223,6 +256,7 @@ impl Script {
         let start = Instant::now();
         let mut stage = stage();
         stage.left_handed = self.left_handed;
+        stage.modes = self.modes;
         let mut r = Recorder::start(start, &head("test", &Feel::DEFAULT, &stage));
         for (t, input) in &self.frames {
             r.push(start + *t, input);
@@ -388,7 +422,161 @@ fn scripts() -> Vec<(&'static str, Script)> {
         s.finger(0, 6, on + n * 0.1, on - n * 0.004);
         s.finger(0, 6, on - n * 0.004, on + n * 0.1);
     });
+    monitor_scripts(&mut out);
     out
+}
+
+/// How a hand is held in a script.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Pose {
+    /// Fingers out.
+    Open,
+    /// The index out, the rest curled: pointing, to touch.
+    Point,
+    /// All curled.
+    Fist,
+    /// Fingers out, thumb on the middle fingertip.
+    Middle,
+}
+
+/// A hand at `palm`, fingers forward (`-Z`), as `p` says; its index fingertip ends
+/// 10 cm in front of the palm when out.
+fn pose(palm: Vec3, p: Pose) -> Joints {
+    let mut j = [(palm, 0.01); 26];
+    j[signals::WRIST].0 = palm + Vec3::new(0.0, 0.0, 0.06);
+    j[signals::MIDDLE_PROXIMAL].0 = palm + Vec3::new(0.0, 0.0, -0.03);
+    let out = |dx: f32| palm + Vec3::new(dx, 0.0, -0.1);
+    let curled = |dx: f32| palm + Vec3::new(dx, -0.02, -0.025);
+    let (index_out, others_out) = match p {
+        Pose::Open | Pose::Middle => (true, true),
+        Pose::Point => (true, false),
+        Pose::Fist => (false, false),
+    };
+    for (tip, dx) in [(10, 0.025), (15, -0.01), (20, -0.025), (25, -0.04)] {
+        let o = if tip == 10 { index_out } else { others_out };
+        j[tip].0 = if o { out(dx) } else { curled(dx) };
+    }
+    j[signals::THUMB_TIP].0 = if p == Pose::Middle {
+        j[signals::MIDDLE_TIP].0 + Vec3::new(-0.005, 0.0, 0.0)
+    } else {
+        palm + Vec3::new(0.06, 0.0, -0.04)
+    };
+    j
+}
+
+/// Where a fingertip is `z` in front of the middle of the monitor within reach (3).
+fn before_near(z: f32) -> Vec3 {
+    let p = stage()
+        .piece(Thing::Display(display(3)))
+        .expect("on the stage")
+        .place;
+    p.position + p.rotation * Vec3::new(0.0, 0.0, z)
+}
+
+/// Step 8's scripts: monitors touched, pinched, clicked, scrolled and taken.
+fn monitor_scripts(out: &mut Vec<(&'static str, Script)>) {
+    let mut add = |name, f: &dyn Fn(&mut Script)| {
+        let mut s = Script::new();
+        f(&mut s);
+        out.push((name, s));
+    };
+    // The palm such that the index fingertip is at `tip`.
+    let palm_for = |tip: Vec3| tip - Vec3::new(0.025, 0.0, -0.1);
+    let touch = |s: &mut Script, n: u32, from: Vec3, to: Vec3| {
+        for i in 1..=n {
+            let tip = from.lerp(to, i as f32 / n as f32);
+            s.pose(1, palm_for(tip), Pose::Point).frames(1);
+        }
+    };
+    add("monitors-touch-tap", &|s| {
+        s.monitors(Take::Hold);
+        touch(s, 10, before_near(0.14), before_near(0.01));
+        touch(s, 3, before_near(0.01), before_near(-0.004));
+        touch(s, 6, before_near(-0.004), before_near(0.06));
+        s.joints(1, None).frames(2);
+    });
+    add("monitors-touch-swipe", &|s| {
+        s.monitors(Take::Hold);
+        touch(s, 10, before_near(0.14), before_near(-0.004));
+        // Up along the monitor's surface.
+        let up = before_near(0.0) - before_near(0.0);
+        let up = up
+            + stage()
+                .piece(Thing::Display(display(3)))
+                .expect("there")
+                .place
+                .rotation
+                * Vec3::new(0.0, 0.08, 0.0);
+        touch(s, 12, before_near(-0.004), before_near(-0.004) + up);
+        touch(s, 6, before_near(-0.004) + up, before_near(0.08) + up);
+    });
+    add("monitors-touch-through", &|s| {
+        s.monitors(Take::Hold);
+        touch(s, 10, before_near(0.14), before_near(-0.004));
+        touch(s, 8, before_near(-0.004), before_near(-0.09));
+        touch(s, 8, before_near(-0.09), before_near(0.12));
+    });
+    // A hand away from what it could touch, its ray from the runtime.
+    let palm = Vec3::new(0.0, 1.3, -0.3);
+    add("monitors-pinch-click", &move |s| {
+        s.monitors(Take::Hold).pose(1, palm, Pose::Open);
+        s.ray_from(1, palm, monitor(1)).frames(3);
+        s.select(1, 1.0).frames(8).select(1, 0.0).frames(3);
+    });
+    add("monitors-pinch-drags", &move |s| {
+        s.monitors(Take::Hold).pose(1, palm, Pose::Open);
+        s.ray_from(1, palm, monitor(1))
+            .frames(3)
+            .select(1, 1.0)
+            .frames(3);
+        s.turn(1, 20, 0.15);
+        s.select(1, 0.0).frames(3);
+    });
+    add("monitors-held-pinch-takes", &move |s| {
+        s.monitors(Take::Hold).pose(1, palm, Pose::Open);
+        s.ray_from(1, palm, monitor(1))
+            .frames(3)
+            .select(1, 1.0)
+            .frames(55);
+        s.sweep(1, 10, Vec3::new(0.0, 0.0, -0.004));
+        s.select(1, 0.0).frames(3);
+    });
+    add("monitors-trigger-and-stick", &|s| {
+        s.monitors(Take::Hold).ray(1, monitor(1)).frames(3);
+        s.select(1, 1.0).frames(4).select(1, 0.0).frames(3);
+        s.stick(1, 0.0, 1.0).frames(45).stick(1, 0.0, 0.0).frames(2);
+    });
+    add("monitors-fist-takes", &move |s| {
+        s.monitors(Take::Fist).pose(1, palm, Pose::Open);
+        s.ray_from(1, palm, monitor(2)).frames(5);
+        // Closing the hand: the runtime's ray goes.
+        s.no_ray(1).pose(1, palm, Pose::Fist).frames(3);
+        for i in 0..15u32 {
+            s.pose(1, palm + Vec3::new(0.004 * i as f32, 0.0, 0.0), Pose::Fist)
+                .frames(1);
+        }
+        s.pose(1, palm + Vec3::new(0.06, 0.0, 0.0), Pose::Open)
+            .frames(3);
+    });
+    add("monitors-middle-pinch-scrolls", &move |s| {
+        s.monitors(Take::Fist).pose(1, palm, Pose::Open);
+        s.ray_from(1, palm, monitor(1)).frames(3);
+        s.pose(1, palm, Pose::Middle).frames(2);
+        for i in 0..12u32 {
+            s.pose(
+                1,
+                palm + Vec3::new(0.0, 0.005 * i as f32, 0.0),
+                Pose::Middle,
+            )
+            .frames(1);
+        }
+        s.pose(1, palm, Pose::Open).frames(3);
+        // A middle pinch let go without moving: a right click.
+        s.pose(1, palm, Pose::Middle)
+            .frames(4)
+            .pose(1, palm, Pose::Open)
+            .frames(3);
+    });
 }
 
 fn expected_dir() -> PathBuf {
@@ -423,6 +611,29 @@ fn the_scripts_play_as_they_did() {
         );
         if name == "hands-typing" {
             assert!(journal.is_empty(), "typing did something: {journal:?}");
+        }
+        // What each of step 8's scripts must come to, whatever its numbers.
+        let has = |what: &str| journal.iter().any(|l| l.contains(what));
+        let wanted: &[&str] = match name {
+            "monitors-touch-tap" => &["touch down display 3", "touch up display 3"],
+            "monitors-touch-swipe" => &["touch down", "touch move", "touch up"],
+            "monitors-touch-through" => &["touch down", "touch cancel"],
+            "monitors-pinch-click" => &["mouse display 1", "left down", "left up"],
+            "monitors-pinch-drags" => &["left down", "mouse display 1", "left up"],
+            "monitors-held-pinch-takes" => &["take display 1", "let-go display 1"],
+            "monitors-trigger-and-stick" => &["left down", "left up", "scroll display 1"],
+            "monitors-fist-takes" => &["take display 2", "drag display 2", "let-go display 2"],
+            "monitors-middle-pinch-scrolls" => &["scroll display 1", "right down", "right up"],
+            _ => &[],
+        };
+        for what in wanted {
+            assert!(has(what), "{name}: no \"{what}\" in {journal:#?}");
+        }
+        if name == "monitors-held-pinch-takes" {
+            assert!(!has("left down"), "{name}: a take is no click");
+        }
+        if name == "monitors-touch-through" {
+            assert!(!has("touch up"), "{name}: pushed through is no tap");
         }
         wrong.extend(check(name, &journal));
     }

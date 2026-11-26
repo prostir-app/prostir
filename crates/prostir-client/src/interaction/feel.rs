@@ -139,8 +139,6 @@ feel! {
 
     /// "Attach" under a detached window stays this long after the ray left it.
     attach_linger_ms: 1200.0, 0.0, 10000.0;
-    /// The mouse goes where the user looks after the gaze rests this long.
-    gaze_dwell_ms: 600.0, 100.0, 5000.0;
 
     // ---- Step 8: touching a monitor like a touchscreen ----
 
@@ -336,10 +334,6 @@ impl Feel {
 
     pub fn attach_linger(&self) -> Duration {
         ms(self.attach_linger_ms)
-    }
-
-    pub fn gaze_dwell(&self) -> Duration {
-        ms(self.gaze_dwell_ms)
     }
 }
 

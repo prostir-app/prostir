@@ -21,7 +21,10 @@ use std::time::{Duration, Instant};
 
 use glam::{Quat, Vec2, Vec3};
 
-use super::{Button, FrameInput, HandState, Head, Joints, Menu, Menus, Scene};
+use super::{
+    Button, FrameInput, HandState, Head, Joints, Menu, Menus, Modes, MouseButton, PcInput, Scene,
+    Take, TouchPhase, Touched,
+};
 use crate::ids::{DisplayKey, Target, Thing};
 use crate::layout::{Hit, Placement, Ray, facing};
 use crate::ui::{self, Action};
@@ -60,7 +63,11 @@ pub struct Stage {
     pub menu_open: bool,
     pub large_menu: bool,
     pub left_handed: bool,
+    /// What the hands could do beyond the input before step 8.
+    pub modes: Modes,
     pub pieces: Vec<Piece>,
+    /// The numbers played with (the recording's).
+    feel: Feel,
     wrist: Option<Placement>,
     held: Vec<Thing>,
     resizing: Option<DisplayKey>,
@@ -87,7 +94,9 @@ impl Stage {
             menu_open,
             large_menu: false,
             left_handed: false,
+            modes: Modes::default(),
             pieces,
+            feel: Feel::DEFAULT,
             wrist: None,
             held: Vec::new(),
             resizing: None,
@@ -172,6 +181,14 @@ impl Stage {
         );
         let _ = writeln!(out, "large-menu {}", u8::from(self.large_menu));
         let _ = writeln!(out, "left-handed {}", u8::from(self.left_handed));
+        let m = self.modes;
+        let take = match m.take {
+            Take::Fist => "fist",
+            Take::Middle => "middle",
+            Take::Hold => "hold",
+        };
+        let (monitors, hands) = (u8::from(m.monitors), u8::from(m.hands));
+        let _ = writeln!(out, "modes {monitors} {take} {hands}");
         for p in &self.pieces {
             let what = match p.thing {
                 Thing::Display(id) => format!("display {id}"),
@@ -208,6 +225,15 @@ impl Stage {
                 }
                 Some("large-menu") => stage.large_menu = words.next() == Some("1"),
                 Some("left-handed") => stage.left_handed = words.next() == Some("1"),
+                Some("modes") => {
+                    stage.modes.monitors = words.next() == Some("1");
+                    stage.modes.take = match words.next() {
+                        Some("fist") => Take::Fist,
+                        Some("middle") => Take::Middle,
+                        _ => Take::Hold,
+                    };
+                    stage.modes.hands = words.next() == Some("1");
+                }
                 Some(kind @ ("display" | "keyboard")) => {
                     let thing = if kind == "display" {
                         Thing::Display(words.next().and_then(DisplayKey::parse).ok_or_else(bad)?)
@@ -347,6 +373,44 @@ impl Scene for Stage {
     fn resizing(&self) -> Option<DisplayKey> {
         self.resizing
     }
+    fn feel(&self) -> &Feel {
+        &self.feel
+    }
+    fn modes(&self) -> Modes {
+        self.modes
+    }
+    fn touchable(&self, at: Vec3, only: Option<DisplayKey>) -> Option<Touched> {
+        let mut best: Option<Touched> = None;
+        for p in &self.pieces {
+            let Thing::Display(id) = p.thing else {
+                continue;
+            };
+            if p.window || only.is_some_and(|o| o != id) {
+                continue;
+            }
+            let Some(a) = crate::layout::against(&p.place, p.height, None, at) else {
+                continue;
+            };
+            if only.is_none() && a.z < -self.feel.touch_through_m {
+                continue;
+            }
+            if best.is_none_or(|b| a.z.abs() < b.z.abs()) {
+                best = Some(Touched {
+                    id,
+                    local: a.local,
+                    z: a.z,
+                    point: a.point,
+                    normal: a.normal,
+                    uv: crate::layout::image_uv(&p.place, p.height, None, a.local),
+                });
+            }
+        }
+        best
+    }
+    fn monitor_uv(&self, id: DisplayKey, local: Vec2) -> Option<Vec2> {
+        let p = self.piece(Thing::Display(id))?;
+        Some(crate::layout::image_uv(&p.place, p.height, None, local))
+    }
     fn palm(&mut self, place: Option<Placement>) {
         if place.is_some() != self.wrist.is_some() {
             let shown = if place.is_some() { "shown" } else { "gone" };
@@ -427,6 +491,54 @@ impl Scene for Stage {
     fn haptic(&mut self, hand: usize) {
         let side = if hand == 0 { "left" } else { "right" };
         self.note(format!("haptic {side}"), String::new());
+    }
+    fn pc(&mut self, _now: Instant, input: PcInput) {
+        let uv = |v: Vec2| format!("at ({:.3}, {:.3})", v.x, v.y);
+        let display = |id: DisplayKey| name(Thing::Display(id));
+        match input {
+            PcInput::Move { id, uv: at } => self.note(format!("mouse {}", display(id)), uv(at)),
+            PcInput::Button {
+                id,
+                uv: at,
+                button,
+                down,
+            } => {
+                let button = match button {
+                    MouseButton::Left => "left",
+                    MouseButton::Right => "right",
+                };
+                let way = if down { "down" } else { "up" };
+                self.note(
+                    format!("{button} {way} {} {}", display(id), uv(at)),
+                    String::new(),
+                );
+            }
+            PcInput::Scroll { id, dx, dy } => {
+                self.note(
+                    format!("scroll {}", display(id)),
+                    format!("by ({dx}, {dy})"),
+                );
+            }
+            PcInput::Touch {
+                id,
+                slot,
+                uv: at,
+                phase,
+            } => {
+                let phase = match phase {
+                    TouchPhase::Down => "down",
+                    TouchPhase::Move => "move",
+                    TouchPhase::Up => "up",
+                    TouchPhase::Cancel => "cancel",
+                };
+                let what = format!("touch {phase} {} slot {slot}", display(id));
+                if phase == "move" {
+                    self.note(what, uv(at));
+                } else {
+                    self.note(format!("{what} {}", uv(at)), String::new());
+                }
+            }
+        }
     }
 }
 
@@ -700,6 +812,7 @@ pub fn replay(rec: &Recording, start: Instant) -> Vec<String> {
     let mut stage = rec.stage.clone();
     stage.held.clear();
     stage.journal.clear();
+    stage.feel = rec.feel;
     let mut menus = StageMenus;
     for (t, input) in &rec.frames {
         let now = start + *t;

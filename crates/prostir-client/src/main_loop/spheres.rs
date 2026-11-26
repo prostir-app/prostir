@@ -1,6 +1,8 @@
 //! What the overlay draws over everything, as spheres: lights where a fingertip is
-//! about to touch the menu and where a ray points, the rings of a touch and of
-//! "where is the mouse", the magnet's edge while dragging, the hands and the rays.
+//! about to touch the menu or a monitor and where a ray points, the rings of a touch,
+//! a click and of "where is the mouse", a ring closing in while a press is held, the
+//! magnet's edge while dragging, the hands and the rays. How the hands and the effects
+//! look follows "Hands (trial)" in the preview build (as before step 8 otherwise).
 
 use std::time::Instant;
 
@@ -8,9 +10,17 @@ use glam::Vec3;
 
 use crate::app::Model;
 use crate::ids::Thing;
-use crate::interaction::{FrameInput, Hands, INDEX_TIP, POKE_HOVER};
+use crate::interaction::trial::HandLook;
+use crate::interaction::{FrameInput, Hands, INDEX_TIP, Mark};
 use crate::layout;
 use crate::platform::openxr::overlay::{self, Sphere};
+
+/// The light blue of hovers, touches and clicks.
+const BLUE: [f32; 3] = [0.72, 0.84, 1.0];
+/// A ring held towards what holding does.
+const AMBER: [f32; 3] = [1.0, 0.82, 0.4];
+/// Done: a right click, a take.
+const GREEN: [f32; 3] = [0.6, 1.0, 0.75];
 
 /// The frame's spheres into `spheres` (emptied first).
 pub fn fill(
@@ -22,30 +32,77 @@ pub fn fill(
 ) {
     let world = model.world();
     let settings = *model.settings();
+    let trial = model.trial();
+    let (size, strength) = (trial.fx.size(), trial.fx.alpha());
+    let rgba = |c: [f32; 3], a: f32| [c[0], c[1], c[2], (a * strength).min(1.0)];
     spheres.clear();
     // Light on the menu where a fingertip is about to touch: wide and faint from a
     // few centimetres away, small and bright right before contact.
     let place = world.menu();
+    let hover = model.feel().poke_hover_m;
     for (_, at, z, pressed) in hands.pokes() {
-        let near = (1.0 - z.max(0.0) / POKE_HOVER).clamp(0.0, 1.0);
+        let near = (1.0 - z.max(0.0) / hover).clamp(0.0, 1.0);
         let pressed = if pressed { 0.25 } else { 0.0 };
         spheres.push(Sphere::glow(
             place.position + place.rotation * Vec3::new(at.x, at.y, 0.003),
-            0.034 - 0.020 * near,
-            [
-                0.72,
-                0.84,
-                1.0,
-                (0.12 + 0.6 * near * near + pressed).min(1.0),
-            ],
+            (0.034 - 0.020 * near) * size,
+            rgba(BLUE, (0.12 + 0.6 * near * near + pressed).min(1.0)),
         ));
     }
-    // A touch spreads out as a ring for a moment.
-    for (center, k) in hands.rings(now) {
+    // The same on a monitor (step 8): a ring closing in as the finger comes near, the
+    // touched point while pressed, and a ring closing in on a long press.
+    let touch_hover = model.feel().touch_hover_m;
+    for h in 0..2 {
+        let Some(n) = hands.near_monitor(h) else {
+            continue;
+        };
+        let at = n.point + n.normal * 0.003;
+        if n.pressed {
+            spheres.push(Sphere::ring(at, 0.012 * size, rgba([1.0; 3], 0.95)));
+            spheres.push(Sphere::glow(at, 0.018 * size, rgba(BLUE, 0.6)));
+            if n.held > 0.25 {
+                let c = if n.held >= 1.0 { GREEN } else { AMBER };
+                spheres.push(Sphere::ring(
+                    at + n.normal * 0.001,
+                    (0.04 - 0.026 * n.held) * size,
+                    rgba(c, 0.4 + 0.5 * n.held),
+                ));
+            }
+        } else {
+            let k = (n.z.max(0.0) / touch_hover).clamp(0.0, 1.0);
+            spheres.push(Sphere::ring(
+                at,
+                (0.007 + 0.03 * k) * size,
+                rgba(BLUE, 0.35 + 0.55 * (1.0 - k)),
+            ));
+            spheres.push(Sphere::glow(
+                at,
+                0.02 * size,
+                rgba(BLUE, 0.15 + 0.35 * (1.0 - k)),
+            ));
+        }
+    }
+    // A press held towards taking or a right click: a ring closing in.
+    for h in 0..2 {
+        if let Some((at, k)) = hands.progress(h) {
+            let c = if k >= 1.0 { GREEN } else { AMBER };
+            spheres.push(Sphere::ring(
+                at,
+                (0.05 - 0.035 * k) * size,
+                rgba(c, 0.4 + 0.5 * k),
+            ));
+        }
+    }
+    // A touch or a click spreads out as a ring for a moment.
+    for (center, k, mark) in hands.marks(now) {
+        let c = match mark {
+            Mark::Touch => [0.8, 0.9, 1.0],
+            Mark::Right => GREEN,
+        };
         spheres.push(Sphere::ring(
             center,
-            0.012 + 0.03 * k,
-            [0.8, 0.9, 1.0, 0.9 * (1.0 - k)],
+            (0.012 + 0.03 * k) * size,
+            rgba(c, 0.9 * (1.0 - k)),
         ));
     }
     // Where a ray points: a small light on the menu, a wider faint one on monitors.
@@ -58,8 +115,8 @@ pub fn fill(
         };
         spheres.push(Sphere::glow(
             pick.hit.point,
-            radius,
-            [0.72, 0.84, 1.0, alpha],
+            radius * size,
+            rgba(BLUE, alpha),
         ));
     }
     // Where the mouse is: rings closing in on it, three times.
@@ -108,34 +165,46 @@ pub fn fill(
     let world = model.world();
     // Hands are drawn over everything (the compositor has no depth for them), so
     // near a menu they would cover its text: the hand holding the palm menu is not
-    // drawn, and a hand about to touch a menu is see-through.
+    // drawn, and a hand about to touch a menu is see-through. A hand pressing a
+    // monitor is drawn stopped on its surface.
     let menu_hand = usize::from(settings.left_handed);
     for (h, j) in input.joints.iter().enumerate() {
         let Some(j) = j else { continue };
         if h == menu_hand && world.wrist().is_some() {
             continue;
         }
+        let mut j = *j;
+        if let Some(push) = hands.push(h) {
+            for joint in &mut j {
+                joint.0 += push;
+            }
+        }
         let tip = j[INDEX_TIP].0;
         let near_palm = world
             .wrist()
             .is_some_and(|w| w.position.distance(tip) < 0.15);
-        let near_panel = hands.poking(h);
-        let alpha = if near_palm || near_panel { 0.3 } else { 1.0 };
-        overlay::hand_spheres(j, alpha, spheres);
+        let near = near_palm || hands.poking(h) || hands.near_monitor(h).is_some();
+        let alpha = trial.look.alpha(near);
+        if trial.look == HandLook::Tips {
+            overlay::tip_spheres(&j, alpha, spheres);
+        } else {
+            overlay::hand_spheres(&j, alpha, spheres);
+        }
     }
-    for (input, pick) in input.hands.iter().zip(hands.picks()) {
-        if let Some(ray) = input.ray {
-            let length = pick.map_or(1.2, |p| p.hit.t).min(4.0);
+    for (h, hand) in input.hands.iter().enumerate() {
+        if let Some((ray, length)) = hands.ray(h) {
             overlay::ray_spheres(ray.origin, ray.dir, length, spheres);
-            if !input.is_hand {
-                // Where the controller is, since it is not visible otherwise.
-                spheres.push(Sphere {
-                    center: ray.origin,
-                    radius: 0.012,
-                    color: [0.30, 0.32, 0.38, 1.0],
-                    kind: overlay::Kind::Ball,
-                });
-            }
+        }
+        if let Some(ray) = hand.ray
+            && !hand.is_hand
+        {
+            // Where the controller is, since it is not visible otherwise.
+            spheres.push(Sphere {
+                center: ray.origin,
+                radius: 0.012,
+                color: [0.30, 0.32, 0.38, 1.0],
+                kind: overlay::Kind::Ball,
+            });
         }
     }
 }

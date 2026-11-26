@@ -113,6 +113,52 @@ pub fn hit_surface(ray: Ray, p: &Placement, height: f32, curve_radius: Option<f3
     })
 }
 
+/// A point near a monitor (a fingertip): where it is against its surface.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Against {
+    /// The flat-equivalent point on it, as [`Hit::local`].
+    pub local: Vec2,
+    /// How far in front of the surface (negative: behind it).
+    pub z: f32,
+    /// The point of the surface it is over, and the surface's normal there.
+    pub point: Vec3,
+    pub normal: Vec3,
+}
+
+/// Where `at` is against the monitor at `p`, `height` high, on a cylinder of
+/// `curve_radius` (none: flat); `None` beside it (not over its surface).
+pub fn against(p: &Placement, height: f32, curve_radius: Option<f32>, at: Vec3) -> Option<Against> {
+    let inv = p.rotation.inverse();
+    match curve_radius {
+        None => {
+            let l = inv * (at - p.position);
+            let normal = p.rotation * Vec3::Z;
+            (l.x.abs() <= p.width / 2.0 && l.y.abs() <= height / 2.0).then(|| Against {
+                local: Vec2::new(l.x, l.y),
+                z: l.z,
+                point: at - normal * l.z,
+                normal,
+            })
+        }
+        Some(radius) => {
+            let c = Cylinder::new(p, radius);
+            let q = inv * (at - c.center);
+            let r = q.x.hypot(q.z).max(1e-4);
+            let angle = q.x.atan2(-q.z);
+            if angle.abs() > c.central_angle / 2.0 || q.y.abs() > height / 2.0 {
+                return None;
+            }
+            Some(Against {
+                local: Vec2::new(c.radius * angle.sin(), q.y),
+                z: c.radius - r,
+                point: c.center
+                    + p.rotation * Vec3::new(q.x / r * c.radius, q.y, q.z / r * c.radius),
+                normal: p.rotation * Vec3::new(-q.x / r, 0.0, -q.z / r),
+            })
+        }
+    }
+}
+
 /// Where `local` (a hit's flat-equivalent point) lies across the image: 0..=1 from
 /// the top left. On a curve the image is laid out along the arc.
 pub fn image_uv(p: &Placement, height: f32, curve_radius: Option<f32>, local: Vec2) -> Vec2 {
