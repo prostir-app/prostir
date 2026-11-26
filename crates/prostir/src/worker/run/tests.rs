@@ -23,6 +23,8 @@ struct Stub {
     scale: DeskScale,
     /// Making a monitor fails while set.
     refuse: Arc<AtomicBool>,
+    /// A layout with new scales fails while set.
+    refuse_scales: Arc<AtomicBool>,
 }
 
 type DeskScale = Arc<Mutex<Option<u16>>>;
@@ -119,8 +121,27 @@ impl Desktop for Stub {
     fn show(&mut self, key: &OutputKey) -> Result<Box<dyn Output>> {
         bail!("no display {key}")
     }
-    fn place(&mut self, _plan: &DeskPlan, _current: &Outputs) -> Result<()> {
-        self.calls.lock().unwrap().push("place".into());
+    /// New scales in place: listed at them from now on, as KWin does.
+    fn place(&mut self, plan: &DeskPlan, _current: &Outputs) -> Result<()> {
+        if plan.scales.is_empty() {
+            self.calls.lock().unwrap().push("place".into());
+            return Ok(());
+        }
+        let scales: Vec<String> = plan
+            .scales
+            .iter()
+            .map(|(key, percent)| format!("{key} {percent}"))
+            .collect();
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("place with {}", scales.join(", ")));
+        if self.refuse_scales.load(Ordering::Relaxed) {
+            bail!("the stub desktop takes no scale now");
+        }
+        if let Some((_, percent)) = plan.scales.last() {
+            *self.scale.lock().unwrap() = Some(*percent);
+        }
         Ok(())
     }
     fn windows(&mut self) -> Option<&mut dyn Windows> {
@@ -192,6 +213,7 @@ fn the_newest_wanted_state_wins_and_the_desktop_is_placed_once() {
             has_primary: false,
             origin_is_primary: false,
             scales: Scales::Any { min: 50, max: 400 },
+            scales_in_place: false,
             refresh: vec![60],
             screenshot_one_output: true,
             moves_pointer: false,
@@ -202,6 +224,7 @@ fn the_newest_wanted_state_wins_and_the_desktop_is_placed_once() {
         outputs: Arc::default(),
         scale: Arc::default(),
         refuse: Arc::default(),
+        refuse_scales: Arc::default(),
     };
     let (events, received) = crate::events::channel();
     let inbox: Arc<Inbox<Wanted, Job>> = Arc::default();
@@ -334,6 +357,7 @@ fn a_monitor_that_cannot_be_made_again_ends_its_stream() {
             has_primary: false,
             origin_is_primary: false,
             scales: Scales::Any { min: 50, max: 400 },
+            scales_in_place: false,
             refresh: vec![60],
             screenshot_one_output: true,
             moves_pointer: false,
@@ -344,6 +368,7 @@ fn a_monitor_that_cannot_be_made_again_ends_its_stream() {
         outputs: Arc::default(),
         scale: DeskScale::default(),
         refuse: refuse.clone(),
+        refuse_scales: Arc::default(),
     };
     let (events, _received) = crate::events::channel();
     let router = Arc::new(Router::new());
@@ -413,6 +438,7 @@ fn a_monitor_that_cannot_be_made_again_ends_its_stream() {
 struct Harness {
     calls: Calls,
     scale: DeskScale,
+    refuse_scales: Arc<AtomicBool>,
     inbox: Arc<Inbox<Wanted, Job>>,
     received: std::sync::mpsc::Receiver<Event>,
     thread: std::thread::JoinHandle<()>,
@@ -420,8 +446,14 @@ struct Harness {
 
 impl Harness {
     fn start() -> Self {
+        Self::of(false)
+    }
+
+    /// On a desktop that changes scales in place (`in_place`), or not.
+    fn of(in_place: bool) -> Self {
         let calls = Calls::default();
         let scale = DeskScale::default();
+        let refuse_scales = Arc::new(AtomicBool::new(false));
         let stub = Stub {
             caps: DesktopCaps {
                 name: "stub",
@@ -429,6 +461,7 @@ impl Harness {
                 has_primary: false,
                 origin_is_primary: false,
                 scales: Scales::Any { min: 50, max: 400 },
+                scales_in_place: in_place,
                 refresh: vec![60],
                 screenshot_one_output: true,
                 moves_pointer: false,
@@ -439,6 +472,7 @@ impl Harness {
             outputs: Arc::default(),
             scale: scale.clone(),
             refuse: Arc::default(),
+            refuse_scales: refuse_scales.clone(),
         };
         let (events, received) = crate::events::channel();
         let inbox: Arc<Inbox<Wanted, Job>> = Arc::default();
@@ -454,6 +488,7 @@ impl Harness {
         Self {
             calls,
             scale,
+            refuse_scales,
             inbox,
             received,
             thread,
@@ -594,4 +629,80 @@ fn a_scale_taken_on_the_desktop_stands_until_the_control_loop_has_it() {
     let mut w = wanted(&[(2, 2, 640)]);
     follow_rescaled(&mut rescaled, &mut w);
     assert!(rescaled.is_empty(), "no such monitor any more");
+}
+
+/// On a desktop that changes scales in place, another scale is given with the layout,
+/// in one call: the output is not made anew (its windows stay), and a scale given on
+/// the desktop afterwards is not mistaken for the old one.
+#[test]
+fn a_scale_changes_in_place() {
+    let harness = Harness::of(true);
+    harness.settle(wanted(&[(1, 1, 640)]));
+    harness.settle(with_scale(wanted(&[(1, 1, 640)]), 1, 1.25));
+    // The desktop lists it at its new scale: nothing is taken back on the next looks.
+    harness.tick();
+    harness.tick();
+    let calls = harness.end();
+    assert_eq!(
+        calls.iter().filter(|c| c.starts_with("make")).count(),
+        1,
+        "{calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c == "place with Prostir-1 125"),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.starts_with("scale taken")),
+        "{calls:?}"
+    );
+    let removed = calls.iter().filter(|c| c.starts_with("remove")).count();
+    assert_eq!(removed, 1, "only as the worker ends: {calls:?}");
+}
+
+/// Where the desktop does not change scales in place, the output is made anew at
+/// the new one, as before.
+#[test]
+fn a_scale_is_made_anew_where_not_in_place() {
+    let harness = Harness::start();
+    harness.settle(wanted(&[(1, 1, 640)]));
+    harness.settle(with_scale(wanted(&[(1, 1, 640)]), 1, 1.5));
+    let calls = harness.end();
+    let made = calls.iter().filter(|c| *c == "make Prostir-1").count();
+    assert_eq!(made, 2, "{calls:?}");
+    assert!(!calls.iter().any(|c| c.starts_with("place with")));
+}
+
+/// A scale the desktop refuses in place: the monitor stays as it is (not made anew),
+/// the control loop hears the scale it keeps, the layout goes on without it, and the
+/// scale is not asked again while it is the one wanted.
+#[test]
+fn a_scale_refused_in_place_is_kept_and_not_asked_again() {
+    let harness = Harness::of(true);
+    harness.settle(wanted(&[(1, 1, 640)]));
+    harness.refuse_scales.store(true, Ordering::Relaxed);
+    let upto = harness
+        .inbox
+        .want(with_scale(wanted(&[(1, 1, 640)]), 1, 1.5));
+    let mut refused = None;
+    loop {
+        match harness
+            .received
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+        {
+            Event::Desk(_, Done::ScaleRefused { id, percent }) => refused = Some((id, percent)),
+            Event::Desk(_, Done::Settled(n)) if n >= upto => break,
+            _ => {}
+        }
+    }
+    assert_eq!(refused, Some((ScreenId::saved(1), 100)));
+    // The control loop takes the scale back; then a new one is asked.
+    harness.tick();
+    harness.settle(wanted(&[(1, 1, 640)]));
+    let calls = harness.end();
+    let asked = calls.iter().filter(|c| c.starts_with("place with")).count();
+    assert_eq!(asked, 1, "{calls:?}");
+    let made = calls.iter().filter(|c| c.starts_with("make")).count();
+    assert_eq!(made, 1, "{calls:?}");
 }

@@ -166,6 +166,9 @@ pub struct Displays {
     /// When each display of the PC was last connected, in seconds since 1970 (0: not
     /// known), to forget the least recently seen of those not connected.
     physical_seen: BTreeMap<ScreenId, u64>,
+    /// The monitors whose scale the main headset chooses ("Auto"): only virtual
+    /// monitors, never a display of the PC or a window panel.
+    auto: std::collections::BTreeSet<ScreenId>,
     /// Displays larger than the headset decodes (see [`Displays::stop_too_big`]): the
     /// size and codec they did not fit in, until a headset or codec they fit.
     too_big: BTreeMap<ScreenId, ((u32, u32), Codec)>,
@@ -254,6 +257,12 @@ impl Displays {
             placing: placing::Placings::default(),
             headset_places: false,
             physical_seen: set.physical.iter().map(|(id, p)| (*id, p.seen)).collect(),
+            auto: set
+                .auto
+                .iter()
+                .filter(|id| set.specs.contains_key(id))
+                .copied()
+                .collect(),
             too_big: BTreeMap::new(),
             settings: settings.clone(),
             audio: None,
@@ -580,6 +589,21 @@ impl Displays {
                     ..
                 }) = self.screens.get_mut(&id)
                 {
+                    spec.scale = f64::from(percent) / 100.0;
+                    // Chosen by the person, in the desktop's settings.
+                    if self.auto.remove(&id) {
+                        info!("{id}: the scale given on the desktop ends its Auto");
+                    }
+                    return DeskNews::Rescaled;
+                }
+            }
+            Done::ScaleRefused { id, percent } => {
+                if let Some(Screen {
+                    kind: ScreenKind::Virtual { spec },
+                    ..
+                }) = self.screens.get_mut(&id)
+                {
+                    warn!("{id}: the desktop kept it at {percent} %");
                     spec.scale = f64::from(percent) / 100.0;
                     return DeskNews::Rescaled;
                 }

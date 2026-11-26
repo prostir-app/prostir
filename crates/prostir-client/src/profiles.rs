@@ -97,6 +97,10 @@ pub struct Profile {
     pub name: Option<String>,
     /// The monitors, left to right: their sizes and scales.
     pub monitors: Vec<Mode>,
+    /// The monitors (by place in `monitors`) whose scale is Auto: the headset chooses
+    /// it (their scale above is the one they had, which they are made at). Saved by
+    /// versions before Auto: none.
+    pub auto: Vec<usize>,
     /// Index into `monitors`.
     pub primary: u8,
     /// The displays of the PCs themselves that were shown (a laptop's panel, say).
@@ -170,6 +174,7 @@ impl Profile {
             .unwrap_or(layout::RADIUS);
         Self {
             name: None,
+            auto: Vec::new(),
             primary: primary
                 .and_then(|p| index(&p))
                 .and_then(|i| u8::try_from(i).ok())
@@ -211,6 +216,14 @@ impl Profile {
             }
         }
         out.push('\n');
+        // A line of its own: a version before Auto passes it over.
+        if !self.auto.is_empty() {
+            out.push_str("auto");
+            for i in &self.auto {
+                let _ = write!(out, " {i}");
+            }
+            out.push('\n');
+        }
         for k in &self.shown {
             let _ = writeln!(out, "shown {k}");
         }
@@ -268,6 +281,7 @@ struct Draft {
     places: Vec<(usize, Placement)>,
     frame: Option<ProfileFrame>,
     rows: Option<Vec<Vec<usize>>>,
+    auto: Option<Vec<usize>>,
     /// A line it knows was not read: the profile is not read.
     bad: bool,
 }
@@ -313,6 +327,15 @@ impl Draft {
                     self.rows.is_some()
                 }
             }
+            "auto" => {
+                self.auto.is_none() && {
+                    self.auto = rest
+                        .split(' ')
+                        .map(|i| i.parse::<usize>().ok())
+                        .collect::<Option<Vec<usize>>>();
+                    self.auto.is_some()
+                }
+            }
             _ => return Took::Unknown,
         };
         if read { Took::Yes } else { Took::Bad }
@@ -337,8 +360,16 @@ impl Draft {
         if seen.windows(2).any(|w| w[0] == w[1]) || seen.last().is_some_and(|&i| i >= n) {
             return None;
         }
+        // Monitors it does not have, or one twice, say nothing: none in Auto.
+        let mut auto = self.auto.unwrap_or_default();
+        auto.sort_unstable();
+        auto.dedup();
+        if auto.last().is_some_and(|&i| i >= n) {
+            auto.clear();
+        }
         Some(Profile {
             name: self.name,
+            auto,
             monitors,
             primary,
             shown: self.shown,
@@ -545,6 +576,7 @@ mod tests {
         let laptop = DisplayKey::new(PcId([0xab; 8]), DisplayId(100));
         Profile {
             name: None,
+            auto: Vec::new(),
             monitors: vec![
                 Mode::new(2560, 1440),
                 Mode {
@@ -564,6 +596,25 @@ mod tests {
         }
     }
 
+    /// Monitors in Auto go on a line of their own and read back; a profile without
+    /// the line (saved before Auto) has none; one naming a monitor it does not have
+    /// keeps its monitors, none in Auto; a line that is not numbers is not read.
+    #[test]
+    fn auto_reads_back() {
+        let p = Profile {
+            auto: vec![0, 2],
+            ..sample()
+        };
+        let text = text_of(&vec![p.clone()]);
+        assert!(text.contains("\nauto 0 2\n"), "{text}");
+        assert_eq!(read(&text), vec![p]);
+        assert!(!text_of(&vec![sample()]).contains("auto"));
+        let far = text.replace("auto 0 2", "auto 0 7");
+        assert_eq!(read(&far)[0].auto, Vec::<usize>::new());
+        let (slots, _) = parse(&text.replace("auto 0 2", "auto x")).unwrap();
+        assert!(slots.is_empty(), "{slots:?}");
+    }
+
     /// The text of the file: the format line, then each profile in order after an
     /// empty line, its name first where it has one.
     #[test]
@@ -572,6 +623,7 @@ mod tests {
         assert_eq!(text_of(&profiles), "format 2\n");
         profiles.push(Profile {
             name: Some("Робота вдома".into()),
+            auto: Vec::new(),
             ..sample()
         });
         let place = "-1 0.5 -1.25 0 0 0 1 1.2";
@@ -627,6 +679,7 @@ mod tests {
         profiles.push(sample());
         profiles.push(Profile {
             name: Some("Кіно".into()),
+            auto: Vec::new(),
             monitors: vec![Mode::new(1920, 1080)],
             primary: 0,
             shown: Vec::new(),

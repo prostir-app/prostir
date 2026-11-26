@@ -782,6 +782,7 @@ mod tests {
         let mut profiles = profiles::empty();
         profiles.push(profiles::Profile {
             name: Some("Робота".into()),
+            auto: Vec::new(),
             monitors: vec![prostir_proto::state::Mode::new(2560, 1440)],
             primary: 0,
             shown: Vec::new(),

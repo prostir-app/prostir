@@ -14,6 +14,10 @@ headset-dev-unknown = Модель шолома невідома: лише ст�
 headset-dev-super-sampling = Згладжування шару
 headset-dev-sharpening = Підточування шару
 headset-dev-auto = Авто
+headset-dev-auto-line = Авто: k щонайменше
+headset-dev-line-85 = 0,85
+headset-dev-line-90 = 0,9
+headset-dev-line-100 = 1,0
 headset-dev-metrics = Показники біля монітора
 # $rate (Number): megabits a second
 headset-dev-mbit = { $rate } Мбіт/с

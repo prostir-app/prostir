@@ -17,6 +17,7 @@
 
 #![forbid(unsafe_code)]
 
+mod auto;
 #[cfg(test)]
 mod tests;
 

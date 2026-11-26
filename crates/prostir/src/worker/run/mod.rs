@@ -151,6 +151,17 @@ impl Made {
         }
     }
 
+    /// Whether it is the monitor `what` asks for but for its scale: the scale can
+    /// change in place, where the desktop does that.
+    fn is_but_scale(&self, what: &What) -> bool {
+        match (self, what) {
+            (Made::Monitor { spec, number }, What::Monitor { spec: s, number: n }) => {
+                number == n && spec.width == s.width && spec.height == s.height
+            }
+            _ => false,
+        }
+    }
+
     fn spec(&self) -> Option<&MonitorSpec> {
         match self {
             Made::Monitor { spec, .. } | Made::Panel { spec, .. } => Some(spec),
@@ -298,6 +309,9 @@ pub struct Worker {
     rescaled: BTreeMap<ScreenId, (u16, u16)>,
     /// The scales taken on a tick, kept for the next.
     scales_taken: Vec<(ScreenId, u16)>,
+    /// Monitors whose scale the desktop did not take in place: the scale refused, not
+    /// asked again while it is the one wanted (see [`place::Rescale`]).
+    scale_refused: BTreeMap<ScreenId, u16>,
     panels_checked: Instant,
     physical_due: Instant,
 }
@@ -371,6 +385,7 @@ impl Worker {
             primary_checked: now,
             rescaled: BTreeMap::new(),
             scales_taken: Vec::new(),
+            scale_refused: BTreeMap::new(),
             panels_checked: now,
             physical_due: now,
         }
@@ -419,6 +434,13 @@ impl Worker {
     /// Takes the newest wanted state.
     fn take(&mut self, mut wanted: Wanted) {
         place::follow_rescaled(&mut self.rescaled, &mut wanted);
+        // A scale refused is asked again once another was wanted in between.
+        self.scale_refused.retain(|id, refused| {
+            wanted.screens.iter().any(|(i, s)| match &s.what {
+                What::Monitor { spec, .. } => i == id && spec.percent() == *refused,
+                _ => false,
+            })
+        });
         let was = self.wanted.as_ref();
         if was.is_none_or(|w| w.layout != wanted.layout) {
             self.layout_due = true;
@@ -468,6 +490,10 @@ impl Worker {
             };
             self.step(step);
         }
+        // A monitor at another scale is laid out with it, in place.
+        if !self.rescales().is_empty() {
+            self.layout_due = true;
+        }
         self.keep_primary_ours();
         if std::mem::take(&mut self.wallpapers_due) {
             self.begin("giving new monitors the wallpaper");
@@ -493,9 +519,14 @@ impl Worker {
         let find = |id: &ScreenId| wanted.screens.iter().find(|(i, _)| i == id);
         // Outputs not wanted, or wanted as something else, go first (to stay within
         // what the desktop and the encoders take).
+        let in_place = self.desktop.caps().scales_in_place;
         for (id, slot) in &self.slots {
             match find(id) {
                 Some((_, w)) if slot.made.is(&w.what) => {}
+                // Another scale is given in place, with the layout (see `place`);
+                // one the desktop refused leaves the monitor as it is.
+                Some((_, w))
+                    if in_place && slot.output.is_some() && slot.made.is_but_scale(&w.what) => {}
                 _ => return Some(Step::Remove(*id)),
             }
         }

@@ -371,16 +371,20 @@ fn a_guest_is_not_asked_for_the_volume() {
     assert!(guest.view().volume_asks.is_empty());
 }
 
-/// Another scale for a monitor: the same number, made anew at it (starting in the
-/// list that comes with the reply, then running at the new scale); a scale the PC
-/// does not offer is `BAD_SIZE` and changes nothing; a display that is not there is
-/// `UNKNOWN_DISPLAY`.
+/// Another scale for a monitor: the same number, given in place (the fake desktop
+/// does, as KWin): still running with the reply, its stream not started over, laid
+/// out at its new size; a scale the PC does not offer is `BAD_SIZE` and changes
+/// nothing; a display that is not there is `UNKNOWN_DISPLAY`.
 #[test]
 fn a_monitor_gets_another_scale() {
     let (_dir, _pc, _keys, mut headset) = session("set-scale", &Options::default());
     let id = headset.view().order()[0];
+    let pc_caps = headset.view().pc.caps.clone().unwrap();
+    assert!(pc_caps.has(prostir_proto::state::caps::pc::SCALE_IN_PLACE));
     let scales = headset.view().pc.limits.as_ref().unwrap().scales.clone();
     let larger = *scales.iter().find(|s| **s != 100).expect("a larger text");
+    let starts = headset.view().streams[&id].starts;
+    let width = headset.view().display(id).unwrap().mode.w;
     let outcome = headset
         .ask(Request::SetScale { id, scale: larger })
         .unwrap();
@@ -388,15 +392,22 @@ fn a_monitor_gets_another_scale() {
     let d = headset.view().display(id).cloned().unwrap();
     assert_eq!(
         (d.mode.scale, d.state),
-        (larger, DisplayState::Starting),
-        "starting with the reply"
+        (larger, DisplayState::Running),
+        "running with the reply"
     );
+    let logical = (f64::from(width) * 100.0 / f64::from(larger)).round() as u32;
     headset
-        .wait(SOON, "running at the new scale", |v| {
+        .wait(SOON, "laid out at the new size", |v| {
             v.display(id)
-                .is_some_and(|d| d.mode.scale == larger && d.state == DisplayState::Running)
+                .and_then(|d| d.desk)
+                .is_some_and(|r| r.w.abs_diff(logical) <= 1)
         })
         .unwrap();
+    assert_eq!(
+        headset.view().streams[&id].starts,
+        starts,
+        "its stream did not start over"
+    );
     assert_eq!(headset.view().order()[0], id, "the same number");
     let odd = headset.ask(Request::SetScale { id, scale: 133 }).unwrap();
     assert_eq!(failed_with(&odd), Some(ErrorCode::BAD_SIZE), "{odd:?}");
@@ -533,4 +544,58 @@ fn a_picture_of_a_still_monitor_comes_from_its_stream() {
             pc.wait_log(SOON, "screenshot from the stream:");
         }
     }
+}
+
+/// Auto (feature 17): monitors kept by an earlier version are not in it; turned on,
+/// the main headset's choice is taken in place (a scale the desktop does not give that
+/// size becomes the nearest it gives); one chosen by hand takes the monitor out of it,
+/// after which the headset's choice changes nothing; a display of the PC cannot be in
+/// it.
+#[test]
+fn auto_takes_the_headsets_scale_until_one_is_chosen() {
+    let (_dir, _pc, _keys, mut headset) = session("auto-scale", &Options::default());
+    let id = headset.view().order()[0];
+    let in_auto = |v: &View| v.pc.scale_auto.as_ref().is_some_and(|a| a.has(id));
+    assert!(headset.view().pc.scale_auto.is_some(), "the part is there");
+    assert!(!in_auto(headset.view()), "kept from before: not in Auto");
+    let not_auto = headset.ask(Request::AutoScale { id, scale: 125 }).unwrap();
+    assert_eq!(not_auto, Outcome::Done);
+    assert_eq!(headset.view().display(id).unwrap().mode.scale, 100);
+    let on = headset.ask(Request::SetScaleAuto { id, on: true }).unwrap();
+    assert_eq!(on, Outcome::Done);
+    assert!(in_auto(headset.view()));
+    let chosen = headset.ask(Request::AutoScale { id, scale: 150 }).unwrap();
+    assert_eq!(chosen, Outcome::Done);
+    let d = headset.view().display(id).cloned().unwrap();
+    assert_eq!((d.mode.scale, d.state), (150, DisplayState::Running));
+    assert!(in_auto(headset.view()), "still in Auto");
+    let by_hand = headset.ask(Request::SetScale { id, scale: 125 }).unwrap();
+    assert_eq!(by_hand, Outcome::Done);
+    assert!(!in_auto(headset.view()), "chosen by hand");
+    headset.ask(Request::AutoScale { id, scale: 200 }).unwrap();
+    assert_eq!(headset.view().display(id).unwrap().mode.scale, 125);
+    let nobody = headset
+        .ask(Request::SetScaleAuto {
+            id: DisplayId(4_000_000),
+            on: true,
+        })
+        .unwrap();
+    assert_eq!(failed_with(&nobody), Some(ErrorCode::UNKNOWN_DISPLAY));
+    // A monitor added is in Auto.
+    let added = headset
+        .ask(Request::AddDisplay {
+            mode: Mode::new(1920, 1080),
+        })
+        .unwrap();
+    let Outcome::Added { id: new } = added else {
+        panic!("{added:?}");
+    };
+    assert!(
+        headset
+            .view()
+            .pc
+            .scale_auto
+            .as_ref()
+            .is_some_and(|a| a.has(new))
+    );
 }

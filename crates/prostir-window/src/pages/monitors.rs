@@ -12,7 +12,7 @@ const SIZES: [[u32; 2]; 5] = [
     [1440, 2560],
 ];
 
-const SCALES: [u16; 3] = [100, 125, 150];
+const SCALES: [u16; 5] = [100, 125, 150, 175, 200];
 
 pub(super) fn monitors(ui: &mut Ui, v: &mut View<'_, '_>, s: &State, _revision: u32) {
     let tk = v.tk;
@@ -189,22 +189,63 @@ fn selected_monitor(ui: &mut Ui, v: &mut View<'_, '_>, s: &State) {
     } else {
         &s.limits.scales[..]
     };
-    let labels: Vec<String> = scales.iter().map(|sc| percent(tk, *sc)).collect();
+    // Auto, for Prostir's own monitors (never the PC's displays): a switch, the scale
+    // it chose under it.
+    let can = !v.ui.unsupported.contains("set_scale") && !matches!(d.kind, DisplayKind::Physical);
+    if d.kind == DisplayKind::Virtual && !v.ui.unsupported.contains("set_scale_auto") {
+        let label = tk.t("window-mon-scale-auto");
+        // The headset chooses: while none is connected, the switch says so.
+        let desc = if d.auto_scale && s.connected().is_some() {
+            tk.f(
+                "window-mon-scale-auto-at",
+                &[("scale", d.mode.scale.into())],
+            )
+        } else {
+            tk.t("window-mon-scale-auto-desc")
+        };
+        w::row(ui, tk, &label, Some(&desc), |ui| {
+            if let Some(on) = w::switch(ui, tk, &label, d.auto_scale, true) {
+                v.out
+                    .push(Action::Send(Request::SetScaleAuto { id: d.id, on }));
+            }
+        });
+        ui.add_space(tk.th.shape.padding * 0.5);
+    }
+    // More than three scales take a line of their own, as numbers.
+    let wide = scales.len() > 3;
+    let labels: Vec<String> = scales
+        .iter()
+        .map(|sc| {
+            if wide {
+                sc.to_string()
+            } else {
+                percent(tk, *sc)
+            }
+        })
+        .collect();
     let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
     let current = scales
         .iter()
         .position(|sc| *sc == d.mode.scale)
         .unwrap_or(usize::MAX);
-    w::row(ui, tk, &tk.t("window-mon-scale"), None, |ui| {
-        let can =
-            !v.ui.unsupported.contains("set_scale") && !matches!(d.kind, DisplayKind::Physical);
-        if let Some(i) = w::segmented(ui, tk, &labels, current, can) {
-            v.out.push(Action::Send(Request::SetScale {
-                id: d.id,
-                scale: scales[i],
-            }));
-        }
-    });
+    let chosen = if wide {
+        text(ui, tk.t("window-mon-scale-percent"), tk.body_m(), p.text);
+        ui.add_space(tk.th.shape.spacing * 0.5);
+        let within = ui.available_width();
+        w::segmented_within(ui, tk, &labels, current, can, within)
+    } else {
+        let mut chosen = None;
+        w::row(ui, tk, &tk.t("window-mon-scale"), None, |ui| {
+            chosen = w::segmented(ui, tk, &labels, current, can);
+        });
+        chosen
+    };
+    if let Some(i) = chosen {
+        v.out.push(Action::Send(Request::SetScale {
+            id: d.id,
+            scale: scales[i],
+        }));
+    }
     w::divider(ui, tk);
     if d.kind == DisplayKind::Physical {
         let opts = [tk.t("window-mon-shown"), tk.t("window-mon-hidden")];

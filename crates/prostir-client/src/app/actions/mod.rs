@@ -58,7 +58,9 @@ impl Model {
             | Action::WindowHere
             | Action::Screenshot
             | Action::AddScale(_)
+            | Action::AddAuto
             | Action::SetScale(..)
+            | Action::ScaleAuto(_)
             | Action::FindMouse => self.act_monitors(action),
             Action::Cinema(_)
             | Action::CinemaScreen(_)
@@ -117,7 +119,8 @@ impl Model {
             | Action::DevSizeReset
             | Action::DevSuperSampling(_)
             | Action::DevSharpening(_)
-            | Action::DevMetrics(_) => self.act_dev(action),
+            | Action::DevMetrics(_)
+            | Action::DevAutoLine(_) => self.act_dev(action),
         }
         self.world_done();
     }

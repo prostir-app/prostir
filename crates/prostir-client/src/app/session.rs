@@ -116,6 +116,7 @@ impl Model {
                                 .f("headset-toast-profile-switched", &[("name", name.into())]);
                             let note = Note::done(Some(Action::ApplyProfile(slot)), &text);
                             self.tell(note, true, true);
+                            self.profile_scales(pc, slot, &ids);
                             let keys = ids.into_iter().map(|id| DisplayKey::new(pc, id)).collect();
                             self.world
                                 .profile_made(keys, &self.settings, self.head.1, now);
@@ -160,10 +161,14 @@ impl Model {
                     return;
                 };
                 // What waited for an answer gets none, nor do the commands of that PC.
-                for (req, _) in gone.waited {
-                    self.given_up(pc, req, ui::Failure::Disconnected);
+                for (req, what) in gone.waited {
+                    // Auto's own asks were nobody's press: nothing said.
+                    if !matches!(what, ui::Asked::AutoScale(_)) {
+                        self.given_up(pc, req, ui::Failure::Disconnected);
+                    }
                 }
                 self.menu.notes.forget_requests(pc);
+                self.auto.forget_pc(pc);
                 self.menu.physical_asked.retain(|(k, _)| k.pc != pc);
                 self.sessions.remove(&pc);
                 self.videos.pc_ended(pc);
@@ -223,6 +228,7 @@ impl Model {
             self.saves.mark(persist::File::Settings);
         }
         self.menu.notes.forget_requests(pc);
+        self.auto.forget_pc(pc);
         // Whether the system lets the app record (the PC shows when it does not): the
         // shell looks, and says what it found as `PlatformEvent::Mic`.
         self.effects

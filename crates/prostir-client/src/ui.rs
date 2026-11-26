@@ -200,6 +200,12 @@ pub struct UiState {
     pub can_scale: bool,
     /// The scale a monitor added gets, percent.
     pub add_scale: u16,
+    /// The PC changes scales in place (its capability 17): the menu offers "Auto".
+    pub can_auto: bool,
+    /// A monitor added is in Auto (else at `add_scale`).
+    pub add_auto: bool,
+    /// The monitors in Auto.
+    pub auto: Vec<DisplayKey>,
     /// Window panels shown (detached PC windows).
     pub windows: Vec<MonitorEntry>,
     /// The PC can move the mouse (for following the gaze).
@@ -269,6 +275,8 @@ pub struct DevView {
     pub known: bool,
     /// "Reset" has something to put back.
     pub can_reset: bool,
+    /// The line Auto's scale reaches, in hundredths (see `autoscale::LINES`).
+    pub auto_line: u8,
 }
 
 /// Which control asked the PC for something: its answer is said under the button pressed
@@ -282,6 +290,8 @@ pub enum Asked {
     Physical(DisplayKey),
     /// A monitor's scale.
     Scale(DisplayKey),
+    /// A monitor's scale chosen in Auto, not by a button: nothing said in the menu.
+    AutoScale(DisplayKey),
     Sound,
     Encoding,
     DetachWindow,
@@ -393,8 +403,12 @@ pub enum Action {
     ShowPhysical(DisplayKey, bool),
     /// The scale a monitor added gets, percent.
     AddScale(u16),
+    /// A monitor added is in Auto.
+    AddAuto,
     /// Another scale for a monitor, percent.
     SetScale(DisplayKey, u16),
+    /// A monitor's scale in Auto: chosen by the headset from how large it is shown.
+    ScaleAuto(DisplayKey),
     /// "No limits": more monitors and displays than the PC advises.
     NoLimits(bool),
     SetAudio(bool),
@@ -507,6 +521,9 @@ pub enum Action {
     /// "For development": the numbers next to the monitor looked at.
     #[cfg(feature = "preview")]
     DevMetrics(bool),
+    /// "For development": the line Auto's scale reaches, in hundredths.
+    #[cfg(feature = "preview")]
+    DevAutoLine(u8),
     Close,
 }
 
@@ -3023,34 +3040,60 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
             *shorten = true;
         }
         items.push(info);
-        // Another scale, where the PC makes monitors at its scales.
+        // Another scale, where the PC makes monitors at its scales: "Auto" first where
+        // the PC changes scales in place, the scale it chose then marked.
         let scales = scales_of(s);
         if !scales.is_empty() {
-            let (y0, bw) = (y + 66.0, 92.0);
-            let n = scales.len().min(3);
+            let shown = &scales[..scales.len().min(SCALES_SHOWN)];
+            let n = shown.len() + usize::from(s.can_auto);
+            let bw = if n > 3 { 70.0 } else { 92.0 };
+            let y0 = y + 66.0;
             let label = l.t("headset-scale");
             items.push(text_in(
                 lw - n as f32 * (bw + 8.0) - 10.0,
                 text(lx, y0 + 25.0, 18.0, false, MUTED, label),
             ));
-            for (i, &scale) in scales.iter().take(3).enumerate() {
-                let r = rect(
+            let auto = s.can_auto && s.auto.contains(&m.id);
+            let at = |i: usize| {
+                rect(
                     lx + lw - 10.0 - (n - i) as f32 * (bw + 8.0) + 8.0,
                     y0,
                     bw,
                     36.0,
-                );
-                let on = m.scale == scale;
-                let action = Action::SetScale(m.id, scale);
+                )
+            };
+            if s.can_auto {
+                let action = Action::ScaleAuto(m.id);
                 let mut b = button(
-                    r,
-                    &l.f("headset-percent", &[("value", scale.into())]),
-                    if on { Style::Selected } else { Style::Normal },
-                    (!on).then_some(action),
+                    at(0),
+                    l.t("headset-scale-auto"),
+                    if auto { Style::Selected } else { Style::Normal },
+                    (!auto).then_some(action),
                 );
                 if let Item::Button { key, size, .. } = &mut b {
                     *key = Some(action);
                     *size = 17.0;
+                }
+                items.push(b);
+            }
+            for (i, &scale) in shown.iter().enumerate() {
+                let on = m.scale == scale;
+                let action = Action::SetScale(m.id, scale);
+                // In Auto: the scale it chose shows, and is still there to keep.
+                let style = match (on, auto) {
+                    (true, false) => Style::Selected,
+                    (true, true) => Style::TabOn,
+                    _ => Style::Normal,
+                };
+                let mut b = button(
+                    at(i + usize::from(s.can_auto)),
+                    &l.f("headset-percent", &[("value", scale.into())]),
+                    style,
+                    (!on || auto).then_some(action),
+                );
+                if let Item::Button { key, size, .. } = &mut b {
+                    *key = Some(action);
+                    *size = if n > 3 { 16.0 } else { 17.0 };
                 }
                 items.push(b);
             }
@@ -3135,6 +3178,9 @@ fn monitor_list(s: &UiState, items: &mut Vec<Item>, lx: f32, lw: f32, mut y: f32
     ));
     y + 52.0
 }
+
+/// Scales a row of the menu offers at most (with "Auto": six buttons).
+const SCALES_SHOWN: usize = 5;
 
 /// Scales the PC makes monitors at, where it makes them at more than one: what the
 /// menu offers.
@@ -3343,41 +3389,71 @@ fn segmented(
 fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, mut y: f32) -> f32 {
     let l = &s.texts;
     let scales = scales_of(s);
-    // The scale the new monitor gets, beside the title: small choices on its right.
-    let (sw, sgap) = (76.0, 6.0);
-    let shown = scales.len().min(3);
+    // The scale the new monitor gets, beside the title: small choices on its right,
+    // "Auto" first where the PC changes scales in place. With more than three, no
+    // word before them (the title needs the room).
+    let scales = &scales[..scales.len().min(SCALES_SHOWN)];
+    let auto = s.can_auto && !scales.is_empty();
+    let shown = scales.len() + usize::from(auto);
+    let (sw, sgap) = if shown > 3 { (58.0, 5.0) } else { (76.0, 6.0) };
     let choices_w = shown as f32 * (sw + sgap);
+    let label_w = if shown > 3 { 0.0 } else { 120.0 };
     if shown > 0 {
-        let label = l.t("headset-scale");
-        let label_w = 120.0;
-        items.push(text_in(
-            label_w,
-            text(rx + rw - choices_w - label_w, y, 17.0, false, MUTED, label),
-        ));
-        for (i, &scale) in scales.iter().take(3).enumerate() {
-            let r = rect(
+        if label_w > 0.0 {
+            let label = l.t("headset-scale");
+            items.push(text_in(
+                label_w,
+                text(rx + rw - choices_w - label_w, y, 17.0, false, MUTED, label),
+            ));
+        }
+        let at = |i: usize| {
+            rect(
                 rx + rw - choices_w + sgap + i as f32 * (sw + sgap),
                 y - 26.0,
                 sw,
                 36.0,
-            );
-            let on = s.add_scale == scale;
-            let action = Action::AddScale(scale);
+            )
+        };
+        if auto {
+            let on = s.add_auto;
+            let action = Action::AddAuto;
             let mut b = button(
-                r,
-                &l.f("headset-percent", &[("value", scale.into())]),
+                at(0),
+                l.t("headset-scale-auto"),
                 if on { Style::Selected } else { Style::Normal },
                 (!on).then_some(action),
             );
             if let Item::Button { key, size, .. } = &mut b {
                 *key = Some(action);
-                *size = 16.0;
+                *size = 15.0;
+            }
+            items.push(b);
+        }
+        for (i, &scale) in scales.iter().enumerate() {
+            let r = at(i + usize::from(auto));
+            let on = !(auto && s.add_auto) && s.add_scale == scale;
+            let action = Action::AddScale(scale);
+            // More than three: numbers alone, as the PC's window shows them.
+            let label = if shown > 3 {
+                scale.to_string()
+            } else {
+                l.f("headset-percent", &[("value", scale.into())])
+            };
+            let mut b = button(
+                r,
+                &label,
+                if on { Style::Selected } else { Style::Normal },
+                (!on).then_some(action),
+            );
+            if let Item::Button { key, size, .. } = &mut b {
+                *key = Some(action);
+                *size = if shown > 3 { 15.0 } else { 16.0 };
             }
             items.push(b);
         }
     }
     let title_room = if shown > 0 {
-        rw - choices_w - 130.0
+        rw - choices_w - label_w - 10.0
     } else {
         rw
     };
@@ -4922,6 +4998,7 @@ fn build_dev(s: &UiState, v: DevView, items: &mut Vec<Item>, x: f32, w: f32, mut
     let size = |label, size: MonitorSize, known: bool| {
         (label, Action::DevSize(size), dev.size == size, known)
     };
+    let top_of_size = y;
     segmented(
         items,
         x,
@@ -4939,6 +5016,22 @@ fn build_dev(s: &UiState, v: DevView, items: &mut Vec<Item>, x: f32, w: f32, mut
             size(l.t("headset-dev-size-85"), MonitorSize::Scale85, v.known),
         ],
     );
+    // "Reset" of the size, small on the right of its title.
+    let reset_w = 220.0;
+    let mut reset = button(
+        rect(x + w - reset_w, top_of_size - 26.0, reset_w, 36.0),
+        l.t("headset-dev-reset"),
+        if v.can_reset {
+            Style::Normal
+        } else {
+            Style::Disabled
+        },
+        v.can_reset.then_some(Action::DevSizeReset),
+    );
+    if let Item::Button { size, .. } = &mut reset {
+        *size = 16.0;
+    }
+    items.push(reset);
     if !v.known {
         items.push(text(
             x,
@@ -4973,7 +5066,8 @@ fn build_dev(s: &UiState, v: DevView, items: &mut Vec<Item>, x: f32, w: f32, mut
         Action::DevSharpening,
     );
     segmented(items, x, w, &mut y, title, options);
-    // The numbers, and "Reset" of the size on their right.
+    // The numbers, and on their right the line of Auto's scale: headset pixels a
+    // logical pixel takes at least.
     let top = y;
     let on = dev.metrics;
     segmented(
@@ -4987,16 +5081,28 @@ fn build_dev(s: &UiState, v: DevView, items: &mut Vec<Item>, x: f32, w: f32, mut
             (l.t("headset-on"), Action::DevMetrics(true), on, true),
         ],
     );
-    items.push(button(
-        rect(x + half + gap, top + 18.0, half, 48.0),
-        l.t("headset-dev-reset"),
-        if v.can_reset {
-            Style::Normal
-        } else {
-            Style::Disabled
-        },
-        v.can_reset.then_some(Action::DevSizeReset),
-    ));
+    let lines = crate::autoscale::LINES.map(|line| {
+        let label = l.t(match line {
+            85 => "headset-dev-line-85",
+            90 => "headset-dev-line-90",
+            _ => "headset-dev-line-100",
+        });
+        (
+            label,
+            Action::DevAutoLine(line),
+            v.auto_line == line,
+            v.known,
+        )
+    });
+    let mut right = top;
+    segmented(
+        items,
+        x + half + gap,
+        half,
+        &mut right,
+        l.t("headset-dev-auto-line"),
+        lines.to_vec(),
+    );
     // The PC's settings that change how text looks, as on its own page.
     let Some(pc) = &s.pc else {
         items.push(text(
@@ -5583,12 +5689,16 @@ mod tests {
             confirm_delete: None,
             can_scale: true,
             add_scale: 100,
+            can_auto: false,
+            add_auto: false,
+            auto: Vec::new(),
             active_profile: None,
             note: None,
             dev: Some(DevView {
                 dev: Dev::default(),
                 known: true,
                 can_reset: true,
+                auto_line: 85,
             }),
         }
     }
@@ -5871,6 +5981,65 @@ mod tests {
         s.can_scale = true;
         s.limits.as_mut().unwrap().scales = vec![100];
         assert!(scales(&s).is_empty());
+    }
+
+    /// Where the PC changes scales in place: "Auto" before the five scales, for the
+    /// monitor picked and for one added. In Auto, the scale chosen shows and can be
+    /// pressed to keep it; a monitor added in Auto has no scale picked.
+    #[test]
+    fn auto_before_the_scales() {
+        let buttons = |s: &UiState| -> Vec<(Action, Style, Option<Action>)> {
+            Panel::new()
+                .build(s)
+                .into_iter()
+                .filter_map(|i| match i {
+                    Item::Button {
+                        key:
+                            Some(
+                                a @ (Action::SetScale(..)
+                                | Action::AddScale(_)
+                                | Action::ScaleAuto(_)
+                                | Action::AddAuto),
+                            ),
+                        style,
+                        action,
+                        ..
+                    } => Some((a, style, action)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut s = sample_state();
+        s.tab = Tab::Monitors;
+        s.selected = Some(k(102));
+        s.monitors[1].scale = 125;
+        s.limits.as_mut().unwrap().scales = vec![100, 125, 150, 175, 200];
+        s.can_auto = true;
+        s.add_auto = true;
+        s.auto = vec![k(102)];
+        let all = buttons(&s);
+        assert_eq!(all.len(), 12, "{all:?}");
+        assert!(all.contains(&(Action::ScaleAuto(k(102)), Style::Selected, None)));
+        let chosen = Action::SetScale(k(102), 125);
+        assert!(all.contains(&(chosen, Style::TabOn, Some(chosen))));
+        assert!(all.contains(&(Action::AddAuto, Style::Selected, None)));
+        let added = Action::AddScale(100);
+        assert!(all.contains(&(added, Style::Normal, Some(added))));
+        // Not in Auto: its scale picked, Auto there to press.
+        s.auto.clear();
+        s.add_auto = false;
+        let all = buttons(&s);
+        let auto = Action::ScaleAuto(k(102));
+        assert!(all.contains(&(auto, Style::Normal, Some(auto))));
+        assert!(all.contains(&(chosen, Style::Selected, None)));
+        assert!(all.contains(&(Action::AddScale(100), Style::Selected, None)));
+        // Nothing of Auto where the PC cannot.
+        s.can_auto = false;
+        assert!(
+            buttons(&s)
+                .iter()
+                .all(|(a, ..)| !matches!(a, Action::ScaleAuto(_) | Action::AddAuto))
+        );
     }
 
     /// Every page and state, in both languages, without text that does not fit.
@@ -6188,6 +6357,22 @@ mod tests {
                 st.active_profile = Some(1);
                 st.error = Some(lang.f("headset-monitors-at-most", &[("count", 6.into())]));
                 states.push(st.clone());
+                // Auto and five scales, and three (a PC that does not give 150 % every size).
+                if tab == Tab::Monitors {
+                    for scales in [vec![100, 125, 150, 175, 200], vec![100, 125, 200]] {
+                        for auto in [true, false] {
+                            let mut a = st.clone();
+                            a.confirm_remove = None;
+                            if let Some(l) = a.limits.as_mut() {
+                                l.scales.clone_from(&scales);
+                            }
+                            a.can_auto = true;
+                            a.add_auto = auto;
+                            a.auto = if auto { vec![k(103)] } else { Vec::new() };
+                            states.push(a);
+                        }
+                    }
+                }
                 // Twenty languages, every page of them.
                 if tab == Tab::Settings(Section::Language) {
                     for page in 0..3 {

@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 mod actions;
+mod auto;
 mod gaze;
 mod hands;
 mod session;
@@ -309,6 +310,11 @@ pub struct Menu {
     pub physical_page: u8,
     /// The scale a monitor added gets, percent.
     pub add_scale: u16,
+    /// A monitor added is in Auto (where the PC changes scales in place).
+    pub add_auto: bool,
+    /// A monitor added at a scale chosen by hand, PC and request: taken out of Auto
+    /// once made.
+    pub add_fixed: Option<(PcId, ReqId)>,
     /// Displays of the PC itself asked to be shown or hidden, the last ask of each
     /// first: their switches show it until the PC answers.
     pub physical_asked: Vec<(DisplayKey, bool)>,
@@ -440,6 +446,11 @@ pub struct Model {
     palm_shown: bool,
     /// The volume shared with the PC (`None`: the app cannot set the system's).
     volume: Option<volume::SharedVolume>,
+    /// "Auto" of the monitors' scales (see `autoscale`), and its list, filled again
+    /// at each look.
+    auto: crate::autoscale::Auto,
+    auto_list: Vec<crate::autoscale::Monitor>,
+    auto_asks: Vec<(DisplayKey, u16)>,
 
     // The frame.
     /// Head position and gaze.
@@ -560,6 +571,8 @@ impl Model {
                 profile_page: 0,
                 physical_page: 0,
                 add_scale: 100,
+                add_auto: true,
+                add_fixed: None,
                 physical_asked: Vec::new(),
                 encoding_before: None,
                 sound_before: None,
@@ -584,6 +597,9 @@ impl Model {
             profiles_changed: false,
             palm_shown: false,
             volume,
+            auto: crate::autoscale::Auto::default(),
+            auto_list: Vec::new(),
+            auto_asks: Vec::new(),
             head: (Vec3::ZERO, -Vec3::Z),
             head_right: Vec3::X,
             view_eye: None,
@@ -952,6 +968,7 @@ impl Model {
         self.adding_due();
         self.world.settle(now);
         self.world_done();
+        self.auto_scale();
         self.expire_shown();
         if let Some(head) = input.head {
             self.frame(input, head);
@@ -1351,8 +1368,15 @@ impl Model {
             .filter(|d| d.is_shown_physical())
             .filter_map(|d| self.key(d.id))
             .collect();
-        self.world
-            .profile(shown, |k| self.display(k).map_or(100, |d| d.mode.scale))
+        let mut profile = self
+            .world
+            .profile(shown, |k| self.display(k).map_or(100, |d| d.mode.scale));
+        // Which are in Auto, by place (the profile's monitors are the lineup's).
+        let monitors = self.world.monitors();
+        profile.auto = (0..profile.monitors.len())
+            .filter(|&i| monitors.get(i).is_some_and(|m| self.is_auto(m.0)))
+            .collect();
+        profile
     }
 
     /// The placeholder of a monitor being added goes once its picture is there, it
@@ -1727,6 +1751,17 @@ impl Model {
             );
             return None;
         };
+        // Auto's own: nothing said in the menu.
+        if let ui::Asked::AutoScale(k) = what {
+            self.auto_scale_answered(k, outcome);
+            return Some(what);
+        }
+        // A monitor added at a scale chosen by hand leaves Auto.
+        if let (ui::Asked::AddMonitor, Outcome::Added { id }) = (what, outcome)
+            && self.menu.add_fixed.take_if(|f| *f == (pc, req)).is_some()
+        {
+            self.added_fixed(pc, *id);
+        }
         // A display of the PC asked to be shown or hidden: its switch shows what the
         // PC says again.
         if let ui::Asked::Physical(k) = what {
@@ -1858,8 +1893,12 @@ impl Model {
     /// laid out with what streams.
     fn expire_asks(&mut self) {
         let now = self.now;
-        for (pc, req, _) in self.session.expire(now) {
+        for (pc, req, what) in self.session.expire(now) {
             self.world.switch_given_up(pc, req);
+            // Auto's own asks were nobody's press: nothing said.
+            if matches!(what, ui::Asked::AutoScale(_)) {
+                continue;
+            }
             self.given_up(pc, req, ui::Failure::TimedOut);
         }
         if self.menu.notes.shown().is_some() {

@@ -281,6 +281,12 @@ pub enum Done {
         id: ScreenId,
         percent: u16,
     },
+    /// The desktop did not take monitor `id`'s new scale in place: it stays at
+    /// `percent`, the scale it has.
+    ScaleRefused {
+        id: ScreenId,
+        percent: u16,
+    },
     /// The PC's own displays, connected and on now.
     Physical(Vec<PhysicalDisplay>),
     /// The output the user works on.

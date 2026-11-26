@@ -316,11 +316,25 @@ pub fn segmented(
     selected: usize,
     enabled: bool,
 ) -> Option<usize> {
+    segmented_within(ui, tk, options, selected, enabled, f32::INFINITY)
+}
+
+/// [`segmented`], at most `within` wide: the choices narrower (less room around their
+/// labels) where they would not fit.
+pub fn segmented_within(
+    ui: &mut Ui,
+    tk: &Tk<'_>,
+    options: &[&str],
+    selected: usize,
+    enabled: bool,
+    within: f32,
+) -> Option<usize> {
     let font = tk.body_m();
     let pad = tk.th.shape.padding;
     let gap = tk.th.shape.spacing * 0.75;
+    let n = options.len() as f32;
     // Equal widths read as one control rather than a row of separate buttons.
-    let w = options
+    let label_w = options
         .iter()
         .map(|o| {
             ui.painter()
@@ -328,9 +342,9 @@ pub fn segmented(
                 .size()
                 .x
         })
-        .fold(0.0, f32::max)
-        + pad * 2.0;
-    let n = options.len() as f32;
+        .fold(0.0, f32::max);
+    let fits = ((within - gap * (n - 1.0)) / n.max(1.0)).max(label_w + pad * 0.5);
+    let w = (label_w + pad * 2.0).min(fits);
     // One allocation for the whole control keeps its order in right-to-left rows.
     let (whole, base) = ui.allocate_exact_size(
         vec2(w * n + gap * (n - 1.0), tk.th.shape.control_height),

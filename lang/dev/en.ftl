@@ -14,6 +14,10 @@ headset-dev-unknown = This headset model is not known: only the standard size.
 headset-dev-super-sampling = Layer smoothing
 headset-dev-sharpening = Layer sharpening
 headset-dev-auto = Auto
+headset-dev-auto-line = Auto: k at least
+headset-dev-line-85 = 0.85
+headset-dev-line-90 = 0.9
+headset-dev-line-100 = 1.0
 headset-dev-metrics = Numbers by the monitor
 # $rate (Number): megabits a second
 headset-dev-mbit = { $rate } Mbit/s
