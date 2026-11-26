@@ -39,7 +39,7 @@ headset-dev-take-fist = Fist
 headset-dev-take-middle = Middle pinch
 headset-dev-take-hold = Held pinch
 headset-dev-move = A monitor in the hand moves
-headset-dev-move-as-now = As now
+headset-dev-move-as-now = Along the ray
 # $power (Number): the power of the reach (1, 2, 3)
 headset-dev-move-sphere = Sphere, p = { $power }
 headset-dev-hand-look = Hands look

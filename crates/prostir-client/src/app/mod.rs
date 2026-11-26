@@ -68,8 +68,6 @@ pub const CONFIRM_FOR: Duration = Duration::from_secs(4);
 pub const TOAST_FOR: Duration = Duration::from_secs(4);
 /// How long the "where is the mouse" rings show.
 pub const FINDER_FOR: Duration = Duration::from_millis(1600);
-/// How long the gaze rests on another monitor before the mouse goes there.
-pub const GAZE_DWELL: Duration = Duration::from_millis(600);
 /// After the gaze sent the mouse somewhere, how long before it may again.
 const GAZE_AGAIN: Duration = Duration::from_millis(1500);
 /// Without a PC this long, the menu opens on its own (the connection screen).
@@ -1531,7 +1529,7 @@ impl Model {
                 let recently = self
                     .gaze_moved
                     .is_some_and(|t| now.saturating_duration_since(t) < GAZE_AGAIN);
-                if now.saturating_duration_since(since) >= GAZE_DWELL && !recently {
+                if now.saturating_duration_since(since) >= self.feel.gaze_dwell() && !recently {
                     let f = |v: f32| (v * 65535.0) as u16;
                     info!("gaze: mouse to monitor {id} at {:.2},{:.2}", uv.x, uv.y);
                     self.mouse_to(id, f(uv.x), f(uv.y));
@@ -1731,6 +1729,7 @@ impl Model {
     pub fn headset_state(&self) -> HeadsetState {
         HeadsetState {
             profiles: Some(self.profiles_part()),
+            prefs: Some(prefs_of(&self.settings, &self.feel)),
             // With its count of the headset's own changes.
             volume: self.volume.as_ref().map(volume::SharedVolume::now),
             ..headset_state(
@@ -1760,7 +1759,7 @@ impl Model {
     fn prefs_changed(&mut self) {
         let state = self.headset_state();
         self.session.set_headset(state);
-        let part = prefs_of(&self.settings);
+        let part = prefs_of(&self.settings, &self.feel);
         self.tell_all(&ClientMsg::Prefs { part });
     }
 
@@ -2059,14 +2058,14 @@ fn tab_from_code(code: u8) -> Tab {
 }
 
 /// The headset's settings the PC acts on, from `s`.
-fn prefs_of(s: &Settings) -> Prefs {
+fn prefs_of(s: &Settings, feel: &Feel) -> Prefs {
     Prefs {
         notifications: s.notifications,
         sound_from_screen: s.sound_from_screen,
         focus_mode: s.focus,
         gaze_mouse_ms: s
             .gaze_mouse
-            .then(|| u16::try_from(GAZE_DWELL.as_millis()).unwrap_or(u16::MAX)),
+            .then(|| u16::try_from(feel.gaze_dwell().as_millis()).unwrap_or(u16::MAX)),
         no_limits: s.no_limits,
     }
 }
@@ -2091,7 +2090,7 @@ pub fn headset_state(
     }
     HeadsetState {
         caps: Some(told),
-        prefs: Some(prefs_of(settings)),
+        prefs: Some(prefs_of(settings, &Feel::DEFAULT)),
         presence: Some(Presence { worn }),
         battery: battery.map(|(percent, charging)| Battery { percent, charging }),
         volume: volume

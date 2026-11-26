@@ -8,6 +8,7 @@
 
 use super::monitors::Take;
 
+#[cfg(any(test, feature = "preview"))]
 /// How the hands are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HandLook {
@@ -20,6 +21,7 @@ pub enum HandLook {
     Tips,
 }
 
+#[cfg(any(test, feature = "preview"))]
 impl HandLook {
     /// The choices, in the menu's order.
     pub const ALL: [HandLook; 5] = [
@@ -41,6 +43,7 @@ impl HandLook {
     }
 }
 
+#[cfg(any(test, feature = "preview"))]
 /// How strong the lights, rings and rays are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FxSet {
@@ -51,6 +54,7 @@ pub enum FxSet {
     Bold,
 }
 
+#[cfg(any(test, feature = "preview"))]
 impl FxSet {
     pub const ALL: [FxSet; 3] = [FxSet::Thin, FxSet::Standard, FxSet::Bold];
 
@@ -100,8 +104,44 @@ pub struct Trial {
     pub monitors: bool,
     pub take: Take,
     pub movement: Movement,
+    #[cfg(any(test, feature = "preview"))]
     pub look: HandLook,
+    #[cfg(any(test, feature = "preview"))]
     pub fx: FxSet,
+}
+
+impl Trial {
+    /// How much larger than standard each light and ring is drawn.
+    pub fn fx_size(&self) -> f32 {
+        #[cfg(any(test, feature = "preview"))]
+        return self.fx.size();
+        #[cfg(not(any(test, feature = "preview")))]
+        1.0
+    }
+
+    /// How much more opaque.
+    pub fn fx_alpha(&self) -> f32 {
+        #[cfg(any(test, feature = "preview"))]
+        return self.fx.alpha();
+        #[cfg(not(any(test, feature = "preview")))]
+        1.0
+    }
+
+    /// How opaque a hand is drawn (`near`: near a menu or a monitor it may touch).
+    pub fn hand_alpha(&self, near: bool) -> f32 {
+        #[cfg(any(test, feature = "preview"))]
+        return self.look.alpha(near);
+        #[cfg(not(any(test, feature = "preview")))]
+        if near { 0.3 } else { 1.0 }
+    }
+
+    /// Only the fingertips of the hands are drawn.
+    pub fn tips_only(&self) -> bool {
+        #[cfg(any(test, feature = "preview"))]
+        return self.look == HandLook::Tips;
+        #[cfg(not(any(test, feature = "preview")))]
+        false
+    }
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use glam::{Quat, Vec2, Vec3};
 
@@ -82,7 +82,8 @@ pub enum PcInput {
         button: MouseButton,
         down: bool,
     },
-    /// Scrolled, in 120ths of a notch (up and right positive).
+    /// Scrolled, in 120ths of a notch, as a wheel: `dy` positive scrolls up (a hand
+    /// moving up, the stick pushed forward), `dx` positive to the right.
     Scroll { id: DisplayKey, dx: i16, dy: i16 },
     /// A fingertip's touch, one slot for each hand.
     Touch {
@@ -119,6 +120,8 @@ pub(super) struct Carry {
     /// The palm's ray turned by this, so it pointed at the point taken when it was
     /// taken (the monitor does not jump to where the palm points).
     turn: Quat,
+    /// Since when the hand is not seen (it is held where it is a moment).
+    lost: Option<Instant>,
 }
 
 impl Carry {
@@ -127,6 +130,7 @@ impl Carry {
             grab,
             palm: None,
             turn: Quat::IDENTITY,
+            lost: None,
         }
     }
 
@@ -185,6 +189,8 @@ pub(super) struct Scroll {
     last_y: f32,
     moved: bool,
     acc: f32,
+    /// Since when the hand is not seen.
+    lost: Option<Instant>,
 }
 
 /// A fingertip near a monitor this frame, for the shell to draw.
@@ -245,9 +251,6 @@ impl Shared {
 fn degrees(a: Vec3, b: Vec3) -> f32 {
     a.angle_between(b).to_degrees()
 }
-
-/// A short wait drawn as a ring only once it lasted this long.
-const RING_AFTER: Duration = Duration::from_millis(150);
 
 impl Hands {
     // ---- What the shell draws ----
@@ -349,16 +352,19 @@ impl Hands {
         input: &FrameInput,
         scene: &mut impl Scene,
     ) {
-        if !self.m.modes.monitors || !self.m.modes.hands {
-            return;
-        }
+        let on = self.m.modes.monitors && self.m.modes.hands;
         let f = self.feel;
         for h in 0..2 {
-            let hand = &self.hands[h];
+            let hand = &mut self.hands[h];
             let poke = match hand.phase {
-                Phase::Poke(p) => Some(p),
-                Phase::Idle if hand.m.touch_mode && self.poke_hover[h].is_none() => None,
-                _ => continue,
+                Phase::Poke(p) if on => Some(p),
+                Phase::Idle if on && hand.m.touch_mode && self.poke_hover[h].is_none() => None,
+                // Not looked at this frame: a touch then starts only from in front,
+                // seen in the frames right before.
+                _ => {
+                    hand.m.last_z = None;
+                    continue;
+                }
             };
             let tip = input.joints[h]
                 .filter(|_| input.hands[h].is_hand)
@@ -737,7 +743,8 @@ impl Hands {
         }
         if !p.down {
             // The hand's button waits.
-            if take == Take::Hold && held >= ms(f.hold_take_ms) && turned <= f.hold_slop_deg {
+            let slop = f.hold_slop_deg.min(f.freeze_deg);
+            if take == Take::Hold && held >= ms(f.hold_take_ms) && turned <= slop {
                 self.hands[h].phase = Phase::Idle;
                 if let Some(grab) = start_grab(scene, p.id, ray) {
                     scene.haptic(h);
@@ -758,7 +765,7 @@ impl Hands {
                         down: true,
                     },
                 );
-            } else if held > RING_AFTER
+            } else if held > ms(f.ring_after_ms)
                 && let Some(at) = point
             {
                 let full = if take == Take::Hold {
@@ -833,6 +840,7 @@ impl Hands {
                     grab: self.reach(grab, ray, head, h),
                     palm: Some(gesture),
                     turn: Quat::from_rotation_arc(palm.dir, toward),
+                    lost: None,
                 });
             }
             return true;
@@ -847,6 +855,7 @@ impl Hands {
                 last_y: y,
                 moved: false,
                 acc: 0.0,
+                lost: None,
             });
             self.m.mouse_hand = Some(h);
             return true;
@@ -867,8 +876,19 @@ impl Hands {
     ) {
         let f = self.feel;
         let g = self.hands[h].m.gestures;
-        let joints = input.joints[h];
-        let (true, Some(j), false) = (g.middle.down, joints, switched) else {
+        // Not seen: held a moment, then over without a click (the gestures are not
+        // known then, so their end is no right click either).
+        let Some(j) = input.joints[h].filter(|_| !switched) else {
+            let lost = *s.lost.get_or_insert(now);
+            if switched || now.saturating_duration_since(lost) > ms(f.lost_grace_ms) {
+                self.hands[h].phase = Phase::Idle;
+            } else {
+                self.hands[h].phase = Phase::Scroll(s);
+            }
+            return;
+        };
+        s.lost = None;
+        if !g.middle.down {
             self.hands[h].phase = Phase::Idle;
             if !s.moved && g.middle.released {
                 for down in [true, false] {
@@ -885,7 +905,7 @@ impl Hands {
                 self.rings.push((s.at, now, Mark::Right));
             }
             return;
-        };
+        }
         let y = j[signals::PALM].0.y;
         if (y - s.start_y).abs() > f.scroll_start_m {
             s.moved = true;
@@ -931,6 +951,15 @@ impl Hands {
             _ => g.fist.down,
         };
         let ray = input.joints[h].map(|j| c.palm_ray(&j, head, h == 0, &f));
+        // Not seen: held where it is a moment, then let go there.
+        if ray.is_none() && !switched {
+            let lost = *c.lost.get_or_insert(now);
+            if now.saturating_duration_since(lost) <= ms(f.lost_grace_ms) {
+                self.hands[h].phase = Phase::Carry(c);
+                return;
+            }
+        }
+        c.lost = None;
         let (true, Some(ray), false) = (still, ray, switched) else {
             self.hands[h].phase = Phase::Idle;
             if scene.let_go(now, c.grab.id) {
@@ -985,6 +1014,25 @@ impl Hands {
         }
     }
 
+    /// The modes changed (in "For development"): what a hand does on a monitor by them
+    /// ends as cancelling would (a button up, a touch cancelled, a monitor carried by
+    /// the palm let go where it is), so nothing stays pressed on the PC.
+    pub(super) fn modes_changed(&mut self, now: Instant, scene: &mut impl Scene) {
+        for h in 0..2 {
+            self.end_monitor(h, Some(now), scene, true);
+            if let Phase::Carry(c) = self.hands[h].phase
+                && c.palm.is_some()
+            {
+                self.hands[h].phase = Phase::Idle;
+                scene.let_go(now, c.grab.id);
+            }
+            self.hands[h].m.touch_mode = false;
+            self.hands[h].m.last_z = None;
+        }
+        self.m.mouse_hand = None;
+        self.sync(scene);
+    }
+
     /// The one pointer: where the hand that pressed last points (else the other),
     /// unless its ray hardly moved or it moved it a moment ago.
     pub(super) fn mouse(&mut self, now: Instant, scene: &mut impl Scene) {
@@ -993,11 +1041,22 @@ impl Hands {
         }
         let f = self.feel;
         let has = |h: usize| self.hands[h].m.point.is_some();
-        let mover = self
-            .m
-            .mouse_hand
-            .filter(|&h| has(h))
-            .or_else(|| [1, 0].into_iter().find(|&h| has(h)));
+        // While the hand that pressed last still presses (a touch, a click, a scroll),
+        // the other only points, even where that hand gives no point.
+        let pressing = self.m.mouse_hand.filter(|&h| {
+            matches!(
+                self.hands[h].phase,
+                Phase::Poke(_) | Phase::RayPress(_) | Phase::Scroll(_)
+            )
+        });
+        let mover = match pressing {
+            Some(h) => Some(h).filter(|&h| has(h)),
+            None => self
+                .m
+                .mouse_hand
+                .filter(|&h| has(h))
+                .or_else(|| [1, 0].into_iter().find(|&h| has(h))),
+        };
         let Some(h) = mover else {
             return;
         };

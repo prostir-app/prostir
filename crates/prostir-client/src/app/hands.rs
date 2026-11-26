@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use glam::{Vec2, Vec3};
-use log::info;
+use log::debug;
 use prostir_proto::state::caps;
 
 use super::{By, Effect, Model, SystemCmd};
@@ -273,7 +273,7 @@ impl Scene for Model {
                 phase: TouchPhase::Move,
                 ..
             } => {}
-            other => info!("hands: {other:?} (no message to the PC yet)"),
+            other => debug!("hands: {other:?} (no message to the PC yet)"),
         }
     }
 }

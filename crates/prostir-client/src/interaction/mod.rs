@@ -508,7 +508,10 @@ impl Hands {
         };
         self.sync(scene);
         let modes = scene.modes();
-        self.m.modes = modes;
+        if modes != self.m.modes {
+            self.m.modes = modes;
+            self.modes_changed(now, scene);
+        }
         let tips = input.tips();
 
         // Step 8: each hand's gestures, and whether its fingertip touches or its ray
@@ -647,9 +650,15 @@ impl Hands {
             let hand = &mut self.hands[h];
             // One thing at a time: a hand that holds, presses or touches a monitor
             // does not touch the menu.
-            let touching = match hand.phase {
-                Phase::Idle => None,
-                Phase::Touching { drag } => Some(drag),
+            // A hand that carries something or presses a monitor does not touch the
+            // menu (one thing at a time). A pinch held on something with the
+            // fingertip coming near the menu: as before step 8, the finger is then
+            // the pointer, not the ray, so the hold takes nothing; it presses nothing
+            // either.
+            let (touching, pinching) = match hand.phase {
+                Phase::Idle => (None, false),
+                Phase::Touching { drag } => (Some(drag), false),
+                Phase::Pressed { .. } => (None, true),
                 _ => {
                     hand.last_z = None;
                     continue;
@@ -685,13 +694,19 @@ impl Hands {
             let inside = l.x.abs() <= half_w && l.y.abs() <= half_h;
             if !inside || l.z > f.poke_hover_m || l.z < -f.poke_behind_m {
                 hand.last_z = None;
-                hand.phase = Phase::Idle;
+                if !pinching {
+                    hand.phase = Phase::Idle;
+                }
                 continue;
             }
             // Near the menu, the finger is the pointer, not this hand's ray.
             self.picks[h] = None;
             let at = Vec2::new(l.x, l.y);
             self.poke_hover[h] = Some((at, l.z));
+            if pinching {
+                hand.last_z = Some(l.z);
+                continue;
+            }
             let mut pressed = touching.is_some();
             if pressed && l.z > f.poke_release_m {
                 pressed = false;

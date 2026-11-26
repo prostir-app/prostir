@@ -10,7 +10,6 @@ use glam::Vec3;
 
 use crate::app::Model;
 use crate::ids::Thing;
-use crate::interaction::trial::HandLook;
 use crate::interaction::{FrameInput, Hands, INDEX_TIP, Mark};
 use crate::layout;
 use crate::platform::openxr::overlay::{self, Sphere};
@@ -33,7 +32,7 @@ pub fn fill(
     let world = model.world();
     let settings = *model.settings();
     let trial = model.trial();
-    let (size, strength) = (trial.fx.size(), trial.fx.alpha());
+    let (size, strength) = (trial.fx_size(), trial.fx_alpha());
     let rgba = |c: [f32; 3], a: f32| [c[0], c[1], c[2], (a * strength).min(1.0)];
     spheres.clear();
     // Light on the menu where a fingertip is about to touch: wide and faint from a
@@ -184,8 +183,8 @@ pub fn fill(
             .wrist()
             .is_some_and(|w| w.position.distance(tip) < 0.15);
         let near = near_palm || hands.poking(h) || hands.near_monitor(h).is_some();
-        let alpha = trial.look.alpha(near);
-        if trial.look == HandLook::Tips {
+        let alpha = trial.hand_alpha(near);
+        if trial.tips_only() {
             overlay::tip_spheres(&j, alpha, spheres);
         } else {
             overlay::hand_spheres(&j, alpha, spheres);

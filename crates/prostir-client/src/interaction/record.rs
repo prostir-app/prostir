@@ -36,10 +36,13 @@ use super::trial::Movement;
 /// The first line of a recording.
 pub const FORMAT: &str = "prostir-input 1";
 /// How long "Record the input" records.
+#[cfg(any(test, feature = "preview"))]
 pub const RECORD_FOR: Duration = Duration::from_secs(30);
 /// The most frames a second it keeps room for.
+#[cfg(any(test, feature = "preview"))]
 const RATE_MAX: u32 = 120;
 /// The most bytes one frame takes.
+#[cfg(any(test, feature = "preview"))]
 const FRAME_MAX: usize = 4 + 1 + 4 + 36 + 2 * (2 + 24 + 8 + 26 * 16);
 
 // ---- What stood in the room ----
@@ -715,6 +718,7 @@ impl Reader<'_> {
 
 /// A recording being made: room for all of it is taken at the start, so a frame takes
 /// no memory (see the module).
+#[cfg(any(test, feature = "preview"))]
 #[derive(Debug)]
 pub struct Recorder {
     bytes: Vec<u8>,
@@ -722,6 +726,7 @@ pub struct Recorder {
     frames: u32,
 }
 
+#[cfg(any(test, feature = "preview"))]
 impl Recorder {
     /// A recording of [`RECORD_FOR`] from `now`, its head `head` (see [`head`]).
     pub fn start(now: Instant, head: &str) -> Self {

@@ -142,6 +142,9 @@ feel! {
 
     /// "Attach" under a detached window stays this long after the ray left it.
     attach_linger_ms: 1200.0, 0.0, 10000.0;
+    /// The mouse goes where the user looks after the gaze rests this long (the PC is
+    /// told it with the settings it acts on).
+    gaze_dwell_ms: 600.0, 100.0, 5000.0;
 
     // ---- Step 8: touching a monitor like a touchscreen ----
 
@@ -198,7 +201,7 @@ feel! {
     /// "Hold" takes after a pinch held this long...
     hold_take_ms: 500.0, 100.0, 3000.0;
     /// ...with the ray turned no more than this.
-    hold_slop_deg: 2.0, 0.1, 10.0;
+    hold_slop_deg: 1.5, 0.1, 10.0;
     /// A middle pinch closes when thumb and middle tips come this near...
     middle_on_m: 0.015, 0.002, 0.06;
     /// ...and opens when they are this far apart.
@@ -214,8 +217,8 @@ feel! {
 
     // ---- What is shown ----
 
-    /// A wave where a click or a touch was spreads this long.
-    wave_ms: 400.0, 50.0, 3000.0;
+    /// A press held still shows a ring closing in only once it lasted this long.
+    ring_after_ms: 150.0, 0.0, 2000.0;
     /// A controller's vibration: how strong (0 to 1).
     haptic_amplitude: 0.4, 0.0, 1.0;
     /// And how long.
@@ -337,6 +340,10 @@ impl Feel {
 
     pub fn attach_linger(&self) -> Duration {
         ms(self.attach_linger_ms)
+    }
+
+    pub fn gaze_dwell(&self) -> Duration {
+        ms(self.gaze_dwell_ms)
     }
 }
 

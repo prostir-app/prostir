@@ -50,6 +50,12 @@ fn stage() -> Stage {
             piece(2, Vec3::new(1.4, 1.6, -1.1), 1.0, 0.56, false),
             piece(5, Vec3::new(-1.2, 1.7, -1.0), 0.5, 0.4, true),
             piece(3, Vec3::new(0.45, 1.0, -0.5), 0.5, 0.3, false),
+            Piece {
+                thing: Thing::Keyboard,
+                place: placed(Vec3::new(0.0, 0.75, -0.45), 0.4),
+                height: 0.15,
+                window: false,
+            },
         ],
     )
 }
@@ -424,7 +430,95 @@ fn scripts() -> Vec<(&'static str, Script)> {
         s.finger(0, 6, on - n * 0.004, on + n * 0.1);
     });
     monitor_scripts(&mut out);
+    review_scripts(&mut out);
     out
+}
+
+/// What a review of step 8.1 asked for: a fingertip passing the menu while a hand
+/// carries or holds a pinch, the keyboard window, the menu toggled under a pinch, a
+/// middle pinch losing the hand a frame, a touch coming from behind a monitor.
+fn review_scripts(out: &mut Vec<(&'static str, Script)>) {
+    let mut add = |name, f: &dyn Fn(&mut Script)| {
+        let mut s = Script::new();
+        f(&mut s);
+        out.push((name, s));
+    };
+    let m = stage().menu;
+    let n = m.rotation * Vec3::Z;
+    // Joints with the index fingertip at `tip`.
+    let at = |tip: Vec3| tip_joints(tip + Vec3::new(0.0, -0.05, 0.08), tip);
+    add("carry-past-the-menu", &move |s| {
+        // A pinch held on monitor 1 takes it; then the fingertip passes 2 cm in front
+        // of the menu's button and away.
+        s.hand(1, true)
+            .ray(1, monitor(1))
+            .joints(1, Some(&at(Vec3::new(0.3, 1.2, -0.2))));
+        s.frames(2).select(1, 1.0).frames(35);
+        for i in 0..=10 {
+            let tip = m.position + n * 0.02 + Vec3::new(0.03 * (i as f32 - 5.0), 0.0, 0.0);
+            s.joints(1, Some(&at(tip))).frames(1);
+        }
+        s.joints(1, Some(&at(Vec3::new(0.3, 1.2, -0.2)))).frames(2);
+        s.select(1, 0.0).frames(3);
+    });
+    add("pinch-held-drifting-onto-the-menu", &move |s| {
+        // A pinch held on monitor 1 while the fingertip drifts 3 cm in front of the
+        // menu: the finger is the pointer then, so the hold takes nothing.
+        s.hand(1, true)
+            .ray(1, monitor(1))
+            .joints(1, Some(&at(m.position + n * 0.03)));
+        s.frames(2)
+            .select(1, 1.0)
+            .frames(40)
+            .select(1, 0.0)
+            .frames(3);
+    });
+    add("keyboard-window", &|s| {
+        let k = stage()
+            .piece(Thing::Keyboard)
+            .expect("there")
+            .place
+            .position;
+        s.ray(1, k).frames(2).grab(1, 1.0).frames(2);
+        s.sweep(1, 10, Vec3::new(0.003, 0.0, 0.0));
+        s.grab(1, 0.0).frames(2);
+    });
+    add("menu-toggled-during-a-pending-pinch", &|s| {
+        // A pinch on a menu button; the menu closed and opened by the controller's
+        // menu button meanwhile: the pinch opening clicks nothing.
+        s.hand(1, true)
+            .ray(1, menu_button())
+            .frames(2)
+            .select(1, 1.0)
+            .frames(3);
+        s.input.menu_button = true;
+        s.frames(2);
+        s.input.menu_button = true;
+        s.frames(2).select(1, 0.0).frames(3);
+    });
+    let palm = Vec3::new(0.0, 1.3, -0.3);
+    add("monitors-middle-pinch-loses-a-frame", &move |s| {
+        s.monitors(Take::Fist).pose(1, palm, Pose::Open);
+        s.ray_from(1, palm, monitor(1)).frames(3);
+        s.pose(1, palm, Pose::Middle).frames(3);
+        // The hand not seen for a frame, then seen still pinching.
+        s.joints(1, None).frames(1);
+        s.pose(1, palm, Pose::Middle).frames(3);
+        s.pose(1, palm, Pose::Open).frames(3);
+    });
+    add("monitors-touch-from-behind", &|s| {
+        // In front of the small monitor, then away (the ray back), then right behind
+        // its surface and on through it: no touch, it came from behind.
+        let palm_for = |tip: Vec3| tip - Vec3::new(0.025, 0.0, -0.1);
+        s.monitors(Take::Hold);
+        for z in [0.12, 0.08, 0.03, 0.03] {
+            s.pose(1, palm_for(before_near(z)), Pose::Point).frames(1);
+        }
+        s.pose(1, palm_for(before_near(0.4)), Pose::Point).frames(3);
+        for z in [-0.01, -0.004, -0.002, 0.03] {
+            s.pose(1, palm_for(before_near(z)), Pose::Point).frames(1);
+        }
+    });
 }
 
 /// How a hand is held in a script.
@@ -606,12 +700,16 @@ fn the_scripts_play_as_they_did() {
         let rec = Recording::read(&script.recording()).expect("read back");
         assert_eq!(rec.frames.len(), script.frames.len(), "{name}");
         let journal = replay(&rec, Instant::now());
-        assert!(
-            !journal.is_empty() || name == "hands-typing",
-            "{name}: nothing"
-        );
-        if name == "hands-typing" {
-            assert!(journal.is_empty(), "typing did something: {journal:?}");
+        // These do nothing, on purpose.
+        let quiet = [
+            "hands-typing",
+            "pinch-held-drifting-onto-the-menu",
+            "monitors-touch-from-behind",
+        ];
+        if quiet.contains(&name) {
+            assert!(journal.is_empty(), "{name} did something: {journal:?}");
+        } else {
+            assert!(!journal.is_empty(), "{name}: nothing");
         }
         // What each of step 8's scripts must come to, whatever its numbers.
         let has = |what: &str| journal.iter().any(|l| l.contains(what));
@@ -625,6 +723,10 @@ fn the_scripts_play_as_they_did() {
             "monitors-trigger-and-stick" => &["left down", "left up", "scroll display 1"],
             "monitors-fist-takes" => &["take display 2", "drag display 2", "let-go display 2"],
             "monitors-middle-pinch-scrolls" => &["scroll display 1", "right down", "right up"],
+            "carry-past-the-menu" => &["take display 1", "let-go display 1"],
+            "keyboard-window" => &["take keyboard", "drag keyboard", "let-go keyboard"],
+            "menu-toggled-during-a-pending-pinch" => &["menu closed", "menu open"],
+            "monitors-middle-pinch-loses-a-frame" => &["right down", "right up"],
             _ => &[],
         };
         for what in wanted {
@@ -632,6 +734,13 @@ fn the_scripts_play_as_they_did() {
         }
         if name == "monitors-held-pinch-takes" {
             assert!(!has("left down"), "{name}: a take is no click");
+        }
+        if name == "carry-past-the-menu" || name == "menu-toggled-during-a-pending-pinch" {
+            assert!(!has("press-menu"), "{name}: the menu pressed");
+        }
+        if name == "monitors-middle-pinch-loses-a-frame" {
+            let rights = journal.iter().filter(|l| l.contains("right down")).count();
+            assert_eq!(rights, 1, "{name}: {journal:#?}");
         }
         if name == "monitors-touch-through" {
             assert!(!has("touch up"), "{name}: pushed through is no tap");
@@ -790,4 +899,95 @@ fn one_pointer_follows_the_hand_that_pressed_last() {
     let moves: Vec<&String> = journal.iter().filter(|l| l.contains("mouse")).collect();
     let last = moves.last().expect("the mouse moved");
     assert!(last.contains("display 1"), "{journal:#?}");
+}
+
+/// Each frame of `script` played against the stage, `between` done to the hands and
+/// the stage before frame `i`: the journal.
+fn play_with(
+    script: &Script,
+    between: impl Fn(usize, &mut super::super::Hands, &mut Stage),
+) -> Vec<String> {
+    let start = Instant::now();
+    let mut hands = super::super::Hands::new();
+    let mut stage = stage();
+    stage.modes = script.modes;
+    let mut menus = StageMenus;
+    for (i, (t, input)) in script.frames.iter().enumerate() {
+        let now = start + *t;
+        stage.at(start, now);
+        between(i, &mut hands, &mut stage);
+        hands.buttons(now, input, &mut stage);
+        hands.step(now, input, &mut stage, &mut menus);
+    }
+    stage.journal()
+}
+
+/// The hands no longer the app's (the system menu) mid-touch and mid-click: the touch
+/// is cancelled, the button let go, nothing stays pressed.
+#[test]
+fn cancelling_ends_what_presses_a_monitor() {
+    let palm_for = |tip: Vec3| tip - Vec3::new(0.025, 0.0, -0.1);
+    let mut s = Script::new();
+    s.monitors(Take::Hold);
+    for i in 0..=10 {
+        let z = 0.12 - 0.0124 * i as f32;
+        s.pose(1, palm_for(before_near(z)), Pose::Point).frames(1);
+    }
+    s.frames(3);
+    let journal = play_with(&s, |i, hands, stage| {
+        if i == 12 {
+            hands.cancel_all(stage);
+        }
+    });
+    let text = journal.join("\n");
+    assert!(
+        text.contains("touch down") && text.contains("touch cancel"),
+        "{text}"
+    );
+    assert!(!text.contains("touch up"), "{text}");
+    assert!(text.contains("cancel-holds"), "{text}");
+
+    let mut s = Script::new();
+    s.monitors(Take::Hold)
+        .ray(1, monitor(1))
+        .frames(2)
+        .select(1, 1.0)
+        .frames(6);
+    let journal = play_with(&s, |i, hands, stage| {
+        if i == 5 {
+            hands.cancel_all(stage);
+        }
+    });
+    let text = journal.join("\n");
+    assert!(
+        text.contains("left down") && text.contains("left up"),
+        "{text}"
+    );
+}
+
+/// The modes turned off in the middle of a click or a touch: the button goes up, the
+/// touch is cancelled, the hands are not busy.
+#[test]
+fn turning_the_modes_off_mid_press_lets_go() {
+    let mut s = Script::new();
+    s.monitors(Take::Hold)
+        .ray(1, monitor(1))
+        .frames(2)
+        .select(1, 1.0)
+        .frames(6);
+    let busy = std::cell::Cell::new(true);
+    let journal = play_with(&s, |i, hands, stage| {
+        if i == 5 {
+            stage.modes = Modes::default();
+        }
+        if i == 7 {
+            busy.set(hands.busy());
+        }
+    });
+    let text = journal.join("\n");
+    assert!(
+        text.contains("left down") && text.contains("left up"),
+        "{text}"
+    );
+    assert!(!busy.get(), "busy after the modes went off");
 }
