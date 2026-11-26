@@ -475,8 +475,8 @@ impl Worker {
                 if tuning.1 != self.tuning.unwrap_or_default().1 {
                     e.set_sharp(wanted.encoding.sharp);
                 }
-                let (kbps, sharpens) = e.tuned();
-                self.shared.router.set_tuning(id, kbps, sharpens);
+                let (kbps, sharpens, slowed) = e.tuned();
+                self.shared.router.set_tuning(id, kbps, sharpens, slowed);
             }
         }
         self.tuning = Some(tuning);
