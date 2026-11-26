@@ -878,6 +878,49 @@ fn line_up_of_two_wide_ones_at_one_to_one_cuts_nothing() {
     assert_eq!(desk.cutting(), [], "lined up again");
 }
 
+/// The same desk as laid out with another machine's libm (Ubuntu 24.04's glibc: the
+/// last bits of a sine differ, and the 2560x1440 and the second 5120x1440 go into rows
+/// above): "Line up" put the row of the first two behind the user, facing away, and the
+/// 2560x1440 brought into view into them. A row's directions round the axis follow its
+/// order now (`prostir_layout::tidy`), so it stays in front.
+#[test]
+fn line_up_of_a_wide_pair_keeps_it_in_front() {
+    let mut desk = Trial::of_on(
+        &[(1920, 1080), (5120, 1440), (2560, 1440), (5120, 1440)],
+        &SIZES,
+        Some(25.0),
+    );
+    let laid: [([f32; 3], [f32; 4]); 4] = [
+        (
+            [0.79133916, -0.08, -0.45687988],
+            [0.0, -0.5, 0.0, 0.8660254],
+        ),
+        (
+            [-0.24443188, -0.08, 0.49741372],
+            [0.0, 0.97403574, 0.0, 0.2263943],
+        ),
+        ([0.0, 1.8562664, -0.8202252], [0.0, 0.0, 0.0, 1.0]),
+        (
+            [-0.30855715, 0.45951003, -0.46039137],
+            [0.0, 0.29095465, 0.0, 0.95673686],
+        ),
+    ];
+    for (n, p) in &mut desk.sim.world.placements {
+        let (position, rotation) = laid[n.id.0 as usize - 1];
+        p.position = Vec3::from_array(position);
+        p.rotation = Quat::from_array(rotation);
+    }
+    assert_eq!(desk.cutting(), [], "laid out");
+    for again in [false, true] {
+        desk.line_up();
+        desk.sim.after(1000);
+        assert_eq!(desk.cutting(), [], "lined up (again: {again})");
+        for (n, p) in &desk.sim.world.placements {
+            assert!(p.normal().dot(-p.position) > 0.0, "{n} faces away: {p:?}");
+        }
+    }
+}
+
 /// Each step on its own with monitors far wider than the circle (5120x1440) among
 /// them: nothing cuts, and the PC's own displays stay glued.
 #[test]

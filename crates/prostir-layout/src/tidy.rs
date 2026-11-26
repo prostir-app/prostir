@@ -868,12 +868,17 @@ fn straighten<K: Copy + Ord>(row: &[(K, Placement, PixelSize)]) -> Vec<(K, Place
     let tallest = poses.iter().map(|p| p.height).fold(0.0f32, f32::max);
     let half = |w: f32| f64::from((w / 2.0 / radius).min(1.0).asin());
     let half_in = |w: f32| f64::from(cone_half(radius, w, tallest, tilt));
-    // Directions around the axis, each near the one before it in the row, so the row
-    // keeps its own order and ends (as its rows say, left to right).
+    // Directions around the axis, each near where the row's order puts it, side by side
+    // to the right of the one before, so the row keeps its own order and ends (as its
+    // rows say, left to right). Near the one before instead, a monitor of a wide pair
+    // (a 5120x1440 close by takes a third of the circle) may be nearer it round the
+    // other way: the mean direction of the row then lands behind the user.
     let mut az: Vec<f64> = Vec::with_capacity(row.len());
-    for p in &poses {
+    for (i, p) in poses.iter().enumerate() {
         let a = f64::from(p.centre.x).atan2(f64::from(-p.centre.z));
-        az.push(az.last().map_or(a, |&before| unwrap(a, before)));
+        az.push(az.last().map_or(a, |&before| {
+            unwrap(a, before + half_in(poses[i - 1].width) + half_in(p.width))
+        }));
     }
     // Side by side from `start` in that order, the mean direction kept.
     let mut offsets = vec![0.0f64; row.len()];
