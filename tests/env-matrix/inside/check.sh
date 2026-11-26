@@ -195,6 +195,7 @@ if command -v wayland-info >/dev/null; then
     wayland-info >"$OUT/registry.txt" 2>&1
     for p in zkde_screencast_unstable_v1 org_kde_kwin_outputdevice kde_output_device_v2 \
         kde_output_management_v2 zwlr_screencopy_manager_v1 ext_image_copy_capture_manager_v1 \
+        ext_output_image_capture_source_manager_v1 \
         zwlr_output_manager_v1 zxdg_output_manager_v1 zwlr_virtual_pointer_manager_v1 \
         org_kde_kwin_fake_input; do
         grep -q "interface: '$p'" "$OUT/registry.txt" && rep "registry_$p" yes || rep "registry_$p" no

@@ -1,5 +1,6 @@
 //! Captures an output with `wlr-screencopy` (Hyprland, Sway) and feeds the frames to
-//! the encoder's `appsrc`.
+//! the encoder's `appsrc`, with the pointer drawn in or left out (`overlay_cursor`)
+//! while `pointer.rs` tells it apart.
 //!
 //! Frames go into GPU buffers (dmabuf) allocated with a layout (modifier) the VA-API
 //! converter can read directly, so nothing is copied through the CPU. Without such a
@@ -74,12 +75,14 @@ pub struct Capture {
 
 impl Capture {
     /// Starts capturing `output` (its compositor name) into `appsrc`. While `paused`
-    /// is set nothing is captured.
+    /// is set nothing is captured; while `apart` is, frames leave the pointer out (its
+    /// session tells it, see `pointer.rs`), taken anew for each frame.
     pub fn start(
         output: String,
         appsrc: gst_app::AppSrc,
         paused: Arc<Pause>,
         dmabuf: bool,
+        apart: Arc<AtomicBool>,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let closed = Arc::new(AtomicBool::new(false));
@@ -89,7 +92,7 @@ impl Capture {
             std::thread::Builder::new()
                 .name(format!("capture-{output}"))
                 .spawn(move || {
-                    if let Err(e) = run(&output, &appsrc, &paused, &stop, dmabuf) {
+                    if let Err(e) = run(&output, &appsrc, &paused, &stop, dmabuf, &apart) {
                         warn!("capture of {output} stopped: {e:#}");
                     }
                     closed.store(true, Ordering::Relaxed);
@@ -723,6 +726,7 @@ fn run(
     paused: &Pause,
     stop: &AtomicBool,
     want_dmabuf: bool,
+    apart: &AtomicBool,
 ) -> Result<()> {
     let conn = Connection::connect_to_env().context("no Wayland display")?;
     let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
@@ -803,7 +807,9 @@ fn run(
         }
         state.frame = Frame::default();
         let asked = Instant::now();
-        let frame = manager.capture_output(1, &output, &qh, ());
+        // The pointer drawn in, or left out while its session tells it.
+        let overlay = i32::from(!apart.load(Ordering::Relaxed));
+        let frame = manager.capture_output(overlay, &output, &qh, ());
         let deadline = Instant::now() + Duration::from_secs(2);
         while !(state.frame.described || state.frame.failed) && Instant::now() < deadline {
             wait(&conn, &mut queue, &mut state, Duration::from_millis(100))?;

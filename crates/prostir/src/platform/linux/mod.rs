@@ -34,3 +34,15 @@ fn is_panel(connector: &str) -> bool {
 fn named_virtual(name: &str) -> bool {
     name.starts_with("Virtual-") || name.starts_with(hyprland::PREFIX)
 }
+
+/// Premultiplied RGBA made straight, in place (a clear pixel stays all 0).
+fn straighten(rgba: &mut [u8]) {
+    for p in rgba.as_chunks_mut::<4>().0 {
+        let a = u16::from(p[3]);
+        for c in &mut p[..3] {
+            *c = (u16::from(*c) * 255 + a / 2)
+                .checked_div(a)
+                .map_or(0, |v| v.min(255) as u8);
+        }
+    }
+}

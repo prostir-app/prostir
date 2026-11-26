@@ -306,7 +306,10 @@ pub trait Output: Send {
 
     /// The next encoder [`Output::attach`] feeds gets frames with the pointer left out
     /// (`apart`, see [`CursorSource`]) or drawn in, where the desktop makes that per
-    /// stream (KWin). Never apart for a window panel, which keeps the pointer.
+    /// stream (KWin); at once, also for the running one, where its
+    /// [`CursorSource::restarts_streams`] is false (wlroots desktops: each frame is
+    /// captured with the pointer in or out). Never apart for a window panel, which
+    /// keeps the pointer.
     fn set_cursor_apart(&mut self, _apart: bool) {}
 
     /// Makes it the primary output, where the desktop has one.
@@ -374,13 +377,14 @@ pub trait Pointer {
 
 /// The key of an output, stable while it exists: on Linux the connector name the
 /// desktop lists (`Virtual-Prostir-1`, `Prostir-2`, `eDP-1`), which does not change.
-/// A desktop whose names do change makes its own key and keeps it to itself.
+/// A desktop whose names do change makes its own key and keeps it to itself. Shared,
+/// not copied: the pointer's every move names its output.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OutputKey(String);
+pub struct OutputKey(Arc<str>);
 
 impl OutputKey {
     pub fn new(key: impl Into<String>) -> Self {
-        Self(key.into())
+        Self(key.into().into())
     }
 
     pub fn as_str(&self) -> &str {

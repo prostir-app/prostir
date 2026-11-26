@@ -1,10 +1,13 @@
 //! Hyprland: virtual monitors are headless outputs (`output create headless`), placed
-//! with monitor rules, and captured with `wlr-screencopy` (see `screencopy.rs`).
+//! with monitor rules, and captured with `wlr-screencopy` (see `screencopy.rs`); the
+//! pointer apart from the frames through `ext-image-copy-capture` (`pointer.rs`, Hyprland
+//! 0.54 and newer).
 //!
 //! Everything goes through Hyprland's IPC socket, the same one `hyprctl` uses.
 //! Monitor rules are set with Lua (`eval`) on Lua configs (Hyprland 0.53 and newer)
 //! and with `keyword` on `hyprland.conf` ones.
 
+pub mod pointer;
 pub mod screencopy;
 pub mod windows;
 
@@ -13,7 +16,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -24,10 +27,11 @@ use serde_json::Value;
 use crate::encoder::Encoder;
 use crate::platform::linux::{is_panel, named_virtual};
 use crate::platform::{
-    AddModel, Cursor, DeskPlan, Desktop, DesktopCaps, FrameSource, Geometry, GpuDevices, Memory,
-    Origin, Output, OutputHealth, OutputKey, Outputs, PhysicalDisplay, Pointer, Scales,
-    VirtualSpec, Windows,
+    AddModel, Cursor, CursorSink, CursorSource, DeskPlan, Desktop, DesktopCaps, FrameSource,
+    Geometry, GpuDevices, Memory, Origin, Output, OutputHealth, OutputKey, Outputs,
+    PhysicalDisplay, Pointer, Scales, VirtualSpec, Windows,
 };
+use pointer::{PointerSession, SinkSlot, Units};
 use screencopy::Capture;
 use windows::HyprWindows;
 
@@ -658,6 +662,8 @@ pub struct Hyprland {
     caps: DesktopCaps,
     windows: HyprWindows,
     rules: Arc<Rules>,
+    /// The pointer apart from the frames, where Hyprland offers pointer sessions.
+    cursor: Option<HyprCursor>,
     /// The graphics devices to share (wlr-screencopy hands buffers over: none taken
     /// yet).
     _gpu: GpuDevices,
@@ -688,8 +694,61 @@ impl Hyprland {
             },
             windows: HyprWindows::new(),
             rules,
+            cursor: cursor_apart().map(|()| HyprCursor::default()),
             _gpu: gpu,
         }
+    }
+}
+
+/// Whether the pointer can go apart from the frames: Hyprland offers pointer sessions
+/// (0.54 and newer), and gives Prostir the pointer's place without asking (with
+/// `ecosystem:enforce_permissions` it may not: its pictures would be black and the
+/// pointer gone). Says why not, once.
+fn cursor_apart() -> Option<()> {
+    let enforced =
+        request("j/getoption ecosystem:enforce_permissions").is_ok_and(|reply| option_on(&reply));
+    let why = if !pointer::offered() {
+        "no pointer sessions (ext-image-copy-capture, Hyprland 0.54 and newer)"
+    } else if enforced {
+        "Hyprland enforces permissions (ecosystem:enforce_permissions)"
+    } else {
+        info!("Hyprland: the pointer can go apart from the frames");
+        return Some(());
+    };
+    info!("Hyprland: the pointer stays in the frames: {why}");
+    None
+}
+
+/// Whether `getoption`'s answer (JSON) says the option is on.
+fn option_on(reply: &str) -> bool {
+    serde_json::from_str::<Value>(reply)
+        .ok()
+        .and_then(|v| v.get("int").and_then(Value::as_i64))
+        .is_some_and(|n| n != 0)
+}
+
+/// How Hyprland counts what it says of the pointer on output `name` (see
+/// [`Units::hyprland`]): its scale, and the highest one of the outputs that are on,
+/// at least 1 (Hyprland's own pointers are drawn at it).
+fn units_of(name: &str) -> Units {
+    let all = monitors();
+    let on = all.iter().filter(|m| !m.disabled);
+    let highest = on.clone().map(|m| m.scale).fold(1.0, f64::max);
+    let scale = on.clone().find(|m| m.name == name).map_or(1.0, |m| m.scale);
+    Units::hyprland(scale, highest)
+}
+
+/// The pointer apart from the frames: each output's pointer session tells the core's
+/// sink, kept here. Switching costs nothing: each frame is captured with the pointer
+/// in or out as asked then.
+#[derive(Default)]
+struct HyprCursor {
+    sink: SinkSlot,
+}
+
+impl CursorSource for HyprCursor {
+    fn set_apart(&mut self, sink: Option<CursorSink>) {
+        *self.sink.lock().unwrap() = sink;
     }
 }
 
@@ -716,11 +775,19 @@ impl Desktop for Hyprland {
 
     fn make(&mut self, spec: &VirtualSpec) -> Result<Box<dyn Output>> {
         let name = self.rules.create(spec)?;
-        Ok(Box::new(HyprOutput::new(name, Some(self.rules.clone()))))
+        Ok(Box::new(HyprOutput::new(
+            name,
+            Some(self.rules.clone()),
+            self.cursor.as_ref().map(|c| c.sink.clone()),
+        )))
     }
 
     fn show(&mut self, key: &OutputKey) -> Result<Box<dyn Output>> {
-        Ok(Box::new(HyprOutput::new(key.to_string(), None)))
+        Ok(Box::new(HyprOutput::new(
+            key.to_string(),
+            None,
+            self.cursor.as_ref().map(|c| c.sink.clone()),
+        )))
     }
 
     /// Scales of whole logical pixels only (see [`whole_pixel_scales`]).
@@ -755,6 +822,13 @@ impl Desktop for Hyprland {
     fn pointer(&mut self) -> Option<&mut dyn Pointer> {
         Some(&mut self.windows)
     }
+
+    fn cursor(&mut self) -> Option<&mut dyn CursorSource> {
+        match &mut self.cursor {
+            Some(c) => Some(c),
+            None => None,
+        }
+    }
 }
 
 /// The scales, in steps of 5 % from 50 % to 400 %, that Hyprland gives an output of
@@ -776,23 +850,37 @@ pub fn whole_pixel_scales(w: u32, h: u32) -> Scales {
 const SCALE_READ: Duration = Duration::from_secs(2);
 
 /// A headless output of ours, or a display of the PC, captured with wlr-screencopy.
+///
+/// While the pointer is apart (and it is no window panel), its pointer session tells
+/// the pointer and has the capture leave it out of the frames; it runs while the
+/// output does, whatever its encoder does.
 struct HyprOutput {
     key: OutputKey,
+    // Field order matters: the pointer session ends before the capture.
+    pointer: Option<PointerSession>,
     capture: Option<Capture>,
     /// Ours (removed when dropped, with its rule), not a display of the PC shown as it
     /// is.
     owned: Option<Arc<Rules>>,
     /// When Hyprland was last asked for its scale, and what it said.
     scale_read: Cell<(Option<Instant>, Option<u16>)>,
+    /// The core's sink for the pointer, where Hyprland offers pointer sessions.
+    cursor: Option<SinkSlot>,
+    /// The frames leave the pointer out (its session says so while the headset draws
+    /// it), read for each frame.
+    apart: Arc<AtomicBool>,
 }
 
 impl HyprOutput {
-    fn new(name: String, owned: Option<Arc<Rules>>) -> Self {
+    fn new(name: String, owned: Option<Arc<Rules>>, cursor: Option<SinkSlot>) -> Self {
         Self {
             key: OutputKey::new(name),
+            pointer: None,
             capture: None,
             owned,
             scale_read: Cell::new((None, None)),
+            cursor,
+            apart: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -800,6 +888,7 @@ impl HyprOutput {
 impl Drop for HyprOutput {
     fn drop(&mut self) {
         // Stop capturing before the output goes away.
+        self.pointer.take();
         self.capture.take();
         if let Some(rules) = &self.owned {
             rules.remove(self.key.as_str());
@@ -848,7 +937,11 @@ impl Output for HyprOutput {
             origin: Origin::Capture,
             // GPU buffers for an encoder that takes them, else shared memory.
             memory: Memory::DmaBuf,
-            cursor: Cursor::InFrame,
+            cursor: if self.pointer.is_some() {
+                Cursor::Separate
+            } else {
+                Cursor::InFrame
+            },
         }
     }
 
@@ -861,8 +954,29 @@ impl Output for HyprOutput {
             appsrc,
             encoder.paused(),
             encoder.takes_dmabuf(),
+            self.apart.clone(),
         )?);
         Ok(())
+    }
+
+    /// At once, also for the running capture: its session starts or ends (without
+    /// pointer sessions the pointer stays in the frames).
+    fn set_cursor_apart(&mut self, apart: bool) {
+        let Some(sink) = self.cursor.clone().filter(|_| apart) else {
+            self.pointer = None;
+            return;
+        };
+        if self.pointer.is_some() {
+            return;
+        }
+        let name = self.key.to_string();
+        let units = {
+            let name = name.clone();
+            Box::new(move || units_of(&name))
+        };
+        self.pointer = PointerSession::start(name, sink, self.apart.clone(), units)
+            .inspect_err(|e| warn!("{}: no pointer session: {e:#}", self.key))
+            .ok();
     }
 
     fn detach(&mut self) {
@@ -896,6 +1010,29 @@ mod tests {
         "refreshRate":120.00000,"x":0,"y":0,"scale":2.0,"focused":false,"disabled":false},
         {"id":1,"name":"Prostir-1","width":2560,"height":1440,"refreshRate":60.0,
         "x":1440,"y":0,"scale":1.0,"focused":true,"disabled":false}]"#;
+
+    /// `getoption` as Hyprland answers it.
+    #[test]
+    fn reads_whether_an_option_is_on() {
+        assert!(option_on(
+            r#"{"option": "ecosystem:enforce_permissions", "int": 1, "set": true}"#
+        ));
+        assert!(!option_on(
+            r#"{"option": "ecosystem:enforce_permissions", "int": 0, "set": false}"#
+        ));
+        assert!(!option_on("no such option"));
+    }
+
+    /// Without pointer sessions the pointer stays in the frames: asked apart, an
+    /// output starts none and its frames keep the pointer.
+    #[test]
+    fn without_pointer_sessions_the_pointer_stays_in_the_frames() {
+        let mut output = HyprOutput::new(output_name(1), None, None);
+        output.set_cursor_apart(true);
+        assert!(output.pointer.is_none());
+        assert_eq!(output.source().cursor, Cursor::InFrame);
+        assert!(!output.apart.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn other_tools_headless_outputs_are_virtual() {

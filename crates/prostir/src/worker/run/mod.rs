@@ -505,6 +505,17 @@ impl Worker {
         });
         source.set_apart(sink);
         self.cursor_restarts = source.restarts_streams();
+        // Where that reaches the running streams, each output switches now (a window
+        // panel keeps the pointer).
+        if !self.cursor_restarts {
+            for slot in self.slots.values_mut() {
+                let panel = slot.is_panel();
+                if let Some(output) = slot.output.as_mut() {
+                    output.set_cursor_apart(apart && !panel);
+                    slot.cursor_apart = apart;
+                }
+            }
+        }
         self.shared.steps.end();
         self.cursor_apart = apart;
         info!(
