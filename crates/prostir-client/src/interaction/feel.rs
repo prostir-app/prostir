@@ -84,6 +84,12 @@ feel! {
     /// And a hand's move counts as reaching in or out only while it goes this many
     /// times faster towards or away from the shoulder than across.
     reach_dominance: 1.5, 1.0, 5.0;
+    /// Moving on a sphere, the hand's place is smoothed (one-euro): held still, its
+    /// tremor is let through only below this many hertz...
+    carry_smooth_hz: 1.0, 0.05, 30.0;
+    /// ...and the faster it moves, the less it lags: this many hertz more for each
+    /// centimetre a second.
+    carry_smooth_beta: 0.2, 0.0, 2.0;
     /// What a hand holds is never nearer than this.
     distance_min_m: 0.3, 0.1, 2.0;
     /// Nor further than this.
