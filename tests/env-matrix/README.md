@@ -34,4 +34,22 @@ and the logs of every process into `~/.cache/prostir-build/envmatrix-out/NAME-CO
 Build output goes to `~/.cache/prostir-build/target-envmatrix/NAME` (delete it
 when done); `ENVMATRIX_CACHE` moves both.
 
-`inside/` holds what runs in the container: `build.sh`, `check.sh`.
+`inside/` holds what runs in the container: `build.sh`, `check.sh`, `cursor.sh`.
+
+The pointer apart from the frames on wlroots desktops (`cursor.sh`): the PC app's unit
+tests, built on the host (`cargo test -p prostir --bin prostir --no-run` prints where),
+run the pointer session against a compositor in the container; Sway is installed for
+the check (it needs the network) and copied, as Arch gives it file capabilities a
+rootless container cannot run:
+
+```sh
+podman run --rm --security-opt label=disable -v "$PWD/tests/env-matrix/inside:/inside:ro" \
+    -v DIR_WITH_prostir-test:/t:ro localhost/prostir-em-fedora43 bash -c \
+    'dnf install -y -q sway wayland-utils && cp "$(command -v sway)" /usr/local/bin/ && bash /inside/cursor.sh sway'
+```
+
+2026-11-26: Sway 1.10.1 (Debian 13) has no pointer sessions (the pointer stays in the
+frames); Sway 1.11 (Fedora 43) and 1.12 (Arch) have them, and the sessions tell the
+look (24x24 and 10x16) and every move, over the edge of two outputs in order (on the
+next one, then off the last). Hyprland 0.57.2 does not start in a container (no KMS
+device), so it is not checked here.

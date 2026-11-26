@@ -72,7 +72,8 @@ wayland-client = { version = "0.31", optional = true }
 wayland-protocols-plasma = { version = "0.3", features = ["client"], optional = true }
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"], optional = true }
 zbus.workspace = true
-wayland-protocols = { version = "0.32", features = ["client", "unstable"], optional = true }
+# `staging`: `ext-image-copy-capture`, the pointer apart on wlroots desktops.
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"], optional = true }
 gbm = { version = "0.18.0", default-features = false, optional = true }
 gstreamer-allocators = { version = "0.25", features = ["v1_16"], optional = true }
 # KWin's streams read straight from PipeWire (not through `pipewiresrc`), with the
