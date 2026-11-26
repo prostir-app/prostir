@@ -239,6 +239,8 @@ pub struct UiState {
     pub confirm_remove: Option<DisplayKey>,
     /// A profile whose "Save here" was pressed once (press again to overwrite).
     pub confirm_save: Option<usize>,
+    /// "Reset" of the layout was pressed once and now asks for confirmation.
+    pub confirm_reset: bool,
     /// A profile whose "×" was pressed once (press again to delete it).
     pub confirm_delete: Option<usize>,
     pub tab: Tab,
@@ -453,6 +455,9 @@ pub enum Action {
     Tab(Tab),
     /// Lay everything out again in front of the user, where they look now.
     Recenter,
+    /// Put the arrangement back as the layout makes it, in front of the user, the
+    /// monitors at their standard size (from the menu, the second press confirms).
+    ResetArrangement,
     /// The first-run tips were read.
     IntroDone,
     Language(Language),
@@ -3548,13 +3553,37 @@ fn build_monitor_options(s: &UiState, items: &mut Vec<Item>, rx: f32, rw: f32, m
     }
 
     let st = s.settings;
+    // "Reset" beside the title: the arrangement as the layout makes it (asks again
+    // first).
+    let reset_w = 220.0;
+    let (label, style) = if s.confirm_reset {
+        (l.t("headset-layout-reset-confirm"), Style::Armed)
+    } else {
+        (l.t("headset-layout-reset"), Style::Normal)
+    };
+    let mut b = button(
+        rect(rx + rw - reset_w, y - 30.0, reset_w, 40.0),
+        label,
+        style,
+        Some(Action::ResetArrangement),
+    );
+    if let Item::Button { size, .. } = &mut b {
+        *size = size.min(17.0);
+    }
+    items.push(b);
+    items.push(text_in(
+        rw - reset_w - 16.0,
+        text(rx, y, 21.0, true, SECTION, l.t("headset-layout")),
+    ));
+    // The title is drawn: the choices where `segmented` puts them under one.
+    y += 48.0;
     let layouts = items.len();
     segmented(
         items,
         rx,
         rw,
         &mut y,
-        l.t("headset-layout"),
+        "",
         vec![
             (
                 l.t("headset-layout-around"),
@@ -5899,6 +5928,7 @@ mod tests {
             error: None,
             confirm_remove: None,
             confirm_save: None,
+            confirm_reset: false,
             tab: Tab::Monitors,
             texts: crate::lang::builtin("uk"),
             languages: languages(),
@@ -6577,6 +6607,7 @@ mod tests {
                     d.connected = true;
                 }
                 st.confirm_delete = Some(1);
+                st.confirm_reset = true;
                 st.active_profile = Some(1);
                 st.error = Some(lang.f("headset-monitors-at-most", &[("count", 6.into())]));
                 states.push(st.clone());

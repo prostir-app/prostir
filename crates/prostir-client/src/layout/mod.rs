@@ -5,7 +5,7 @@
 //! make and the PC desktop made of those is `prostir_layout`, the code the PC runs too;
 //! here the headset's state goes in and out of it. Pure functions, by topic: where a
 //! ray meets a monitor ([`hit`]), the magnet ([`stick`]), the presets, a new monitor
-//! and "Line up" ([`arrange`]), cinema ([`cinema`]), a thing held ([`grab`]), the PC's
+//! and "Line up" ([`arrange`]), cinema ([`cinema`]), a thing held ([`grab`]), where a monitor may stand ([`limit`]), the PC's
 //! desktop ([`desktop`]), the order of drawing ([`draw`]) and the files ([`saved`]).
 
 #![forbid(unsafe_code)]
@@ -16,6 +16,7 @@ mod desktop;
 mod draw;
 mod grab;
 mod hit;
+mod limit;
 mod saved;
 mod stick;
 #[cfg(test)]
@@ -36,6 +37,7 @@ pub use hit::{
     Against, Cylinder, Hit, Ray, against, hit, hit_surface, image_frame, image_point, image_uv,
     image_width,
 };
+pub use limit::{Bounds, Keep, limit, within};
 pub use prostir_layout::space::cuts;
 pub use saved::{Arrangement, Desk, PixelSize, parse_keyboard, write_keyboard};
 pub(crate) use saved::{parse_place, parse_radius, parse_tilt, placed_well, upright, write_place};

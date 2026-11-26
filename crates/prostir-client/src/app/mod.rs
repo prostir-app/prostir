@@ -317,6 +317,8 @@ pub struct Menu {
     pub confirm_remove: Option<(DisplayKey, Instant)>,
     /// "Save here" pressed once for this profile.
     pub confirm_save: Option<(usize, Instant)>,
+    /// "Reset" of the layout pressed once, when.
+    pub confirm_reset: Option<Instant>,
     /// "×" pressed once for this profile.
     pub confirm_delete: Option<(usize, Instant)>,
     pub confirm_forget: Option<(usize, Instant)>,
@@ -597,6 +599,7 @@ impl Model {
                 error: None,
                 confirm_remove: None,
                 confirm_save: None,
+                confirm_reset: None,
                 confirm_delete: None,
                 confirm_forget: None,
                 profile_page: 0,
@@ -702,6 +705,13 @@ impl Model {
         return self.dev_input.trial;
         #[cfg(not(feature = "preview"))]
         crate::interaction::trial::Trial::default()
+    }
+
+    /// The colours, opacity and sizes of what the headset draws over the monitors (in
+    /// the preview build, as strong as "Hands (trial)" says).
+    pub fn palette(&self) -> crate::palette::Palette {
+        let t = self.trial();
+        crate::palette::Palette::DEFAULT.scaled(t.fx_size(), t.fx_alpha())
     }
 
     /// The PCs' mouse pointers, where the headset draws them.
@@ -1200,6 +1210,7 @@ impl Model {
         let save = m.confirm_save.take_if(|(_, at)| over(*at, CONFIRM_FOR));
         let delete = m.confirm_delete.take_if(|(_, at)| over(*at, CONFIRM_FOR));
         let forget = m.confirm_forget.take_if(|(_, at)| over(*at, CONFIRM_FOR));
+        let reset = m.confirm_reset.take_if(|at| over(*at, CONFIRM_FOR));
         m.toast
             .take_if(|t| now.saturating_duration_since(t.since) > TOAST_FOR);
         if error.is_some()
@@ -1207,6 +1218,7 @@ impl Model {
             || save.is_some()
             || delete.is_some()
             || forget.is_some()
+            || reset.is_some()
         {
             self.rev += 1;
         }
@@ -1661,6 +1673,13 @@ impl Model {
     /// Turns the whole arrangement around the user (see `World::recenter`).
     fn recenter(&mut self) {
         self.world.recenter(&self.settings, self.head, self.now);
+        self.world_done();
+    }
+
+    /// "Reset" (see `World::reset_arrangement`).
+    fn reset_arrangement(&mut self) {
+        self.world
+            .reset_arrangement(&self.settings, self.head, self.now);
         self.world_done();
     }
 

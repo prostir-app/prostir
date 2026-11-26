@@ -282,6 +282,7 @@ pub fn done_text(action: Action) -> Option<&'static str> {
         Action::Preset(_) => "headset-note-layout",
         Action::Tidy => "headset-note-lined-up",
         Action::Recenter => "headset-note-in-front",
+        Action::ResetArrangement => "headset-note-reset",
         _ => return None,
     })
 }

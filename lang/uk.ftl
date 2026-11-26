@@ -797,6 +797,8 @@ headset-monitors-at-most =
        *[many] Максимум { $count } моніторів
     }
 headset-layout = Розкладка
+headset-layout-reset = Скинути
+headset-layout-reset-confirm = Скинути? Ще раз
 headset-layout-around = Навколо мене
 headset-layout-wall = Стіна
 headset-curve = Вигин
@@ -1004,6 +1006,7 @@ headset-note-window-here = Вікно перенесено сюди
 headset-note-layout = Монітори розставлено заново
 headset-note-lined-up = Шви прибрано
 headset-note-in-front = Усе перед вами
+headset-note-reset = Монітори стоять так, як їх ставить розкладка
 headset-note-mic-headset = Програми на ПК чують мікрофон шолома
 headset-note-mic-pc = Програми на ПК чують мікрофон ПК
 headset-note-mic-ask = Дозвіл на мікрофон спитає система

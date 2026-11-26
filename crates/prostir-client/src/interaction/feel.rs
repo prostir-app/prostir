@@ -78,9 +78,12 @@ feel! {
     near_take_m: 0.35, 0.0, 2.0;
     /// A hand's reach moves what it holds by the reach to this power.
     reach_power: 3.0, 0.5, 6.0;
-    /// Moving on a sphere (to try): reaching in or out less than this does not change
-    /// the distance.
+    /// Moving on a sphere: reaching in or out less than this does not change the
+    /// distance.
     reach_dead_m: 0.02, 0.0, 0.2;
+    /// And a hand's move counts as reaching in or out only while it goes this many
+    /// times faster towards or away from the shoulder than across.
+    reach_dominance: 1.5, 1.0, 5.0;
     /// What a hand holds is never nearer than this.
     distance_min_m: 0.3, 0.1, 2.0;
     /// Nor further than this.
@@ -98,6 +101,22 @@ feel! {
     stick_width_per_s: 1.0, 0.1, 10.0;
     /// Two hands resizing one monitor count as no nearer than this.
     two_hands_min_m: 0.05, 0.01, 0.5;
+
+    // ---- Where a monitor may stand (step 8.3) ----
+
+    /// A monitor's nearest point is never nearer the eye than this...
+    bound_near_m: 0.35, 0.1, 2.0;
+    /// ...and its middle never further than this.
+    bound_far_m: 6.0, 1.0, 50.0;
+    /// Nor wider than this angle as seen from the eye.
+    bound_angle_deg: 140.0, 30.0, 175.0;
+    /// Its middle never lower than this below eye level (where the floor is not
+    /// known).
+    bound_below_deg: 70.0, 10.0, 89.0;
+    /// Its lower edge at least this above the floor, where the floor is known.
+    bound_floor_m: 0.05, 0.0, 1.0;
+    /// A monitor carried slows down this near a bound, and stops at it.
+    bound_soft_m: 0.05, 0.0, 0.5;
 
     // ---- Touching the menu ----
 
@@ -283,13 +302,14 @@ impl Feel {
 
     /// The pairs whose first must stay below the second (the hysteresis of each
     /// threshold, the bounds of each range).
-    fn pairs(&self) -> [(&'static str, &'static str); 9] {
+    fn pairs(&self) -> [(&'static str, &'static str); 10] {
         [
             ("press_off", "press_on"),
             ("pinch_on_m", "pinch_off_m"),
             ("distance_min_m", "distance_max_m"),
             ("width_min_m", "width_max_m"),
             ("palm_face_off", "palm_face_on"),
+            ("bound_near_m", "bound_far_m"),
             ("switch_touch_m", "switch_ray_m"),
             ("middle_on_m", "middle_off_m"),
             ("fist_on", "fist_off"),

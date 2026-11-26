@@ -22,9 +22,10 @@ use crate::ids::{DisplayKey, PcId};
 use crate::layers::{self, Layer, Plan, Quad};
 use crate::layout::Cylinder;
 use crate::platform::meta::{self, passthrough};
-use crate::platform::openxr::overlay::{self, Sphere};
+use crate::platform::openxr::overlay;
 use crate::platform::openxr::{self as xrutil, Gfx, ImageLayer, as_layer, pose, posef};
 use crate::platform::video::SurfaceVideo;
+use crate::view::fx::Effects;
 use crate::world::KEYBOARD_ASPECT;
 
 /// The side of the black layer over a dimmed room, in metres, a metre in front of
@@ -36,7 +37,8 @@ const DIM_SIZE: f32 = 40.0;
 pub struct Buffers {
     /// Where the eyes are, for the hands and rays.
     views: [xr::View; 2],
-    pub spheres: Vec<Sphere>,
+    /// The hands, rays and effects of the frame.
+    pub effects: Effects,
     /// What is shown, where, in which order.
     pub plan: Plan,
     /// Each monitor's colour scale, in the plan's order.
@@ -152,7 +154,7 @@ fn picture_of<'p>(pictures: &'p Pictures, layer: &Layer) -> Option<(&'p ImageLay
     })
 }
 
-/// The hands and rays drawn (`kept.buffers.spheres`, filled), the layers planned and
+/// The hands, rays and effects drawn (`kept.buffers.effects`, filled), the layers planned and
 /// made, and the frame at `time` ended: how many layers it wanted.
 pub fn end(
     xr: &Xr,
@@ -170,12 +172,12 @@ pub fn end(
     let buffers = &mut kept.buffers;
     let hands = &kept.hands;
     let pictures = &mut stage.pictures;
-    let spheres = &mut buffers.spheres;
-    let views = (!spheres.is_empty()
+    let effects = &mut buffers.effects;
+    let views = (!effects.is_empty()
         && xrutil::locate_views(session, time, local, &mut buffers.views))
     .then_some(&buffers.views[..]);
     if let Some(ov) = &mut stage.overlay {
-        ov.render(gl, views.unwrap_or(&[]), spheres)?;
+        ov.render(gl, views.unwrap_or(&[]), effects.list())?;
     }
     let projection_views = stage
         .overlay

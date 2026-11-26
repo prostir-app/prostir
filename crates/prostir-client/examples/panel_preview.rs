@@ -1,6 +1,6 @@
 //! Renders the headset menu to a PNG for checking the design on the desktop.
 //! cargo run -p prostir-client --example panel_preview -- panel.png [hover_x hover_y]
-//! Environment: WRIST=1 (the wrist menu), TAB=monitors|profiles|look|sound|language|pc|paired|help|dev|dev-hands (default: quick), DEV=1 ("For development", as the preview build has it, built with `--features preview`; UNKNOWN_HEADSET=1: a headset not in the table), LANG_UI=en|uk|qps (qps: the longer pseudo-language), PAIR=show|type|failed, OFFLINE=1, KEYPAD=…, NOTE=done|failed|waiting|saved (what the page says under a button pressed on it), PHYSICAL=n (the PC's own displays, 0 to 5; 2 by default), PHYSICAL_MAX=n (how many of them the PC lets show; 4 by default), PROFILES=n (saved profiles; 3 by default), SELECTED=1 (the second monitor picked on the map), NO_SCALE=1 (a PC without monitors at another scale)
+//! Environment: WRIST=1 (the wrist menu), TAB=monitors|profiles|look|sound|language|pc|paired|help|dev|dev-hands (default: quick), DEV=1 ("For development", as the preview build has it, built with `--features preview`; UNKNOWN_HEADSET=1: a headset not in the table), LANG_UI=en|uk|qps (qps: the longer pseudo-language), PAIR=show|type|failed, OFFLINE=1, KEYPAD=…, NOTE=done|failed|waiting|saved (what the page says under a button pressed on it), PHYSICAL=n (the PC's own displays, 0 to 5; 2 by default), PHYSICAL_MAX=n (how many of them the PC lets show; 4 by default), PROFILES=n (saved profiles; 3 by default), SELECTED=1 (the second monitor picked on the map), NO_SCALE=1 (a PC without monitors at another scale), RESET=1 ("Reset" of the layout asking again)
 
 use prostir::ids::{DisplayKey, PcId};
 use prostir::lang::{BUILTIN, Known, Lang, Language, Loader, Texts};
@@ -184,6 +184,7 @@ fn main() {
     let mut state = UiState {
         mic_denied: std::env::var("MIC_DENIED").is_ok(),
         confirm_save: None,
+        confirm_reset: std::env::var_os("RESET").is_some(),
         unreachable: std::env::var("BLOCKED").ok(),
         can_move_mouse: std::env::var("NO_MOUSE").is_err(),
         paired: vec!["workstation".into(), "laptop".into()],

@@ -306,6 +306,11 @@ pub struct World {
     /// [`World::take_rearranged`]).
     rearranged: bool,
 
+    /// Where a monitor in a hand may stand (see `layout::limit`), and the floor's
+    /// height where it is known.
+    bounds: layout::Bounds,
+    floor: Option<f32>,
+
     /// The magnet's memory (see `stick_of`), asked every frame of a drag.
     stick: layout::StickScratch<DisplayKey>,
     /// Displays the last list no longer has (see [`World::listed`]), and streams it
@@ -378,6 +383,8 @@ impl World {
             resizing: None,
             dragged: false,
             rearranged: false,
+            bounds: layout::Bounds::default(),
+            floor: None,
             stick: layout::StickScratch::default(),
             gone: Vec::new(),
             waiting: Vec::new(),
@@ -1828,6 +1835,16 @@ impl World {
         self.send_layout(now);
     }
 
+    /// "Reset": the monitors as the chosen layout makes them, in front of the user
+    /// where they look now (`head`, `forward`), at their standard size, and the
+    /// layout's tilt; cinema makes its view anew. Window panels, another PC's
+    /// displays and what the hands held stay out of it (what they held is let go).
+    pub fn reset_arrangement(&mut self, s: &Settings, (head, forward): (Vec3, Vec3), now: Instant) {
+        let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(-Vec3::Z);
+        self.center = (head, (-flat.x).atan2(-flat.z));
+        self.preset_chosen(s, now);
+    }
+
     /// The A button: lines up what the user arranged by hand, row by row (see
     /// `layout::line_up`), instead of replacing it with the preset: every row keeps its
     /// place and the way it stands, tilted back or overhead too; but a monitor out of
@@ -2309,10 +2326,42 @@ impl World {
         Some(at)
     }
 
+    /// Where a monitor in a hand may stand (from the numbers of how the hands feel).
+    pub fn set_bounds(&mut self, bounds: layout::Bounds) {
+        self.bounds = bounds;
+    }
+
+    /// Whether monitor `id` at `p` (`aspect`: its height over its width) would cut
+    /// into another monitor, hide one or be hidden by one from `eye` (more than a
+    /// sliver of a seam). Takes no memory.
+    fn troubles(&self, id: DisplayKey, p: &Placement, aspect: f32, eye: Vec3) -> bool {
+        use prostir_layout::space::{cuts, hidden_by};
+        const SLIVER: f64 = 0.03;
+        let h = p.width * aspect;
+        self.sizes.iter().any(|&(other, w, oh)| {
+            let Some(q) = self.placements.get(&other).filter(|_| other != id) else {
+                return false;
+            };
+            let qh = q.width * oh as f32 / w.max(1) as f32;
+            cuts(p, h, q, qh)
+                || hidden_by(p, h, q, qh, eye) > SLIVER
+                || hidden_by(q, qh, p, h, eye) > SLIVER
+        })
+    }
+
+    /// The height of display `id`'s picture over its width (none: not known yet).
+    fn aspect_of(&self, id: DisplayKey) -> f32 {
+        self.streams
+            .get(&id)
+            .map_or(9.0 / 16.0, |&(w, h)| h as f32 / w.max(1) as f32)
+    }
+
     /// `thing`, in a hand, is now at `p` (worked out from where it was, see
     /// [`World::place`]): the keyboard window stays flat, a monitor on a wall stays
-    /// parallel to it, and with "move all together" the rest goes along. `head`: where
-    /// the head is.
+    /// parallel to it, a monitor stays within the bounds (see `layout::limit`: further
+    /// away rather than too near, nearer rather than too far, never too low; one the
+    /// app made outside them goes no further out), and with
+    /// "move all together" the rest goes along as one piece. `head`: where the head is.
     pub fn drag(&mut self, s: &Settings, thing: Thing, mut p: Placement, head: Vec3) {
         let wall = s.preset == Preset::Wall && !self.cinema;
         if thing == Thing::Keyboard {
@@ -2321,6 +2370,27 @@ impl World {
         } else if wall && thing != Thing::Menu {
             // On a wall, monitors stay parallel to it wherever they go.
             p.rotation = Quat::from_rotation_y(self.center.1);
+        }
+        if let Some(id) = thing.display() {
+            let aspect = self.aspect_of(id);
+            let was = self.placements.get(&id).copied();
+            let bounds = match &was {
+                Some(was) => self.bounds.loosened_for(was, aspect, head),
+                None => self.bounds,
+            };
+            let limited = layout::limit(p, aspect, head, self.floor, &bounds, layout::Keep::Size);
+            // The bounds never put it into another monitor or over one: where they
+            // would (and where the hand put it would not), it stays where it was.
+            p = match was {
+                Some(was)
+                    if limited != p
+                        && self.troubles(id, &limited, aspect, head)
+                        && !self.troubles(id, &p, aspect, head) =>
+                {
+                    was
+                }
+                _ => limited,
+            };
         }
         let target = match thing {
             Thing::Menu => &mut self.menu,
@@ -2398,17 +2468,21 @@ impl World {
         Some(width)
     }
 
-    /// The monitor resized with both hands is `width` wide now (the rest goes along
-    /// with "move all together").
-    pub fn resize(&mut self, s: &Settings, width: f32) {
+    /// The monitor resized with both hands is `width` wide now, as wide as the bounds
+    /// let it be where it stands, seen from `head` (the rest goes along with "move all
+    /// together").
+    pub fn resize(&mut self, s: &Settings, width: f32, head: Vec3) {
         let Some(id) = self.resizing else {
             return;
         };
+        let (aspect, floor, bounds) = (self.aspect_of(id), self.floor, self.bounds);
         let Some(p) = self.placements.get_mut(&id) else {
             return;
         };
         let before = *p;
+        let bounds = bounds.loosened_for(&before, aspect, head);
         p.width = width;
+        *p = layout::limit(*p, aspect, head, floor, &bounds, layout::Keep::Place);
         let after = *p;
         self.dragged |= before != after;
         self.carry_all(s, id, &before, &after);

@@ -246,6 +246,22 @@
 - A hand that carries a monitor, the menu or the keyboard window no longer presses a
   button of the menu when its fingertip passes in front of it: a hand does one thing at
   a time.
+- A monitor taken by a hand or a controller moves on a sphere around your eye, facing
+  you: turning the hand or the controller turns it around you at the same distance;
+  only reaching in or out takes it nearer or further. It stops softly between 0.35 m
+  and 6 m from the eye, and a hand keeps it no wider than 140° as seen and no lower than
+  70° below eye level, never pushing it into another monitor. A monitor the layout put
+  further than 6 m or larger than 140° stays where it is when taken and goes no further
+  out. For now the bounds apply only to what a hand or a controller does: the layouts,
+  "Line up", profiles and the saved arrangement are not checked against them, monitors
+  carried with "All together" move without them, the floor is not read from the headset
+  yet (the 70° rule stands for it), and on the "Wall" layout a monitor moves on the
+  sphere too, staying parallel to the wall.
+- Holding a pinch on something shows a ring under it and one closing in until it is
+  taken; taking it shows a short wave, and a small ring marks where the hand holds it.
+- "Reset" beside "Layout" on the Monitors page (press twice) and `prostir ctl reset`
+  put the monitors back as the layout places them, in front of you, at their standard
+  size.
 
 ### Settings
 

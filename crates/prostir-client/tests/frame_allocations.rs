@@ -10,7 +10,9 @@
 //! `MouseTo` each frame, a trigger clicking, holding and its stick scrolling (every
 //! message of the input queued for the PC as the shell queues them), a fist carrying a
 //! monitor past its neighbour (the magnet), the ray giving way to touch and back, the
-//! input recorded, all take none.
+//! input recorded, all take none. The hands' layer is filled each frame too (step 8.2):
+//! a pinch held on a monitor, its rings, the take's wave and the ring where the hand
+//! holds it, none.
 //!
 //! On the desktop only: the app built for Android has its own counting allocator, and
 //! a program has one.
@@ -40,6 +42,7 @@ use prostir::session::NetCmd;
 use prostir::settings::Settings;
 use prostir::ui::Action;
 use prostir::view::View;
+use prostir::view::fx::Effects;
 use prostir_proto::link::{LinkInfo, RecordSender};
 use prostir_proto::state::{
     Display, DisplayId, DisplayKind, DisplayState, Displays, HostCaps, Mode, permission,
@@ -134,6 +137,9 @@ struct Loop {
     gazes: u64,
     /// The frame's layers.
     plan: Plan,
+    /// The hands, rays and effects drawn (step 8.2), and the most in a frame.
+    effects: Effects,
+    most_effects: usize,
     /// The numbers of "For development" (the preview build): their label and the
     /// menu's panel they are drawn by, the bytes the stream counts, how many times the
     /// label was drawn again.
@@ -316,6 +322,9 @@ impl Loop {
                 let _ = self.m.magnet(id);
             }
         }
+        // The hands, rays and effects of the hands' layer.
+        self.effects.fill(&mut self.m, &self.hands, &input, now);
+        self.most_effects = self.most_effects.max(self.effects.list().len());
         // The frame's layers, and the model told when monitors do not fit.
         layers::plan(&self.m, &self.hands, &Drawn, &mut self.plan);
         if let Some(hidden) = self.plan.news() {
@@ -427,6 +436,8 @@ fn connected(layers_max: u8) -> Loop {
         forward: -Vec3::Z,
         gazes: 0,
         plan: Plan::new(),
+        effects: Effects::new(),
+        most_effects: 0,
         #[cfg(feature = "preview")]
         label: prostir::metrics::Label::new(),
         #[cfg(feature = "preview")]
@@ -809,9 +820,10 @@ fn a_drag_over_a_seam_takes_no_memory() {
     let corner = one.position + Vec3::new(-one.width / 2.0, h(&one) / 2.0, 0.0);
     let over = corner + Vec3::new(0.1, h(&three) / 2.0 + 0.02, 0.0);
     // The grip pressed on the third monitor, then held while the ray goes from it to
-    // over the seam, and stays there swaying a little. The hand halfway between, so
-    // the monitor, held at the distance it was taken at, goes there.
-    let hand = (three.position + over) / 2.0;
+    // over the seam, and stays there swaying a little. The controller just under the
+    // eye, so the monitor, moved on the sphere round the eye as its ray turns, goes
+    // there.
+    let hand = Vec3::new(0.0, -0.05, 0.0);
     let drag = move |i: u32| {
         let mut grab = Button::default();
         grab.update(1.0);
@@ -848,6 +860,69 @@ fn a_drag_over_a_seam_takes_no_memory() {
         l.frame(drag(i));
     }
     assert_eq!(allocations() - before, 0, "a drag over a seam");
+}
+
+/// The effects of the hands' layer (step 8.2): a pinch held on a monitor shows a ring
+/// under it and one closing in, takes it with a wave, and a ring shows where the hand
+/// holds it while it is carried, all without memory. (Taking and letting go change the
+/// arrangement, which is no frame's work: they are left out of the count.)
+#[test]
+fn the_effects_take_no_memory() {
+    let mut l = connected(16);
+    let target =
+        l.m.world()
+            .shown(DisplayKey::new(PC, DisplayId(1)))
+            .expect("drawn")
+            .position;
+    // Pinched from the 30th frame and held.
+    let pinch = move |i: u32| {
+        let select = Button {
+            down: i >= 30,
+            pressed: i == 30,
+            released: false,
+        };
+        let drift = Vec3::new((i as f32 * 0.03).sin() * 0.002, 0.0, 0.0);
+        HandState {
+            ray: ray_at(target + drift),
+            select,
+            is_hand: true,
+            ..HandState::default()
+        }
+    };
+    for i in 0..30 {
+        l.frame(pinch(i));
+    }
+    // Held towards taking: a ring under the pinch, then one closing in.
+    let before = allocations();
+    let mut i = 30;
+    while l.hands.held().next().is_none() && i < 60 {
+        if l.hands
+            .pressing(1)
+            .is_some_and(|(_, k)| k.is_some_and(|k| k > 0.9))
+        {
+            break;
+        }
+        l.frame(pinch(i));
+        i += 1;
+    }
+    assert_eq!(allocations() - before, 0, "a pinch held towards taking");
+    assert!(l.hands.pressing(1).is_some(), "pressed");
+    let most = l.most_effects;
+    // Taken (not counted), then carried with its wave and the ring where it is held.
+    while l.hands.held().next().is_none() && i < 80 {
+        l.frame(pinch(i));
+        i += 1;
+    }
+    assert!(
+        l.hands.held().any(|t| t.display().is_some()),
+        "the pinch holds the monitor"
+    );
+    let before = allocations();
+    for n in i..i + 300 {
+        l.frame(pinch(n));
+    }
+    assert_eq!(allocations() - before, 0, "carrying a monitor");
+    assert!(most >= 2 && l.most_effects >= 2, "drawn: {most}");
 }
 
 /// A right hand with its index fingertip at `tip`, fingers forward: pointing (the

@@ -1,5 +1,5 @@
 //! The monitors: adding (at a scale), removing, another scale, the order, the window
-//! panels, "Line up" and "In front".
+//! panels, "Line up", "In front" and "Reset".
 
 use prostir_proto::request::Request;
 use prostir_proto::state::Mode;
@@ -90,6 +90,24 @@ impl Model {
                     self.open_panel();
                 }
                 self.done(action);
+            }
+            Action::ResetArrangement => {
+                // From the menu it asks again first; a command from the PC does it.
+                let confirmed = !self.press_in_menu
+                    || self
+                        .menu
+                        .confirm_reset
+                        .is_some_and(|at| self.now.saturating_duration_since(at) < CONFIRM_FOR);
+                if confirmed {
+                    self.menu.confirm_reset = None;
+                    self.reset_arrangement();
+                    if self.menu.open {
+                        self.open_panel();
+                    }
+                    self.done(action);
+                } else {
+                    self.menu.confirm_reset = Some(self.now);
+                }
             }
             Action::DetachWindow => {
                 self.request(Request::DetachWindow, ui::Asked::DetachWindow);

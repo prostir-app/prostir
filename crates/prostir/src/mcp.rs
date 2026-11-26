@@ -1085,7 +1085,8 @@ static TOOLS: &[Tool] = &[
     command("show_mouse", "Headset command: shows where the mouse is."),
     command(
         "reset_arrangement",
-        "Headset command: the monitors' arrangement as it first was.",
+        "Headset command: the monitors as the chosen layout places them, in front of the \
+         person, at their standard size.",
     ),
     asks(
         "profile",

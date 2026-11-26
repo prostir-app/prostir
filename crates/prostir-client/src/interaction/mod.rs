@@ -302,6 +302,8 @@ pub enum Mark {
     Touch,
     /// A right click.
     Right,
+    /// Something taken into a hand.
+    Take,
 }
 
 /// The hands' own state from frame to frame (see the module).
@@ -387,6 +389,36 @@ impl Hands {
             let age = now.saturating_duration_since(*when);
             (age < ring).then(|| (*at, age.as_secs_f32() / ring.as_secs_f32(), *mark))
         })
+    }
+
+    /// A hand's pinch held down on what its ray points at (before step 8's modes, or
+    /// off a monitor): where, and how far the hold that takes it has come (0 to 1;
+    /// `None` until it lasted [`Feel::ring_after_ms`], or for what cannot be taken).
+    pub fn pressing(&self, h: usize) -> Option<(Vec3, Option<f32>)> {
+        let Phase::Pressed { since, .. } = self.hands.get(h)?.phase else {
+            return None;
+        };
+        let pick = self.picks[h]?;
+        let takes = matches!(
+            pick.thing,
+            Thing::Display(_) | Thing::Menu | Thing::Keyboard
+        );
+        let held = since
+            .zip(self.m.now)
+            .map(|(t, now)| now.saturating_duration_since(t).as_secs_f32() * 1000.0);
+        let k = held
+            .filter(|ms| takes && *ms > self.feel.ring_after_ms)
+            .map(|ms| (ms / self.feel.hold_to_take_ms).min(1.0));
+        Some((pick.hit.point, k))
+    }
+
+    /// What hand `h` carries, and the point it holds it by (from its centre, as a
+    /// share of its width: see [`Grab::anchor`]).
+    pub fn carried(&self, h: usize) -> Option<(Thing, Vec2)> {
+        match self.hands.get(h)?.phase {
+            Phase::Carry(c) => Some((c.grab.id, c.grab.anchor)),
+            _ => None,
+        }
     }
 
     /// What the hands hold.
@@ -875,11 +907,12 @@ impl Hands {
                 _ => None,
             }
             .map(|g| match frame.head {
-                Some(full) if input.is_hand => self.reach(g, ray, full, hand),
-                _ => g,
+                Some(full) => self.reach(g, ray, full, hand, input.is_hand),
+                None => g,
             });
             if let Some(grab) = grabbed {
                 scene.haptic(hand);
+                self.took(now, ray.origin + ray.dir * grab.distance);
                 self.hands[hand].phase = Phase::Carry(monitors::Carry::by_ray(grab));
             }
         }
@@ -959,6 +992,11 @@ impl Hands {
         {
             self.hands[hand].phase = Phase::Pressed { since, click };
         }
+    }
+
+    /// Something was taken at `point`: a wave there, as a hand has no vibration.
+    fn took(&mut self, now: Instant, point: Vec3) {
+        self.rings.push((point, now, Mark::Take));
     }
 
     /// A press was made (a button, the menu toggled): what the menu showed changed, so a

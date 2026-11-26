@@ -32,6 +32,7 @@ pub mod metrics;
 pub mod net;
 pub mod note;
 pub mod outbox;
+pub mod palette;
 pub mod pending;
 pub mod persist;
 pub mod physical;

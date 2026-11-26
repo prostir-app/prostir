@@ -2,7 +2,8 @@
 //! (plans/step-8-interaction.md, section 9, 8.0a and 8.0b), chosen in "For development",
 //! kept in memory only: touching and clicking monitors and how a hand takes one, how
 //! the hands are drawn, how strong the effects are. Every choice's default is the input
-//! and the look as they were before step 8.
+//! and the look as they were before step 8, but how a monitor moves: on the sphere
+//! (step 8.3), the way before kept here to compare.
 
 #![forbid(unsafe_code)]
 
@@ -77,15 +78,22 @@ impl FxSet {
     }
 }
 
-/// How a monitor in a hand moves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// How a monitor in a hand or by a controller moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Movement {
-    /// As before step 8: along the hand's ray, the distance by the reach cubed.
-    #[default]
+    /// As before step 8: along the ray, a hand's distance by its reach cubed.
     AsNow,
-    /// On a sphere round the eye, the distance by the reach to this power (see
-    /// `layout::Grab::on_sphere`).
+    /// On a sphere round the eye (step 8.3, see `layout::Grab::on_sphere`), a hand's
+    /// distance by its reach to this power.
     Sphere(u8),
+}
+
+impl Default for Movement {
+    /// On the sphere, the distance as much as the reach (plans/step-8-interaction.md,
+    /// section 5; the power the owner tries in the headset).
+    fn default() -> Self {
+        Movement::Sphere(1)
+    }
 }
 
 impl Movement {
@@ -153,6 +161,7 @@ mod tests {
     fn the_defaults_are_as_before() {
         let t = Trial::default();
         assert!(!t.monitors);
+        assert_eq!(t.movement, Movement::Sphere(1));
         assert_eq!(t.look.alpha(false), 1.0);
         assert_eq!(t.look.alpha(true), 0.3);
         assert_eq!((t.fx.size(), t.fx.alpha()), (1.0, 1.0));
