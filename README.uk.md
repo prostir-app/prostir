@@ -191,6 +191,9 @@ Prostir на ПК («Монітори» → «Профілі в …» → «Пе
 - KDE Plasma 6 на Wayland або Hyprland (перевірено на 0.57, працюють і конфіги Lua, і
   `hyprland.conf`). KWin транслює віртуальні виходи сам; у Hyprland Prostir створює
   headless-виходи й захоплює їх через `wlr-screencopy` просто в буфери відеокарти.
+  На KDE вказівник миші йде окремо від картинки, і шолом малює його одразу; у Hyprland
+  він лишається в картинці, з її затримкою, бо захоплення вказівника в Hyprland (сесії
+  курсора `ext-image-copy-capture`) дає порожні картинки для тем hyprcursor.
 - PipeWire з його сервером PulseAudio (`pipewire-pulse`), `pw-cli`, `pw-loopback`,
   `pactl` і `pacat`.
 - GStreamer 1.24 або новіший із плагіном `va` (апаратне кодування), `h264parse` і

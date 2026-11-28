@@ -194,7 +194,10 @@ has not been paired with.
 - KDE Plasma 6 on Wayland, or Hyprland (tested with 0.57, Lua and `hyprland.conf`
   configs both work). KWin streams its virtual outputs itself; on Hyprland Prostir
   creates headless outputs and captures them with `wlr-screencopy` straight into GPU
-  buffers.
+  buffers. On KDE the mouse pointer travels apart from the picture and the headset
+  draws it at once; on Hyprland it stays in the picture, with the picture's delay,
+  because Hyprland's pointer capture (`ext-image-copy-capture` cursor sessions) gives
+  empty pictures for hyprcursor themes.
 - PipeWire with its PulseAudio server (`pipewire-pulse`), `pw-cli`, `pw-loopback`,
   `pactl` and `pacat`.
 - GStreamer 1.24 or newer with the `va` plugin (hardware encoding), `h264parse` and
